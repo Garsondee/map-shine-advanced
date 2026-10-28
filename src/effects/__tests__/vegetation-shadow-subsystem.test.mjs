@@ -15,9 +15,15 @@
 import {
   createVegetationShadowSubsystem,
   vegetationShadowPadPx,
+  vegetationShadowReachPx,
+  vegetationShadowMaxThrowPx,
+  vegetationShadowShift,
   VEG_SHADOW_SMEAR_TAPS,
 } from '../vegetation-shadow-subsystem.js';
 import { VEGETATION_KINDS } from '../vegetation.js';
+import { maxThrowForHeightPx, BASE_SOFTNESS_PX } from '../shadow-access.js';
+import { shadowPenumbraPx } from '../lighting/light-visibility.js';
+import { computeQuadCorners } from '../../foundry/scene-geometry.js';
 
 /** A uniform bag shaped like the one `buildVegetationMaterial` returns. */
 function fakeShadowUniforms() {
@@ -35,18 +41,20 @@ function fakeShadowUniforms() {
     uShadowPenumbraUv: { value: vec2() },
     uShadowStrength: { value: -1 },
     uShadowSmearLod: { value: -1 },
+    uShadowShiftUv: { value: vec2() },
+    uShadowShiftWorld: { value: vec2() },
     artTexelsPerWorldPx: 1,
   };
 }
 
 /** The subsystem with every injected dep faked; only `syncUniforms` is exercised. */
-function makeSubsystem({ castStrength }) {
+function makeSubsystem({ castStrength, golden01 = 0 }) {
   return createVegetationShadowSubsystem({
     THREE: {},
     scene: { add() {} },
     dimensions: { sceneRect: { x: 0, y: 0, width: 4000, height: 4000 } },
     getShadowHandle: () => ({
-      atmosphere: { elevationDeg: 45 },
+      atmosphere: { elevationDeg: 45, golden01 },
       forCaster: () => ({ offsetX: 40, offsetY: 25, offsetPx: 47, penumbraPx: 6, strength01: castStrength }),
     }),
     setTileGeometry() {},
@@ -127,6 +135,64 @@ export function run(t) {
     ok('the tree pad stays under the hard 320px ceiling', treePad <= 320);
     ok('an unknown kind pads by a finite amount rather than NaN', Number.isFinite(vegetationShadowPadPx(undefined)));
     ok('the smear tap count is the shared constant the material builds against', VEG_SHADOW_SMEAR_TAPS === 6);
+  }
+
+  // --- golden hour: darker and longer, with NO bigger quad -----------------
+  // The pad is the fill bill. Shifting the quad onto the streak means doubling
+  // the longest throw must leave the pad exactly where it was before the shift
+  // (the old formula: one full un-stretched throw + the blur allowance).
+  for (const kind of VEGETATION_KINDS) {
+    const h = kind.shadowHeightPx;
+    const blur = shadowPenumbraPx({ heightPx: h, elevationDeg: 0, baseSoftnessPx: BASE_SOFTNESS_PX }) * 2;
+    const oldPad = Math.min(320, maxThrowForHeightPx(h) + blur);
+    ok(
+      `${kind.id}: the pad is unchanged by the ×2 golden length`,
+      Math.abs(vegetationShadowPadPx(kind) - oldPad) < 1e-9
+    );
+    ok(
+      `${kind.id}: the longest golden throw is twice the daytime bound`,
+      vegetationShadowMaxThrowPx(kind) === maxThrowForHeightPx(h) * 2
+    );
+    ok(
+      `${kind.id}: the quad can hold that whole throw`,
+      vegetationShadowReachPx(kind) === vegetationShadowMaxThrowPx(kind)
+    );
+  }
+  {
+    const day = fakeShadowUniforms();
+    makeSubsystem({ castStrength: 0.45 }).syncUniforms(day, TREE, PLACEMENT, PARAMS);
+    const gold = fakeShadowUniforms();
+    makeSubsystem({ castStrength: 0.45, golden01: 1 }).syncUniforms(gold, TREE, PLACEMENT, PARAMS);
+    ok('golden hour darkens the shadow (×1.45)', Math.abs(gold.uShadowStrength.value - 0.45 * 1.45) < 1e-9);
+    ok(
+      'golden hour lengthens the sweep ×2',
+      Math.abs(gold.uShadowSmearUv.value.x - 2 * day.uShadowSmearUv.value.x) < 1e-12
+    );
+    ok('no golden hour leaves strength untouched', day.uShadowStrength.value === 0.45);
+    const strong = fakeShadowUniforms();
+    makeSubsystem({ castStrength: 0.9, golden01: 1 }).syncUniforms(strong, TREE, PLACEMENT, PARAMS);
+    ok('golden strength never passes 0.97', strong.uShadowStrength.value === 0.97);
+    ok(
+      'the quad shift is half the sweep',
+      gold.uShadowShiftUv.value.x === gold.uShadowSmearUv.value.x / 2 &&
+        gold.uShadowShiftWorld.value.x === gold.uShadowShiftUv.value.x * PLACEMENT.width
+    );
+  }
+
+  // --- the shift's world step is the UV step through the placement ----------
+  // The vertices move by `world`, the fragment adds `uv` back; if the two ever
+  // disagree the shadow slides off its plant. Checked against the real
+  // UV→world mapping on a rotated, mirrored tile.
+  {
+    const placement = { x: 500, y: 300, width: -200, height: 120, rotation: 30 };
+    const s = vegetationShadowShift(0.3, -0.1, placement);
+    const [c00, c10, , c01] = computeQuadCorners(placement);
+    const wx = (c10.x - c00.x) * s.uvX + (c01.x - c00.x) * s.uvY;
+    const wy = (c10.y - c00.y) * s.uvX + (c01.y - c00.y) * s.uvY;
+    ok(
+      'a rotated, mirrored shift moves the quad exactly by its UV step',
+      Math.abs(wx - s.worldX) < 1e-9 && Math.abs(wy - s.worldY) < 1e-9
+    );
   }
 
   // ==========================================================================

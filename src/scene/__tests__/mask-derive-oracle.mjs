@@ -261,7 +261,7 @@ export function oracleDeriveFloorProducts({
         for (let gx = 0; gx < casterSpecActive.w; gx++) {
           const wx = casterSpecActive.x + (gx + 0.5) * casterSpecActive.texelW;
           const i = gy * casterSpecActive.w + gx;
-          const outdoorsByte = sampleMaskGridWorld(outdoors, wx, wy) ?? 255;
+          const outdoorsByte = sampleMaskGridWorld(outdoorsCaster, wx, wy) ?? 255;
           const indoorness = 255 - outdoorsByte;
           coverBuilding.data[i] = indoorness;
           casterBuilding.data[i] = indoorness >= HEIGHT_COVERAGE_THRESHOLD ? buildingByte : 0;
@@ -273,7 +273,7 @@ export function oracleDeriveFloorProducts({
       for (let gx = 0; gx < casterSpecActive.w; gx++) {
         const wx = casterSpecActive.x + (gx + 0.5) * casterSpecActive.texelW;
         const i = gy * casterSpecActive.w + gx;
-        const outdoorsByte = sampleMaskGridWorld(outdoors, wx, wy) ?? 255;
+        const outdoorsByte = sampleMaskGridWorld(outdoorsCaster, wx, wy) ?? 255;
         const isExterior = outdoorsByte >= OVERHEAD_EXTERIOR_THRESHOLD;
         const gated = isExterior ? coverOverhead.data[i] : 0;
         coverOverhead.data[i] = gated;

@@ -102,15 +102,13 @@ export const WIND_GUSTS = {
     // step() where uActiveTrails is set.
     minTrails: 3,
     maxTrails: 24,
-    // FLOW-ENERGY VISIBILITY GATE (dimensionless flow magnitude, full-strength
-    // ambient + structure×gain, times windSpeed01 — see this file's own header
-    // for why ambient is NOT exposure-scaled) — a trail is invisible below
-    // `flowLo` and full-strength above `flowHi`, smoothstepped between. This
-    // is the whole "only where the flow is fast" behaviour: tuned so open
-    // gales and funnel
-    // pinch-points clear `flowHi` while calm/sheltered air sits below `flowLo`.
-    flowLo: 0.12,
-    flowHi: 0.35,
+    // VISIBILITY GATE, in REAL m/s of local flow (2026-10-27 — was a
+    // dimensionless `flowLo`/`flowHi` on `flowMag × windSpeed01`). A trail is
+    // invisible below `gateLoMps` and full-strength above `gateHiMps`: a gale
+    // (Beaufort 8, ~17 m/s) is where ribbons are fully drawn, a fresh breeze
+    // where they begin. This is the whole "only where the flow is fast" rule.
+    gateLoMps: 8,
+    gateHiMps: 18,
     // Ribbon WIDTH at the head, in world px (tapers to ~0 at the tail — the
     // draw-side comet profile). Opacity ceiling is separate (`opacityMax`).
     widthPx: 12,
@@ -121,10 +119,6 @@ export const WIND_GUSTS = {
     // How hard a head obeys the field — same meaning + default as the
     // diagnostic particles' own windGain (see wind-diagnostic-particles.js).
     windGain: 0.9,
-    // Gusts are outdoor/high-energy by definition, so they carry the SAME
-    // outdoor gale multiplier the diagnostic uses — 2× the calibrated
-    // Beaufort-8 gale ceiling. Applied to the coherent flow + the speed ceiling.
-    outdoorGaleBoost: 2,
     // Snappier acceleration than the drifting diagnostic dust (2.5s): a gust
     // should feel taut, so its head reaches the flow ceiling faster.
     accelToMaxSeconds: 1.2,

@@ -108,13 +108,53 @@ export {
   // one number, not two copies that can drift.
   computeGustEnvelope,
   WIND_DEFAULT_GUSTINESS01,
+  // ⭐ THE ONE REAL SPEED (2026-10-27). Gust fronts and turbulence ride the
+  // mean wind at `speed01 × 70 m/s × pixelsPerMetre`; every consumer that moves
+  // WITH the wind (rain, snow, torrent waves, trails, motes) converts through
+  // these rather than holding its own px/s calibration — which is how the rain
+  // came to move "at a COMPLETELY different pace" from the gusts.
+  windFieldPxPerSecPerUnit,
+  windTravelPxPerSec,
+  windGaleCharacterNode,
+  windStrength01Node,
+  WIND_DEFAULT_PIXELS_PER_METRE,
+  WIND_GALE_CHARACTER_MPS,
+  WALL_CORNER_SPEEDUP,
+  WIND_GUST_PEAK,
   // ⭐ THE ONE angle→vector conversion, shader side. Every consumer of
   // `directionDeg` outside world/ resolves through this or its CPU twin
   // below — see `wind-bake.js#windFlowVector` for the convention and for the
   // three disagreeing readings it replaced.
   windFlowVectorNode,
+  // ⭐ INTEGRATED ADVECTION (2026-10-27) — the CPU-integrated distance the wind
+  // has carried its patterns, so a wind FADE changes their pace instead of
+  // flinging them (`speed × t` with a moving speed). See the block in
+  // wind-field.js above `createWindAdvectionState`.
+  createWindAdvectionState,
+  stepWindAdvection,
+  createWindAdvectionUniforms,
+  writeWindAdvectionUniforms,
+  windAdvectionDtSecNode,
+  windGustPhaseRate,
 } from './wind-field.js';
 export { ambientVectorFromWind, windFlowVector, computeWindBakeGridSpec, rasterizeWallsToGrid } from './wind-bake.js';
+// ⭐ THE BAKED WIND FIELD (epic mmp-fpu) — `sampleWind` evaluated once per frame into a texture on the wind
+// grid, so consumers READ the wind instead of compiling its noise (19.7 s → ~1 s for the candle flame).
+export { buildWindFieldBakeMaterial, sampleBakedWindField, windGridUvNode } from './wind-field-bake.js';
+// ⭐ THE WIND'S RECORDED PAST (epic mmp-fpu) — gust magnitudes baked every 0.6 s into an atlas, so a candle's
+// memory is texture fetches instead of 14 gust-envelope evaluations in its shader.
+export {
+  GUST_HISTORY_STEP_S,
+  GUST_HISTORY_TAPS,
+  GUST_HISTORY_TILES,
+  GUST_HISTORY_SLOTS,
+  gustHistorySlotFor,
+  gustHistoryTileOf,
+  gustHistoryAtlasSize,
+  gustHistoryMomentAt,
+  planGustHistoryBakes,
+  sampleGustHistoryTap,
+} from './wind-gust-history.js';
 // ⭐ WHAT THE DIAL MEANS — the Beaufort scale, so `speed01` has a real-world
 // reading instead of being a unitless 0..1 nothing could check against. The
 // wind probe reports through `describeWindSpeed01`; #497's Stages 2-4 build
@@ -128,6 +168,15 @@ export {
   metresPerSecondForSpeed01,
   speed01ForMetresPerSecond,
   beaufortRowForMetresPerSecond,
+  beaufortForMetresPerSecond,
+  hurricaneCategoryForMetresPerSecond,
+  speed01FromLegacyBeaufortDial,
+  windStrength01ForSpeed01,
+  windPerceived01ForSpeed01,
+  speed01ForWindPerceived01,
+  metresPerSecondForLegacyBeaufortDial,
+  WIND_DIAL_MAX_METRES_PER_SECOND,
+  SAFFIR_SIMPSON_SCALE,
   describeWindSpeed01,
 } from './wind-scale.js';
 export {
@@ -143,6 +192,8 @@ export {
   doorReachScaleForWindSpeed,
   DOOR_REACH_SCALE_CALM,
   DOOR_REACH_SCALE_GALE,
+  DOOR_REACH_SCALE_MAX,
+  DOOR_REACH_GALE_MPS,
   distanceFromNearestSolid,
   wallAvoidanceDirectionFromDistance,
   wallProximityFromDistance,

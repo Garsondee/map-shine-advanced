@@ -183,9 +183,12 @@ export function buildVisionFloorMaterial({ THREE }) {
  * @param {*} args.mask - an ALREADY-SAMPLED vec4 from this subsystem's R/G/B mask.
  * @param {*} args.illum - an ALREADY-SAMPLED vec4 from `buf:scene.illum`.
  * @param {number} args.threshold - `REVEAL_ILLUMINATION_THRESHOLD`.
+ * @param {((screenUV:*) => *)|null} [args.extraRevealed] - a boolean-node builder: pixels it says
+ *   are revealed stay revealed whatever the mask says (the Table's padding). Needs `screenUV`.
+ * @param {*} [args.screenUV] - the screen UV `mask` and `illum` were sampled at.
  * @returns {*} a boolean TSL node.
  */
-function buildRevealedNode({ THREE, mask, illum, threshold }) {
+function buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed = null, screenUV = null }) {
   const { float, max } = THREE.TSL;
   // The SAME illumination the composite lit the frame with — deliberately not
   // a second, differently-derived brightness, so "bright enough to see" and
@@ -197,7 +200,11 @@ function buildRevealedNode({ THREE, mask, illum, threshold }) {
   // `vision-mask.js#decideRevealed`'s own header documents in full).
   const insideSight = mask.r.greaterThan(float(0.5));
   const insideLight = mask.b.greaterThan(float(0.5));
-  return insideSight.or(insideLight.and(litEnough));
+  const sighted = insideSight.or(insideLight.and(litEnough));
+  // THE TABLE (effects/table/table-subsystem.js): while it is on, the scene's padding is the
+  // table top, not fog. A screen-space caller passes both pieces; every other caller omits them
+  // and gets exactly the rule above.
+  return extraRevealed && screenUV ? sighted.or(extraRevealed(screenUV)) : sighted;
 }
 
 /**
@@ -241,18 +248,77 @@ function buildRevealedNode({ THREE, mask, illum, threshold }) {
  * @param {number} args.threshold - `REVEAL_ILLUMINATION_THRESHOLD`
  *   (`./vision-mask.js`) — pass the SAME constant `buildVisionGateMaterial`
  *   is given, never a second, independently-chosen number.
+ * @param {((screenUV:*) => *)|null} [args.extraRevealed] - the Table's "padding is not fog" term;
+ *   pass the SAME one the gate was given.
  * @returns {{revealed: *, factor: *}} `revealed`: the boolean TSL node.
  *   `factor`: `1` where revealed, `0` where not — the same multiplicative
  *   shape `buildVisionGateMaterial`'s own gate quad uses (minus the door-fog
  *   softening; see this function's own header), ready to multiply into a
  *   caller's own additive contribution.
  */
-export function sampleVisionRevealFactor({ THREE, maskTexture, illumTexture, screenUV, threshold }) {
+export function sampleVisionRevealFactor({
+  THREE,
+  maskTexture,
+  illumTexture,
+  screenUV,
+  threshold,
+  extraRevealed = null,
+}) {
   const { texture, float, select } = THREE.TSL;
   const mask = texture(maskTexture).sample(screenUV);
   const illum = texture(illumTexture).sample(screenUV);
-  const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
+  const revealed = buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed, screenUV });
   return { revealed, factor: select(revealed, float(1), float(0)) };
+}
+
+/**
+ * THE SHARED "EVER SEEN" QUERY — the explored buffer at a screen UV. Used by
+ * the explored-dim quad below AND by the present's fog hold
+ * (`grade/grade-present.js`, 2026-10-27), so "explored" means one thing.
+ *
+ * Screen UV → world position → explored-buffer UV. Identical mapping to
+ * `sun-occlusion-render.js#buildSunVisibilityNode`, reused rather than
+ * re-derived so the two cannot drift (and so a Y-flip mistake here would
+ * have to be a mistake there too, where it is already proven correct).
+ *
+ * @param {object} args
+ * @param {*} args.THREE
+ * @param {*} args.exploredTexture - the boolean "ever seen" buffer.
+ * @param {*} args.uViewRect - current camera's world-space view rect.
+ * @param {*} args.uExploredRect - the explored buffer's own world rect.
+ * @param {*} args.screenUV - a vec2 TSL node.
+ * @param {*} [args.exploredSnapshotTexture] - the remembered-colour buffer, whose ALPHA marks every
+ *   texel the full reveal test ever passed on (see "SEEN BY DAYLIGHT" below). Omit → sight shape only.
+ * @returns {{isExplored: *, bufferUv: *}} the boolean node, and the buffer UV
+ *   (for a caller that also reads the snapshot at the same place).
+ */
+export function sampleExploredNode({
+  THREE,
+  exploredTexture,
+  uViewRect,
+  uExploredRect,
+  screenUV,
+  exploredSnapshotTexture = null,
+}) {
+  const { texture, float, mix, vec2 } = THREE.TSL;
+  const worldX = mix(uViewRect.x, uViewRect.z, screenUV.x);
+  const worldY = mix(uViewRect.y, uViewRect.w, screenUV.y);
+  const eu = worldX.sub(uExploredRect.x).div(uExploredRect.z.sub(uExploredRect.x));
+  const ev = worldY.sub(uExploredRect.y).div(uExploredRect.w.sub(uExploredRect.y));
+  const bufferUv = vec2(eu.clamp(0, 1), ev.clamp(0, 1));
+  const insideSightEver = texture(exploredTexture).sample(bufferUv).r.greaterThan(float(0.5));
+  if (!exploredSnapshotTexture) return { isExplored: insideSightEver, bufferUv };
+  // SEEN BY DAYLIGHT (2026-10-27). The author: a token *"outside, at noon"*
+  // and its explored fog *"is not what I would expect to see"*. The world
+  // buffer above only ever reads R — the SIGHT shape, which under PF2e's
+  // rules-based vision is a speck for any token without darkvision (sight
+  // range 0) — so ground revealed by light perception (B AND lit: daylight,
+  // torches) was shown live and then forgotten. Foundry's own fog remembers
+  // everything its vision revealed. The snapshot publish quad writes alpha 1
+  // exactly where the FULL reveal test passed (and the snapshot is cleared to
+  // alpha 0), so its alpha is that memory; union it in.
+  const seenEver = texture(exploredSnapshotTexture).sample(bufferUv).a.greaterThan(float(0.5));
+  return { isExplored: insideSightEver.or(seenEver), bufferUv };
 }
 
 /**
@@ -303,12 +369,19 @@ export function sampleVisionRevealFactor({ THREE, maskTexture, illumTexture, scr
  *   transition, or nothing transitioning at all) is completely unaffected.
  * @returns {*} a NodeMaterial for a fullscreen quad.
  */
-export function buildVisionGateMaterial({ THREE, maskTexture, illumTexture, threshold, doorFogProgress = null }) {
+export function buildVisionGateMaterial({
+  THREE,
+  maskTexture,
+  illumTexture,
+  threshold,
+  doorFogProgress = null,
+  extraRevealed = null,
+}) {
   const { texture, uv, float, vec4, select } = THREE.TSL;
 
   const mask = texture(maskTexture).sample(uv());
   const illum = texture(illumTexture).sample(uv());
-  const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
+  const revealed = buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed, screenUV: uv() });
 
   // wasFloorRevealed=true (or no doorFogProgress supplied at all) → factor 1,
   // byte-for-byte today's behaviour. Only a pixel that is revealed now AND
@@ -369,6 +442,8 @@ export function buildVisionGateMaterial({ THREE, maskTexture, illumTexture, thre
  * @param {*} args.uViewRect - current camera's world-space view rect, [x0,y0,x1,y1] as a vec4-like.
  * @param {*} args.uExploredRect - the explored buffers' own world rect.
  * @param {number} [args.dimFactor] - `EXPLORED_DIM_FACTOR`.
+ * @param {*} [args.memoryLight] - a vec3 uniform node, the current ambient (sRGB). With it the
+ *   snapshot must hold UNLIT colour (`storeUnlit`); omit for a snapshot that was stored already lit.
  * @returns {*} a NodeMaterial for a fullscreen quad.
  */
 export function buildVisionExploredDimMaterial({
@@ -381,24 +456,30 @@ export function buildVisionExploredDimMaterial({
   uViewRect,
   uExploredRect,
   dimFactor,
+  extraRevealed = null,
+  memoryLight = null,
 }) {
-  const { texture, uv, float, vec3, vec4, select, mix, vec2 } = THREE.TSL;
+  const { texture, uv, float, vec3, vec4, select, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
   const mask = texture(maskTexture).sample(uv());
   const illum = texture(illumTexture).sample(uv());
-  const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
+  const revealed = buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed, screenUV: uv() });
 
-  // Screen UV → world position → explored-buffer UV. Identical mapping to
-  // `sun-occlusion-render.js#buildSunVisibilityNode`, reused rather than
-  // re-derived so the two cannot drift (and so a Y-flip mistake here would
-  // have to be a mistake there too, where it is already proven correct).
-  const worldX = mix(uViewRect.x, uViewRect.z, uv().x);
-  const worldY = mix(uViewRect.y, uViewRect.w, uv().y);
-  const eu = worldX.sub(uExploredRect.x).div(uExploredRect.z.sub(uExploredRect.x));
-  const ev = worldY.sub(uExploredRect.y).div(uExploredRect.w.sub(uExploredRect.y));
-  const bufferUv = vec2(eu.clamp(0, 1), ev.clamp(0, 1));
-  const isExplored = texture(exploredTexture).sample(bufferUv).r.greaterThan(float(0.5));
-  const snapshotColor = texture(exploredSnapshotTexture).sample(bufferUv).rgb;
+  const { isExplored, bufferUv } = sampleExploredNode({
+    THREE,
+    exploredTexture,
+    uViewRect,
+    uExploredRect,
+    screenUV: uv(),
+    exploredSnapshotTexture,
+  });
+  const storedColor = texture(exploredSnapshotTexture).sample(bufferUv).rgb;
+  // RELIT BY THE CURRENT TIME OF DAY (2026-10-28). The snapshot holds plain map
+  // colour (`buildVisionSnapshotPublishMaterial`'s `storeUnlit`); the light on
+  // it is today's ambient, so memory dims and warms with the sky like the rest
+  // of the scene instead of keeping the noon or torchlight it was seen under.
+  // Only the ambient: a torch lit now in a room nobody can see must not show.
+  const snapshotColor = memoryLight ? sRGBTransferEOTF(sRGBTransferOETF(storedColor).mul(memoryLight)) : storedColor;
 
   const shouldDim = isExplored.and(revealed.not());
   const outColor = select(shouldDim, snapshotColor.mul(float(dimFactor)), vec3(0, 0, 0));
@@ -463,6 +544,7 @@ export function buildVisionExploredDimMaterial({
  * @param {*} args.maskTexture @param {*} args.illumTexture @param {number} args.threshold - SAME reveal test as the other two quads.
  * @param {*} args.uViewRect - current camera's world-space view rect.
  * @param {*} args.uExploredRect - the explored buffers' own world rect — what THIS quad's `uv()` spans.
+ * @param {boolean} [args.storeUnlit] - store plain map colour, not colour x illum (pair with the dim quad's `memoryLight`).
  * @returns {*} a NodeMaterial for a fullscreen quad bound to `exploredSnapshotTarget`.
  */
 export function buildVisionSnapshotPublishMaterial({
@@ -473,6 +555,7 @@ export function buildVisionSnapshotPublishMaterial({
   threshold,
   uViewRect,
   uExploredRect,
+  storeUnlit = false,
 }) {
   const { texture, uv, float, vec3, vec4, select, mix, vec2, step, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
@@ -508,7 +591,10 @@ export function buildVisionSnapshotPublishMaterial({
   // `EOTF( OETF(albedo) × illum )`, in gamma space (`buf:scene.illum` is
   // Foundry's own sRGB ambient — that module's header).
   const rawMapColor = texture(mapOnlyTexture).sample(screenUv).rgb;
-  const litMapColor = sRGBTransferEOTF(sRGBTransferOETF(rawMapColor).mul(illum.rgb));
+  // `storeUnlit` (2026-10-28): keep the plain map colour and let the dim quad
+  // light it with the CURRENT ambient — a lit snapshot freezes the noon sun or a
+  // torch it was seen under, and then outshines the live scene at dusk.
+  const litMapColor = storeUnlit ? rawMapColor : sRGBTransferEOTF(sRGBTransferOETF(rawMapColor).mul(illum.rgb));
   const outColor = select(shouldWrite, litMapColor, vec3(0, 0, 0));
 
   const material = new THREE.NodeMaterial();

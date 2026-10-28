@@ -108,10 +108,19 @@
  * @module effects/particles/precip-splash-runtime
  */
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
-import { createWindHandle, windFlowVectorNode } from '../../world/index.js';
+import {
+  createWindHandle,
+  windFlowVectorNode,
+  windFieldPxPerSecPerUnit,
+  windStrength01ForSpeed01,
+  WIND_DEFAULT_PIXELS_PER_METRE,
+  createWindAdvectionUniforms,
+  writeWindAdvectionUniforms,
+} from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
 import { buildSquallField } from '../precipitation/squall-field.js';
+import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
 
 const log = createLogger('precip-splash');
 const TIER0_WIND_HANDLE = createWindHandle();
@@ -124,6 +133,17 @@ const TIER0_WIND_HANDLE = createWindHandle();
  * cannot travel far enough to need the wider apron.
  */
 const SPAWN_MARGIN_FRAC = 0.12;
+
+/** Splash size on the viewed floor's own ground, relative to the old uniform size
+ * (author, 2026-10-27: "half the current scale"). Raised surfaces grow back from
+ * here — see STRIKE HEIGHT in `createPrecipSplashEngine`. */
+const GROUND_SPLASH_SCALE = 0.5;
+/** Height (world px above the floor) at which a struck surface reads as the full,
+ * un-halved size. ~3 grid squares: a low roof or canopy. */
+const STRIKE_REF_HEIGHT_PX = 300;
+/** Ceiling on the size multiplier so a high exaggeration on a tall tower cannot
+ * draw a splash the size of a room. */
+const STRIKE_SCALE_MAX = 3;
 
 /**
  * V2's `SizeOverLife` control points — `new Bezier(0.4, 4.0, 7.0, 9.0)`
@@ -200,6 +220,8 @@ export function createPrecipSplashEngine({
   renderOrder = 0,
   windHandle = TIER0_WIND_HANDLE,
   openSkyTexture = null,
+  /** `buf:scene.illum` — a splash in a building's shadow darkens like the ground. Absent ⇒ compiled out. */
+  illumTexture = null,
 }) {
   const TSL = THREE.TSL;
   const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, atan, fract, uv, mix, positionGeometry } = TSL;
@@ -302,6 +324,8 @@ export function createPrecipSplashEngine({
    * that never calls `setAmbient()` gets exactly today's look, not a broken one.
    */
   const uAmbientRgb = uniform(vec3(1, 1, 1));
+  /** The scene's light level — the shade's reference ("how much darker than the ambient is this pixel"). */
+  const uSceneLight = uniform(float(1));
   /**
    * ⭐ WIND SMEAR (§4.1) — *"lashing against the ground is precisely an impact
    * that cannot stay round"*.
@@ -318,6 +342,17 @@ export function createPrecipSplashEngine({
    * value. Only the DRIFT reads it; the smear reads `speed01` directly. */
   const uWindAirSpeed = uniform(float(2250));
   /**
+   * 2026-10-27 — THE WIND'S REAL SPEED. `uWindAirSpeed` used to hold the
+   * Studio `windAirSpeedPxS` (2250 px/s per dial unit) directly; it now holds
+   * the REAL px/s per dial unit for this scene (`70 m/s × px/m`) times that
+   * param ÷ 2250, recomputed each step, so splashes and drips drift at the
+   * pace the wind overlay's gusts travel. `uWindStrength01` is the Beaufort
+   * strength (`windStrength01ForSpeed01`) for the 0..1 LOOK ramps that were
+   * tuned on the old dial.
+   */
+  let windAirGain = 1;
+  const uWindStrength01 = uniform(float(0));
+  /**
    * ⭐ §4.1's THIRD RATE FACTOR, FINALLY PRESENT. This engine's header has said
    * since P2 that `rate ∝ precip01 × skyReach × squallField` was missing its
    * squall term and that inventing a local noise would be a second, private
@@ -328,6 +363,8 @@ export function createPrecipSplashEngine({
   const uGustiness01 = uniform(float(0));
   const uSquallDepth = uniform(float(1));
   const uSquallScale = uniform(float(3.9));
+  /** The wind's integrated travel — the squall's bands are placed by it, as the curtain's and the bodies' are. */
+  const uAdvection = createWindAdvectionUniforms(TSL);
 
   // ── THE GATES ────────────────────────────────────────────────────────────
   /** `w <= 0` disables the clip — the same fail-open polarity as the fall: a
@@ -342,6 +379,51 @@ export function createPrecipSplashEngine({
    * nothing was injected, and the gate is then compiled OUT rather than built
    * around a null (which throws at graph-build, silently). */
   const skyReachTex = openSkyPixel ? TSL.texture(openSkyPixel) : null;
+
+  /**
+   * ⭐ STRIKE HEIGHT — a splash is drawn at the SCALE OF WHAT IT HITS.
+   *
+   * Water on the floor of the viewed level is the smallest splash
+   * (`GROUND_SPLASH_SCALE` × the size dial); water on anything raised above it —
+   * a roof tile, a canopy, a bridge deck — grows with that thing's height until
+   * at `STRIKE_REF_HEIGHT_PX` it is the full, un-halved size. Nearer the eye is
+   * bigger, which is the depth cue. `uElevationExag` multiplies only the
+   * height-driven part, so 0 flattens everything back to the ground size and 2+
+   * pushes tall things past full size.
+   *
+   * The height is the mask authority's `casterHeight` field (world px above THIS
+   * floor, a byte scaled by `uHeightScalePx`). Wherever a splash can appear at
+   * all the sky reaches it, so the only thing that reads as non-zero there is a
+   * raised surface of this floor. Absent bake ⇒ height 0 ⇒ ground size, the same
+   * fail-open-to-the-plain-case polarity as the sky gate. A SEPARATE `texture()`
+   * node (shared nodes carry the wrong uv), built on the same white placeholder:
+   * `uHeightHasBake` = 0 mixes it out, so the placeholder is never read as height.
+   */
+  const uHeightRect = uniform(vec4(0, 0, 1, 1));
+  const uHeightHasBake = uniform(float(0));
+  const uHeightScalePx = uniform(float(0));
+  const uElevationExag = uniform(float(1));
+  const heightTex = openSkyPixel ? TSL.texture(openSkyPixel) : null;
+
+  /** Size multiplier for an impact at world point `p` — see STRIKE HEIGHT above. */
+  const strikeScaleAt = (p) => {
+    if (!heightTex) return float(GROUND_SPLASH_SCALE);
+    const uvx = p.x.sub(uHeightRect.x).div(uHeightRect.z.sub(uHeightRect.x).max(float(1)));
+    const uvy = p.y.sub(uHeightRect.y).div(uHeightRect.w.sub(uHeightRect.y).max(float(1)));
+    const inside = uvx
+      .greaterThanEqual(float(0))
+      .and(uvx.lessThanEqual(float(1)))
+      .and(uvy.greaterThanEqual(float(0)))
+      .and(uvy.lessThanEqual(float(1)));
+    const sampled = heightTex.sample(vec2(uvx.clamp(float(0), float(1)), uvy.clamp(float(0), float(1)))).r;
+    const gate = uHeightHasBake.mul(inside.select(float(1), float(0)));
+    const heightPx = sampled.mul(uHeightScalePx).mul(gate);
+    const lift = heightPx
+      .div(float(STRIKE_REF_HEIGHT_PX))
+      .mul(uElevationExag)
+      .mul(float(1 - GROUND_SPLASH_SCALE));
+    return float(GROUND_SPLASH_SCALE).add(lift).min(float(STRIKE_SCALE_MAX));
+  };
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
 
@@ -590,6 +672,7 @@ export function createPrecipSplashEngine({
       gustiness01: uGustiness01,
       bandDepth: uSquallDepth,
       scale: uSquallScale,
+      advection: uAdvection,
     });
 
   const vA = Fn(() => {
@@ -686,7 +769,10 @@ export function createPrecipSplashEngine({
 
     // World px, NOT scaled by the view — a splash is scenery, not atmosphere.
     // See the header.
-    const sizePx = c.y.mul(growth(t)).mul(uSizeScale);
+    const sizePx = c.y
+      .mul(growth(t))
+      .mul(uSizeScale)
+      .mul(strikeScaleAt(position.element(i)));
     const local = positionGeometry.xy.mul(sizePx);
 
     /**
@@ -724,8 +810,27 @@ export function createPrecipSplashEngine({
      * ends up pointing upwind on half the population; giving the quad to the
      * wind and the shape to the hash makes that unrepresentable.
      */
-    const w = windToward();
-    const elong = float(1).add(uWindSpeed01.mul(uSmearGain).mul(float(ELONGATION_PER_SMEAR)));
+    /**
+     * PER-SPLASH SCATTER OFF THE WIND (author, 2026-10-27: "up to 45 degrees
+     * from the wind direction on a bell curve"). The sum of three uniform
+     * hashes is a near-Gaussian bell on ±1.5, mapped onto ±45°: most splashes
+     * lean close to the wind, a few swing wide, none past 45°. Keyed on the
+     * body's `phase` (re-rolled at every respawn) plus its slot, so each impact
+     * gets its own lean. Rotating the BASIS rotates every downstream wind term
+     * (the crown shift, the bright rim) with it — they read local +x as downwind.
+     */
+    const key = c.w.mul(float(3.17)).add(float(i).mul(float(0.013)));
+    const bell = hash11(key.add(float(11.1)))
+      .add(hash11(key.add(float(23.7))))
+      .add(hash11(key.add(float(41.3))))
+      .sub(float(1.5))
+      .div(float(1.5));
+    const lean = bell.mul(float(Math.PI / 4));
+    const w0 = windToward();
+    const cl = cos(lean);
+    const sl = sin(lean);
+    const w = vec2(w0.x.mul(cl).sub(w0.y.mul(sl)), w0.x.mul(sl).add(w0.y.mul(cl)));
+    const elong = float(1).add(uWindStrength01.mul(uSmearGain).mul(float(ELONGATION_PER_SMEAR)));
     // Area is roughly preserved: what the along-wind axis gains, the across
     // axis gives back. A quad that only grows would make a gale read as bigger
     // splashes rather than as wind-struck ones.
@@ -781,12 +886,17 @@ export function createPrecipSplashEngine({
    * ambient. Multiplied by `uAmbientRgb` below, never used raw. */
   const SPLASH_WET_ALBEDO = vec3(0.4, 0.5, 0.62);
 
+  const shade = buildWeatherShadeNode(TSL, {
+    illumTexNode: illumTexture ? TSL.texture(illumTexture) : null,
+    uSceneLight,
+  });
+
   material.colorNode = Fn(() => {
     const ringR = vA.y;
     const phase = vB.z;
     const t = vB.w;
 
-    const bias = uWindSpeed01.mul(uSmearGain).mul(float(CENTRE_BIAS_PER_SMEAR)).clamp(float(0), float(0.55));
+    const bias = uWindStrength01.mul(uSmearGain).mul(float(CENTRE_BIAS_PER_SMEAR)).clamp(float(0), float(0.55));
     const p = uv().sub(float(0.5)).mul(float(2)).sub(vec2(bias, 0));
     const d = p.length();
     const nearRing = float(1)
@@ -830,7 +940,9 @@ export function createPrecipSplashEngine({
     // Freshly-landed water flashes; a settling film calms back toward the wet
     // base — reuses the `life01` every other consumer here already reads.
     const freshness = float(1).sub(t).pow(float(1.4));
-    return mix(wet, rgb, mix(float(0.55), float(1), freshness));
+    const out = mix(wet, rgb, mix(float(0.55), float(1), freshness));
+    // In a building's shadow the puddle sees less light, like the ground under it.
+    return shade ? out.mul(shade) : out;
   })();
 
   material.opacityNode = Fn(() => {
@@ -867,7 +979,7 @@ export function createPrecipSplashEngine({
      * `uWindSmear01` is a per-FRAME uniform, identical for every body, so it is
      * read here directly rather than crossing as a varying.
      */
-    const bias = uWindSpeed01.mul(uSmearGain).mul(float(CENTRE_BIAS_PER_SMEAR)).clamp(float(0), float(0.55));
+    const bias = uWindStrength01.mul(uSmearGain).mul(float(CENTRE_BIAS_PER_SMEAR)).clamp(float(0), float(0.55));
     const p = p0.sub(vec2(bias, 0));
     const d = p.length();
     const theta = atan(p.y, p.x);
@@ -1100,9 +1212,16 @@ export function createPrecipSplashEngine({
         const sp = src.ambient.speed01?.value;
         const dg = src.ambient.directionDeg?.value;
         const gu = src.ambient.gustiness01?.value;
-        if (Number.isFinite(sp)) uWindSpeed01.value = sp;
+        if (Number.isFinite(sp)) {
+          uWindSpeed01.value = sp;
+          uWindStrength01.value = windStrength01ForSpeed01(sp);
+        }
         if (Number.isFinite(dg)) uWindDirDeg.value = dg;
         if (Number.isFinite(gu)) uGustiness01.value = gu;
+        const ppm = src.ambient.pixelsPerMetre?.value;
+        uWindAirSpeed.value =
+          windFieldPxPerSecPerUnit(Number.isFinite(ppm) && ppm > 0 ? ppm : WIND_DEFAULT_PIXELS_PER_METRE) * windAirGain;
+        writeWindAdvectionUniforms(uAdvection, src.ambient.advection);
       }
       uDtSec.value = Math.max(0, Math.min(0.1, dtSec || 0));
       // Read by the SQUALL FIELD only — its bands travel. Never by the respawn
@@ -1145,6 +1264,27 @@ export function createPrecipSplashEngine({
       return { armed: true, rect };
     },
 
+    /**
+     * Arm the strike-height field (the floor's baked `casterHeight`). Same
+     * fail-open polarity as the sky gate: no texture ⇒ every splash is ground size.
+     * @param {*} texture - R = height byte/255.
+     * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect
+     * @param {number} scalePx - world px a full byte (R = 1) stands for.
+     */
+    setHeightTexture(texture, rect, scalePx) {
+      if (!heightTex) return { armed: false, reason: 'no openSkyTexture injected — the height field cannot arm' };
+      if (!texture || !rect || !(scalePx > 0)) {
+        heightTex.value = openSkyPixel;
+        uHeightHasBake.value = 0;
+        return { armed: false, reason: texture ? 'no rect/scale supplied' : 'no texture supplied' };
+      }
+      heightTex.value = texture;
+      uHeightRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+      uHeightScalePx.value = scalePx;
+      uHeightHasBake.value = 1;
+      return { armed: true, rect, scalePx };
+    },
+
     setSceneBounds(rect) {
       if (!rect || !(rect.maxX > rect.minX)) {
         uSceneRect.value.set(0, 0, 0, 0);
@@ -1167,6 +1307,7 @@ export function createPrecipSplashEngine({
      */
     setFrame(fallFrame) {
       if (!splashes) return;
+      if (Number.isFinite(fallFrame?.sceneLight01)) uSceneLight.value = fallFrame.sceneLight01;
       const fallLive = Number.isFinite(fallFrame?.liveCount) ? fallFrame.liveCount : 0;
       const fallCap = Math.max(1, S?.capacity ?? 1);
       // ⚠️ THE FRACTION IS THE CURTAIN'S OWN, capacity-normalised — that is
@@ -1180,13 +1321,14 @@ export function createPrecipSplashEngine({
     setTuning(t = {}) {
       if (Number.isFinite(t.splashSizeScale)) uSizeScale.value = t.splashSizeScale;
       if (Number.isFinite(t.splashAlphaScale)) uAlphaScale.value = t.splashAlphaScale;
+      if (Number.isFinite(t.splashElevationExag)) uElevationExag.value = Math.max(0, t.splashElevationExag);
       if (Number.isFinite(t.splashPeakBoost)) uPeakBoost.value = t.splashPeakBoost;
       if (Number.isFinite(t.splashSmearGain)) uSmearGain.value = t.splashSmearGain;
       if (Number.isFinite(t.splashRateScale)) {
         rateScale = Math.max(0, t.splashRateScale);
         applyCount();
       }
-      if (Number.isFinite(t.windAirSpeedPxS)) uWindAirSpeed.value = t.windAirSpeedPxS;
+      if (Number.isFinite(t.windAirSpeedPxS)) windAirGain = Math.max(0, t.windAirSpeedPxS) / 2250;
       // ONE dial for one phenomenon — the veil, the bodies and the splashes all
       // read this same number.
       if (Number.isFinite(t.curtainBandDepth)) uSquallDepth.value = Math.max(0, Math.min(1, t.curtainBandDepth));
@@ -1226,14 +1368,20 @@ export function createPrecipSplashEngine({
           // Both halves of the top-down asymmetry model, separately — the
           // elongation is deliberately near 1 and the BIAS is what carries the
           // look, so one merged "smear" number would hide which is which.
-          elongation: 1 + uWindSpeed01.value * uSmearGain.value * ELONGATION_PER_SMEAR,
-          centreBias: Math.min(0.55, uWindSpeed01.value * uSmearGain.value * CENTRE_BIAS_PER_SMEAR),
+          elongation: 1 + uWindStrength01.value * uSmearGain.value * ELONGATION_PER_SMEAR,
+          centreBias: Math.min(0.55, uWindStrength01.value * uSmearGain.value * CENTRE_BIAS_PER_SMEAR),
         },
         tuning: {
           sizeScale: uSizeScale.value,
           alphaScale: uAlphaScale.value,
           peakBoost: uPeakBoost.value,
           smearGain: uSmearGain.value,
+          elevationExag: uElevationExag.value,
+        },
+        strikeHeight: {
+          inGraph: Boolean(heightTex),
+          armed: uHeightHasBake.value === 1,
+          scalePx: uHeightScalePx.value,
         },
         skyGate: {
           hasPlaceholder: Boolean(openSkyPixel),

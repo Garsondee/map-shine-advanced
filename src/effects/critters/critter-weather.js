@@ -35,7 +35,7 @@
  *
  * @module effects/critters/critter-weather
  */
-import { windFlowVector } from '../../world/index.js';
+import { windFlowVector, windStrength01ForSpeed01 } from '../../world/index.js';
 
 /** Precipitation (0..1) at which rain or snow counts as a FULL load on an insect. */
 export const LOAD_SATURATION = 0.7;
@@ -80,7 +80,9 @@ export function skyFeel(env) {
   } else if (kind === 'ash' || kind === 'embers') {
     rainShare = 0.6;
   }
-  const wind = clamp01(env?.wind?.speed01);
+  // Beaufort strength (2026-10-27: the dial went linear to 70 m/s; the critter
+  // thresholds were tuned when 0..1 was force ÷ 12).
+  const wind = windStrength01ForSpeed01(clamp01(env?.wind?.speed01));
   const gust = clamp01(env?.wind?.gustiness01);
   const temperature = Number.isFinite(env?.weather?.temperature01) ? clamp01(env.weather.temperature01) : MILD;
   return {

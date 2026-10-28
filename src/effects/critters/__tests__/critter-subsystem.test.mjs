@@ -193,7 +193,7 @@ export function run(t) {
     'the species name becomes its shader index',
     fly.lookIndex === FLY_LOOKS.indexOf('bluebottle') && fly.lookIndex === 2
   );
-  t.ok('plain numbers are passed through by their own names', fly.buzz === 4000 && fly.size === 4);
+  t.ok('plain numbers are passed through by their own names', fly.buzz === 4000 && fly.size === 6);
   t.ok('the sky-resolved shadow rides along', fly.shadowAmount === 0.3 && fly.shadowShift[1] === 0.2);
   t.ok(
     'an unknown species falls back to "mixed" (0), never a negative index',

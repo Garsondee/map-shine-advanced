@@ -47,6 +47,11 @@ const log = createLogger('progress-notice');
 /** How long work must run before anything is shown. Same figure as ui/floor-transition.js. */
 export const NOTICE_SHOW_AFTER_MS = 250;
 
+/** What a player is told when a scene loads: that it is, and that it may take a while — never which scene. */
+export const PLAYER_SCENE_MESSAGE = 'Loading a new scene — this might take a little while.';
+/** The same for a floor change. */
+export const PLAYER_FLOOR_MESSAGE = 'Changing floors — this might take a little while.';
+
 /**
  * Escape text for a Foundry notification message. Level and scene names are user
  * data and `ui.notifications` renders HTML, so they never go in raw.
@@ -111,11 +116,14 @@ export function describeStep(steps, progress) {
 
 /**
  * The notification text for one moment of a prepare.
- * @param {{verb?: string, name: string}} subject - e.g. {verb: 'Preparing', name: 'Ground Floor'}
+ * A subject with no `name` (a player's — they are never told where the table is going
+ * next) gets `generic` instead: no name, no step detail, just that it is loading.
+ * @param {{verb?: string, name?: string|null, generic?: string}} subject - e.g. {verb: 'Preparing', name: 'Ground Floor'}
  * @param {ReturnType<typeof describeStep>} d
  * @returns {string} already escaped
  */
-export function formatPrepareMessage({ verb = 'Preparing', name }, d) {
+export function formatPrepareMessage({ verb = 'Preparing', name, generic = PLAYER_SCENE_MESSAGE }, d) {
+  if (name === null || name === undefined) return escapeNoticeText(generic);
   return `${escapeNoticeText(verb)} ${escapeNoticeText(name)} — step ${d.step} of ${d.of}: ${escapeNoticeText(d.label)}${d.detail}`;
 }
 

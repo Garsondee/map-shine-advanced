@@ -87,8 +87,12 @@ export function run(t) {
   // ── kinds differ only where the table says so ──
   const fly = createUniformBank(stubTSL(), { ...CRITTER_UNIFORM_DEFAULTS, ...CRITTER_KIND_DEFAULTS.fly });
   const firefly = createUniformBank(stubTSL(), { ...CRITTER_UNIFORM_DEFAULTS, ...CRITTER_KIND_DEFAULTS.firefly });
-  t.ok('a fly is 4 px by default and a firefly 3', fly.get('size').value === 4 && firefly.get('size').value === 3);
-  t.ok('everything else is shared', fly.get('opacity').value === firefly.get('opacity').value);
+  t.ok('a fly is 6 px by default and a firefly 3', fly.get('size').value === 6 && firefly.get('size').value === 3);
+  // `speed` stays genuinely universal (every kind's own schema still defaults it to 1, no kind
+  // overrides it); `opacity`/`lightInfluence`/`perspective` no longer are — fireflies' own
+  // 2026-10-28 retune gave it independently-tuned values the other kinds don't share (see
+  // critter-uniforms.js's own firefly kind-defaults block).
+  t.ok('speed is still shared', fly.get('speed').value === firefly.get('speed').value);
   t.ok(
     'the per-kind overrides name only uniforms the table declares (no typo can hide in them)',
     Object.values(CRITTER_KIND_DEFAULTS).every((o) => Object.keys(o).every((k) => k in CRITTER_UNIFORM_DEFAULTS))

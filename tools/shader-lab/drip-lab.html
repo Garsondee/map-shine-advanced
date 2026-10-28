@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Drip lab</title>
+    <style>
+      body {
+        background: #111;
+        color: #ccc;
+        font: 12px monospace;
+        margin: 8px;
+      }
+      #wrap {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      canvas {
+        display: block;
+        background: #000;
+        max-width: 100%;
+      }
+      #panel {
+        width: 340px;
+        flex: none;
+        max-height: 720px;
+        overflow-y: auto;
+      }
+      #panel h4 {
+        margin: 10px 0 4px;
+        color: #9c9;
+      }
+      #panel label {
+        display: grid;
+        grid-template-columns: 120px 1fr 44px;
+        gap: 4px;
+        align-items: center;
+        margin: 2px 0;
+      }
+      #panel button {
+        font: inherit;
+        margin: 2px 2px 2px 0;
+      }
+      pre {
+        white-space: pre-wrap;
+        max-height: 220px;
+        overflow: auto;
+        margin: 6px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div>
+      Drip lab: <code>window.dripLab</code> — the REAL roof-drip engine (<code>precip-drip-runtime.js</code>) fed by the
+      REAL roofline extractor (<code>drip-edges.js</code>) over a synthetic courtyard, viewed top-down.
+    </div>
+    <div id="wrap">
+      <canvas id="view" width="1280" height="720"></canvas>
+      <div id="panel"></div>
+    </div>
+    <pre id="status">loading…</pre>
+    <script type="module" src="/tools/shader-lab/drip-lab.js"></script>
+  </body>
+</html>

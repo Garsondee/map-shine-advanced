@@ -36,6 +36,7 @@ import { run as runRunConditions } from './run-conditions.test.mjs';
 import { run as runGpuQueueProbe } from './gpu-queue-probe.test.mjs';
 import { run as runPresentationMonitor } from './presentation-monitor.test.mjs';
 import { run as runFloorTimeline } from './floor-timeline.test.mjs';
+import { run as runCrashGuard } from './crash-guard.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -86,6 +87,7 @@ const suites = [
   ['gpu-queue-probe', runGpuQueueProbe],
   ['presentation-monitor', runPresentationMonitor],
   ['floor-timeline', runFloorTimeline],
+  ['crash-guard', runCrashGuard],
 ];
 
 for (const [name, fn] of suites) {

@@ -51,6 +51,20 @@ import {
   PLAYER_VISION_TOKEN_SLOTS,
 } from '../vision/player-vision-grade-render.js';
 import { VISION_MODE_PRESETS } from '../vision/player-vision-modes.js';
+// TEMPERATURE EFFECTS (2026-10-27) — frost frame + outdoor heat ripple, folded
+// in here for the same reason the fire heat haze below is: both re-point the
+// present's own sample position, and this is the one draw that already has
+// the outdoors gate and the graded image at any UV.
+import {
+  createTemperatureUniforms,
+  buildFrostNodes,
+  applyFrostLayer,
+  buildHeatRippleOffset,
+} from '../temperature/temperature-render.js';
+import { HEAT_TAP_Y_FREQ } from '../temperature/temperature-model.js';
+// THE FOG HOLD (2026-10-27) — the vision gate's own reveal test, re-asked here
+// so the grade never reaches into the fog (see `setFogHoldActive`).
+import { sampleVisionRevealFactor, sampleExploredNode } from '../vision/vision-mask-render.js';
 
 const STYLE_NAMES_SAFE = new Set(STYLIZE_LOOK_NAMES);
 const PLAYER_VISION_MODE_NAMES_SAFE = new Set(PLAYER_VISION_GRADE_MODE_KEYS);
@@ -100,6 +114,8 @@ function writeGradeUniforms(u, params) {
  *   in the previous version: sharing the node is what makes a mask rebake reach
  *   the grade too).
  * @param {*} [args.uViewRect] @param {*} [args.uOutdoorsRect] - the SHARED gate uniforms.
+ * @param {*} [args.uOutdoorsExtent] - the environmental light's outdoors extent (the viewer's effects
+ *   extent), so the outdoor grade reaches a parallax canopy overhanging the Table's recess wall.
  * @param {*} [args.lutTexture] - a placeholder identity 3D LUT texture, so the
  *   LUT node always compiles; `setLut` swaps its `.value` in. Omit → no LUT node.
  * @param {(THREE:*, tex:*, uvNode:*) => {rgb:*, a:*}} [args.buildPostUpscaleSharpenNode] -
@@ -113,7 +129,13 @@ function writeGradeUniforms(u, params) {
  *   use for "this material needs something from outside its own zone."
  *   Omit → the render-scale governor's post-upscale sharpen never compiles
  *   in, same as never calling `setPostUpscaleSharpenActive`.
- * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setStylize, setPlayerVisionMode, setPlayerVisionTokens, setLut, setPostUpscaleSharpenActive, rebindLit, gateCompiled }}
+ * @param {*} [args.temperatureNoiseTexture] - a repeat-wrapped placeholder for
+ *   the Temperature Effects tile (`temperature-noise.js`); `setTemperatureNoise`
+ *   swaps the real one in. Omit → frost and heat ripple never compile in.
+ * @param {{maskTexture:*, illumTexture:*, exploredTexture:*, exploredSnapshotTexture?:*, uExploredRect:*, threshold:number, extraRevealed?:(uv:*)=>*}} [args.fogHold] -
+ *   the vision gate's own inputs (`vision-mask-render.js`), so the present can
+ *   keep the grade out of the fog. Omit → `setFogHoldActive` is a no-op.
+ * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setStylize, setPlayerVisionMode, setPlayerVisionTokens, setLut, setPostUpscaleSharpenActive, setFogHoldActive, setTemperatureEffects, setTemperatureNoise, rebindLit, gateCompiled }}
  */
 export function buildGradePresentMaterial({
   THREE,
@@ -121,11 +143,14 @@ export function buildGradePresentMaterial({
   outdoorsTexNode,
   uViewRect,
   uOutdoorsRect,
+  uOutdoorsExtent = null,
   lutTexture,
   buildPostUpscaleSharpenNode,
+  temperatureNoiseTexture,
+  fogHold,
 }) {
   const TSL = THREE.TSL;
-  const { texture, vec2, vec3, vec4, mix, uv, dot, uniform, float, max, min } = TSL;
+  const { texture, vec2, vec3, vec4, mix, uv, dot, uniform, float, max, min, select } = TSL;
 
   const presentTexNode = texture(litTexture);
   const uEnv = makeGradeUniforms(TSL, false);
@@ -206,6 +231,32 @@ export function buildGradePresentMaterial({
   const uHeatActive = uniform(float(0));
   const uHeatTime = uniform(float(0));
 
+  /** TEMPERATURE EFFECTS — which of its two warp layers are COMPILED IN. A
+   * structural choice, same shape as `sharpenActive`: off ⇒ not one node of
+   * it exists, so a temperate scene's present is the shader it always was. */
+  const uTemp = createTemperatureUniforms(TSL);
+  const tempNoiseNode = temperatureNoiseTexture ? texture(temperatureNoiseTexture) : null;
+  let frostCompiled = false;
+  let heatRippleCompiled = false;
+
+  /**
+   * THE FOG HOLD — is it COMPILED IN (2026-10-27)? The author: *"when it is
+   * dark it must be perfect solid black"*, and the Temperature grade must stay
+   * *"only … in visible areas for that token and not extend into the Fog of
+   * War"*. The vision gate (`vt-pan-viewer.js#runVisionGatePass`) blacks out
+   * and dims `scene.lit` BEFORE bloom, so everything this material does after
+   * it — the env grade's lift and exposure, the warm/cold split-tone, the
+   * artistic grade — used to paint straight over the fog: never-seen ground
+   * came out brown, and remembered ground brightened only where `_Outdoors`
+   * was white. With the hold on, each pixel asks the gate's own question:
+   *   revealed now          → graded, as before
+   *   explored, not visible → exactly what the gate left (the dim memory)
+   *   never explored        → solid black, bloom's spill included
+   * Same compile-time shape as `sharpenActive`: off (MSA not owning vision)
+   * means not one node of it exists.
+   */
+  let fogHoldActive = false;
+
   /**
    * The Stylize effect's per-style colour transform, applied to the fully
    * graded/tone-mapped/LUT'd colour (i.e. strictly AFTER Colour Grade's own
@@ -252,6 +303,7 @@ export function buildGradePresentMaterial({
         uOutdoorsRect,
         outdoorsTexNode,
         uvNode: sampleUv,
+        uExtentRect: uOutdoorsExtent,
       });
       const gradedEnv = buildGradeNode(TSL, sampledLit, uEnv);
       const afterEnv = outdoorsAt ? mix(sampledLit, gradedEnv, outdoorsAt) : sampledLit;
@@ -263,7 +315,28 @@ export function buildGradePresentMaterial({
       });
       // STYLIZE remains before the personal viewing-device optics.
       const styled = buildStylizeNode(gradedArt, currentStyle);
-      return styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+      const shot = styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+      if (!fogHoldActive) return shot;
+      // THE FOG HOLD — see `fogHoldActive`. Asked at the SAME uv the picture
+      // was sampled at, so frost refraction and heat ripple move the fog's
+      // edge with the image instead of shearing it off.
+      const { revealed } = sampleVisionRevealFactor({
+        THREE,
+        maskTexture: fogHold.maskTexture,
+        illumTexture: fogHold.illumTexture,
+        screenUV: sampleUv,
+        threshold: fogHold.threshold,
+        extraRevealed: fogHold.extraRevealed ?? null,
+      });
+      const { isExplored } = sampleExploredNode({
+        THREE,
+        exploredTexture: fogHold.exploredTexture,
+        uViewRect,
+        uExploredRect: fogHold.uExploredRect,
+        screenUV: sampleUv,
+        exploredSnapshotTexture: fogHold.exploredSnapshotTexture ?? null,
+      });
+      return select(revealed, shot, select(isExplored, sampledLit, vec3(0, 0, 0)));
     };
     // THE HEAT WARP: for each hot fire, a column of rising shimmer above it (screen up), strongest just over the flame and fading out
     // by `reach` radii; two octaves of slow noise pushed upward make the picture ripple.
@@ -300,7 +373,38 @@ export function buildGradePresentMaterial({
         return vec2(total.x.div(viewSpanX), total.y.div(viewSpanY));
       })();
     })();
-    const afterStylize = buildStyledAt(uv().add(heatOffsetUv));
+    // TEMPERATURE EFFECTS — only the layers currently showing are built.
+    let sampleUv = uv().add(heatOffsetUv);
+    let frost = null;
+    if (tempNoiseNode && (frostCompiled || heatRippleCompiled)) {
+      const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1e-5));
+      const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1e-5));
+      if (frostCompiled) {
+        frost = buildFrostNodes(TSL, {
+          uvNode: uv(),
+          aspectNode: viewSpanX.div(viewSpanY),
+          noiseTexNode: tempNoiseNode,
+          u: uTemp,
+        });
+        sampleUv = sampleUv.add(frost.offsetUv);
+      }
+      if (heatRippleCompiled) {
+        const worldXY = vec2(uViewRect.x.add(uv().x.mul(viewSpanX)), uViewRect.y.add(uv().y.mul(viewSpanY)));
+        sampleUv = sampleUv.add(
+          buildHeatRippleOffset(TSL, {
+            worldXY,
+            noiseTexNode: tempNoiseNode,
+            gate: buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode }),
+            u: uTemp,
+            yFreq: HEAT_TAP_Y_FREQ,
+          })
+        );
+      }
+    }
+    const styledAtSample = buildStyledAt(sampleUv);
+    // Frost sits on the glass: over the finished shot, under the viewer's own
+    // vision-mode device below.
+    const afterStylize = frost ? applyFrostLayer(TSL, styledAtSample, frost, uTemp) : styledAtSample;
     // Convert the token's world-pixel center using the SAME live camera rect
     // the environmental gate uses. This stays aligned while panning/zooming;
     // computing UV on the JS side would trail the camera by a frame.
@@ -525,6 +629,22 @@ export function buildGradePresentMaterial({
         rebuildFragment();
       }
     },
+    /**
+     * Turn the fog hold on/off (2026-10-27) — see `fogHoldActive`. Rebuilds
+     * only when the state flips; a no-op if built without `fogHold`. The
+     * viewer turns it on while MSA owns vision and off when the gate hands
+     * fog back to Foundry (then `scene.lit` is ungated and the mask stale).
+     * @param {boolean} active
+     */
+    setFogHoldActive: (active) => {
+      const next = !!active && !!fogHold;
+      if (next !== fogHoldActive) {
+        fogHoldActive = next;
+        rebuildFragment();
+      }
+    },
+    /** Is the fog hold compiled in right now — for diagnostics and tests. */
+    fogHoldCompiled: () => fogHoldActive,
     /** Re-point at a freshly-allocated lit target (resize). */
     rebindLit: (tex) => {
       presentTexNode.value = tex;
@@ -589,6 +709,44 @@ export function buildGradePresentMaterial({
       uHeatActive.value = any;
       uHeatTime.value = Number.isFinite(timeSec) ? timeSec % 1000 : 0;
     },
+    /**
+     * Push this frame's Temperature Effects warp (2026-10-27). `frost` /
+     * `heatRipple` say which layers are SHOWING; flipping either rebuilds the
+     * fragment (compile-time, same as `setPostUpscaleSharpenActive`), so the
+     * caller should only flip them on real transitions. A no-op for both
+     * layers when this material was built without a noise texture.
+     * @param {{frost?: boolean, heatRipple?: boolean, frostCover?: number,
+     *   frostShape?: number[], frostScale?: number, frostRefractUv?: number[],
+     *   frostLook?: number[], frostTint?: number[], heatAmpUv?: number[],
+     *   heatScroll?: number[], heatScale?: number}} s
+     */
+    setTemperatureEffects: (s = {}) => {
+      const nextFrost = !!tempNoiseNode && s.frost === true;
+      const nextHeat = !!tempNoiseNode && s.heatRipple === true;
+      if (nextFrost !== frostCompiled || nextHeat !== heatRippleCompiled) {
+        frostCompiled = nextFrost;
+        heatRippleCompiled = nextHeat;
+        rebuildFragment();
+      }
+      const setV = (node, arr) => {
+        if (Array.isArray(arr) && arr.every(Number.isFinite)) node.value.set(...arr);
+      };
+      if (Number.isFinite(s.frostCover)) uTemp.frostCover.value = s.frostCover;
+      setV(uTemp.frostShape, s.frostShape);
+      if (Number.isFinite(s.frostScale)) uTemp.frostScale.value = s.frostScale;
+      setV(uTemp.frostRefractUv, s.frostRefractUv);
+      setV(uTemp.frostLook, s.frostLook);
+      setV(uTemp.frostTint, s.frostTint);
+      setV(uTemp.heatAmpUv, s.heatAmpUv);
+      setV(uTemp.heatScroll, s.heatScroll);
+      if (Number.isFinite(s.heatScale) && s.heatScale > 0) uTemp.heatScale.value = s.heatScale;
+    },
+    /** Swap in the baked Temperature Effects tile (same shape as `setLut`). */
+    setTemperatureNoise: (tex) => {
+      if (tempNoiseNode && tex) tempNoiseNode.value = tex;
+    },
+    /** Which Temperature Effects layers are compiled in right now — for diagnostics. */
+    temperatureCompiled: () => ({ frost: frostCompiled, heatRipple: heatRippleCompiled }),
     gateCompiled,
   };
 }

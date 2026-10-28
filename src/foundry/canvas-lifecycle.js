@@ -173,3 +173,30 @@ export function registerCanvasTearDownWatchdog({ isViewerActive, onOrphaned, log
     },
   };
 }
+
+/**
+ * Redraw the scene Foundry is showing (2026-10-27, epic mmp-fpu) — the restart half of the crash ladder.
+ *
+ * When the GPU device is lost, MSA slides to Foundry's own renderer and the viewer is gone. Foundry's
+ * own context-loss recovery usually redraws the canvas, which fires `canvasInit`/`canvasReady` and starts
+ * MSA again through the normal path (one rung lower — `core/safe-mode.js`). This is the explicit
+ * fallback for when it did not: ask Foundry for a draw of the same scene and let the normal path do
+ * the rest. It starts nothing itself — a redraw is the only restart route that cannot duplicate the
+ * viewer, because every start is a reaction to Foundry's own hooks.
+ *
+ * Lives here because `canvas.*` outside `src/foundry/` is exactly what `foundry/adapter-only` ratchets.
+ *
+ * @returns {Promise<{ok: boolean, reason?: string}>}
+ */
+export async function redrawActiveScene() {
+  const c = globalThis.canvas;
+  const scene = c?.scene ?? null;
+  if (!c || !scene || typeof c.draw !== 'function') return { ok: false, reason: 'no scene on screen to redraw' };
+  if (c.loading === true) return { ok: false, reason: 'Foundry is already drawing' };
+  try {
+    await c.draw(scene);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message ?? err) };
+  }
+}

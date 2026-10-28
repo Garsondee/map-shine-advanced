@@ -387,7 +387,6 @@ studio.registerEffectCard('water', () => ({
   icon: 'water',
   title: 'Water',
   accVar: '--c-atmos',
-  filterCategory: 'surface',
   tier: { tier: 3, maxTier: 4, source: 'profile' },
   mask: { suffix: '_Water', found: true },
   presets: ['CalmLake', 'RagingRiver'],
@@ -450,7 +449,6 @@ for (const spec of [
     icon: spec.icon,
     title: spec.title,
     accVar: '--c-particles',
-    filterCategory: 'particles',
     tier: { tier: 2, maxTier: 4, source: 'profile' },
     mask: { suffix: spec.suffix, found: false },
     presets: Object.keys(spec.presets),
@@ -485,7 +483,6 @@ studio.registerEffectCard('bloom', () => ({
   icon: 'bloom',
   title: 'Bloom',
   accVar: '--c-post',
-  filterCategory: 'post',
   schema: {
     strength: {
       type: 'float',
@@ -522,7 +519,6 @@ studio.registerEffectCard('candleFlame', () => ({
   icon: 'candle',
   title: 'Candle flames',
   accVar: '--c-lighting',
-  filterCategory: 'lighting',
   schema: {
     sizePx: {
       type: 'float',
@@ -559,7 +555,6 @@ studio.registerEffectCard('storm', () => ({
   icon: 'bolt',
   title: 'Precipitation, lightning and distant thunder',
   accVar: '--c-particles',
-  filterCategory: 'particles',
   schema: {
     intensity: {
       type: 'float',
@@ -623,7 +618,6 @@ studio.registerEffectCard('fire', () => {
     icon: 'fire',
     title: 'Fire',
     accVar: '--c-lighting',
-    filterCategory: 'lighting',
     mask: { suffix: '_Fire', found: false },
     schema: {
       intensity: {

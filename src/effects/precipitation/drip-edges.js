@@ -100,6 +100,29 @@ export const COVER_THRESHOLD = 0.5;
  */
 export const OPEN_THRESHOLD = 0.25;
 
+/**
+ * How outdoors (on THIS floor's `_Outdoors` grid) the open side of an edge must
+ * read for the edge to drip.
+ *
+ * ⭐ AN EDGE OF `coverAbove` IS NOT ALWAYS AN EAVE. A hole in the floor above
+ * — a double-height entrance hall, a light well, a stair void — is an edge of
+ * the upper floor's art, but the water has nowhere to come from: the ground
+ * beneath the hole is INDOORS. Found 2026-10-27 on the Mansion: the first
+ * floor's open void over the red-carpeted south hall sang a full ring of drips
+ * inside the building. The authored `_Outdoors` mask already says which ground
+ * the sky reaches, so the open side has to agree before a drip may fall onto it.
+ */
+export const DRIP_OUTDOORS_THRESHOLD = 0.5;
+
+/**
+ * How many texels past the edge the outdoors test may look. Two, not one, so a
+ * one-texel disagreement between the upper floor's art and this floor's
+ * `_Outdoors` rasterisation (each point-sampled on its own) cannot silence a
+ * real exterior eave; a void wide enough to matter is many texels across, so
+ * the extra reach never finds the street from inside a hall.
+ */
+export const DRIP_OUTDOORS_REACH = 2;
+
 /** Cap on extracted points. A roofline is a line, not an area — a few hundred
  * points render a whole mansion's eaves. Exceeding it SUBSAMPLES with a stride
  * rather than truncating, so a big map drips evenly instead of only along
@@ -128,8 +151,16 @@ export const MAX_DRIP_POINTS = 512;
  *   result says which was used, because "every drip fell from the same height"
  *   and "the deck heights are all equal" look identical on screen and are very
  *   different facts (`feedback_absent_zone_row_is_a_measurement`).
+ * @param {{spec: object, data: Uint8Array}} [options.outdoorsGrid] - THIS floor's
+ *   `outdoors` grid. When given, an edge drips only if its open side is
+ *   outdoors (see {@link DRIP_OUTDOORS_THRESHOLD}). Sampled in WORLD space, so
+ *   it need not share the cover grid's resolution. Absent = every open side
+ *   counts, exactly as before (the catalog's own absent `_Outdoors` reads as
+ *   all-outdoors too).
  * @returns {{points: Float32Array, count: number, edgeTexels: number, stride: number,
- *   heightSource: string, meanHeightPx: number}}
+ *   heightSource: string, meanHeightPx: number, indoorEdgeTexels: number}}
+ *   `indoorEdgeTexels` counts the cover edges dropped because they open onto
+ *   indoor ground — named, so "no drips here" can be told apart from "no edge".
  *   `points` is `[x0, y0, h0, x1, y1, h1, …]` — world px, world px, world px. Empty on any malformed
  *   input — a roofline that cannot be found must produce NO drips, never a
  *   guessed one, because a drip in the wrong place is worse than no drip at all
@@ -138,7 +169,7 @@ export const MAX_DRIP_POINTS = 512;
 export function extractDripEdges(grid, options = {}) {
   const spec = grid?.spec ?? null;
   const data = grid?.data ?? null;
-  const empty = { points: new Float32Array(0), count: 0, edgeTexels: 0, stride: 1 };
+  const empty = { points: new Float32Array(0), count: 0, edgeTexels: 0, indoorEdgeTexels: 0, stride: 1 };
   if (!spec || !data) return empty;
   const w = spec.w | 0;
   const h = spec.h | 0;
@@ -150,6 +181,29 @@ export function extractDripEdges(grid, options = {}) {
   const heightGrid = options.heightGrid?.data && options.heightGrid?.spec ? options.heightGrid : null;
   const heightScale = Number.isFinite(options.heightScalePx) ? options.heightScalePx : 2048;
   const defaultHeight = Number.isFinite(options.defaultHeightPx) ? options.defaultHeightPx : DEFAULT_DECK_HEIGHT_PX;
+  const outdoorsGrid = options.outdoorsGrid?.data && options.outdoorsGrid?.spec ? options.outdoorsGrid : null;
+  const outdoorsCut = DRIP_OUTDOORS_THRESHOLD * 255;
+
+  const texelW = Number.isFinite(spec.texelW) && spec.texelW > 0 ? spec.texelW : spec.width / w;
+  const texelH = Number.isFinite(spec.texelH) && spec.texelH > 0 ? spec.texelH : spec.height / h;
+
+  /**
+   * Does the ground on the open side of (x, y), stepping (dx, dy), see the sky?
+   * Looks up to {@link DRIP_OUTDOORS_REACH} texels out. Outside the outdoors
+   * grid reads as outdoors — the same fail-open the absent mask has.
+   */
+  const opensOutdoors = (x, y, dx, dy) => {
+    if (!outdoorsGrid) return true;
+    for (let k = 1; k <= DRIP_OUTDOORS_REACH; k++) {
+      const v = sampleGridByte(
+        outdoorsGrid,
+        spec.x + (x + dx * k + 0.5) * texelW,
+        spec.y + (y + dy * k + 0.5) * texelH
+      );
+      if (v === null || v >= outdoorsCut) return true;
+    }
+    return false;
+  };
 
   /**
    * ⚠️ THE DOWNWARD NEIGHBOUR IS NOT SPECIAL, AND THAT IS A CHOICE. A real
@@ -158,30 +212,73 @@ export function extractDripEdges(grid, options = {}) {
    * one on the south. Preferring +Y ("the bottom of the sprite") would be
    * importing a SIDE view's intuition into a plan view, which is the same
    * category error the splash smear made.
+   *
+   * Returns 0 (not an edge), 1 (an eave) or 2 (an edge that opens only onto
+   * INDOOR ground — a void in the floor above, see DRIP_OUTDOORS_THRESHOLD).
    */
-  const isEdge = (x, y) => {
-    if (data[y * w + x] < coverCut) return false;
-    if (x > 0 && data[y * w + (x - 1)] <= openCut) return true;
-    if (x < w - 1 && data[y * w + (x + 1)] <= openCut) return true;
-    if (y > 0 && data[(y - 1) * w + x] <= openCut) return true;
-    if (y < h - 1 && data[(y + 1) * w + x] <= openCut) return true;
+  const edgeKind = (x, y) => {
+    if (data[y * w + x] < coverCut) return 0;
+    let indoor = false;
+    const side = (nx, ny, dx, dy) => {
+      if (data[ny * w + nx] > openCut) return false;
+      if (opensOutdoors(x, y, dx, dy)) return true;
+      indoor = true;
+      return false;
+    };
+    if (x > 0 && side(x - 1, y, -1, 0)) return 1;
+    if (x < w - 1 && side(x + 1, y, 1, 0)) return 1;
+    if (y > 0 && side(x, y - 1, 0, -1)) return 1;
+    if (y < h - 1 && side(x, y + 1, 0, 1)) return 1;
     // A texel on the grid's own border with cover right up to it is an edge of
     // the MAP, not of a roof. Excluded: the world simply continues there, and
     // hanging drips along the rect boundary would outline the map.
-    return false;
+    return indoor ? 2 : 0;
   };
 
   // Pass 1 — count, so the stride is chosen before anything is allocated.
   let edgeTexels = 0;
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (isEdge(x, y)) edgeTexels++;
-  if (edgeTexels === 0) return empty;
+  let indoorEdgeTexels = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const kind = edgeKind(x, y);
+      if (kind === 1) edgeTexels++;
+      else if (kind === 2) indoorEdgeTexels++;
+    }
+  }
+  if (edgeTexels === 0) return { ...empty, indoorEdgeTexels };
 
   const stride = Math.max(1, Math.ceil(edgeTexels / maxPoints));
   const count = Math.min(maxPoints, Math.ceil(edgeTexels / stride));
   const points = new Float32Array(count * 3);
+  const normals = new Float32Array(count * 2);
 
-  const texelW = Number.isFinite(spec.texelW) && spec.texelW > 0 ? spec.texelW : spec.width / w;
-  const texelH = Number.isFinite(spec.texelH) && spec.texelH > 0 ? spec.texelH : spec.height / h;
+  /**
+   * ⭐ WHICH WAY THE EAVE FACES — the outward normal, from roof toward open
+   * ground (2026-10-27, the drip rebuild). Water leaving a roof is THROWN off
+   * its lip, so under a top-down camera the one motion a drip always has is
+   * AWAY from the building; without a normal every drip could only fall on the
+   * spot and read as a dot appearing and vanishing.
+   *
+   * A Sobel over the cover grid rather than the four-neighbour test above, so a
+   * diagonal eave gets a diagonal normal instead of snapping to an axis (which
+   * would throw every drip on a 45° roof in two alternating directions).
+   * Off-grid reads as covered — the same "the map continues there" stance the
+   * border rule above takes. Returns [nx, ny] in WORLD orientation (row 0 =
+   * minY, so +y is +world y), or [0, 0] where the gradient cancels out.
+   */
+  const outwardNormal = (x, y) => {
+    const at = (cx, cy) => (cx < 0 || cy < 0 || cx >= w || cy >= h ? 255 : data[cy * w + cx]);
+    const gx =
+      at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2 * at(x - 1, y) - at(x - 1, y + 1);
+    const gy =
+      at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2 * at(x, y - 1) - at(x + 1, y - 1);
+    // Cover INCREASES toward the roof, so outward is down the gradient. Texel
+    // aspect folded in so a non-square grid still points the right way.
+    const nx = -gx / texelW;
+    const ny = -gy / texelH;
+    const len = Math.hypot(nx, ny);
+    return len > 1e-6 ? [nx / len, ny / len] : [0, 0];
+  };
 
   let seen = 0;
   let written = 0;
@@ -189,7 +286,7 @@ export function extractDripEdges(grid, options = {}) {
   let defaults = 0;
   for (let y = 0; y < h && written < count; y++) {
     for (let x = 0; x < w && written < count; x++) {
-      if (!isEdge(x, y)) continue;
+      if (edgeKind(x, y) !== 1) continue;
       if (seen++ % stride !== 0) continue;
       // ⚠️ TEXEL **CENTRES**, and row 0 IS minY. Both halves are the whole
       // reason this module is pure: they are assertions in the Node suite
@@ -198,6 +295,9 @@ export function extractDripEdges(grid, options = {}) {
       const wy = spec.y + (y + 0.5) * texelH;
       points[written * 3] = wx;
       points[written * 3 + 1] = wy;
+      const [nx, ny] = outwardNormal(x, y);
+      normals[written * 2] = nx;
+      normals[written * 2 + 1] = ny;
       // ⭐ THE DECK's OWN ALTITUDE. Sampled at the edge texel itself, so a
       // bridge drips from bridge height and an awning from awning height with
       // nothing authored. Zero (or no grid) falls back to a plausible eave
@@ -217,8 +317,17 @@ export function extractDripEdges(grid, options = {}) {
   const measured = written - defaults;
   return {
     points: points.subarray(0, written * 3),
+    // `[nx0, ny0, nx1, ny1, …]`, unit outward normals beside `points` (see
+    // `outwardNormal`). Its own array rather than a fourth float in `points`,
+    // so every reader of the stride-3 layout is untouched.
+    normals: normals.subarray(0, written * 2),
+    // The grid's texel size, world px: how far the roof's lip sits outside an
+    // edge texel's centre, and how much eave each point stands for once strode.
+    texelPx: Math.max(texelW, texelH),
+    spacingPx: Math.max(texelW, texelH) * stride,
     count: written,
     edgeTexels,
+    indoorEdgeTexels,
     stride,
     // Which is it: real deck altitudes, the fallback, or a mix? Named rather
     // than inferred — see the `defaultHeightPx` note.
@@ -356,7 +465,7 @@ export const MAX_DRIP_MASK_POINTS = 512;
 export function extractDripMaskPoints(grid, options = {}) {
   const spec = grid?.spec ?? null;
   const data = grid?.data ?? null;
-  const empty = { points: new Float32Array(0), count: 0, edgeTexels: 0, stride: 1 };
+  const empty = { points: new Float32Array(0), count: 0, edgeTexels: 0, indoorEdgeTexels: 0, stride: 1 };
   if (!spec || !data) return empty;
   const w = spec.w | 0;
   const h = spec.h | 0;
@@ -434,11 +543,19 @@ export function extractDripMaskPoints(grid, options = {}) {
   const measured = written - defaults;
   return {
     points: points.subarray(0, written * 3),
+    // No normals: a painted spot has no "outward", so its drips fall where
+    // they are born (a leaking pipe does not throw its water anywhere). Null,
+    // not omitted, so both extractors keep one field set.
+    normals: null,
+    texelPx: Math.max(texelW, texelH),
+    spacingPx: Math.max(texelW, texelH) * keepEvery,
     count: written,
     // Not an "edge" — see this function's own header. Named `edgeTexels`
     // anyway so a consumer of either extractor's return shape reads "how many
     // texels qualified before subsampling" the same way either time.
     edgeTexels: painted,
+    // No outdoors test here: the author pointed at the spot.
+    indoorEdgeTexels: 0,
     stride: keepEvery,
     heightSource: !heightGrid
       ? 'default (no height grid)'

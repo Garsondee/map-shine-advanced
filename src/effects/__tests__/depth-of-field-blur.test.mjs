@@ -29,6 +29,24 @@ export function run(t) {
       'a floor ABOVE the viewed one is zero floors below, never negative',
       computeDofFloorsBelow({ floorIndexHere: 3, viewedFloorIndex: 1 }) === 0
     );
+    ok(
+      'fractional: the viewed floor is not rounded mid-glide',
+      Math.abs(computeDofFloorsBelow({ floorIndexHere: 0, viewedFloorIndex: 0.4, fractional: true }) - 0.4) < 1e-9
+    );
+    ok(
+      'fractional: a floor below the glide start is a whole floor down',
+      computeDofFloorsBelow({ floorIndexHere: 0, viewedFloorIndex: 2, fractional: true }) === 2
+    );
+    ok(
+      'fractional off: the viewed floor still rounds',
+      computeDofFloorsBelow({ floorIndexHere: 0, viewedFloorIndex: 0.4 }) === 0
+    );
+    ok(
+      'the glide’s alpha ramps in with the fraction and is exactly 1 at rest',
+      Math.abs(computeDofAlpha({ floorsBelow: 0.4, lod: 0.5 }) - 0.4) < 1e-9 &&
+        computeDofAlpha({ floorsBelow: 1, lod: 0.5 }) === 1 &&
+        computeDofAlpha({ floorsBelow: 3, lod: 0.5 }) === 1
+    );
     ok('one floor down reads as 1', computeDofFloorsBelow({ floorIndexHere: 0, viewedFloorIndex: 1 }) === 1);
     ok('three floors down reads as 3', computeDofFloorsBelow({ floorIndexHere: 0, viewedFloorIndex: 3 }) === 3);
     ok(

@@ -168,6 +168,7 @@ import {
   computeTieSafeExpectedDepth,
   RENDER_ABOVE_EVERYTHING_DEPTH,
   computeSceneDepthFlags,
+  computeVegetationDepthFlags,
   resolveSceneDepthFloorIndex,
   buildSceneDepthWriterMaterial,
   buildSceneDepthProxyMesh,
@@ -223,6 +224,11 @@ import {
   // The one-byte-grid -> RGBA expansion four per-floor gates share, cached by array
   // identity so floor PREPARE does it off screen (loading audit P-06).
   expandGridToRgba,
+  // THE ROOM MAP — every room on a floor, numbered, as the walls divide it (scene/room-map.js); one shared cache.
+  createRoomMapCache,
+  // THE SCENE EYE (2026-10-28) — the one pretend camera every depth effect shares (scene/scene-eye.js).
+  resolveSceneEye,
+  SCENE_EYE_DEFAULT_FOV_DEG,
 } from '../scene/index.js';
 import {
   computeCameraFrustum,
@@ -252,6 +258,7 @@ import {
   // `deriveGlobalLightWindow`'s own header.
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
+  isGlobalLightSystemOwned,
   readSceneGlobalLightRaw,
   // THE DOOR-REVEAL BRIDGE (2026-08-31) — the inverse of the darkness
   // write-back above: mirrors MSA's own light descriptors (candles, fires,
@@ -350,6 +357,7 @@ import {
   computeAmbientColors,
   computeGlobalLightFloor,
   maxRgb,
+  sceneLightLevel,
   mixRgb,
   // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — the fixed slot cap
   // this file's own per-frame push/clear loop iterates up to.
@@ -421,6 +429,7 @@ import {
   createCritterSubsystem,
   createCritterEngine,
   allocateCritterBuffers,
+  allocateWindCells,
   createCritterZoneBuffer,
   createDoorGraphicsSubsystem,
   KNOWN_DEFERRED_ANIMATIONS,
@@ -428,6 +437,20 @@ import {
   WIND_DIAGNOSTIC_PARTICLES,
   createGustEngine,
   WIND_GUSTS,
+  // WIND TRAILS (2026-10-27) — the ribbon engine's second costume.
+  buildWindTrailsSystem,
+  windTrailsLook,
+  // TABLE (2026-10-27) — the brass-rimmed velvet table round the scene.
+  createTableSubsystem,
+  TABLE_PARAMS,
+  tableTopHeightPx,
+  // PARALLAX (2026-10-28) — each layer scaled about the view centre by its height above the viewed floor.
+  createParallaxSubsystem,
+  // TEMPERATURE EFFECTS (2026-10-27) — the Temperature fader's grade, frost and heat ripple.
+  buildTemperatureNoiseData,
+  createTemperatureFxStepper,
+  applyTemperatureGrade,
+  IDENTITY_TEMPERATURE_GRADE,
   VEGETATION_KINDS,
   detectSelfVegetationKind,
   vegetationOverlayRenderOrder,
@@ -467,6 +490,9 @@ import {
   createSpecularSurfaceSubsystem,
   createSpecularTileSurfaceSubsystem,
   createWindowSurfaceSubsystem,
+  // WINDOW WEATHER (2026-10-27) — sun breaks + rain-wave darkness.
+  buildWindowWeatherGainNode,
+  WINDOW_WEATHER_DEFAULTS,
   createWindowTileSurfaceSubsystem,
   // PRISM (mythica-machina-press#137) — `createPrismSurfaceSubsystem` is the
   // per-tile mesh population (mirrors `createSpecularTileSurfaceSubsystem`'s
@@ -488,7 +514,12 @@ import {
   // outdoors gate `buf:scene.attr`'s G channel does — injected rather than
   // re-derived, so "world XY → mask UV → sample" still exists exactly once.
   buildWorldSpaceOutdoorsGate,
+  buildOutdoorsMaskAtXY,
+  // The padding rule — one "inside the real scene rect" test, shared by every
+  // pass that must not draw past the map edge (environmental-light.js).
+  buildInsideRectNode,
   createSkyHandle,
+  lightGoldenTint,
   buildGradePresentMaterial,
   buildBloomMaterials,
   // LENS (mythica-machina-press#57) — see effects/lens-render.js's own
@@ -540,12 +571,18 @@ import {
   WATER_PRESENCE_EDGE0,
   WATER_PRESENCE_EDGE1,
   cloudTopsGate,
+  cloudTopsEyeMagnification,
   buildCloudTopsParallaxWorldXY,
   // The infravision hot-body recolour's slot count — the producer below must
   // agree with the node graph's own fixed unroll count.
   PLAYER_VISION_TOKEN_SLOTS,
+  // CANOPY LIGHT (2026-10-28) — trees and bushes pass part of a light below them.
+  pushCanopyLightUniforms,
 } from '../effects/index.js';
 import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC, perfNowMs } from '../core/frame-clock.js';
+import { createPipelineGovernor } from './pipeline-governor.js';
+import { planWeatherWarmUp, formatWeatherWarmDetail } from './weather-warm-plan.js';
+import { markCompileDeferrable } from '../core/compile-policy.js';
 import {
   computeWindOverlayGridFromBake,
   buildWindOverlayGeometry,
@@ -584,11 +621,24 @@ import {
   // first happens to push a value (a startup-ordering dependency this way
   // simply does not have).
   WIND_DEFAULT_GUSTINESS01,
+  WIND_DEFAULT_PIXELS_PER_METRE,
+  windStrength01Node,
+  windStrength01ForSpeed01,
+  // Integrated advection — see the block in world/wind-field.js above
+  // `createWindAdvectionState` for the "strobing nightmare" it fixed.
+  stepWindAdvection,
+  createWindAdvectionUniforms,
+  writeWindAdvectionUniforms,
+  // The wind's recent past, recorded as it happens (world/wind-gust-history.js) — the candle memory.
+  planGustHistoryBakes,
+  gustHistoryAtlasSize,
+  gustHistoryTileOf,
   // The dial in real units (Beaufort curve) — cloud drift ties its own speed
   // to the SAME ambient wind speed01 dial turbulence/gusts already read,
   // rather than inventing a second conversion (world/cloud-field.js's own
   // `cloudDriftStep` takes world px/s, not a 0..1 dial).
   metresPerSecondForSpeed01,
+  metresPerSecondForLegacyBeaufortDial,
   // THE CLOUD FIELD (docs/planning/Clouds.md) — see the dedicated import
   // block below this one for the full set; kept separate so a reader
   // scanning wind imports is not also scanning cloud ones.
@@ -1338,6 +1388,7 @@ async function startVtPanViewerUnserialized({
   onItemAlpha,
   getCoverItems,
   onDeviceLost,
+  crashGuard,
   getCandleRenderState,
   getLightningRenderState,
   getRopeChainAnchors,
@@ -1349,6 +1400,7 @@ async function startVtPanViewerUnserialized({
   getSmellyFliesRenderState,
   getMaggotsRenderState,
   getFirefliesRenderState,
+  getDustRenderState,
   // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — boot.js's own
   // per-frame closure: reads the live per-token snapshot + the scene's
   // resolved GM permissions and builds this frame's torch/flashlight
@@ -1399,6 +1451,7 @@ async function startVtPanViewerUnserialized({
   getMaskAuthorityVersion,
   probeMaskAuthorityLiveAt,
   getOutdoorsMaskGrid,
+  getOutdoorsMaskGridFine,
   getFireMaskGrid,
   // Ash Disturbance's authored floor — structurally identical to getFireMaskGrid above.
   getAshMaskGrid,
@@ -1439,6 +1492,14 @@ async function startVtPanViewerUnserialized({
   // TILE-ONLY, the identical shape one effect later.
   getIridescenceMaskItems,
   getIridescenceRenderState,
+  // WIND TRAILS (2026-10-27): `{ enabled, params: <WIND_TRAILS_PARAMS> }`.
+  getWindTrailsRenderState,
+  // TEMPERATURE EFFECTS (2026-10-27): `{ enabled, params: <TEMPERATURE_EFFECTS_PARAMS> }`.
+  getTemperatureEffectsRenderState,
+  // TABLE (2026-10-27): `{ enabled, params: <TABLE_PARAMS> }`.
+  getTableRenderState,
+  // PARALLAX (2026-10-28): `{ enabled, params: <PARALLAX_PARAMS> }`.
+  getParallaxRenderState,
   getApertureGoboRenderState,
   getFluidMaskItems,
   getFluidRenderState,
@@ -1480,6 +1541,9 @@ async function startVtPanViewerUnserialized({
   // the sky ships at `realism01 = 0` that is a no-op either way, so an unwired
   // caller renders exactly as it did before the sky existed.
   getOutdoorsMaskGrid ??= () => null;
+  // The sky/cloud gate texture's caster-resolution twin (boot.js has why); an
+  // unwired caller falls back to the shared grid, exactly today's behaviour.
+  getOutdoorsMaskGridFine ??= getOutdoorsMaskGrid;
   // FIRE's mask-clip texture seam (2026-08-08) — `null` = unwired (the
   // torture fixture), which leaves `bakeFireMaskTexture` unable to find a
   // grid and every fire fail-open (unclipped) — the same "renders exactly as
@@ -1619,6 +1683,14 @@ async function startVtPanViewerUnserialized({
   // matching `IRIDESCENCE.enabledFromProfile: 'extreme'`.
   getIridescenceRenderState ??= () => ({ enabled: false, params: null });
   getIridescenceMaskItems ??= () => [];
+  // Unwired (a harness, a test page) ⇒ no trails — never a guess at a default-on.
+  getWindTrailsRenderState ??= () => ({ enabled: false, params: null });
+  // Unwired ⇒ a temperate look: no grade shift, no frost, no ripple.
+  getTemperatureEffectsRenderState ??= () => ({ enabled: false, params: null });
+  // Unwired ⇒ no table: the padding stays the scene's plain background.
+  getTableRenderState ??= () => ({ enabled: false, params: null });
+  // Unwired ⇒ a flat map: every layer stays at scale 1.
+  getParallaxRenderState ??= () => ({ enabled: false, params: null });
   // APERTURE GOBO's data seam (docs/planning/Aperture-Gobo.md): boot injects
   // `{ enabled, params: <resolved APERTURE_GOBO_PARAMS>, debug }`. Unlike
   // window/specular this effect has no mask seam at all — its only input is
@@ -1741,6 +1813,10 @@ async function startVtPanViewerUnserialized({
   // restoreFoundryArt(), because un-suppressing Foundry's primary/effects art
   // is a Foundry-adapter concern this file must not reach into directly.
   onDeviceLost ??= () => {};
+  // THE CRASH LADDER'S MEMORY (diag/crash-guard.js, epic mmp-fpu) — injected by the composition root, like
+  // the hook above. The viewer tells it what is compiling (so a GPU that dies mid-compile leaves a name
+  // behind) and when the device was lost. The default is inert, so a lab or test viewer needs none.
+  crashGuard ??= { noteCompileStart() {}, noteCompileEnd() {}, recordLoss() {} };
   // Captured for runZoomThrashTest's "blank slate" restart (2026-07-16) —
   // the SAME fully-resolved params this call itself used, so a later restart
   // reproduces an identical fresh viewer without the caller needing to
@@ -2160,6 +2236,16 @@ async function startVtPanViewerUnserialized({
       if (deviceLostSlid) return; // device.lost resolves once, but stay idempotent
       deviceLostSlid = true;
       const detail = `${info?.message || 'unknown'}${info?.reason ? ` (reason: ${info.reason})` : ''}`;
+      // THE CRASH LADDER'S RECORD — FIRST, before any guard or anything that can throw. Every unexpected loss
+      // counts, including one that lands while a viewer is still STARTING (`_active` is assigned at the very
+      // end of a start, so the race guard just below would otherwise discard exactly the loss that happens
+      // mid-load) and one on a viewer a newer scene has superseded (a dying GPU process takes every device).
+      // The write also carries the shaders that were compiling, so the next boot can name them.
+      try {
+        crashGuard.recordLoss({ message: info?.message ?? '', reason: info?.reason ?? '' });
+      } catch (err) {
+        log.error('could not record the device loss for the crash ladder:', err);
+      }
       // THE RACE GUARD: if a newer viewer has already taken over (`_active` is
       // not us), this renderer is a corpse the new viewer's own disposeActive
       // already dealt with — sliding now would call disposeActive() on the LIVE
@@ -2272,6 +2358,39 @@ async function startVtPanViewerUnserialized({
       // best-effort/try-caught inside disposeActive — safe on a lost device.
       disposeActive();
     };
+
+    // THE PIPELINE GOVERNOR (vt/pipeline-governor.js, epic mmp-fpu) — the one door through which this
+    // renderer creates a render pipeline. A big per-frame shader compiles on a worker thread instead of the
+    // GPU process's main thread (where one 20 s candle pipeline outlived Chrome's 15 s watchdog and took every
+    // context on the page with it), every compile is written to the crash breadcrumbs before it starts, and
+    // the load report gets a census of what was created, how big and how long. Installed before any pipeline
+    // exists; three itself is untouched but for that one function.
+    const pipelineGovernor = createPipelineGovernor({ renderer, guard: crashGuard });
+    pipelineGovernor.install();
+    /**
+     * Wait for every pipeline to finish compiling, but never forever: a compile that never resolves (a driver
+     * bug, a device that died without saying so) must not hold a load open. The curtain's own readiness
+     * deadline is the second guard; this one keeps a warm-up from outliving the page.
+     * @param {string} why - for the log.
+     * @param {number} [capMs]
+     */
+    async function settleCompiles(why, capMs = 90_000) {
+      if (pipelineGovernor.inFlight() === 0) return;
+      let timer = null;
+      const outcome = await Promise.race([
+        pipelineGovernor.idle().then(() => 'idle'),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), capMs);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (outcome === 'timeout') {
+        log.warn(
+          `${why}: ${pipelineGovernor.inFlight()} shader compile(s) still running after ${capMs} ms — continuing without them.`,
+          pipelineGovernor.report().compiling
+        );
+      }
+    }
 
     // ========================================================================
     // buf:scene.color — THE FIRST REAL RENDER TARGET (2026-07-17)
@@ -2642,7 +2761,11 @@ async function startVtPanViewerUnserialized({
     let outdoorsTexture = makeOutdoorsPlaceholderTexture(THREE);
     /** The world rect `outdoorsTexture` covers. The placeholder covers the whole
      * scene so the uniform is never nonsense before the first real bake. */
-    let outdoorsRect = { ...dimensions.sceneRect };
+    // ⚠️ MIN/MAX shape, like every later value (`bakeOutdoorsTexture`) — a spread
+    // of `sceneRect`'s {x,y,width,height} handed `setOutdoorsRect` four
+    // `undefined`s, i.e. a NaN rect until the first bake, which the off-the-map
+    // zeroing in `sampleOutdoorsAtWorldXY` would read as "nowhere is outdoors".
+    let outdoorsRect = sceneRectToMinMax(dimensions.sceneRect) ?? { minX: 0, minY: 0, maxX: 1, maxY: 1 };
     /** The LAST thing `bakeOutdoorsTexture` actually did, success or failure —
      * reported verbatim in getEnvSnapshotInfo() so "the sky does nothing" is
      * always answerable from the Diagnostics report rather than the console
@@ -2716,7 +2839,17 @@ async function startVtPanViewerUnserialized({
     // tripped both walls. The subsystem decides WHEN to bake; these two tiny
     // functions are the ONLY code that actually touches the renderer/GPU
     // memory for it, exactly where those walls already say that belongs.
+    /**
+     * @returns {boolean} whether the quad was actually DRAWN. three skips a draw
+     * whose pipeline is still compiling, and since the pipeline governor
+     * (2026-10-27, `vt/pipeline-governor.js`) a pipeline can compile on a worker
+     * thread — so a one-shot bake can now silently not happen. The caller must
+     * not record a bake that did not draw, or the field stays blank until the
+     * sun next moves (live, 2026-10-27: building, overhead and tree shadows all
+     * gone). Read off three's own draw counter, which counts only real draws.
+     */
     function renderSunShadowPass(target, quad) {
+      const drawsBefore = renderer.info?.render?.drawCalls ?? 0;
       const prev = renderer.getRenderTarget();
       // `allocator.create()` returns the WebGLRenderTarget/RenderTarget itself
       // (see sceneColor/sceneIllum/bloomMips' own call sites) — NOT a wrapper
@@ -2727,6 +2860,7 @@ async function startVtPanViewerUnserialized({
       renderer.setRenderTarget(target);
       quad.render(renderer);
       renderer.setRenderTarget(prev);
+      return (renderer.info?.render?.drawCalls ?? 1) > drawsBefore;
     }
     /**
      * The ONE `new THREE.DataTexture(...)` door for a subsystem's baked mask
@@ -2962,9 +3096,19 @@ async function startVtPanViewerUnserialized({
       const cover = wx
         ? composeDripCover({ cover: wx.cover, restrictors: wx.restrictors, outdoors: wx.outdoors })
         : getCoverAboveGrid(idx);
+      // THIS floor's `_Outdoors`: a hole in the floor above (the Mansion's
+      // double-height south hall) is a cover edge over INDOOR ground, and must
+      // not drip. See drip-edges.js#DRIP_OUTDOORS_THRESHOLD.
+      let outdoorsGrid = null;
+      try {
+        outdoorsGrid = getOutdoorsMaskGrid(idx);
+      } catch (err) {
+        log.debug?.(`roofline: outdoors mask unavailable on floor ${idx} (${err?.message ?? err})`);
+      }
       const roofline = extractDripEdges(cover, {
         heightGrid: getCasterHeightGrid(idx),
         heightScalePx: CASTER_HEIGHT_SCALE_PX,
+        outdoorsGrid,
       });
       precipitationSubsystem?.setDripEdges(roofline);
       return roofline;
@@ -3065,6 +3209,11 @@ async function startVtPanViewerUnserialized({
       // the splashes, the curtain and the mantle's accumulation — every one of
       // which was reading the wrong floor's roofs until this line existed.
       const skyReach = bakePrecipSkyReachTexture(idx);
+      // The clouds' floors-above gate — tops and ground shadow alike.
+      const cloudCover = bakeCloudSkyCoverTexture(idx);
+      // The same floor's occluder heights, so a splash is drawn at the scale of
+      // what it strikes (ground small, raised tiles/trees larger).
+      bakeStrikeHeightTexture(idx);
       // ⭐ THE ROOFLINE (P5, §4.3) — extracted from THIS floor's `coverAbove`, so
       // climbing a floor re-sings a different set of eaves and the rooftop
       // (nothing above it) correctly falls silent. It rides the same chokepoint
@@ -3092,7 +3241,13 @@ async function startVtPanViewerUnserialized({
         fire,
         ash,
         skyReach,
-        roofline: { count: roofline.count, edgeTexels: roofline.edgeTexels, heightSource: roofline.heightSource },
+        cloudCover,
+        roofline: {
+          count: roofline.count,
+          edgeTexels: roofline.edgeTexels,
+          indoorEdgeTexels: roofline.indoorEdgeTexels ?? 0,
+          heightSource: roofline.heightSource,
+        },
         authoredDrip: {
           count: authoredDripPoints.count,
           paintedTexels: authoredDripPoints.edgeTexels,
@@ -3301,6 +3456,15 @@ async function startVtPanViewerUnserialized({
      *  throttled rather than run every frame. Starts at 0 so the FIRST vision
      *  frame always publishes immediately, not after one full interval. */
     let lastSnapshotPublishAt = 0;
+    /** A reset of the explored memory (scene change, GM fog reset) that has not
+     *  reached each buffer yet (2026-10-27). `visionMask.sync` hands out its
+     *  `clearFirst` on ONE frame, but the explored draw skips ungated frames and
+     *  the snapshot publish is throttled — a clear landing on a skipped frame
+     *  was lost. Harmless while the snapshot only held colour; now its alpha IS
+     *  "seen" memory (`sampleExploredNode`), so a lost clear would bring back
+     *  fog a GM had reset. Latched here until the draw that clears actually runs. */
+    let exploredClearPending = false;
+    let snapshotClearPending = false;
     /** Total successful capture+publish ticks this session — the report's
      *  own proof the mechanism ever RAN, not just that it was wired in
      *  (`feedback_diagnostics_must_land_in_perf_report`: a claim nobody can
@@ -3436,6 +3600,13 @@ async function startVtPanViewerUnserialized({
      * push's own comment (`updateEnvSnapshot`) for why a scene at genuine
      * ground-level dead calm still gets a cloud deck that visibly moves. */
     let cloudMinWindSpeed01 = 0.1;
+    /** Cloud drift in m/s for the live dial, honouring the floor (an OLD-curve
+     *  value) and the old curve's ceiling — see the 2026-10-27 note at its use. */
+    const cloudDriftMetresPerSecond = (speed01) =>
+      Math.max(
+        metresPerSecondForLegacyBeaufortDial(cloudMinWindSpeed01),
+        Math.min(metresPerSecondForLegacyBeaufortDial(1), metresPerSecondForSpeed01(speed01))
+      );
     /** ⚠️ REAL FINDING, author's live-test round 3: round 2's `0.5` (the
      * author's own literal "halve it" ask) was STILL too fast at full wind —
      * "it needs to go a minimal of half the current speed at full wind."
@@ -3520,12 +3691,12 @@ async function startVtPanViewerUnserialized({
      * "shared external uniform" shape `uCloudOvercast01` above already is)
      * — one instance, handed to every window subsystem below, so a single
      * Studio-card slider moves every window on the map at once. */
-    const uWindowOvercastEdgeWiden = THREE.TSL.uniform(THREE.TSL.float(0.22));
-    const uWindowOvercastContrastSoften = THREE.TSL.uniform(THREE.TSL.float(0.6));
+    const uWindowOvercastEdgeWiden = THREE.TSL.uniform(THREE.TSL.float(0.03));
+    const uWindowOvercastContrastSoften = THREE.TSL.uniform(THREE.TSL.float(0));
     // 0.05 — author's own round-3 tuned value (round 2 shipped 0.5, "drop
     // its overall brightness by up to 50%"); overcast can now extinguish
     // window light almost entirely.
-    const uWindowOvercastMinStrength = THREE.TSL.uniform(THREE.TSL.float(0.05));
+    const uWindowOvercastMinStrength = THREE.TSL.uniform(THREE.TSL.float(1));
     // ═══════════════════════════════════════════════════════════════════
     // THE CLEAR-NOON LOOK (round 3, 2026-09-10) — the deliberate OPPOSITE
     // condition from every cloud/overcast dial above. Author's ask: "at noon
@@ -3548,6 +3719,24 @@ async function startVtPanViewerUnserialized({
      * inside the compiled shader; `1` (the constructor default) is a
      * provable no-op before the first frame pushes a real value. */
     const uWindowNoonBoostMul = THREE.TSL.uniform(THREE.TSL.float(1));
+    /** WINDOW WEATHER (2026-10-27, `effects/window/window-weather.js`) — how
+     * hard it is raining (0..1, pushed per frame from `env.weather`) and the
+     * Window card's three weather dials, shared by every window material. */
+    const uWindowStormRain01 = THREE.TSL.uniform(THREE.TSL.float(0));
+    const uWindowBreakFill = THREE.TSL.uniform(THREE.TSL.float(WINDOW_WEATHER_DEFAULTS.breakFill));
+    const uWindowBreakSizeM = THREE.TSL.uniform(THREE.TSL.float(WINDOW_WEATHER_DEFAULTS.breakSizeM));
+    const uWindowStormDarken = THREE.TSL.uniform(THREE.TSL.float(WINDOW_WEATHER_DEFAULTS.stormDarken));
+    /** The Window card's Rain waves section (2026-10-27) — see
+     * `effects/window/window-weather.js#WINDOW_WEATHER_DEFAULTS`. */
+    const windowWaveDials = {
+      stormBaseDarken: THREE.TSL.uniform(THREE.TSL.float(WINDOW_WEATHER_DEFAULTS.stormBaseDarken)),
+      waveThreshold: THREE.TSL.uniform(THREE.TSL.float(WINDOW_WEATHER_DEFAULTS.waveThreshold)),
+      waveSoftness: THREE.TSL.uniform(THREE.TSL.float(WINDOW_WEATHER_DEFAULTS.waveSoftness)),
+      waveFloor: THREE.TSL.uniform(THREE.TSL.float(WINDOW_WEATHER_DEFAULTS.waveFloor)),
+      waveTintAmount: THREE.TSL.uniform(THREE.TSL.float(WINDOW_WEATHER_DEFAULTS.waveTintAmount)),
+      leadGlow: THREE.TSL.uniform(THREE.TSL.float(WINDOW_WEATHER_DEFAULTS.leadGlow)),
+      waveTint: THREE.TSL.uniform(new THREE.Vector3(...WINDOW_WEATHER_DEFAULTS.waveTint)),
+    };
     /** The previous `getEnvSnapshotInfo()` call's own cloud drift + when it
      * ran — kept so THAT report can show real movement (`driftPxSinceLastCall`,
      * `pxPerSecSinceLastCall`) between two runs of the SAME button, rather
@@ -3600,11 +3789,30 @@ async function startVtPanViewerUnserialized({
      * no parallax — a provable no-op, since `buildCloudTopsParallaxWorldXY`
      * at `M=1` is the identity remap. */
     const uTopsMagnification = THREE.TSL.uniform(THREE.TSL.float(1));
+    /** 1 while the Table is on: the tops are bounded by the DECK's footprint and overhang the table; 0 keeps the
+     * padding rule (bounded by the ground under the pixel). A per-pixel mask blend, not a work gate. */
+    const uTopsOverhang01 = THREE.TSL.uniform(THREE.TSL.float(0));
     /** Master opacity — the Studio `opacity` dial × `cloudTopsGate`'s own
      * `fade` (0 below the fade band, 1 once fully clear of it). Starts at 0:
      * a provable no-op before the first frame ever pushes a real value, the
      * same "fails asleep" default {@link cloudTopsGate} itself takes. */
     const uTopsOpacity = THREE.TSL.uniform(THREE.TSL.float(0));
+    /** THE FLOORS ABOVE (2026-10-28, author: "When underground I zoom out and I
+     * can see clouds across the whole map ... prevent the cloud tops and shadows
+     * from rendering where there is no gap above"). The viewed floor's
+     * `coverAbove` (R = covered by a floor above), shared by the tops (here) and
+     * the cloud shadow (`envLight.setSkyCover`). The placeholder is all zero —
+     * "nothing above" — so a top floor, a one-floor scene, or a floor whose
+     * cover has not derived yet draws exactly as before. Baked by
+     * `bakeCloudSkyCoverTexture`; the node is rebound, never rebuilt, so the
+     * tops material survives every rebake. */
+    const cloudSkyCoverPlaceholder = Object.assign(
+      new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType),
+      { needsUpdate: true }
+    );
+    let cloudSkyCoverTexture = null;
+    const topsSkyCoverTexNode = THREE.TSL.texture(cloudSkyCoverPlaceholder);
+    const uTopsSkyCoverRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
     /** Whether THIS frame's gate is open — read by `runCloudTopsPass`'s own
      * scene-inclusion check (Effects.md Law 4: gate the DRAW, not a uniform;
      * `uTopsOpacity` above still ramps smoothly across the frames the draw
@@ -3836,24 +4044,57 @@ async function startVtPanViewerUnserialized({
       // position) — this mask is about where the quad sits ON THE GROUND,
       // which parallax deliberately distorts away from for the field sample
       // but must not distort for "is this over the map at all".
-      const { float, max: tslMax, smoothstep, clamp: tslClamp, positionWorld } = THREE.TSL;
-      const CLOUD_TOPS_MAP_PAD_FRACTION = 0.1;
+      const { float, max: tslMax, smoothstep, clamp: tslClamp, positionWorld, mix } = THREE.TSL;
+      // 0 since 2026-10-27 (the padding rule, `buildInsideRectNode`): the tops
+      // used to fade out across 10% of the map beyond each edge, which drew
+      // cloud over the scene padding. The pad now collapses to the 1 px floor
+      // below, a hard edge at the real scene rect — and `gateVisibility` then
+      // skips the lighting for every padding pixel.
+      const CLOUD_TOPS_MAP_PAD_FRACTION = 0;
       const sceneMinX = dimensions.sceneRect.x;
       const sceneMinY = dimensions.sceneRect.y;
       const sceneMaxX = dimensions.sceneRect.x + dimensions.sceneRect.width;
       const sceneMaxY = dimensions.sceneRect.y + dimensions.sceneRect.height;
       const scenePadX = Math.max(1, dimensions.sceneRect.width * CLOUD_TOPS_MAP_PAD_FRACTION);
       const scenePadY = Math.max(1, dimensions.sceneRect.height * CLOUD_TOPS_MAP_PAD_FRACTION);
-      const groundXY = positionWorld.xy;
       // How far PAST the true edge, normalised to pad-widths (<=0 inside the
       // map, >=1 at/past the padded boundary) — one term per side, so a
       // non-square map's own aspect ratio never distorts the fade band.
-      const outsideLeft = float(sceneMinX).sub(groundXY.x).div(float(scenePadX));
-      const outsideRight = groundXY.x.sub(float(sceneMaxX)).div(float(scenePadX));
-      const outsideBottom = float(sceneMinY).sub(groundXY.y).div(float(scenePadY));
-      const outsideTop = groundXY.y.sub(float(sceneMaxY)).div(float(scenePadY));
-      const outsideMost = tslMax(tslMax(outsideLeft, outsideRight), tslMax(outsideBottom, outsideTop));
-      const mapBoundsMask = float(1).sub(smoothstep(0, 1, tslClamp(outsideMost, 0, 1)));
+      const insideMap = (xy) => {
+        const outsideLeft = float(sceneMinX).sub(xy.x).div(float(scenePadX));
+        const outsideRight = xy.x.sub(float(sceneMaxX)).div(float(scenePadX));
+        const outsideBottom = float(sceneMinY).sub(xy.y).div(float(scenePadY));
+        const outsideTop = xy.y.sub(float(sceneMaxY)).div(float(scenePadY));
+        const outsideMost = tslMax(tslMax(outsideLeft, outsideRight), tslMax(outsideBottom, outsideTop));
+        return float(1).sub(smoothstep(0, 1, tslClamp(outsideMost, 0, 1)));
+      };
+      // TWO FOOTPRINTS (2026-10-28). The GROUND under the pixel (`positionWorld`) keeps the padding rule —
+      // nothing over the scene padding. The DECK'S OWN footprint (`worldXY`, the point of the deck this pixel
+      // sees through the shared eye) is what bounds the cloud while the Table is on: the deck stays over the
+      // map, but it hangs ABOVE the table, so its edge overhangs the rim and velvet as the view pans — "cloud
+      // tops … hanging above the table in the perspective" (author). `uTopsOverhang01` picks between them.
+      // The deck's footprint fades INWARD over a band of the map (a hard rectangle of cloud floating over the
+      // velvet reads as a cut-out, found in the parallax lab 2026-10-28); the ground rule keeps its hard edge.
+      const deckBand = Math.max(1, Math.min(dimensions.sceneRect.width, dimensions.sceneRect.height) * 0.08);
+      const deckInside = (xy) => {
+        const d = tslMax(
+          tslMax(float(sceneMinX).sub(xy.x), xy.x.sub(float(sceneMaxX))),
+          tslMax(float(sceneMinY).sub(xy.y), xy.y.sub(float(sceneMaxY)))
+        );
+        return smoothstep(0, 1, tslClamp(d.negate().div(float(deckBand)), 0, 1));
+      };
+      // ...and only where the floors above leave a gap to the sky (the ground
+      // under the pixel, like the padding rule): from a cellar the deck shows
+      // through a hole in the floor above and nowhere else. NOT `_Outdoors` —
+      // the deck hangs over roofs, so a one-floor town keeps it over its houses.
+      const openAbove = float(1).sub(
+        buildOutdoorsMaskAtXY(THREE.TSL, {
+          uOutdoorsRect: uTopsSkyCoverRect,
+          outdoorsTexNode: topsSkyCoverTexNode,
+          worldXY: positionWorld.xy,
+        })
+      );
+      const mapBoundsMask = mix(insideMap(positionWorld.xy), deckInside(worldXY), uTopsOverhang01).mul(openAbove);
       const tops = buildCloudTopsNode(THREE.TSL, {
         worldXY,
         uniforms: cloudUniforms,
@@ -3920,6 +4161,17 @@ async function startVtPanViewerUnserialized({
     // skipped and the target is filled with 1 once, so a clear sky costs one
     // bilinear tap per consumer and nothing else.
     // ═══════════════════════════════════════════════════════════════════
+    // THE EFFECTS EXTENT (2026-10-28): where the scene's own effects stop — the real scene rect,
+    // widened to the brass's inner edge while Parallax lifts treetops out over the Table's recess wall
+    // (`table-model.js#tableEffectsRect`, fed every frame beside the Table). The padding rule's clips
+    // (cloud shadow, sun shadow, the outdoors gate, the canopy clip, rain) read THIS, never the scene
+    // rect directly, so an overhanging canopy is lit, shadowed and rained on like the map under it.
+    let effectsExtent = sceneRectToMinMax(dimensions.sceneRect);
+    const uEffectsExtent = THREE.TSL.uniform(
+      effectsExtent
+        ? THREE.TSL.vec4(effectsExtent.minX, effectsExtent.minY, effectsExtent.maxX, effectsExtent.maxY)
+        : THREE.TSL.vec4(-1e9, -1e9, 1e9, 1e9)
+    );
     const cloudShadowCacheW = () => Math.max(1, Math.ceil(internalW / 2));
     const cloudShadowCacheH = () => Math.max(1, Math.ceil(internalH / 2));
     const describeCloudShadowCache = (w, h) => ({
@@ -3941,23 +4193,41 @@ async function startVtPanViewerUnserialized({
     const uCloudShadowCacheRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
     const cloudShadowCacheMaterial = new THREE.NodeMaterial();
     {
-      const { mix, uv, vec2, vec4, float } = THREE.TSL;
+      const { mix, uv, vec2, vec4, float, Fn, If } = THREE.TSL;
       const r = uCloudShadowCacheRect;
       // The SAME uv→world mapping the ambient fill uses for its own quad
       // (environmental-light.js#buildIllumFragment's worldX/worldY).
-      const worldXY = vec2(mix(r.x, r.z, uv().x), mix(r.y, r.w, uv().y));
-      const vis = buildCloudGroundVisNode(THREE.TSL, {
-        worldXY,
-        uniforms: cloudUniforms,
-        buildField: buildCloudFieldNode,
-        offset: uCloudOffset,
-        streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
-        fillShare: uCloudFillShare,
-        // strength omitted: the texel is the RAW transmittance; each
-        // consumer applies its own dial on read.
-        blurFieldUnits: uCloudShadowBlur,
-        varTag: 'cache',
-      });
+      const worldX = mix(r.x, r.z, uv().x);
+      const worldY = mix(r.y, r.w, uv().y);
+      // THE PADDING RULE (2026-10-27, `buildInsideRectNode`): no cloud shadow off
+      // the map, and — the perf half — no field evaluation there either. A texel
+      // in the padding stays at 1 (no shadow) and skips the ~30 noise calls, so
+      // zoomed out past the map edge the cache costs only what the map covers.
+      // A real branch (inside `Fn`), coherent across whole screen regions, so it
+      // diverges only along the map's own edge. The field is pure ALU — no
+      // texture reads inside the branch to lose their derivatives.
+      const vis = Fn(() => {
+        const out = float(1).toVar('cloudCacheVis');
+        // The effects extent, not the bare scene rect: a parallax canopy over the recess wall is shaded too.
+        const inScene = buildInsideRectNode(THREE.TSL, { worldX, worldY, rect: uEffectsExtent });
+        If(inScene.greaterThan(float(0.5)), () => {
+          out.assign(
+            buildCloudGroundVisNode(THREE.TSL, {
+              worldXY: vec2(worldX, worldY),
+              uniforms: cloudUniforms,
+              buildField: buildCloudFieldNode,
+              offset: uCloudOffset,
+              streakSpread: CLOUD_SHADOW_STREAK_SPREAD,
+              fillShare: uCloudFillShare,
+              // strength omitted: the texel is the RAW transmittance; each
+              // consumer applies its own dial on read.
+              blurFieldUnits: uCloudShadowBlur,
+              varTag: 'cache',
+            })
+          );
+        });
+        return out;
+      })();
       cloudShadowCacheMaterial.fragmentNode = vec4(vis, float(0), float(0), float(1));
     }
     cloudShadowCacheMaterial.depthTest = false;
@@ -4062,6 +4332,30 @@ async function startVtPanViewerUnserialized({
     }
 
     /**
+     * The window WEATHER gain — sun breaks under heavy cloud riding the cloud
+     * deck's own drift, and rain-wave darkness riding the wind's own gust
+     * fronts (`effects/window/window-weather.js`). A fresh node per subsystem,
+     * like `buildWindowCloudFactorNode` above, reading `positionWorld`.
+     */
+    function buildWindowWeatherNode() {
+      return buildWindowWeatherGainNode(THREE.TSL, {
+        worldXY: THREE.TSL.positionWorld.xy,
+        timeMs: uGlobalTimeMs,
+        wind: windAmbientRef,
+        cloudOffset: uCloudOffset,
+        overcast01: uCloudOvercast01,
+        rain01: uWindowStormRain01,
+        pixelsPerMetre: windAmbientRef.pixelsPerMetre,
+        dials: {
+          breakFill: uWindowBreakFill,
+          breakSizeM: uWindowBreakSizeM,
+          stormDarken: uWindowStormDarken,
+          ...windowWaveDials,
+        },
+      });
+    }
+
+    /**
      * Water's OWN cloud-factor node (mythica-machina-press#152) — darkens
      * `water-light.js#buildWaterSpecular`'s sun-disc glint only, same
      * "own uniforms, own call, never shared across subsystems" discipline
@@ -4132,8 +4426,16 @@ async function startVtPanViewerUnserialized({
         new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType),
         { needsUpdate: true }
       ),
+      // No cloud shadow under an opaque floor above — see `cloudSkyCoverPlaceholder`.
+      skyCoverPlaceholder: cloudSkyCoverPlaceholder,
     });
     envLight.setOutdoorsRect(outdoorsRect);
+    // The padding rule (`buildInsideRectNode`): no sun shadow off the map. Set
+    // once — `dimensions` never changes without a whole scene reload.
+    {
+      const sceneMinMax = sceneRectToMinMax(dimensions.sceneRect);
+      if (sceneMinMax) envLight.setSceneRect(sceneMinMax);
+    }
 
     /**
      * The fullscreen vision gate quad (Pillar 11). Built ONCE — its material
@@ -4156,6 +4458,33 @@ async function startVtPanViewerUnserialized({
      * viewer finds it. "Bundles clean" says nothing whatsoever about
      * construction order.
      */
+    // THE TABLE (2026-10-27) — built HERE, ahead of the vision quads, because they read its
+    // "the padding is not fog" term; its meshes join the world `scene` once that exists
+    // (`tableSubsystem.attach`, below) and are fed every frame beside `updateCamera`.
+    const tableSubsystem = createTableSubsystem({
+      THREE,
+      markCompileDeferrable,
+      uViewRect: envLight.uViewRect,
+    });
+    // PARALLAX (2026-10-28) — moves the meshes the world pass already draws (no shader, no pipeline).
+    // Fed once a frame beside the Table (`syncParallaxForFrame`, below), which shares its heights.
+    const parallaxSubsystem = createParallaxSubsystem();
+    /**
+     * THE SCENE EYE for this frame (scene/scene-eye.js) — over the TRUE view centre, at the height the Table's
+     * Perspective frames the view from. Resolved once at the top of each frame and handed to every depth
+     * effect (fire, critters, rain, drips, cloud tops; the Table and Parallax derive the same eye from the same
+     * field of view), so they all agree on one perspective. Null before the first frame.
+     */
+    let frameSceneEye = null;
+    /** Whether the last frame moved any mesh, so turning the effect off restores them once and then costs nothing. */
+    let parallaxWasOn = false;
+    /** The OS "reduce motion" setting, read once: it makes a floor change snap instead of glide. */
+    let parallaxReducedMotion = false;
+    try {
+      parallaxReducedMotion = !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+    } catch {
+      // No matchMedia (a test harness): the glide plays.
+    }
     const visionGateQuad = new THREE.QuadMesh(
       buildVisionGateMaterial({
         THREE,
@@ -4163,6 +4492,7 @@ async function startVtPanViewerUnserialized({
         illumTexture: sceneIllum.texture,
         threshold: REVEAL_ILLUMINATION_THRESHOLD,
         doorFogProgress: uDoorFogProgress,
+        extraRevealed: tableSubsystem.revealedOutsideScene,
       })
     );
     // THE EXPLORED-DIM QUAD (finishes slice 3) — a SECOND fullscreen pass,
@@ -4173,9 +4503,14 @@ async function startVtPanViewerUnserialized({
     // one, and why it cannot leak live content the way a naive version once
     // would have (`docs/planning/Vision-Fog-Ownership.md` §4 slice 3's boxed
     // note).
+    /** The light the remembered map is seen under (2026-10-28): this frame's
+     *  ambient (sRGB), pushed next to `envLight.setAmbient`. The snapshot
+     *  stores plain map colour, so memory follows the time of day. */
+    const uVisionMemoryLight = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
     const visionExploredDimQuad = new THREE.QuadMesh(
       buildVisionExploredDimMaterial({
         THREE,
+        memoryLight: uVisionMemoryLight,
         maskTexture: visionMask.texture,
         illumTexture: sceneIllum.texture,
         threshold: REVEAL_ILLUMINATION_THRESHOLD,
@@ -4184,6 +4519,7 @@ async function startVtPanViewerUnserialized({
         uViewRect: envLight.uViewRect,
         uExploredRect: uVisionExploredRect,
         dimFactor: EXPLORED_DIM_FACTOR,
+        extraRevealed: tableSubsystem.revealedOutsideScene,
       })
     );
     // THE SNAPSHOT PUBLISH QUAD — a plain screen-space `QuadMesh`, SAME
@@ -4203,6 +4539,7 @@ async function startVtPanViewerUnserialized({
         threshold: REVEAL_ILLUMINATION_THRESHOLD,
         uViewRect: envLight.uViewRect,
         uExploredRect: uVisionExploredRect,
+        storeUnlit: true,
       })
     );
     // No one-time initial rect push needed any more (2026-08-02): each slot's
@@ -4223,7 +4560,7 @@ async function startVtPanViewerUnserialized({
     function bakeOutdoorsTexture(floorIndex) {
       let grid = null;
       try {
-        grid = getOutdoorsMaskGrid(floorIndex);
+        grid = getOutdoorsMaskGridFine(floorIndex);
       } catch (err) {
         log.warn('sky: outdoors mask unavailable, keeping the previous gate —', err?.message ?? err);
         lastOutdoorsBakeResult = { ok: false, floorIndex, reason: String(err?.message ?? err) };
@@ -4561,7 +4898,9 @@ async function startVtPanViewerUnserialized({
     // etc.) stays at the original, unscaled spread. The one constant to
     // nudge if a live look still shows a jarring jump at low
     // strength/blurPerFloor, or if it now reads as barely-there at all.
-    const DOF_MIP0_TAP_SPREAD = 0.35;
+    // 0.35 → 0.175 (2026-10-27) with the ring radius halved in
+    // depth-of-field-render.js: one floor down was ~50% too blurry.
+    const DOF_MIP0_TAP_SPREAD = 0.175;
     const dofNum = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
     const describeDofMip = (w, h) => ({
       resolvedW: Math.max(1, w),
@@ -4766,6 +5105,27 @@ async function startVtPanViewerUnserialized({
     const uGlobalTimeMs = THREE.TSL.uniform(THREE.TSL.float(0));
 
     /**
+     * VEGETATION'S OWN INTEGRATED CLOCKS (2026-10-27) — the sway's phase in
+     * CYCLES and the leaf flutter's churn in SECONDS-OF-CHURN, advanced once per
+     * frame by `tickVegetationClocks` at the rate the live params and the wind
+     * ask for right now.
+     *
+     * ⚠️ WHY NOT `sin(t × rate)`. Both rates rise with the wind (`galeRateGain`,
+     * `flutterGaleFrequency`), and the phase of `t × rate` moves at `rate + t ×
+     * dRate/dt` — with `t` the seconds since the world loaded. A one-minute Remote
+     * wind fade an hour in swung every branch at ~60× its sway frequency: the
+     * author's *"wind thrashes vegetation to insane amounts very quickly"*. An
+     * integrated phase only ever moves at `rate`. Declared up here, beside the
+     * clock, because the vegetation builders far below close over them.
+     */
+    const uVegSwayCycles = THREE.TSL.uniform(THREE.TSL.float(0));
+    const uVegFlutterChurnSec = THREE.TSL.uniform(THREE.TSL.float(0));
+    /** The rate the churn advanced at this frame — a lagging bush's flutter steps back along it. */
+    const uVegFlutterRate = THREE.TSL.uniform(THREE.TSL.float(0));
+    /** The sim time the vegetation clocks last advanced to — a second call in one frame adds nothing. */
+    let vegClocksAtMs = null;
+
+    /**
      * THE POINT-LIGHT POOL (extraction step 3 of docs/planning/VT-Pan-Viewer-
      * Extraction.md) — the mesh pool, its two dedicated scenes, the candle
      * wall-clip cache, and the per-frame reconcile, all in
@@ -4966,7 +5326,7 @@ async function startVtPanViewerUnserialized({
      * reference). `illumTexNode`/`colorationTexNode` are the scene's own lighting buffers, which is
      * what lets a fly in a torch pool read warm and one in the dark read dark (the `lit` rung).
      */
-    const makeCritterSubsystem = (group, getRenderState) =>
+    const makeCritterSubsystem = (group, getRenderState, extra = {}) =>
       createCritterSubsystem({
         THREE,
         group,
@@ -4984,10 +5344,23 @@ async function startVtPanViewerUnserialized({
           const rank = depthAuthority.rankOfElevation(safeElevation);
           return computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
         },
+        ...extra,
       });
     const smellyFliesSubsystem = makeCritterSubsystem('smellyFlies', getSmellyFliesRenderState);
     const maggotsSubsystem = makeCritterSubsystem('maggots', getMaggotsRenderState);
     const firefliesSubsystem = makeCritterSubsystem('fireflies', getFirefliesRenderState);
+    // DUST — motes over a painted `_Dust` zone, lit by the `_Window` light. The one critter that reads the
+    // wind GRID (a getter: `windHandle` is rebuilt on every rebake and declared further down), the view rect
+    // the lighting buffers are drawn against, and the room's own light against the light outside — which is
+    // how it tells the window's share of `scene.illum` from the room's. Getters, for the same TDZ and
+    // reassignment reasons `getWindHandle` above documents.
+    const dustSubsystem = makeCritterSubsystem('dust', getDustRenderState, {
+      viewRectNode: envLight.uViewRect,
+      getWindHandle: () => windHandle,
+      allocateWindCells,
+      getIndoorLightRgb: () => (lastAmbientColors ? maxRgb(lastAmbientColors.background, lastGlobalLightFloor) : null),
+      getOutdoorLightRgb: () => windowOutdoorLightRgb(),
+    });
 
     // ========================================================================
     // PRECIPITATION — THE FALL (docs/planning/Precipitation.md P1)
@@ -5097,6 +5470,79 @@ async function startVtPanViewerUnserialized({
         restrictors: restrictors ? restrictors.restrictors.length : 0,
       };
       return lastPrecipSkyReachBake;
+    }
+
+    /**
+     * Bake this floor's `coverAbove` grid (R = how covered by the floors above)
+     * into the clouds' gate — see `cloudSkyCoverPlaceholder`. No grid (a floor
+     * whose art has not streamed, or a one-floor scene) falls back to the
+     * placeholder, "nothing above": clouds everywhere, exactly as before this
+     * gate existed. Fail OPEN, like the precipitation gate above, and never a
+     * previous floor's cover.
+     */
+    function bakeCloudSkyCoverTexture(floorIndex) {
+      let grid = null;
+      try {
+        grid = getCoverAboveGrid(floorIndex);
+      } catch {
+        grid = null;
+      }
+      const w = grid?.spec?.w ?? 0;
+      const h = grid?.spec?.h ?? 0;
+      let tex = null;
+      let rect = null;
+      if (grid?.data && w > 0 && h > 0) {
+        tex = createMaskDataTexture(expandGridToRgba(grid.data, w, h, 0), w, h, 'linear', false);
+        rect = {
+          minX: grid.spec.x,
+          minY: grid.spec.y,
+          maxX: grid.spec.x + grid.spec.width,
+          maxY: grid.spec.y + grid.spec.height,
+        };
+      }
+      const live = tex ?? cloudSkyCoverPlaceholder;
+      topsSkyCoverTexNode.value = live;
+      if (rect) uTopsSkyCoverRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+      envLight.setSkyCover(tex, rect);
+      cloudSkyCoverTexture?.dispose();
+      cloudSkyCoverTexture = tex;
+      return tex ? { ok: true, floorIndex, cols: w, rows: h } : { ok: false, floorIndex, reason: 'no coverAbove grid' };
+    }
+
+    let strikeHeightTexture = null;
+
+    /**
+     * Bake this floor's `casterHeight` field into the texture the splashes read
+     * to size themselves by the height of what they strike (R = byte/255, so one
+     * full byte is `CASTER_HEIGHT_SCALE_PX` world px). Same shape as the sky-reach
+     * bake; an absent grid disarms it, and a disarmed splash is simply ground size.
+     */
+    function bakeStrikeHeightTexture(floorIndex) {
+      let grid = null;
+      try {
+        grid = getCasterHeightGrid(floorIndex);
+      } catch {
+        grid = null;
+      }
+      const w = grid?.spec?.w;
+      const h = grid?.spec?.h;
+      if (!grid?.data || !(w > 0 && h > 0)) {
+        strikeHeightTexture?.dispose();
+        strikeHeightTexture = null;
+        precipitationSubsystem?.setStrikeHeightTexture?.(null, null, 0);
+        return { ok: false, floorIndex, reason: 'no casterHeight grid for this floor' };
+      }
+      const tex = createMaskDataTexture(expandGridToRgba(grid.data, w, h, 0), w, h, 'linear', false);
+      strikeHeightTexture?.dispose();
+      strikeHeightTexture = tex;
+      const rect = {
+        minX: grid.spec.x,
+        minY: grid.spec.y,
+        maxX: grid.spec.x + grid.spec.width,
+        maxY: grid.spec.y + grid.spec.height,
+      };
+      precipitationSubsystem?.setStrikeHeightTexture?.(tex, rect, CASTER_HEIGHT_SCALE_PX);
+      return { ok: true, floorIndex, cols: w, rows: h, rect };
     }
 
     /**
@@ -5222,6 +5668,9 @@ async function startVtPanViewerUnserialized({
           // added in this same fix) is the one place this conversion happens
           // now.
           sceneBounds: sceneRectToMinMax(dimensions?.sceneRect),
+          // Where the falling drops may be drawn: the effects extent, so rain crosses a parallax canopy
+          // that overhangs the Table's recess wall. Splashes, the curtain and the fog keep the scene rect.
+          fallBounds: effectsExtent,
           // ⭐ THE MANTLE's clock (§5.2). WRAPPING 0..24, and the runtime unwraps
           // it — see `mantle-model.js#gameHourDelta`, which owns midnight and the
           // backward-clock case so no caller has to.
@@ -5264,6 +5713,16 @@ async function startVtPanViewerUnserialized({
           // it, which the reader treats as "no tint" — the same fail-open
           // default `dayRgbMul`/`dayAlphaMul` already use elsewhere here.
           ambientRgb: lastAmbientColors?.background ?? null,
+          // HOW LIT THE OUTDOORS IS — weather draws AFTER the lighting multiply, so
+          // each body scales its colour by this or it glows in a pitch-black scene.
+          sceneLight01: getSceneLight01(),
+          // ⭐ THE GOLDEN-HOUR COLOUR of the light — weather draws after the lighting multiply, so rain and snow
+          // take the sky's tint themselves (`null` outside the golden grade = no change).
+          skyTintRgb: lightGoldenTint({
+            multiplierRgb: skyHandle?.ambientMultiplierRgb,
+            golden01: skyHandle?.golden01,
+            outdoors01: 1,
+          }),
           // mmp-row — the SAVED rain-glint settings (switch, strength, variation),
           // so a Studio value reaches the fall engines; the subsystem forwards
           // them only when they change. `undefined` keys are skipped.
@@ -5272,6 +5731,8 @@ async function startVtPanViewerUnserialized({
                 rainLightEnabled: cascade.params.rainLightEnabled,
                 rainLightStrength: cascade.params.rainLightStrength,
                 rainGlint: cascade.params.rainGlint,
+                // The torrent's saved strength rides the same door.
+                torrentStrength: cascade.params.torrentStrength,
               }
             : undefined,
           flash01: 0, // sky-flash's own consumer is a later slice.
@@ -5292,6 +5753,13 @@ async function startVtPanViewerUnserialized({
     const pointLights = createPointLightPool({
       THREE,
       getWindHandle: () => windHandle,
+      // Read lazily (`skyHandle` is reassigned; this runs from the frame loop, after it exists).
+      getLightSkyTint: (x, y) =>
+        lightGoldenTint({
+          multiplierRgb: skyHandle?.ambientMultiplierRgb,
+          golden01: skyHandle?.golden01,
+          outdoors01: sampleWindExposureAt(x, y),
+        }),
       getWallStructureVersion,
       envLight,
       blendSunVisibilityAcrossFloors,
@@ -5777,6 +6245,16 @@ async function startVtPanViewerUnserialized({
     /** The last-computed global-illumination floor (null = not active this
      * frame) — same "report what was actually used" reasoning. */
     let lastGlobalLightFloor = null;
+    /**
+     * How lit the outdoors is right now, 0..1 (environmental-light.js#sceneLightLevel
+     * of the SAME ceiling the windows read). Rain, wind ribbons, dust and fog draw
+     * after the lighting multiply, so they scale their own colour by this. A getter,
+     * not a value: both inputs are REASSIGNED every light pass. `1` before the first
+     * light pass — an unmeasured scene keeps its weather.
+     */
+    function getSceneLight01() {
+      return lastAmbientColors ? sceneLightLevel(maxRgb(lastAmbientColors.background, lastGlobalLightFloor)) : 1;
+    }
     /** The last-read grid size (px/square) — tracked for the SAME reason as
      * lastAmbientColors, specifically to let getPointLightsInfo() report the
      * ACTUAL number feeding computeEdgeSoftMarginNormalized, not a guess. */
@@ -5817,6 +6295,54 @@ async function startVtPanViewerUnserialized({
      */
     const uWindGustiness01 = THREE.TSL.uniform(THREE.TSL.float(WIND_DEFAULT_GUSTINESS01));
     /**
+     * THE SCENE'S REAL SCALE, px per metre (2026-10-27) — the fourth ambient
+     * uniform. Gust fronts and turbulence ride the mean wind at `speed01 × 70
+     * m/s × this` (`world/wind-field.js#windFieldPxPerSecPerUnit`), so a 200 px
+     * / 5 ft map sees the same real speed as a 100 px one instead of half of it.
+     * Refreshed from the scene grid on every bake (`refreshWindPixelsPerMetre`).
+     */
+    const uWindPixelsPerMetre = THREE.TSL.uniform(THREE.TSL.float(WIND_DEFAULT_PIXELS_PER_METRE));
+    const refreshWindPixelsPerMetre = () => {
+      const scale = derivePixelsPerMetre({
+        gridSizePixels: globalThis.canvas?.scene?.grid?.size,
+        gridDistance: globalThis.canvas?.scene?.grid?.distance,
+        gridUnits: globalThis.canvas?.scene?.grid?.units,
+      });
+      if (Number.isFinite(scale?.pixelsPerMetre) && scale.pixelsPerMetre > 0) {
+        uWindPixelsPerMetre.value = scale.pixelsPerMetre;
+      }
+    };
+    refreshWindPixelsPerMetre();
+    /**
+     * THE INTEGRATED ADVECTION (2026-10-27) — how far the wind has carried its
+     * patterns, advanced once per frame by `tickWindAdvection` (renderFrame,
+     * before anything samples the field). Every travelling term — gust fronts,
+     * the turbulence's Taylor advection, the squall cells, the storm mist —
+     * reads this instead of `speed × t`, which during a Remote wind fade slid
+     * them by `t · dSpeed/dt` and strobed every consumer. See
+     * `world/wind-field.js`'s "INTEGRATED ADVECTION" block.
+     */
+    const windAdvectionUniforms = createWindAdvectionUniforms(THREE.TSL);
+    let windAdvectionState = null;
+    /** @param {number} tMs @param {number} dtSec - the sim clock, the one `uGlobalTimeMs` carries. */
+    function tickWindAdvection(tMs, dtSec) {
+      windAdvectionState = stepWindAdvection(windAdvectionState, {
+        tMs,
+        dtSec,
+        speed01: uWindSpeed01.value,
+        directionDeg: uWindDirectionDeg.value,
+      });
+      writeWindAdvectionUniforms(windAdvectionUniforms, windAdvectionState);
+    }
+    /** The live ambient object every handle carries — one literal, not three. */
+    const windAmbientRef = {
+      directionDeg: uWindDirectionDeg,
+      speed01: uWindSpeed01,
+      gustiness01: uWindGustiness01,
+      pixelsPerMetre: uWindPixelsPerMetre,
+      advection: windAdvectionUniforms,
+    };
+    /**
      * THE WIND HANDLE (world/wind-access.js, Wind.md §5.1) — the ONE object
      * every wind consumer receives. Rebuilt (never mutated) by `bakeWindField`
      * below; see its construction site for what goes in.
@@ -5845,7 +6371,7 @@ async function startVtPanViewerUnserialized({
      * `publishWindHandle`. Bumps on a regrid or a field-texture swap only. */
     let windLayoutVersion = 0;
     let windLayoutKey = '';
-    let windLayoutTextures = [null, null, null];
+    let windLayoutTextures = [null, null, null, null, null, null];
     /**
      * THE WIND GRID STATE (world/wind-structure.js#createWindGridState) — the
      * baked textures, their backing arrays, the raw per-cell arrays and the
@@ -5985,6 +6511,23 @@ async function startVtPanViewerUnserialized({
     let windPingRT = null;
     let windPongRT = null;
     let windPublishRT = null;
+    // THE BAKED WIND FIELD (world/wind-field-bake.js, epic mmp-fpu) — `sampleWind` evaluated once per
+    // frame into these two grid-sized targets (the frame's clock, and `groundLagSec` earlier for the
+    // bushes), so that every consumer READS the wind instead of compiling ~18 noise evaluations of it.
+    // Allocated and disposed with the sim targets above — the same grid, the same rare regrid event.
+    let windFieldNowRT = null;
+    let windFieldLagRT = null;
+    /** { material, quad, uBakeTimeMs, layoutVersion } for the CURRENT layout; rebuilt lazily. */
+    let windFieldBake = null;
+    // THE WIND'S RECORDED PAST (world/wind-gust-history.js, epic mmp-fpu) — a ring of 16 gust-magnitude grids,
+    // one per 0.6 s moment, in one atlas; each is drawn into the one-tile target and copied into its tile.
+    // `uWindGustGridIndex` is the latest recorded moment: the baker's decision, read by every shader.
+    let windGustAtlasRT = null;
+    let windGustSlotRT = null;
+    let windGustBake = null;
+    let windGustPlan = { lastMoment: null };
+    const uWindGustGridIndex = THREE.TSL.uniform(THREE.TSL.float(0));
+    const windGustCopyAt = new THREE.Vector2();
     let windSimMaterials = null; // { advectDissipate, splat, relax, publish, dispose() } | null (rebuilt lazily)
     let windPingIsCurrent = true; // which of ping/pong currently holds the LATEST D_live
     let windThawUntilMs = 0; // sim ticks while nowMs < this; frozen otherwise
@@ -6200,25 +6743,43 @@ async function startVtPanViewerUnserialized({
       // which rebuilds its materials on a layout change, no longer rebuilds
       // them every frame of a fade.
       const liveTexture = windPublishRT?.texture ?? null;
+      const fieldTexture = windFieldNowRT?.texture ?? null;
+      const fieldLagTexture = windFieldLagRT?.texture ?? null;
+      const gustHistoryTexture = windGustAtlasRT?.texture ?? null;
       const layoutKey = [g.minX, g.minY, g.cellSize, g.cols, g.rows].join('|');
       if (
         layoutKey !== windLayoutKey ||
         windGrid.opennessTexture !== windLayoutTextures[0] ||
         windGrid.wallAvoidTexture !== windLayoutTextures[1] ||
-        liveTexture !== windLayoutTextures[2]
+        liveTexture !== windLayoutTextures[2] ||
+        fieldTexture !== windLayoutTextures[3] ||
+        fieldLagTexture !== windLayoutTextures[4] ||
+        gustHistoryTexture !== windLayoutTextures[5]
       ) {
         windLayoutVersion += 1;
         windLayoutKey = layoutKey;
-        windLayoutTextures = [windGrid.opennessTexture, windGrid.wallAvoidTexture, liveTexture];
+        windLayoutTextures = [
+          windGrid.opennessTexture,
+          windGrid.wallAvoidTexture,
+          liveTexture,
+          fieldTexture,
+          fieldLagTexture,
+          gustHistoryTexture,
+        ];
       }
+      refreshWindPixelsPerMetre();
       windHandle = createWindHandle({
         version: windHandleVersion,
         layoutVersion: windLayoutVersion,
-        ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01, gustiness01: uWindGustiness01 },
+        ambientWind: windAmbientRef,
         grid: { originX: g.minX, originY: g.minY, cellSize: g.cellSize, cols: g.cols, rows: g.rows },
         opennessTexture: windGrid.opennessTexture,
         wallAvoidTexture: windGrid.wallAvoidTexture,
         liveTexture,
+        fieldTexture,
+        fieldLagTexture,
+        gustHistoryTexture,
+        gustHistoryGridIndex: gustHistoryTexture ? uWindGustGridIndex : null,
         cells: windGrid.cells,
         cpuExposureAt: sampleWindExposureAt,
       });
@@ -6235,6 +6796,7 @@ async function startVtPanViewerUnserialized({
       // kernel rebuild.
       particleEngine?.updateWind(windHandle);
       gustEngine?.updateWind(windHandle);
+      trailEngine?.updateWind(windHandle);
       fireSubsystem?.updateWind(windHandle);
     }
 
@@ -6432,6 +6994,34 @@ async function startVtPanViewerUnserialized({
           windPingRT = allocator.create('wind.sim.ping', describeWindSimRT());
           windPongRT = allocator.create('wind.sim.pong', describeWindSimRT());
           windPublishRT = allocator.create('wind.sim.publish', describeWindSimRT());
+          // THE BAKED FIELD'S TWO SLICES — same grid, same lifetime (epic mmp-fpu). The bake material
+          // closes over this grid's constants and these textures, so it goes with them.
+          allocator.dispose(windFieldNowRT);
+          allocator.dispose(windFieldLagRT);
+          windFieldBake?.material?.dispose?.();
+          windFieldBake = null;
+          windFieldNowRT = allocator.create('wind.field.now', describeWindSimRT());
+          windFieldLagRT = allocator.create('wind.field.lag', describeWindSimRT());
+          // THE RECORDED GUST HISTORY: a one-tile target the bake draws into, and the 4x4-tile atlas
+          // consumers read. Single-channel half float — the atlas is the biggest of these, and at the
+          // 512-cell cap it is 2048 px square (the allocator's own limit) at 2 bytes a texel.
+          allocator.dispose(windGustAtlasRT);
+          allocator.dispose(windGustSlotRT);
+          windGustBake?.material?.dispose?.();
+          windGustBake = null;
+          windGustPlan = { lastMoment: null };
+          const atlasSize = gustHistoryAtlasSize(cols, rows);
+          const describeGustRT = (w, h) => ({
+            resolvedW: w,
+            resolvedH: h,
+            type: THREE.HalfFloatType,
+            format: THREE.RedFormat,
+            colorSpace: THREE.NoColorSpace,
+            filter: 'linear',
+            depth: false,
+          });
+          windGustSlotRT = allocator.create('wind.gust.slot', describeGustRT(cols, rows));
+          windGustAtlasRT = allocator.create('wind.gust.atlas', describeGustRT(atlasSize.width, atlasSize.height));
           // Fresh GPU memory is UNDEFINED content — clear all three explicitly
           // so a NaN bit-pattern can never enter the sim. A FRESH local Color,
           // deliberately not the file's shared `_clearColorScratch` (declared
@@ -6440,7 +7030,15 @@ async function startVtPanViewerUnserialized({
           const prevClearColor = renderer.getClearColor(new THREE.Color());
           const prevClearAlpha = renderer.getClearAlpha();
           renderer.setClearColor(0x000000, 0);
-          for (const rt of [windPingRT, windPongRT, windPublishRT]) {
+          for (const rt of [
+            windPingRT,
+            windPongRT,
+            windPublishRT,
+            windFieldNowRT,
+            windFieldLagRT,
+            windGustSlotRT,
+            windGustAtlasRT,
+          ]) {
             renderer.setRenderTarget(rt);
             renderer.clear(true, false, false);
           }
@@ -6532,14 +7130,16 @@ async function startVtPanViewerUnserialized({
         windGrid.applyAmbient(currentWindAmbient(), { speedChanged, directionChanged });
         publishWindHandle();
         pushWindToEngines();
-        log.info(
-          `wind ambient applied in place (${[
-            speedChanged && 'speed → openness',
-            directionChanged && 'direction → shadow',
-          ]
-            .filter(Boolean)
-            .join(', ')}) — no texture or material rebuilt`
-        );
+        // A speed-only apply is routine during a wind fade (a few times a
+        // second, see `setWindAmbient`) — debug, not a line per apply at info.
+        const message = `wind ambient applied in place (${[
+          speedChanged && 'speed → openness',
+          directionChanged && 'direction → shadow',
+        ]
+          .filter(Boolean)
+          .join(', ')}) — no texture or material rebuilt`;
+        if (directionChanged) log.info(message);
+        else log.debug?.(message);
       } catch (err) {
         log.error('wind ambient update failed — the previous wind data stays in place:', err);
       } finally {
@@ -6586,7 +7186,50 @@ async function startVtPanViewerUnserialized({
         return;
       }
       if (!directionChanged && !speedChanged) return;
-      applyWindAmbient({ directionChanged, speedChanged });
+      // ⚠️ A SPEED-ONLY CHANGE IS THROTTLED (2026-10-27). A Remote wind fade
+      // calls this EVERY FRAME, and each apply rewrote the whole openness
+      // texture (up to 512×512), re-uploaded it, re-copied every particle and
+      // fire engine's wind buffer and logged a line — a minute of frame hitches
+      // on top of the fade. The uniforms above already moved, and they are what
+      // every consumer's STRENGTH reads; only the baked openness channel waits,
+      // at most `WIND_SPEED_APPLY_INTERVAL_MS`, flushed by `flushWindSpeedApply`
+      // from the frame loop. A direction change still applies at once — the
+      // wind shadow is baked against it.
+      if (!directionChanged) {
+        windSpeedApplyPending = true;
+        flushWindSpeedApply();
+        return;
+      }
+      windSpeedApplyPending = false;
+      windSpeedAppliedAtMs = lastEnvSnapshot?.env?.time?.realMs ?? null;
+      applyWindAmbient({ directionChanged, speedChanged: true });
+    }
+
+    /** How often a fading wind speed re-derives its baked openness, wall ms. */
+    const WIND_SPEED_APPLY_INTERVAL_MS = 250;
+    let windSpeedApplyPending = false;
+    /** Wall ms of the last speed apply — `null` until the first real frame. */
+    let windSpeedAppliedAtMs = null;
+    /**
+     * Apply a throttled speed change once its interval is up (see
+     * `setWindAmbient`). Wall time (`env.time.realMs`), never sim time: a paused
+     * world must still settle a speed the GM set. Before the first env snapshot
+     * there is no clock, so it applies at once.
+     */
+    function flushWindSpeedApply() {
+      if (!windSpeedApplyPending) return;
+      const nowMs = lastEnvSnapshot?.env?.time?.realMs;
+      if (
+        Number.isFinite(nowMs) &&
+        Number.isFinite(windSpeedAppliedAtMs) &&
+        nowMs - windSpeedAppliedAtMs < WIND_SPEED_APPLY_INTERVAL_MS &&
+        nowMs >= windSpeedAppliedAtMs
+      ) {
+        return;
+      }
+      windSpeedApplyPending = false;
+      windSpeedAppliedAtMs = Number.isFinite(nowMs) ? nowMs : null;
+      applyWindAmbient({ directionChanged: false, speedChanged: true });
     }
 
     // The initial bake fires further down (after candleFlameMat/windOverlayMat
@@ -6684,7 +7327,7 @@ async function startVtPanViewerUnserialized({
         // distinct from the consumer-facing shapes.
         restFieldTexture: windHandle.restFieldTexture,
         solidMaskTexture: windGrid.solidMaskTexture,
-        ambientWind: { directionDeg: uWindDirectionDeg, speed01: uWindSpeed01, gustiness01: uWindGustiness01 },
+        ambientWind: windAmbientRef,
         cols: windHandle.grid.cols,
         rows: windHandle.grid.rows,
         cellSize: windHandle.grid.cellSize,
@@ -6831,6 +7474,106 @@ async function startVtPanViewerUnserialized({
         windIsThawed = true;
         log.info(`wind sim thawed (${slots.length} active impulse(s))`);
       }
+    }
+
+    /**
+     * THE BAKE PASS'S MATERIAL, built lazily for the CURRENT layout (epic mmp-fpu). It closes over the
+     * grid's constants and the three field textures, so a new `windLayoutVersion` (a regrid, a texture
+     * swap) is the only thing that invalidates it — never a wind-speed or direction change, which only
+     * move uniforms. Returns null until there is a bake, a grid and both targets.
+     * @returns {{material: *, quad: *, uBakeTimeMs: *, layoutVersion: number}|null}
+     */
+    function ensureWindFieldBake() {
+      if (!windHandle.hasBake || !windGrid.structure || !windFieldNowRT || !windFieldLagRT) return null;
+      if (windFieldBake && windFieldBake.layoutVersion === windLayoutVersion) return windFieldBake;
+      windFieldBake?.material?.dispose?.();
+      windFieldBake = null;
+      // The HANDLE builds the pass: it owns the assembly of the field's inputs (`wind/handle-only`), so
+      // this site never names one and cannot forget, freeze or duplicate one.
+      const built = windHandle.buildFieldBake(THREE);
+      if (!built) return null;
+      windFieldBake = {
+        material: built.material,
+        quad: new THREE.QuadMesh(built.material),
+        uBakeTimeMs: built.uBakeTimeMs,
+        layoutVersion: windLayoutVersion,
+      };
+      return windFieldBake;
+    }
+
+    /**
+     * BAKE THE WIND FIELD FOR THIS FRAME (epic mmp-fpu) — `sampleWind` into the two grid-sized targets:
+     * the frame's clock, and `groundLagSec` earlier (the bushes read the wind a moment late, see
+     * `buildVegetationSwayDisplacementNode`). Every consumer that asks for `baked: 'now'|'lagged'` then
+     * READS the result instead of compiling the noise. Runs in the `sims` block, after the wind sim has
+     * published this frame's transient gusts (they are part of the field) and before anything draws.
+     * Two quads of at most 512² texels, ~18 noise evaluations each: noise-floor next to one frame.
+     *
+     * @param {number} tMs - the sim clock the consumers read as `uGlobalTimeMs`.
+     */
+    function tickWindFieldBake(tMs) {
+      const bake = ensureWindFieldBake();
+      if (!bake || !Number.isFinite(tMs)) return;
+      const lagMs = Math.max(0, getVegetationRenderState()?.params?.groundLagSec ?? 0) * 1000;
+      const prevRT = renderer.getRenderTarget();
+      bake.uBakeTimeMs.value = tMs;
+      renderer.setRenderTarget(windFieldNowRT);
+      bake.quad.render(renderer);
+      bake.uBakeTimeMs.value = tMs - lagMs;
+      renderer.setRenderTarget(windFieldLagRT);
+      bake.quad.render(renderer);
+      renderer.setRenderTarget(prevRT);
+    }
+
+    /**
+     * THE GUST HISTORY'S BAKE PASS for the CURRENT layout, built lazily (epic mmp-fpu). Like the field's, it
+     * is built by the HANDLE (it owns the field inputs) and invalidated only by a new `windLayoutVersion`.
+     * @returns {{material: *, quad: *, uBakeTimeMs: *, layoutVersion: number}|null}
+     */
+    function ensureGustHistoryBake() {
+      if (!windHandle.hasBake || !windGrid.structure || !windGustAtlasRT || !windGustSlotRT) return null;
+      if (windGustBake && windGustBake.layoutVersion === windLayoutVersion) return windGustBake;
+      windGustBake?.material?.dispose?.();
+      windGustBake = null;
+      const built = windHandle.buildGustHistoryBake(THREE);
+      if (!built) return null;
+      windGustBake = {
+        material: built.material,
+        quad: new THREE.QuadMesh(built.material),
+        uBakeTimeMs: built.uBakeTimeMs,
+        layoutVersion: windLayoutVersion,
+      };
+      return windGustBake;
+    }
+
+    /**
+     * RECORD THE WIND'S PAST (epic mmp-fpu) — every 0.6 s of sim time, draw the gust magnitude over the whole
+     * grid for that moment into the one-tile target and copy it into its tile of the atlas; candles read the
+     * last 14 tiles instead of recomputing 14 gust envelopes in their shaders. Zero or one moment a frame in
+     * play; the whole look-back on the first frame or after the clock jumped back. Paused sim time records
+     * nothing — the past does not advance while the world is held, and neither does a candle's memory of it.
+     *
+     * @param {number} tMs - the sim clock the consumers read as `uGlobalTimeMs`.
+     */
+    function tickGustHistory(tMs) {
+      const bake = ensureGustHistoryBake();
+      if (!bake || !Number.isFinite(tMs) || !windGrid.structure) return;
+      const plan = planGustHistoryBakes(windGustPlan, tMs);
+      windGustPlan = plan.state;
+      if (plan.bakes.length > 0) {
+        const { cols, rows } = windGrid.structure.gridSpec;
+        const prevRT = renderer.getRenderTarget();
+        for (const b of plan.bakes) {
+          bake.uBakeTimeMs.value = b.timeMs;
+          renderer.setRenderTarget(windGustSlotRT);
+          bake.quad.render(renderer);
+          const { tx, ty } = gustHistoryTileOf(b.slot);
+          windGustCopyAt.set(tx * cols, ty * rows);
+          renderer.copyTextureToTexture(windGustSlotRT.texture, windGustAtlasRT.texture, null, windGustCopyAt);
+        }
+        renderer.setRenderTarget(prevRT);
+      }
+      uWindGustGridIndex.value = plan.moment;
     }
 
     /**
@@ -7173,6 +7916,49 @@ async function startVtPanViewerUnserialized({
      * it), both tolerating `null` until constructGustEngineIfNeeded runs. */
     let gustEngine = null;
     let windGustsEnabled = false;
+    /** WIND TRAILS (effects/wind-trails.js, 2026-10-27) — a real effect, not a
+     * debug toggle: its cascade readout (getWindTrailsRenderState) says whether
+     * it is on. Built lazily the first frame it is enabled AND there is wind to
+     * show, so a calm scene allocates nothing. `trailLookParams` is the params
+     * object the engine's look was last pushed from — compared by reference so
+     * an unchanged readout costs nothing per frame. */
+    let trailEngine = null;
+    let trailLookParams = null;
+    function windTrailsActive() {
+      return !!getWindTrailsRenderState()?.enabled && uWindSpeed01.value > 0;
+    }
+    /**
+     * Build the trail engine on first need, and push the saved look into it when that changed. ONE definition, used
+     * by the live frame and by the load-time weather warm-up, so the warm-up builds exactly what a frame would.
+     * @param {object} windSpawnRect - the engine's world rect, the scene-clamped view.
+     */
+    function syncWindTrailEngine(windSpawnRect) {
+      const trailParams = getWindTrailsRenderState()?.params ?? null;
+      if (!trailEngine) {
+        // The graphics profile sets how many points the line is drawn through
+        // (a curve, not corners, at `extreme`). It sizes the geometry, so it is
+        // read once here; a profile change applies the next time the engine builds.
+        let trailProfile;
+        try {
+          trailProfile = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile);
+        } catch {
+          trailProfile = undefined; // registry not ready — standard density
+        }
+        trailEngine = createGustEngine({
+          THREE,
+          system: buildWindTrailsSystem(trailParams ?? {}, trailProfile),
+          worldRect: windSpawnRect,
+          zDepth: 0,
+          windHandle,
+          // Darkened by building shadows like the ground (lighting/weather-shade.js).
+          illumTexture: sceneIllum.texture,
+        });
+        trailLookParams = trailParams;
+      } else if (trailParams !== trailLookParams) {
+        trailEngine.setLook(windTrailsLook(trailParams ?? {}));
+        trailLookParams = trailParams;
+      }
+    }
 
     // ------------------------------------------------------------------
     // THE WIND FIELD DEBUG OVERLAY (diag/wind-field-overlay.js, Wind.md Tier
@@ -7367,17 +8153,30 @@ async function startVtPanViewerUnserialized({
     function disposeWindSim() {
       try {
         windSimMaterials?.dispose();
+        windFieldBake?.material?.dispose?.();
+        windGustBake?.material?.dispose?.();
+        allocator.dispose(windGustAtlasRT);
+        allocator.dispose(windGustSlotRT);
         allocator.dispose(windPingRT);
         allocator.dispose(windPongRT);
         allocator.dispose(windPublishRT);
+        allocator.dispose(windFieldNowRT);
+        allocator.dispose(windFieldLagRT);
         windGrid.dispose();
       } catch (err) {
         log.error('wind sim dispose failed — GPU buffers may leak until renderer.dispose():', err);
       }
       windSimMaterials = null;
+      windFieldBake = null;
+      windGustBake = null;
+      windGustAtlasRT = null;
+      windGustSlotRT = null;
+      windGustPlan = { lastMoment: null };
       windPingRT = null;
       windPongRT = null;
       windPublishRT = null;
+      windFieldNowRT = null;
+      windFieldLagRT = null;
       windSimGridKey = null;
       windActiveImpulses = [];
       windThawUntilMs = 0;
@@ -7505,17 +8304,56 @@ async function startVtPanViewerUnserialized({
     // `loadNamedLut`/`pushGradeLook` below own swapping this placeholder for
     // a real loaded LUT via `gradePresent.setLut`.
     const lutPlaceholder = makeIdentityLutTexture(THREE);
+    /** TEMPERATURE EFFECTS' tile (effects/temperature/temperature-noise.js): a
+     * flat 1×1 stand-in (no crystals, level slopes, mid noise) until the first
+     * frame frost or heat ripple is wanted, when `ensureTemperatureNoise` bakes
+     * the real 512² one (~0.1 s, once per session) — a temperate scene never
+     * pays for it. */
+    const makeTemperatureNoiseTexture = (data, size) => {
+      const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.magFilter = THREE.LinearFilter;
+      tex.minFilter = size > 1 ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+      tex.generateMipmaps = size > 1;
+      tex.colorSpace = THREE.NoColorSpace;
+      tex.needsUpdate = true;
+      return tex;
+    };
+    const temperatureNoisePlaceholder = makeTemperatureNoiseTexture(new Uint8Array([0, 128, 128, 128]), 1);
+    let temperatureNoiseTexture = null;
+    function ensureTemperatureNoise() {
+      if (temperatureNoiseTexture) return;
+      const { data, size } = buildTemperatureNoiseData();
+      temperatureNoiseTexture = makeTemperatureNoiseTexture(data, size);
+      gradePresent.setTemperatureNoise(temperatureNoiseTexture);
+      log.info(`temperature effects: baked the ${size}² frost/ripple tile`);
+    }
     const gradePresent = buildGradePresentMaterial({
       THREE,
       litTexture: sceneLit.texture,
       outdoorsTexNode: envLight.outdoorsTexNode,
       uViewRect: envLight.uViewRect,
       uOutdoorsRect: envLight.uOutdoorsRect,
+      uOutdoorsExtent: envLight.uOutdoorsExtent,
       lutTexture: lutPlaceholder,
       // INJECTED, not imported by grade-present.js itself — see that
       // function's own param doc for why (a real circular zone dependency,
       // not just a door-rule technicality).
       buildPostUpscaleSharpenNode,
+      temperatureNoiseTexture: temperatureNoisePlaceholder,
+      // THE FOG HOLD (2026-10-27) — the SAME four inputs `visionGateQuad` and
+      // `visionExploredDimQuad` are built from, so the present's "is this
+      // pixel in the fog" can never disagree with the gate's.
+      fogHold: {
+        maskTexture: visionMask.texture,
+        illumTexture: sceneIllum.texture,
+        exploredTexture: visionMask.exploredTexture,
+        exploredSnapshotTexture: visionMask.exploredSnapshotTexture,
+        uExploredRect: uVisionExploredRect,
+        threshold: REVEAL_ILLUMINATION_THRESHOLD,
+        extraRevealed: tableSubsystem.revealedOutsideScene,
+      },
     });
     // INITIAL STATE (2026-08-27) — a fresh viewer's `internalScale` may
     // ALREADY be below 1.0 at this point (a player's persisted setting can
@@ -7779,7 +8617,7 @@ async function startVtPanViewerUnserialized({
         const worldXY = vec2(r.x, r.y).add(uv().mul(vec2(r.z.sub(r.x), r.w.sub(r.y))));
         const material = new THREE.NodeMaterial();
         material.fragmentNode = vec4(
-          length(windHandle.node(THREE.TSL, { centerXY: worldXY, time: uGlobalTimeMs })),
+          length(windHandle.strengthNode(THREE.TSL, { centerXY: worldXY, time: uGlobalTimeMs, baked: 'now' })),
           0,
           0,
           1
@@ -7917,6 +8755,30 @@ async function startVtPanViewerUnserialized({
       renderer.setClearColor(sceneBackgroundSaved, prevWorldClearAlpha);
       renderer.setRenderTarget(null);
       renderer.setMRT(previousMRT);
+      // Canopies join `buf:scene.depth` only now, after the ground is painted
+      // — see `vegetationDepthScene`'s own header. Still inside this pass, so
+      // every later reader finds a complete buffer. Not bracketed by
+      // `Z.geomDepth`: a second bracket per frame would count as a second
+      // sample and halve that zone's reported mean.
+      runVegetationDepthPass();
+    }
+    /**
+     * Draw the canopy proxies onto `buf:scene.depth` WITHOUT clearing it —
+     * `runSceneDepthPass` already holds this frame's other proxies, and these
+     * must land on top of them under the same `LessDepth` test. Same target,
+     * camera and save/restore discipline as that pass.
+     */
+    function runVegetationDepthPass() {
+      if (!vegetationDepthScene.children.length) return;
+      const prevAutoClearColor = renderer.autoClearColor;
+      const prevAutoClearDepth = renderer.autoClearDepth;
+      renderer.setRenderTarget(sceneDepth);
+      renderer.autoClearColor = false;
+      renderer.autoClearDepth = false;
+      renderer.render(vegetationDepthScene, depthCamera);
+      renderer.autoClearColor = prevAutoClearColor;
+      renderer.autoClearDepth = prevAutoClearDepth;
+      renderer.setRenderTarget(null);
     }
     function runSceneDepthPass() {
       // STAGE-0 CPU-MYSTERY EXPERIMENT (2026-08-10, debug-only, OFF by
@@ -8259,6 +9121,7 @@ async function startVtPanViewerUnserialized({
       const raisedBackground = maxRgb(background, lastGlobalLightFloor);
 
       envLight.setAmbient(raisedBackground);
+      uVisionMemoryLight.value.set(raisedBackground[0], raisedBackground[1], raisedBackground[2]);
       profiler?.end(Z.lightAmbient);
 
       // SUN SHADOWS — re-march ONLY if the quantised sun, the masks, a floor
@@ -8609,6 +9472,21 @@ async function startVtPanViewerUnserialized({
       // are still this frame's.
 
       profiler?.begin(Z.lightPointUpdate);
+      // CANOPY LIGHT — the Vegetation card's light-blocking and height dials,
+      // with the scene's px per unit so a canopy's height in feet becomes a
+      // distance the light has to cover (`canopy-light.js`).
+      {
+        const vegParams = getVegetationRenderState()?.params ?? {};
+        const gridUnits = Number(globalThis.canvas?.dimensions?.distance);
+        pushCanopyLightUniforms({
+          treeBlock: vegParams.treeLightBlock,
+          bushBlock: vegParams.bushLightBlock,
+          treeHeightFt: vegetationHeightFt({ id: 'tree' }, vegParams),
+          bushHeightFt: vegetationHeightFt({ id: 'bush' }, vegParams),
+          heightReach: vegParams.canopyLightHeight,
+          pxPerUnit: readGridSizePixels().gridSizePixels / (gridUnits > 0 ? gridUnits : 5),
+        });
+      }
       lastGridSizePixels = pointLights.update(darkness01, activeRegions, env, darknessRealism01, currentFloor);
       profiler?.end(Z.lightPointUpdate);
       // Reconcile the flame billboard from the same candle render state the
@@ -8820,6 +9698,7 @@ async function startVtPanViewerUnserialized({
         if (!liveWindowFloorIndices.has(floorIndex)) {
           surface.dispose();
           windowSurfacesByFloor.delete(floorIndex);
+          roomMapCache.drop(floorIndex);
         }
       }
       for (const floor of windowFloors) {
@@ -9051,9 +9930,12 @@ async function startVtPanViewerUnserialized({
         // exploration across the map — and re-bound only when the scene
         // dimensions actually change, because re-binding wipes exploration.
         const exploredDraw = visionDraw.explored;
+        if (exploredDraw?.clearFirst) exploredClearPending = true;
+        if (visionDraw.snapshot?.clearFirst) snapshotClearPending = true;
         if (exploredDraw?.camera && gating.gate) {
           renderer.setRenderTarget(exploredDraw.target);
-          if (exploredDraw.clearFirst) {
+          if (exploredClearPending) {
+            exploredClearPending = false;
             const prevExpClear = renderer.getClearColor(new THREE.Color());
             renderer.setClearColor(0x000000, 1);
             renderer.clear(true, false, false);
@@ -9095,9 +9977,14 @@ async function startVtPanViewerUnserialized({
               // live gate uses, built into the publish material itself.
               const snapshotDraw = visionDraw.snapshot;
               renderer.setRenderTarget(snapshotDraw.target);
-              if (snapshotDraw.clearFirst) {
+              if (snapshotClearPending) {
+                snapshotClearPending = false;
                 const prevSnapClear = renderer.getClearColor(new THREE.Color());
-                renderer.setClearColor(0x000000, 1);
+                // ALPHA 0, not 1 (2026-10-27): the publish quad writes alpha 1
+                // only where the full reveal test passed, so alpha is the
+                // "ever seen" memory `sampleExploredNode` reads. Cleared to 1
+                // it would read as "everything already seen".
+                renderer.setClearColor(0x000000, 0);
                 renderer.clear(true, false, false);
                 renderer.setClearColor(prevSnapClear, prevVisionAlpha);
               }
@@ -9284,6 +10171,16 @@ async function startVtPanViewerUnserialized({
         renderer.render(firefliesSubsystem.scene, camera);
         renderer.autoClearColor = prevFirefliesAutoClear;
         profiler?.end(Z.lightDrawFireflies);
+      }
+      // DUST — additive HDR motes, drawn after the fireflies so the beam's brightest glints feed the bloom
+      // that runs after this block. Lit by reading `scene.illum`, which the window light was added into earlier.
+      if (dustSubsystem.hasContent) {
+        profiler?.begin(Z.lightDrawDust);
+        const prevDustAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(dustSubsystem.scene, camera);
+        renderer.autoClearColor = prevDustAutoClear;
+        profiler?.end(Z.lightDrawDust);
       }
       // (PRECIPITATION does NOT draw here. It is a declared pass and runs from
       // `runPassPlan` via `runSurfacePrecipitationPass` — see that function.
@@ -9687,7 +10584,8 @@ async function startVtPanViewerUnserialized({
     function runSurfaceParticlesPass() {
       const drawParticles = windParticlesEnabled && particleEngine?.scene;
       const drawGusts = windGustsEnabled && gustEngine?.scene;
-      if (!drawParticles && !drawGusts) return;
+      const drawTrails = trailEngine?.scene && windTrailsActive();
+      if (!drawParticles && !drawGusts && !drawTrails) return;
       // Bind sceneLit ONCE and guard the clear (light.accumulate ended with
       // setRenderTarget(null)); draw whichever of the two additive effects are
       // enabled — they are independent toggles sharing one guarded pass, so a
@@ -9703,6 +10601,12 @@ async function startVtPanViewerUnserialized({
       if (drawGusts) {
         profiler?.begin(Z.surfGusts);
         renderer.render(gustEngine.scene, camera);
+        profiler?.end(Z.surfGusts);
+      }
+      // WIND TRAILS — under the same ribbon zone as the gusts (same engine).
+      if (drawTrails) {
+        profiler?.begin(Z.surfGusts);
+        renderer.render(trailEngine.scene, camera);
         profiler?.end(Z.surfGusts);
       }
       renderer.autoClearColor = prevParticleAutoClear;
@@ -9731,6 +10635,10 @@ async function startVtPanViewerUnserialized({
      * The only skip is when MSA does not own vision at all.
      */
     function runVisionGatePass() {
+      // THE FOG HOLD follows ownership: while this gate draws, the present
+      // keeps its grade out of the fog (`grade-present.js#fogHoldActive`).
+      // Only rebuilds on a flip, so a per-frame call costs one compare.
+      gradePresent.setFogHoldActive(visionOwnershipEnabled && !!visionGateQuad);
       if (!visionOwnershipEnabled || !visionGateQuad) return;
       try {
         profiler?.begin(Z.visionGate);
@@ -9758,6 +10666,7 @@ async function startVtPanViewerUnserialized({
         // leak. Foundry's own fog is a complete, working fallback.
         visionOwnershipEnabled = false;
         setVisibilitySuppression(false);
+        gradePresent.setFogHoldActive(false);
         lastVisionGateError = String(err?.message ?? err);
         log.error('vision gate failed — handing fog back to Foundry for this session', {
           err: lastVisionGateError,
@@ -9918,6 +10827,8 @@ async function startVtPanViewerUnserialized({
         resolutionWidth: internalW,
         resolutionHeight: internalH,
         tier,
+        // The table stays straight under the lens's barrel warp (table-subsystem.js#lensGuard).
+        uvGuard: tableSubsystem.lensGuard,
       });
       lensQuad = new THREE.QuadMesh(lensBuilt.material);
       prev?.material?.dispose?.();
@@ -10405,7 +11316,11 @@ async function startVtPanViewerUnserialized({
     function runPostDofPass() {
       const st = getDofRenderState();
       if (!st.enabled) return;
-      if ((view?.floorIndex ?? 0) === 0) return;
+      // PARALLAX (2026-10-28): while a floor change glides, the viewed floor is a fraction, so floors below
+      // it blur in over the glide instead of snapping on at the flip (the shader already works in floats).
+      // At rest this is the integer floor, exactly as before.
+      const dofViewedFloor = parallaxSubsystem.isOn() ? parallaxSubsystem.floorPos() : (view?.floorIndex ?? 0);
+      if (dofViewedFloor <= 1e-4) return;
       const p = st.params || {};
 
       // LIVE TIER REBUILD (2026-08-30) — guarded, unlike bloom's own
@@ -10422,7 +11337,7 @@ async function startVtPanViewerUnserialized({
 
       profiler?.begin(Z.dofUniforms);
       const u = dof.uniforms;
-      u.viewedFloorIndex.value = view.floorIndex;
+      u.viewedFloorIndex.value = dofViewedFloor;
       u.strength.value = dofNum(p.strength, 1.0);
       u.blurPerFloor.value = dofNum(p.blurPerFloor, 1.2);
       u.maxBlur.value = dofNum(p.maxBlur, 1.0);
@@ -10449,6 +11364,9 @@ async function startVtPanViewerUnserialized({
         // unscaled 1.0 spread, so the top of the pyramid (deep floors below)
         // still reaches the same strong blur it always has.
         dof.downsample.uTapSpread.value = k === 0 ? DOF_MIP0_TAP_SPREAD : 1.0;
+        // Only scene.lit (linear HDR) is encoded into sqrt space; mips are
+        // already encoded. The composite squares it back — see uEncodeInput.
+        dof.downsample.uEncodeInput.value = k === 0 ? 1.0 : 0.0;
         renderer.setRenderTarget(dofMips[k]);
         dofDownQuad.render(renderer);
       }
@@ -10647,6 +11565,12 @@ async function startVtPanViewerUnserialized({
      * because the region set it derives from is static almost all the time.
      */
     let lastPublishedGlobalLightWindow = null;
+    /** Does the GAME SYSTEM own Global Illumination (2026-10-27)? Set the first
+     *  time our own publish is overwritten in the same call
+     *  (`isGlobalLightSystemOwned` — PF2e does this every time). From then on
+     *  MSA publishes darkness alone for this viewer's life (one scene), and
+     *  never re-asserts a window the system will only replace again. */
+    let globalLightSystemOwned = false;
     /** What Foundry actually held for Global Illumination on the most recent
      *  frame — captured during the publish decision so the report shows the
      *  same reading the throttle acted on, rather than a fresh read taken at
@@ -10724,6 +11648,10 @@ async function startVtPanViewerUnserialized({
     /** The sky-light lever, 0..1. 0 = exact Foundry parity (a mathematical
      * no-op) — see effects/sky-access.js for why the default cannot be else. */
     let skyRealism01 = 0;
+    /** Golden-hour light lever (1 = the exaggerated grade) and the opt-in
+     * moonlight lever (0 = off). effects/sky-access.js. */
+    let skyGoldenHour01 = 1;
+    let skyMoonlight01 = 0;
     /** THE ENVIRONMENTAL GRADE strength, 0..1 (docs/planning/Grade.md). 0 =
      * neutral (the automatic ToD/weather look is off). This is the lever that
      * carries the cloud desaturation the deleted sky veil couldn't. */
@@ -10910,13 +11838,17 @@ async function startVtPanViewerUnserialized({
       // RE-ASSERT it is not the read-back loop §2.2 forbids.
       const liveGlobalLight = readSceneGlobalLightRaw();
       lastFoundryGlobalLight = liveGlobalLight;
-      const globalLightWindowChanged = shouldPublishGlobalLightWindow(
-        nextGlobalLightWindow,
-        lastPublishedGlobalLightWindow,
-        liveGlobalLight,
-        darknessNowMs,
-        lastPublishedDarknessAtMs
-      );
+      // A SYSTEM-OWNED window (PF2e) is never sent or repaired again — see
+      // `isGlobalLightSystemOwned`. Darkness still publishes on its own throttle.
+      const globalLightWindowChanged =
+        !globalLightSystemOwned &&
+        shouldPublishGlobalLightWindow(
+          nextGlobalLightWindow,
+          lastPublishedGlobalLightWindow,
+          liveGlobalLight,
+          darknessNowMs,
+          lastPublishedDarknessAtMs
+        );
 
       // OR'd with the window's own change flag: darkness may sit still for a
       // long time (a static time of day), and if a GM edits a region's
@@ -10931,7 +11863,16 @@ async function startVtPanViewerUnserialized({
         }) ||
         globalLightWindowChanged
       ) {
-        const published = publishSceneDarkness(env.darkness01, nextGlobalLightWindow);
+        const windowToSend = globalLightSystemOwned ? null : nextGlobalLightWindow;
+        const published = publishSceneDarkness(env.darkness01, windowToSend);
+        // Read back in the SAME tick: `initialize` is synchronous, so a
+        // window that did not land was replaced by the system, not drifted.
+        if (published.ok && windowToSend && isGlobalLightSystemOwned(windowToSend, readSceneGlobalLightRaw())) {
+          globalLightSystemOwned = true;
+          log.info('global illumination is owned by the game system — MSA publishes darkness only', {
+            sent: windowToSend,
+          });
+        }
         // ⚠️ ONLY A SUCCESSFUL WRITE UPDATES EITHER GUARD. If the write failed
         // (no canvas, an API surprise), Foundry still holds whatever it held —
         // recording our INTENDED values as "what we published" would make
@@ -10949,7 +11890,7 @@ async function startVtPanViewerUnserialized({
       // THE SHADOW HANDLE — rebuilt only when the sky actually MOVED, not every
       // frame: it is an immutable value object, and churning a new one per
       // frame would defeat the version-compare its own consumers rely on.
-      const skyKey = `${env.sun.elevationDeg.toFixed(3)}|${env.sun.azimuthDeg.toFixed(3)}|${env.sun.dayFactor01.toFixed(4)}|${env.weather.cloudCover01.toFixed(4)}|${skyRealism01.toFixed(4)}`;
+      const skyKey = `${env.sun.elevationDeg.toFixed(3)}|${env.sun.azimuthDeg.toFixed(3)}|${env.sun.dayFactor01.toFixed(4)}|${env.weather.cloudCover01.toFixed(4)}|${skyRealism01.toFixed(4)}|${skyGoldenHour01.toFixed(3)}|${skyMoonlight01.toFixed(3)}|${(env.sun.golden01 ?? 0).toFixed(3)}`;
       if (skyKey !== lastSkyKey) {
         lastSkyKey = skyKey;
         shadowHandleVersion += 1;
@@ -10969,8 +11910,11 @@ async function startVtPanViewerUnserialized({
           sun: env.sun,
           weather: env.weather,
           realism01: skyRealism01,
+          goldenHour01: skyGoldenHour01,
+          moonlight01: skyMoonlight01,
         });
         envLight.setSky(skyHandle.ambientMultiplierRgb);
+        envLight.setMoon(skyHandle.moonAddRgb);
       }
 
       // ── THE CLOUD FIELD — ticked every frame, never gated on `skyKey` ────
@@ -11064,7 +12008,6 @@ async function startVtPanViewerUnserialized({
         // so vegetation/particles still see genuine calm) — a gentle breeze
         // by default, so a cloud drifts one `cloudScalePx`-wide cell roughly
         // every 10-12 s even when nothing else on the map is moving at all.
-        const effectiveWindSpeed01 = Math.max(cloudMinWindSpeed01, uWindSpeed01.value);
         // ⚠️ `cloudSpeedMul` — author's live-test round 2: "Clouds move far
         // too fast at full wind speed, halve all wind speed effects on
         // cloud movement." Applied HERE, after the floor above, so the
@@ -11072,8 +12015,14 @@ async function startVtPanViewerUnserialized({
         // there a minimum" vs "how fast does the dial itself translate") —
         // multiplying a Studio-tunable INTO the floor constant would make
         // one dial silently change the other's meaning.
+        //
+        // ⚠️ 2026-10-27: THE DIAL WENT LINEAR TO 70 m/s. Cloud drift keeps the
+        // real speeds it was tuned to: its floor parameter is still read on the
+        // OLD curve (it is a saved Studio value) and the drift stops rising at
+        // the old dial's top (34.8 m/s) — clouds are high weather, already halved
+        // by the author, and were never part of the ground-level rescale.
         const windSpeedPxPerSec =
-          metresPerSecondForSpeed01(effectiveWindSpeed01) * sceneScale.pixelsPerMetre * cloudSpeedMul;
+          cloudDriftMetresPerSecond(uWindSpeed01.value) * sceneScale.pixelsPerMetre * cloudSpeedMul;
         const step = cloudDriftStep({
           dtSec: time.dtSec,
           windDirX: flow.x,
@@ -11227,8 +12176,17 @@ async function startVtPanViewerUnserialized({
             topsFg * skyHandle.fill.strength,
             topsFb * skyHandle.fill.strength
           );
-          uTopsViewCentre.value.set(view.centerXPx, view.centerYPx);
-          uTopsMagnification.value = topsGate.magnification;
+          // WHERE THE DECK HANGS: the shared scene eye's centre and law (cloud-shade.js#cloudTopsEyeMagnification),
+          // so the deck sits above the Table's rim and Parallax's floors in the one perspective. The gate above still
+          // decides WHEN it shows; its own magnification is the fallback with no eye.
+          uTopsOverhang01.value = getTableRenderState()?.enabled ? 1 : 0;
+          if (frameSceneEye) {
+            uTopsViewCentre.value.set(frameSceneEye.x, frameSceneEye.y);
+            uTopsMagnification.value = cloudTopsEyeMagnification(env.weather.cloudAltitudePx, frameSceneEye.height);
+          } else {
+            uTopsViewCentre.value.set(view.centerXPx, view.centerYPx);
+            uTopsMagnification.value = topsGate.magnification;
+          }
           uTopsOpacity.value = topsOpacityDial * topsGate.fade;
         } else {
           uTopsOpacity.value = 0;
@@ -11252,7 +12210,13 @@ async function startVtPanViewerUnserialized({
       // drives the SAME three boosts `uCloudShadowStrength`'s own sibling
       // dials do for the opposite condition, so "clear" and "overcast" are
       // symmetric halves of one mood rather than two unrelated mechanisms.
-      const clearNoon01 = Math.max(0, Math.min(1, (1 - env.weather.cloudCover01) * (env.sun?.dayFactor01 ?? 0)));
+      // ⚠️ × (1 − golden01) (2026-10-27): `dayFactor01` is still ~0.5 with the
+      // sun 2° up, so half the NOON exposure/warmth boost rode on top of the
+      // golden grade — part of "golden hour in general is too bright".
+      const clearNoon01 = Math.max(
+        0,
+        Math.min(1, (1 - env.weather.cloudCover01) * (env.sun?.dayFactor01 ?? 0) * (1 - (env.sun?.golden01 ?? 0)))
+      );
       const envGradeResolved = resolveEnvGrade(env);
       envGradeResolved.exposure += noonExposureBoost * clearNoon01;
       envGradeResolved.contrast *= 1 + noonContrastBoost * clearNoon01;
@@ -11265,9 +12229,47 @@ async function startVtPanViewerUnserialized({
       // existing outdoor gate and strength lever — no new uniform, no new pass.
       const hazeViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
       const hazeMap = resolveHazeGrade(env, hazeViewRect ? hazeViewRect.maxX - hazeViewRect.minX : 0);
-      gradePresent.setEnvGrade(scaleGradeToIdentity(applyHazeToGrade(envGradeResolved, hazeMap), gradeEnvStrength));
+      // TEMPERATURE EFFECTS — stepped here, before either grade is pushed: the
+      // outdoor-gated env grade carries the share that does not reach indoors
+      // (`indoorShare`), `pushGradeLook` below carries the rest.
+      pushTemperatureEffects(env);
+      gradePresent.setEnvGrade(
+        applyTemperatureGrade(
+          scaleGradeToIdentity(applyHazeToGrade(envGradeResolved, hazeMap), gradeEnvStrength),
+          temperatureGradeDelta,
+          1 - temperatureIndoorShare
+        )
+      );
       // THE WINDOW'S OWN MIRROR — see `uWindowNoonBoostMul`'s own doc.
       uWindowNoonBoostMul.value = 1 + windowNoonBoost * clearNoon01;
+      // WINDOW WEATHER (2026-10-27) — rain strength (snow and hail darken a
+      // little less: they let more light through than a downpour) and the
+      // Window card's weather dials.
+      {
+        const w = env?.weather ?? {};
+        const wp = getWindowRenderState()?.params ?? {};
+        const D = WINDOW_WEATHER_DEFAULTS;
+        const pick = (k, d) => (Number.isFinite(wp[k]) ? wp[k] : d);
+        const precip = Number.isFinite(w.precip01) ? w.precip01 : 0;
+        const kindGain =
+          w.precipKind === 'rain' || w.precipKind === undefined ? 1 : pick('rainWaveSnowShare', D.snowShare);
+        const p0 = pick('rainWaveStartPrecip', D.startPrecip);
+        const p1 = Math.max(p0 + 0.01, pick('rainWaveFullPrecip', D.fullPrecip));
+        const t = Math.min(1, Math.max(0, (precip - p0) / (p1 - p0)));
+        uWindowStormRain01.value = t * t * (3 - 2 * t) * kindGain;
+        windowWaveDials.stormBaseDarken.value = pick('rainWaveBaseDarken', D.stormBaseDarken);
+        windowWaveDials.waveThreshold.value = pick('rainWaveThreshold', D.waveThreshold);
+        windowWaveDials.waveSoftness.value = pick('rainWaveSoftness', D.waveSoftness);
+        windowWaveDials.waveFloor.value = pick('rainWaveFloor', D.waveFloor);
+        windowWaveDials.waveTintAmount.value = pick('rainWaveTintAmount', D.waveTintAmount);
+        windowWaveDials.leadGlow.value = pick('rainWaveLeadGlow', D.leadGlow);
+        if (Array.isArray(wp.rainWaveTint) && wp.rainWaveTint.length === 3) {
+          windowWaveDials.waveTint.value.set(...wp.rainWaveTint);
+        }
+        if (Number.isFinite(wp.weatherBreakFill)) uWindowBreakFill.value = wp.weatherBreakFill;
+        if (Number.isFinite(wp.weatherBreakSizeM)) uWindowBreakSizeM.value = Math.max(1, wp.weatherBreakSizeM);
+        if (Number.isFinite(wp.weatherStormDarken)) uWindowStormDarken.value = wp.weatherStormDarken;
+      }
 
       // THE ARTISTIC (Look) GRADE — read the effect's resolved params and push.
       // Converts the authored schema (split-tone COLOURS, a tone-map NAME, a LUT
@@ -11601,6 +12603,14 @@ async function startVtPanViewerUnserialized({
       return { skyRealism01, note: skyRealism01 === 0 ? 'exact Foundry parity (the sky light is a no-op)' : null };
     }
 
+    /** GOLDEN-HOUR and MOONLIGHT levers, 0..1 (effects/sky-access.js). */
+    function setSkyLook({ goldenHour01, moonlight01 } = {}) {
+      if (goldenHour01 !== undefined) skyGoldenHour01 = Math.min(1, Math.max(0, Number(goldenHour01) || 0));
+      if (moonlight01 !== undefined) skyMoonlight01 = Math.min(1, Math.max(0, Number(moonlight01) || 0));
+      lastSkyKey = '';
+      return { skyGoldenHour01, skyMoonlight01 };
+    }
+
     /**
      * THE ENVIRONMENTAL GRADE strength, 0..1 (docs/planning/Grade.md). This is
      * the automatic ToD/weather look — and the cloud desaturation the deleted
@@ -11692,6 +12702,49 @@ async function startVtPanViewerUnserialized({
       }
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // TEMPERATURE EFFECTS (effects/temperature/, 2026-10-27) — the Remote's
+    // Temperature fader drives an icy / warm shift on the map-wide grade,
+    // frost creeping in from the screen edges below 10%, and a gentle outdoor
+    // heat ripple when hot. The grade is uniform values only; the two warp
+    // layers are compiled into the present only while they show.
+    // ═══════════════════════════════════════════════════════════════════
+    /** This frame's grade delta and how much of it reaches indoors — read by
+     * the env-grade push (the outdoor share) and `pushGradeLook` (the rest). */
+    let temperatureGradeDelta = IDENTITY_TEMPERATURE_GRADE;
+    let temperatureIndoorShare = 1;
+    /** Holds the frost's grown coverage and the ripple's scroll between frames
+     * (`temperature-model.js#createTemperatureFxStepper`, shared with the lab). */
+    const temperatureStepper = createTemperatureFxStepper();
+    let lastTemperatureFx = null;
+
+    /**
+     * Step and push Temperature Effects for this frame.
+     * @param {object} env - this frame's env snapshot.
+     */
+    function pushTemperatureEffects(env) {
+      const st = getTemperatureEffectsRenderState();
+      const W = Math.max(1, canvasW);
+      const H = Math.max(1, canvasH);
+      const viewRect = view ? viewToWorldRect(view, W / H) : null;
+      const frame = temperatureStepper.step({
+        enabled: !!st?.enabled,
+        params: st?.params,
+        temperature01: env?.weather?.temperature01,
+        realDtSec: Math.max(0, env?.time?.realDtSec ?? env?.time?.dtSec ?? 0),
+        worldDtSec: Math.max(0, env?.time?.dtSec ?? 0),
+        darkness01: env?.darkness01 ?? 0,
+        screenW: W,
+        screenH: H,
+        worldPerScreenPx: viewRect ? (viewRect.maxX - viewRect.minX) / W : 1,
+      });
+      temperatureGradeDelta = frame.grade;
+      temperatureIndoorShare = frame.indoorShare;
+      if (frame.warp.frost || frame.warp.heatRipple) ensureTemperatureNoise();
+      gradePresent.setTemperatureEffects(frame.warp);
+      lastTemperatureFx = { ...frame.info, compiled: gradePresent.temperatureCompiled() };
+    }
+
     /**
      * Read the Colour Grade effect's resolved params and push them to the
      * present grade — the artistic scope. Converts the authored SCHEMA
@@ -11702,7 +12755,12 @@ async function startVtPanViewerUnserialized({
     function pushGradeLook() {
       const st = getGradeLookState();
       if (!st?.enabled) {
-        gradePresent.setArtGrade({}, { toneMapping: 'none', lutStrength: 0 });
+        // Temperature Effects still shift a disabled Colour Grade — it is its
+        // own card; an identity grade plus the delta is the delta alone.
+        gradePresent.setArtGrade(applyTemperatureGrade({}, temperatureGradeDelta, temperatureIndoorShare), {
+          toneMapping: 'none',
+          lutStrength: 0,
+        });
         return;
       }
       const p = st.params || {};
@@ -11724,17 +12782,21 @@ async function startVtPanViewerUnserialized({
       }
       const lutStrength = lutName === 'none' ? 0 : Math.min(1, Math.max(0, Number(p.lutStrength ?? 1) || 0));
       gradePresent.setArtGrade(
-        {
-          exposure: p.exposure,
-          contrast: p.contrast,
-          saturation: p.saturation,
-          vibrance: p.vibrance,
-          temperature: p.temperature,
-          tint: p.tint,
-          lift,
-          gamma: [1, 1, 1],
-          gain,
-        },
+        applyTemperatureGrade(
+          {
+            exposure: p.exposure,
+            contrast: p.contrast,
+            saturation: p.saturation,
+            vibrance: p.vibrance,
+            temperature: p.temperature,
+            tint: p.tint,
+            lift,
+            gamma: [1, 1, 1],
+            gain,
+          },
+          temperatureGradeDelta,
+          temperatureIndoorShare
+        ),
         { toneMapping: p.toneMapping ?? 'none', lutStrength }
       );
     }
@@ -13488,6 +14550,7 @@ async function startVtPanViewerUnserialized({
     }
 
     const scene = new THREE.Scene();
+    tableSubsystem.attach(scene);
     // Door leaves draw inside the world draw itself — see
     // door-graphics-subsystem.js#DOOR_LEAF_RENDER_ORDER.
     scene.add(doorGraphics.root);
@@ -13512,6 +14575,29 @@ async function startVtPanViewerUnserialized({
     // item's own tile geometry rather than allocating any of its own, and
     // residency passes are already event-driven, never per-frame.
     const depthScene = new THREE.Scene();
+    /**
+     * VEGETATION CANOPY PROXIES (Case-2 overlays AND Case-1 self-vegetation
+     * tiles) — `buf:scene.depth`'s second half, drawn AFTER
+     * the world colour draw (`runVegetationDepthPass`), never with
+     * `depthScene` before it (2026-10-28, author with a screenshot: the
+     * wiggle "leaves an ugly grey region behind", then: "something about the
+     * way we are distorting things is destroying the albedo layer beneath").
+     *
+     * A canopy's visible coverage is decided in its FRAGMENT shader — the leaf
+     * flutter shuffles its texture UVs, and the indoor and scene-edge clips
+     * drop pixels — none of which a depth proxy (vertex sway + static alpha
+     * test) can see. While the proxy sat in `buf:scene.depth` before the world
+     * draw, the ground's occlusion discard (`querySceneDepth`, and the early-Z
+     * prepass twin, now removed) skipped painting the ground under the
+     * PROXY's silhouette; wherever the flutter then moved the real leaves off
+     * it, `scene.color` still held its clear — the scene background grey.
+     *
+     * Drawn after the world draw instead, the canopy never hides the ground
+     * beneath it (it is alpha-blended over it, painter order, as always), and
+     * every LATER reader — lights, specular, fire, critters, DoF — still sees
+     * it in the buffer exactly as before.
+     */
+    const vegetationDepthScene = new THREE.Scene();
     /** @type {Array<{mesh: *, material: *, pooled: boolean}>} the depth
      * scene's OWN current children — tracked here (not read back off
      * `depthScene.children`, which would also see anything else ever added
@@ -14223,6 +15309,44 @@ async function startVtPanViewerUnserialized({
     // own argument (at the call site) varies per floor, since
     // `getWindowMaskUrl`/`getWindowMaskRect`/`getWindowBackgroundItemId`
     // already take a `floorIndex` param each.
+    /**
+     * THE LIGHT THE OPEN GROUND IS LIT BY — the raised ambient fill × the sky's
+     * colour + the moon: exactly what `environmental-light.js`'s illum fill
+     * writes at an outdoor pixel before its own shadows and clouds (the window
+     * shades its share by its own cloud and weather terms). A GETTER, called by
+     * the window subsystems every sync: `lastAmbientColors` and `skyHandle` are
+     * both REASSIGNED, so a captured value would freeze the hour.
+     * @returns {number[]|null}
+     */
+    function windowOutdoorLightRgb() {
+      if (!lastAmbientColors) return null;
+      const bg = maxRgb(lastAmbientColors.background, lastGlobalLightFloor);
+      const m = skyHandle?.ambientMultiplierRgb ?? [1, 1, 1];
+      const moon = skyHandle?.moonAddRgb ?? [0, 0, 0];
+      return [bg[0] * m[0] + moon[0], bg[1] * m[1] + moon[1], bg[2] * m[2] + moon[2]];
+    }
+    /**
+     * THE ROOM MAP CACHE (scene/room-map.js) — one map per floor, built from that floor's walls and `_Outdoors`,
+     * rebuilt only when the wall-structure version or the outdoors product changes. Window light's SUN & ROOMS is
+     * its first reader; any effect that wants "which room is this point in" asks the same cache.
+     */
+    const roomMapCache = createRoomMapCache({
+      readWalls: (floorIndex) => {
+        const floorsResult = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+        const floor = floorsResult.ok ? floorsResult.floors.find((f) => f.index === floorIndex) : null;
+        return readSceneWallSegments(floor?.id ?? null);
+      },
+      getOutdoors: (floorIndex) => getWindowOutdoorsGrid(floorIndex),
+      getSceneGeometry: () =>
+        dimensions?.sceneRect
+          ? { sceneRect: dimensions.sceneRect, gridSizePixels: readGridSizePixels().gridSizePixels }
+          : null,
+      getWallVersion: () => getWallStructureVersion(),
+      createTexture: (data, w, h) => createMaskDataTexture(data, w, h, 'linear'),
+      // Wall-clock, not sim time: the rebuild throttle must keep running while the game is paused for wall edits.
+      now: perfNowMs,
+      onBuilt: (msg) => log.info(msg),
+    });
     const windowSurfacesByFloor = new Map();
     function createWindowSurfaceForFloor() {
       return createWindowSurfaceSubsystem({
@@ -14255,6 +15379,7 @@ async function startVtPanViewerUnserialized({
         cloudOvercastContrastSoftenNode: uWindowOvercastContrastSoften,
         cloudOvercastMinStrengthNode: uWindowOvercastMinStrength,
         cloudNoonBoostNode: uWindowNoonBoostMul,
+        weatherGainNode: buildWindowWeatherNode(),
         getWindowRenderState,
         // THE DAYLIGHT TINT's own sun read — a GETTER, matching `getSkyHandle`
         // above: `lastEnvSnapshot` is REASSIGNED every `updateEnvSnapshot()`
@@ -14265,6 +15390,8 @@ async function startVtPanViewerUnserialized({
         // is REASSIGNED every frame), plus the buildings that say which way is down the pane.
         getEnv: () => lastEnvSnapshot?.env ?? null,
         getWindowOutdoorsGrid,
+        // SUN & ROOMS: the floor's rooms, from the shared cache above.
+        getRoomMap: (floorIndex, opts) => roomMapCache.get(floorIndex, opts),
         // THE OUTSIDE-AMBIENT CEILING (2026-08-09) — a GETTER for the same
         // reason: `lastAmbientColors`/`lastGlobalLightFloor` are REASSIGNED
         // every `runLightAccumulatePass()` call. `.background` (raised by any
@@ -14276,6 +15403,9 @@ async function startVtPanViewerUnserialized({
         // function's own header). See `window-render.js#uAmbientCeiling`.
         getAmbientCeilingRgb: () =>
           lastAmbientColors ? maxRgb(lastAmbientColors.background, lastGlobalLightFloor) : null,
+        // THE OUTDOOR MATCH (2026-10-27) — what a fully painted _Window pulls
+        // its room toward; see `windowOutdoorLightRgb`.
+        getOutdoorLightRgb: windowOutdoorLightRgb,
         // So sync() can bracket its own per-frame cost (light.windowSync) —
         // perf-instrumentation-audit-2026-08-12, same shape as specular's
         // own `profiler` above.
@@ -14342,10 +15472,12 @@ async function startVtPanViewerUnserialized({
       cloudOvercastContrastSoftenNode: uWindowOvercastContrastSoften,
       cloudOvercastMinStrengthNode: uWindowOvercastMinStrength,
       cloudNoonBoostNode: uWindowNoonBoostMul,
+      weatherGainNode: buildWindowWeatherNode(),
       getWindowRenderState,
       getEnvSun: () => lastEnvSnapshot?.env?.sun ?? null,
       getAmbientCeilingRgb: () =>
         lastAmbientColors ? maxRgb(lastAmbientColors.background, lastGlobalLightFloor) : null,
+      getOutdoorLightRgb: windowOutdoorLightRgb,
       profiler,
     });
 
@@ -14469,6 +15601,14 @@ async function startVtPanViewerUnserialized({
       label: 'effect shaders still compiling (masks arrived after the first warm-up)',
       stage: READINESS_STAGE.COMPILE,
       read: () => (effectsWarmedAfterContent ? 0 : 1),
+    });
+    // A large pipeline compiling on a worker thread (vt/pipeline-governor.js) is real outstanding work: the
+    // scene must not reveal while a light bucket or a canopy is still not drawn. COMPILE stage.
+    readiness.register({
+      id: 'pipelineCompiles',
+      label: 'large shaders still compiling',
+      stage: READINESS_STAGE.COMPILE,
+      read: () => pipelineGovernor.inFlight(),
     });
     readiness.register({
       id: 'specularMaskLoad',
@@ -15036,9 +16176,11 @@ async function startVtPanViewerUnserialized({
           uvS = tileMotion.uTexPivotUV.add(tileMotion.uTexScrollUV).add(rotated);
         }
         uvS = uvS.toVar();
+        // TOKENS sample sharper than the ground (see TOKEN_SHARP_LOD_BIAS).
+        const smallArt = item.kind === 'token' ? { lodBias: TOKEN_SHARP_LOD_BIAS, farRollOff: false } : {};
         const clear = shouldUseFullAlbedoClarity()
-          ? buildAlbedoClarityNode(THREE, tex, uvS, uTexSize)
-          : buildFlatAlbedoNode(THREE, tex, uvS);
+          ? buildAlbedoClarityNode(THREE, tex, uvS, uTexSize, smallArt)
+          : buildFlatAlbedoNode(THREE, tex, uvS, smallArt);
         const c = vec4(clear.rgb, clear.a).toVar();
         c.rgb.mulAssign(uTint);
         c.a.mulAssign(uAlpha);
@@ -15356,7 +16498,6 @@ async function startVtPanViewerUnserialized({
       const { vec2, float, positionLocal, sin, cos, length, pow, max, min, mix, smoothstep, clamp, texture } =
         THREE.TSL;
       const worldXY = vec2(positionLocal.x, positionLocal.y);
-      const tSec = uGlobalTimeMs.mul(float(0.001));
       // THE ARRIVAL LAG — see `effects/vegetation.js#VEGETATION_KINDS`'s own
       // "THE THREE ARRIVAL/DECORRELATION CONSTANTS" header for the author
       // report. `windLagFraction` is a BUILD-TIME per-kind constant (0 for
@@ -15373,7 +16514,9 @@ async function startVtPanViewerUnserialized({
       // `colorNode`'s flutter block, which already recomputes `edgeFade` from
       // the same uniforms for the identical reason: a node built in one Fn()
       // scope cannot be referenced from another).
-      const galenessRaw = windHandle.ambient ? windHandle.ambient.speed01 : float(0);
+      // Beaufort strength, not the raw dial (2026-10-27 — the dial went linear
+      // to 70 m/s; `galeness` was tuned when 0..1 was force ÷ 12).
+      const galenessRaw = windHandle.ambient ? windStrength01Node(THREE.TSL, windHandle.ambient.speed01) : float(0);
 
       // (1) PER-CLUMP DECORRELATION. `clumpHashSalt` (build-time, 0 for trees)
       // is added to each salt so a tree and a bush sharing one clump cell no
@@ -15464,9 +16607,14 @@ async function startVtPanViewerUnserialized({
        * is negligible in practice because the field's finest eddy is ~260 px,
        * far larger than a clump.
        */
-      const fieldWindLean = windHandle.node(THREE.TSL, {
+      const fieldWindLean = windHandle.strengthNode(THREE.TSL, {
         centerXY: worldXY,
         time: windTime,
+        // READ the wind baked this frame (epic mmp-fpu): the field's ~18 noise evaluations were inlined into
+        // every vegetation material, tree and bush, canopy and shadow twin. Trees read "now"; bushes read the
+        // slice baked `groundLagSec` earlier — the same lag `windTime` applies. Any other lag fraction has no
+        // slice and keeps the analytic field.
+        baked: lagFraction === 0 ? 'now' : lagFraction === 1 ? 'lagged' : undefined,
       });
       // (1b) GUST WANDER (2026-08-15, author: *"preserve the direction largely
       // but add a bit of turbulence"*) — one curl-noise octave, decorrelated
@@ -15508,9 +16656,11 @@ async function startVtPanViewerUnserialized({
       const galeness = clamp(galenessRaw, float(0), float(1));
       const bend = leanDir.mul(localSpeed).mul(galeness).mul(galeness).mul(motion.uGaleBendAmount);
 
-      // (3) OSCILLATING SWAY.
+      // (3) OSCILLATING SWAY. The phase is the INTEGRATED clock (`uVegSwayCycles`,
+      // its own doc says why `(t + phase) × rate` thrashed during a wind fade);
+      // the per-clump offset stays seconds at today's rate, a bounded term.
       const rate = motion.uSwayFrequency.mul(kindSwayFreqMul).mul(float(1).add(galeness.mul(motion.uGaleRateGain)));
-      const swing = sin(tSec.add(phase).mul(rate).mul(float(6.2831853)));
+      const swing = sin(uVegSwayCycles.mul(kindSwayFreqMul).add(phase.mul(rate)).mul(float(6.2831853)));
       const amplitude = pow(max(localSpeed, float(0)), motion.uSwayCurve).mul(ampJitter);
       const oscillate = leanDir.mul(amplitude).mul(swing);
 
@@ -15642,7 +16792,43 @@ async function startVtPanViewerUnserialized({
       // function's own @returns doc.
       const rawDisplaceLen = length(translateDisplace);
       const displaceCapScale = min(float(1), float(VEG_MAX_DISPLACE_PX).div(max(rawDisplaceLen, float(1e-4))));
-      return { xy: translateDisplace.mul(displaceCapScale), liftY };
+      const cappedDisplace = translateDisplace.mul(displaceCapScale);
+
+      /* ⭐ NOTHING BLOWS INDOORS (2026-10-28, author: at high wind, bushes and
+       * trees outside a house get pushed into its interior).
+       *
+       * THE `_Outdoors` MASK (black = indoors) ALREADY SAYS WHERE A PLANT MAY
+       * GO. The wind field is sealed-room aware, but a plant THROWN by an
+       * outdoor gust travels hundreds of px on the strength of the wind where
+       * it STANDS, so it lands inside regardless of the calm in there.
+       *
+       * Per vertex, three taps of a tiny linear-filtered texture: the mask at
+       * the rest point, and at the half-way and end points of the throw. The
+       * throw is scaled by the WORSE of the two destination taps (two, not
+       * one, so a thin wall cannot be skipped over). The scale only applies
+       * in proportion to how outdoors the REST point is, so a plant that
+       * grows indoors, or a canopy already over a roof, sways exactly as
+       * before. Result: foliage leans up to a wall and stops there.
+       *
+       * Applied to the translation only, after the cap, so it is shared by the
+       * canopy, its shadow twin and the depth proxy (all three call this
+       * function, so none can disagree). Lift is a separate channel and keeps
+       * its own scene-edge fade. Vertex stage only: ~17k vertices on the
+       * biggest map, no per-pixel cost. Compiled out when no mask exists.
+       */
+      let xy = cappedDisplace;
+      if (envLight?.outdoorsTexNode) {
+        const maskAt = (p) =>
+          buildOutdoorsMaskAtXY(THREE.TSL, {
+            uOutdoorsRect: envLight.uOutdoorsRect,
+            outdoorsTexNode: envLight.outdoorsTexNode,
+            worldXY: p,
+          });
+        const restOutdoors = maskAt(worldXY);
+        const reach = min(maskAt(worldXY.add(cappedDisplace.mul(float(0.5)))), maskAt(worldXY.add(cappedDisplace)));
+        xy = cappedDisplace.mul(mix(float(1), reach, restOutdoors));
+      }
+      return { xy, liftY };
     }
 
     /**
@@ -15904,7 +17090,9 @@ async function startVtPanViewerUnserialized({
       // The prevailing strength dial (0..1) — drives the CHARACTER terms (bend,
       // rate) that must respond to "how windy is the scene" rather than to the
       // local vector's own magnitude alone.
-      const uGaleness = windHandle.ambient ? windHandle.ambient.speed01 : float(0);
+      // Beaufort strength, not the raw dial (2026-10-27 — the dial went linear
+      // to 70 m/s; `galeness` was tuned when 0..1 was force ÷ 12).
+      const uGaleness = windHandle.ambient ? windStrength01Node(THREE.TSL, windHandle.ambient.speed01) : float(0);
 
       // SHADOW-ONLY uniforms. Written per-frame by the caller from
       // `shadowHandle.forCaster()` — the sky changes far slower than a frame,
@@ -15923,8 +17111,18 @@ async function startVtPanViewerUnserialized({
        * toward it) — sized so a station's texel footprint covers the gap to the
        * next one. See `alphaAt`'s own doc for the ladder this removes. */
       const uShadowSmearLod = uniform(float(0));
+      /** THE SHIFTED QUAD (2026-10-27) — the quad moves by half the throw onto
+       * the streak (`uShadowShiftWorld`, vertex) and the fragment adds the same
+       * step back in UV (`uShadowShiftUv`), so the picture stays put while the
+       * pad only has to reach half a throw. Both written by
+       * `vegetation-shadow-subsystem.js#vegetationShadowShift`; zero = unshifted. */
+      const uShadowShiftUv = uniform(vec2(0, 0));
+      const uShadowShiftWorld = uniform(vec2(0, 0));
 
       const material = new THREE.NodeMaterial();
+      // Redrawn every frame, so it may compile on a worker thread and appear a few frames late rather than
+      // block the GPU process (core/compile-policy.js). The map's own art material is a different builder.
+      markCompileDeferrable(material, 'vegetation');
       material.transparent = true;
       material.depthTest = false;
       material.depthWrite = false;
@@ -15971,7 +17169,13 @@ async function startVtPanViewerUnserialized({
           asShadow,
           rotationLiftEnabled,
         });
-        return positionLocal.add(vec3(displace.xy.x, displace.xy.y, float(0))).add(vec3(0, 1, 0).mul(displace.liftY));
+        const displaced = positionLocal
+          .add(vec3(displace.xy.x, displace.xy.y, float(0)))
+          .add(vec3(0, 1, 0).mul(displace.liftY));
+        // The shadow's quad rides onto its streak AFTER the sway is computed, so
+        // the sway still samples the wind at the plant's own position. A JS
+        // branch: the canopy's graph never contains this add.
+        return asShadow ? displaced.add(vec3(uShadowShiftWorld.x, uShadowShiftWorld.y, float(0))) : displaced;
       })();
 
       material.colorNode = Fn(() => {
@@ -16003,13 +17207,19 @@ async function startVtPanViewerUnserialized({
           const coarseFoliageAlpha = texture(tex).sample(sampleUv).level(float(VEG_FLUTTER_GATE_LOD)).a;
           If(coarseFoliageAlpha.greaterThan(float(VEG_FLUTTER_GATE_ALPHA_EPS)), () => {
             const galeness = clamp(uGaleness, float(0), float(1));
-            // `rate`/`spaceFreq` are LIVE uniform nodes here, not the plain JS
-            // numbers curlNoise2D's own JSDoc describes — safe (verified against
-            // the vendored TSL `ConvertType`/`float()`: a node passed to `float()`
-            // is cast/passed through, never re-wrapped as a NEW constant), and it
-            // is what makes "Flutter frequency" a live, per-frame-tunable rate
-            // rather than a number only a material rebuild could change.
+            // `spaceFreq` is a LIVE uniform node here, not the plain JS number
+            // curlNoise2D's own JSDoc describes — safe (verified against the
+            // vendored TSL `ConvertType`/`float()`: a node passed to `float()` is
+            // cast/passed through, never re-wrapped as a NEW constant).
+            //
+            // ⚠️ THE CHURN IS INTEGRATED (2026-10-27): the rate — `flutterFrequency
+            // + galeness × flutterGaleFrequency` — is advanced on the CPU into
+            // `uVegFlutterChurnSec` and handed in with `rate: 1`. Passing the rate
+            // here made the pattern move at `rate + t·dRate/dt` during a wind fade,
+            // a leaf blender. See `uVegSwayCycles`' own doc. The INSTANTANEOUS
+            // rate is still what scales the strength below.
             const flutterRate = uFlutterFrequency.add(galeness.mul(uFlutterGaleFrequency));
+            //
             // THE SAME ARRIVAL LAG THE SWAY OBEYS (2026-08-15) — folded in here
             // too, because flutter's own strength is driven by the LOCAL WIND
             // SPEED sampled a few lines below. Leaving this stage on live time
@@ -16023,12 +17233,17 @@ async function startVtPanViewerUnserialized({
               flutterLagFraction === 0
                 ? uGlobalTimeMs
                 : uGlobalTimeMs.sub(uGroundLagSec.mul(float(1000 * flutterLagFraction)));
+            // The lag steps back along today's churn rate, never `t × rate`.
+            const flutterChurn =
+              flutterLagFraction === 0
+                ? uVegFlutterChurnSec
+                : uVegFlutterChurnSec.sub(uVegFlutterRate.mul(uGroundLagSec).mul(float(flutterLagFraction)));
             // ONE octave — the stated fragment-cost ceiling (4 noise evals).
             const flutterVec = curlNoise2D(THREE.TSL, {
               p: vec2(positionLocal.x, positionLocal.y),
-              timeSec: flutterWindTime.mul(float(0.001)),
+              timeSec: flutterChurn,
               spaceFreq: float(kind.flutterSpaceFreq).mul(uFlutterScale),
-              rate: flutterRate,
+              rate: 1,
               phaseX: 613,
               phaseY: -157,
             });
@@ -16038,9 +17253,13 @@ async function startVtPanViewerUnserialized({
             // SPEED` (the sway cap) — flutter never needed the higher ceiling.
             const localSpeed = clamp(
               length(
-                windHandle.node(THREE.TSL, {
+                windHandle.strengthNode(THREE.TSL, {
                   centerXY: vec2(positionLocal.x, positionLocal.y),
                   time: flutterWindTime,
+                  // The per-PIXEL wind sample — the single most expensive thing in a vegetation fragment
+                  // shader — becomes one filtered read of the baked field (epic mmp-fpu). Same slice as
+                  // the sway above, for the same reason.
+                  baked: flutterLagFraction === 0 ? 'now' : flutterLagFraction === 1 ? 'lagged' : undefined,
                 })
               ),
               float(0),
@@ -16154,10 +17373,12 @@ async function startVtPanViewerUnserialized({
           // what keeps a long streak solid instead of ghosting.
           // Undo the pad, per axis (the pad is a fixed fraction of each axis, so
           // the two differ on a non-square tile): meshUv 0..1 → artUv -pad..1+pad.
+          // `+ uShadowShiftUv` undoes the quad's move onto its streak (see the
+          // uniform's own doc), so `base` is still the art under this ground point.
           const base = vec2(
             sampleUv.x.mul(float(1 + 2 * shadowPadUv[0])).sub(float(shadowPadUv[0])),
             sampleUv.y.mul(float(1 + 2 * shadowPadUv[1])).sub(float(shadowPadUv[1]))
-          );
+          ).add(uShadowShiftUv);
           const p = uShadowPenumbraUv;
           /** Alpha of the plant at an art UV, with everything outside the art
            * reading 0 — the pad is empty ground, not a stretched edge pixel.
@@ -16213,7 +17434,15 @@ async function startVtPanViewerUnserialized({
             const faded = tapAlpha.mul(float(1).sub(uShadowSmearTaper.mul(float(t))));
             smeared = max(smeared, faded);
           }
-          const shadowAlpha = smeared.mul(uShadowStrength).mul(occlusionAlphaFactor(occ));
+          // THE PADDING RULE (2026-10-27, `buildInsideRectNode`): this quad is
+          // padded by the full throw, so a tree at the map edge streaked its
+          // shadow out across the scene padding. Clipped at the real scene rect.
+          const shadowInScene = buildInsideRectNode(THREE.TSL, {
+            worldX: THREE.TSL.positionWorld.x,
+            worldY: THREE.TSL.positionWorld.y,
+            rect: vec4(uSceneMin.x, uSceneMin.y, uSceneMin.x.add(uSceneSize.x), uSceneMin.y.add(uSceneSize.y)),
+          });
+          const shadowAlpha = smeared.mul(uShadowStrength).mul(occlusionAlphaFactor(occ)).mul(shadowInScene);
           // Flat black with alpha — under ordinary alpha blending this IS a
           // multiply-darken of whatever ground is beneath it.
           return vec4(float(0), float(0), float(0), shadowAlpha);
@@ -16224,6 +17453,62 @@ async function startVtPanViewerUnserialized({
         c.a.mulAssign(uAlpha);
         c.a.mulAssign(uIntensity);
         c.a.mulAssign(occlusionAlphaFactor(occ));
+        // THE PADDING RULE, canopy half (2026-10-28, author: clip vegetation
+        // that ends up outside the scene). The shadow branch above already
+        // clips at the real scene rect; the canopy did not, so a bush or tree
+        // swayed out over the scene padding stayed drawn there. Same
+        // `buildInsideRectNode`, same rect, evaluated at the DISPLACED
+        // fragment position (`positionWorld` follows `positionNode`), so what
+        // is cut is what actually lands outside, not where the plant stood.
+        // Overlay only: a floor-surface sprite is the map art itself.
+        // The EFFECTS EXTENT, not the bare scene rect (2026-10-28): a canopy Parallax lifts out over the
+        // Table's recess wall reaches the brass, and is cut only past it. Off, the extent IS the scene rect.
+        // (The shadow above keeps the scene rect: it lies on the ground, which ends at the board.)
+        if (!isFloorSurface) {
+          c.a.mulAssign(
+            buildInsideRectNode(THREE.TSL, {
+              worldX: THREE.TSL.positionWorld.x,
+              worldY: THREE.TSL.positionWorld.y,
+              rect: uEffectsExtent,
+            })
+          );
+        }
+        /* THE INDOOR CLIP, fragment half (2026-10-28, author with a screenshot:
+         * a bush beside a house corner still drawn over the interior at high
+         * wind, "Not working yet").
+         *
+         * The vertex gate in `buildVegetationSwayDisplacementNode` stops
+         * VERTICES at a wall, but the mesh is 60 px triangles: one straddling
+         * the wall has a pinned outdoor corner and a free indoor corner (an
+         * indoor vertex has nothing to protect, so it sways), and the foliage
+         * between them is STRETCHED across the wall. A vertex-only test cannot
+         * see that.
+         *
+         * Per pixel, then: `positionGeometry` is this pixel's REST world
+         * position (the mesh is built in world space, no transform), and
+         * `positionWorld` is where the sway put it. Foliage that started
+         * outdoors and now sits indoors is dropped. Weighted by the rest
+         * value, so a plant painted indoors is untouched, the same rule as the
+         * vertex gate. Two taps of the small mask texture, canopy only (the
+         * shadow branch returned above). */
+        if (!isFloorSurface && envLight?.outdoorsTexNode) {
+          const maskAt = (x, y) =>
+            buildOutdoorsMaskAtXY(THREE.TSL, {
+              uOutdoorsRect: envLight.uOutdoorsRect,
+              outdoorsTexNode: envLight.outdoorsTexNode,
+              worldXY: vec2(x, y),
+            });
+          const restOutdoors = maskAt(THREE.TSL.positionGeometry.x, THREE.TSL.positionGeometry.y);
+          // Where the SWAY put it, in the map's own plane: the mesh transform is Parallax's lift (scaled
+          // about the eye), not a move across the map, so it is undone first. Testing the lifted position
+          // dropped every canopy Parallax raised out past the map's edge (outdoors reads 0 off the map)
+          // or over a roof — the author, 2026-10-28: "are we clipping trees to prevent overflow".
+          const swayedXY = THREE.TSL.positionWorld.xy
+            .sub(THREE.TSL.modelPosition.xy)
+            .div(THREE.TSL.modelScale.xy.max(float(1e-4)));
+          const hereOutdoors = maskAt(swayedXY.x, swayedXY.y);
+          c.a.mulAssign(mix(float(1), hereOutdoors, restOutdoors));
+        }
         return c;
       })();
 
@@ -16337,7 +17622,15 @@ async function startVtPanViewerUnserialized({
           uUvPerWorldPx,
         },
         shadow: asShadow
-          ? { uShadowPenumbraUv, uShadowStrength, uShadowSmearUv, uShadowSmearTaper, uShadowSmearLod }
+          ? {
+              uShadowPenumbraUv,
+              uShadowStrength,
+              uShadowSmearUv,
+              uShadowSmearTaper,
+              uShadowSmearLod,
+              uShadowShiftUv,
+              uShadowShiftWorld,
+            }
           : null,
         windHandleVersion: windHandle.version,
       };
@@ -19009,6 +20302,7 @@ async function startVtPanViewerUnserialized({
      */
     function syncAllVegetationMotionForFrame() {
       const vegState = getVegetationRenderState();
+      tickVegetationClocks(vegState?.params);
       for (const state of itemStates.values()) {
         if (state.wholeImage) {
           for (const t of state.wholeImage.tiles) {
@@ -19037,6 +20331,30 @@ async function startVtPanViewerUnserialized({
           }
         }
       }
+    }
+
+    /**
+     * Advance `uVegSwayCycles`/`uVegFlutterChurnSec` (their own doc says why
+     * they are integrated) at the rates the live params and the CURRENT wind
+     * ask for. Sim clock, like the `uGlobalTimeMs` it replaces in those two
+     * terms, so a paused world still holds its branches still. Once per sim
+     * frame: a second call at the same `tMs` adds nothing.
+     * @param {object|undefined} params - the live resolved vegetation params.
+     */
+    function tickVegetationClocks(params) {
+      const time = lastEnvSnapshot?.env?.time;
+      const tMs = time?.tMs;
+      if (!Number.isFinite(tMs) || tMs === vegClocksAtMs) return;
+      vegClocksAtMs = tMs;
+      const dt = Math.min(Math.max(Number.isFinite(time.dtSec) ? time.dtSec : 0, 0), 0.25);
+      // The CPU twin of the shaders' `galeness` (`windStrength01Node`, clamped).
+      const gale = Math.min(1, Math.max(0, windStrength01ForSpeed01(uWindSpeed01.value)));
+      const p = params ?? {};
+      const swayHz = (p.swayFrequency ?? 1) * (1 + gale * (p.galeRateGain ?? 0));
+      const flutterRate = (p.flutterFrequency ?? 1) + gale * (p.flutterGaleFrequency ?? 0);
+      uVegFlutterRate.value = flutterRate;
+      uVegSwayCycles.value += swayHz * dt;
+      uVegFlutterChurnSec.value += flutterRate * dt;
     }
 
     /**
@@ -19162,6 +20480,137 @@ async function startVtPanViewerUnserialized({
           }
         }
       }
+    }
+
+    /**
+     * PARALLAX (2026-10-28, author: "a subtle parallax and depth effect") — once a frame, before the
+     * pass plan: resolve the layer heights (`effects/parallax/`), then scale every drawable about the
+     * view centre by its height above the viewed floor. The carrier is the mesh's own transform
+     * (`position.xy = eye·(1 − s)`, `scale.xy = s`), which is exact because every drawable's vertices
+     * are baked in world px under an identity transform — so no shader, vertex buffer or pipeline is
+     * touched. The colour mesh, its `buf:scene.depth` proxy and its early-Z prepass twin share ONE
+     * geometry, so a twin takes its colour mesh's scale by that geometry and the three can never
+     * disagree about where a layer is (which would break the `EqualDepth` and occlusion logic).
+     *
+     * WHAT MOVES, AND WHAT STAYS PUT
+     *  - floor art: its floor's plane; the viewed floor is `s = 1`, so the grid and tokens stay exact.
+     *  - a tile: its own elevation (a roof or awning rises); a rug at the floor's level does not.
+     *  - a level's foreground: the top of its floor.
+     *  - a canopy (Case-2 overlay, or a self-`_Tree` tile): its floor's plane plus the Vegetation card's
+     *    own Tree/Bush height in feet — the same number that sorts it above or below the floor above.
+     *  - a canopy's SHADOW: the floor's plane. A shadow lies on the ground, so it stays while its canopy
+     *    rides above it — the clearest depth cue there is.
+     *  - tokens, doors, the Table, water and every screen-space effect stay where they are. The lighting
+     *    is screen-locked: on a lifted layer it sits `r·|1 − 1/s|` px off (zero at the centre), which at
+     *    the subtle defaults is invisible against soft light and fog.
+     *
+     * Heights are published to the Table (`topHeightPx`/`floorDepthPx`) and the glided floor to DoF, so
+     * the rim, the layers and the blur all agree. Off, it restores every mesh once and then costs nothing.
+     * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect - the unclamped view rect.
+     * @param {number} nowMs - the real (wall) clock: a glide is presentation pacing, not sim time.
+     */
+    function syncParallaxForFrame(rect, nowMs) {
+      const plx = getParallaxRenderState();
+      const wantOn = !!plx?.enabled;
+      if (!wantOn && !parallaxWasOn) {
+        parallaxSubsystem.update({
+          enabled: false,
+          params: null,
+          floors: [],
+          floorIndex: view?.floorIndex ?? 0,
+          nowMs,
+          viewRect: rect,
+          sceneRect: null,
+        });
+        return;
+      }
+      const floorsRes = wantOn ? getActiveSceneFloors(globalThis.canvas?.scene ?? null) : null;
+      const floors = floorsRes?.ok ? floorsRes.floors : [];
+      const vegState = getVegetationRenderState();
+      const treeKind = VEGETATION_KINDS.find((k) => k.id === 'tree');
+      const params = parallaxReducedMotion ? { ...(plx?.params ?? {}), glideSec: 0 } : plx?.params;
+      const tableState = getTableRenderState();
+      const sceneRect = dimensions?.sceneRect ?? null;
+      // The stack is fitted to the table top (its tallest layer level with the brass) while both are on.
+      const tableTopPx =
+        tableState?.enabled && plx?.params?.tableFollows !== false && sceneRect
+          ? tableTopHeightPx(
+              tableState.params,
+              Math.min(sceneRect.width, sceneRect.height),
+              (rect.maxY - rect.minY) / 2
+            )
+          : undefined;
+      const frame = parallaxSubsystem.update({
+        enabled: wantOn,
+        params,
+        floors,
+        floorIndex: view?.floorIndex ?? 0,
+        nowMs,
+        viewRect: rect,
+        sceneRect,
+        fovDeg: tableState?.params?.fovDeg ?? TABLE_PARAMS.fovDeg.default,
+        extraTopAbove: vegState?.enabled && treeKind ? vegetationHeightFt(treeKind, vegState.params) : undefined,
+        tableTopPx,
+      });
+      parallaxWasOn = !!frame;
+      // Items first (colour meshes record their scale by geometry), then the twins that read it.
+      const floorIndexOf = (item) => {
+        if (item.levelId) {
+          const f = floors.find((x) => x.id === item.levelId);
+          if (f) return f.index;
+        }
+        return resolveElevationFloorIndex(floors, item.key?.elevation ?? 0)?.index ?? 0;
+      };
+      const tileLift = plx?.params?.tileLift !== false;
+      for (const state of itemStates.values()) {
+        const item = state.item;
+        if (!item) continue;
+        const idx = frame ? floorIndexOf(item) : 0;
+        const base = frame ? frame.floorBase(idx) : 0;
+        let elevation = base;
+        if (frame) {
+          if (item.kind === 'levelForeground') elevation = frame.floorTop(idx);
+          else if (item.kind === 'tile' && tileLift && Number.isFinite(item.key?.elevation))
+            // Clamped to the stack: an "always on top" tile at elevation 9999 is the roof's height, not the sky's.
+            elevation = Math.min(Math.max(item.key.elevation, frame.floorBase(0)), frame.floorTop(floors.length - 1));
+        }
+        if (state.wholeImage) {
+          for (const t of state.wholeImage.tiles) {
+            let e = elevation;
+            if (frame && t.vegActive) {
+              // A self-`_Tree`/`_Bush` tile is the canopy itself: it rides at the Vegetation card's height.
+              if (t.parallaxKind === undefined)
+                t.parallaxKind = detectSelfVegetationKind(item.src, VEGETATION_KINDS) ?? null;
+              if (t.parallaxKind) e = Math.max(e, base + vegetationHeightFt(t.parallaxKind, vegState?.params));
+            }
+            parallaxSubsystem.placeItem(t.mesh, e);
+            if (t.shadow) parallaxSubsystem.placeItem(t.shadow.mesh, base);
+          }
+        }
+        if (state.vegetationOverlays) {
+          for (const kind of VEGETATION_KINDS) {
+            const entry = state.vegetationOverlays[kind.id];
+            if (!entry || entry.status !== 'ready') continue;
+            parallaxSubsystem.placeItem(entry.mesh, base + (frame ? vegetationHeightFt(kind, vegState?.params) : 0));
+            if (entry.shadow) parallaxSubsystem.placeItem(entry.shadow.mesh, base);
+          }
+        }
+      }
+      for (const entry of depthProxyEntries) parallaxSubsystem.placeProxy(entry.mesh);
+      for (const entry of depthPrepassEntries) parallaxSubsystem.placeProxy(entry.mesh);
+    }
+
+    /** Parallax's cull rect: the view, reached out by how far the lowest layer shrinks, so a lower floor's
+     * tiles just beyond the edge are streamed in before they slide into view. */
+    function parallaxCullRect(rect) {
+      const s = parallaxSubsystem.lowestScale();
+      if (!(s < 0.9999)) return rect;
+      const k = 1 / s;
+      const cx = (rect.minX + rect.maxX) / 2;
+      const cy = (rect.minY + rect.maxY) / 2;
+      const hw = ((rect.maxX - rect.minX) / 2) * k;
+      const hh = ((rect.maxY - rect.minY) / 2) * k;
+      return { minX: cx - hw, minY: cy - hh, maxX: cx + hw, maxY: cy + hh };
     }
 
     /** Last unbounded-floor warning emitted, so the report below fires on a
@@ -19769,6 +21218,7 @@ async function startVtPanViewerUnserialized({
       lightDrawFire: profiler?.indexOf('light.drawFire') ?? -1,
       lightDrawSmellyFlies: profiler?.indexOf('light.drawSmellyFlies') ?? -1,
       lightDrawFireflies: profiler?.indexOf('light.drawFireflies') ?? -1,
+      lightDrawDust: profiler?.indexOf('light.drawDust') ?? -1,
       lightDrawWindOverlay: profiler?.indexOf('light.drawWindOverlay') ?? -1,
       surfSpecularSync: profiler?.indexOf('surface.specularSync') ?? -1,
       surfSpecular: profiler?.indexOf('surface.specularDraw') ?? -1,
@@ -20022,7 +21472,14 @@ async function startVtPanViewerUnserialized({
       // anything downstream (candle flame, lights, the debug overlay)
       // samples it this frame.
       profiler?.begin(Z.simsWind);
+      // The wind's integrated travel FIRST — every sim and material below this
+      // line samples gust fronts/turbulence placed by it (see its own doc).
+      tickWindAdvection(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value, lastEnvSnapshot?.env?.time?.dtSec ?? 0);
       tickWindSim(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value, lastEnvSnapshot?.env?.time?.dtSec ?? 0);
+      // The wind FIELD for this frame, baked once for every consumer to read (epic mmp-fpu) — after the
+      // wind sim (its transient gusts are part of the field) and before anything below samples it.
+      tickWindFieldBake(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value);
+      tickGustHistory(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value);
       profiler?.end(Z.simsWind);
       // FLUID's own sim tick — same clock, same "inside the gpuProbe bracket"
       // reasoning as tickWindSim above, and it must run AFTER this frame's own
@@ -20090,12 +21547,20 @@ async function startVtPanViewerUnserialized({
       // stale-water fix actually depends on.
       const currentViewRect = viewToWorldRect(view, canvasW / canvasH);
       const windSpawnRect = clampRectToBounds(currentViewRect, dimensions.sceneRect);
+      // THE SCENE EYE — from the UNCLAMPED view (the eye is over what you see, not over the clamped spawn rect).
+      frameSceneEye = resolveSceneEye(
+        currentViewRect,
+        getTableRenderState()?.params?.fovDeg ?? SCENE_EYE_DEFAULT_FOV_DEG
+      );
+      // The outdoors' light level, once for all three wind engines (they draw after the lighting multiply).
+      const sceneLight01 = getSceneLight01();
       if (windParticlesEnabled && view && particleEngine) {
         profiler?.begin(Z.simsDust);
         particleEngine.step(renderer, {
           dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           worldRect: windSpawnRect,
+          sceneLight01,
         });
         profiler?.end(Z.simsDust);
       }
@@ -20107,6 +21572,19 @@ async function startVtPanViewerUnserialized({
           dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           worldRect: windSpawnRect,
+          sceneLight01,
+        });
+        profiler?.end(Z.simsGusts);
+      }
+      // WIND TRAILS — same field, same spot in the frame. Built on first need.
+      if (view && windTrailsActive()) {
+        profiler?.begin(Z.simsGusts);
+        syncWindTrailEngine(windSpawnRect);
+        trailEngine.step(renderer, {
+          dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
+          tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          worldRect: windSpawnRect,
+          sceneLight01,
         });
         profiler?.end(Z.simsGusts);
       }
@@ -20138,7 +21616,8 @@ async function startVtPanViewerUnserialized({
           renderer,
           lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.dtSec ?? 0,
-          windSpawnRect
+          windSpawnRect,
+          frameSceneEye
         );
         // the billow flame's splat (the job list `sync` just prepared), straight away while no target is bound
         tickFireField();
@@ -20165,7 +21644,8 @@ async function startVtPanViewerUnserialized({
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
           windSpawnRect,
           lastEnvSnapshot?.env ?? null,
-          activeTokenPoints
+          activeTokenPoints,
+          frameSceneEye
         );
       }
       if (view && maggotsSubsystem) {
@@ -20175,7 +21655,8 @@ async function startVtPanViewerUnserialized({
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
           windSpawnRect,
           lastEnvSnapshot?.env ?? null,
-          activeTokenPoints
+          activeTokenPoints,
+          frameSceneEye
         );
       }
       if (view && firefliesSubsystem) {
@@ -20185,7 +21666,19 @@ async function startVtPanViewerUnserialized({
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
           windSpawnRect,
           lastEnvSnapshot?.env ?? null,
-          activeTokenPoints
+          activeTokenPoints,
+          frameSceneEye
+        );
+      }
+      if (view && dustSubsystem) {
+        dustSubsystem.sync(
+          renderer,
+          lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          windSpawnRect,
+          lastEnvSnapshot?.env ?? null,
+          activeTokenPoints,
+          frameSceneEye
         );
       }
       // PRECIPITATION — its compute step, in the same no-target-bound block as
@@ -20201,7 +21694,11 @@ async function startVtPanViewerUnserialized({
           renderer,
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
           lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
-          windSpawnRect
+          windSpawnRect,
+          // The UNCLAMPED view — the torrent lays its streaks out in screen
+          // space, and the clamped rect would slide them at the scene's edge.
+          currentViewRect,
+          frameSceneEye
         );
       }
       // Re-derive the camera from the live view EVERY frame: this is what makes
@@ -20209,6 +21706,57 @@ async function startVtPanViewerUnserialized({
       // and it is the single place the Y-flip is applied (see updateCamera).
       profiler?.begin(Z.tickCamera);
       updateCamera(currentViewRect);
+      {
+        // PARALLAX first: it resolves the layer heights the Table's recess is dug to, then moves the meshes.
+        syncParallaxForFrame(currentViewRect, lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value);
+        const plxFrame = parallaxSubsystem.frame();
+        const tableState = getTableRenderState();
+        tableSubsystem.update({
+          enabled: !!tableState?.enabled,
+          params: tableState?.params,
+          viewRect: currentViewRect,
+          sceneRect: dimensions?.sceneRect,
+          canvasSize: dimensions,
+          drawHeightPx: internalH,
+          stack:
+            plxFrame && getParallaxRenderState()?.params?.tableFollows !== false
+              ? { topHeightPx: plxFrame.topHeight, floorDepthPx: plxFrame.bottomDepth }
+              : null,
+          // Raised layers keep less of the board shadow: steps of it drawn between them.
+          shade: plxFrame ? parallaxSubsystem.edgeShade() : null,
+        });
+        // THE LIFTED SHADOW LOOKUP's inputs (`scene/scene-eye.js#liftedLookupNode`): the shared eye, and how
+        // far a shadow is thrown per px of caster height — the same projection every caster uses, measured
+        // at 100 px so the soft knee that tames dawn and dusk throws applies here too.
+        {
+          const per = projectShadowOffset({
+            azimuthDeg: skyHandle.key.azimuthDeg,
+            elevationDeg: skyHandle.key.elevationDeg,
+            heightPx: 100,
+            maxOffsetPx: 300,
+            offsetScale: 1,
+            softKnee: true,
+          });
+          envLight.setLayerEye({
+            eyeHeight: plxFrame?.eyeH ?? frameSceneEye?.height ?? 0,
+            throwPerPx: { x: per.x / 100, y: per.y / 100 },
+          });
+        }
+        // The effects extent follows the Table (the brass's inner edge while layers are raised).
+        const extent = tableSubsystem.effectsRect() ?? sceneRectToMinMax(dimensions?.sceneRect);
+        if (
+          extent &&
+          (!effectsExtent ||
+            extent.minX !== effectsExtent.minX ||
+            extent.minY !== effectsExtent.minY ||
+            extent.maxX !== effectsExtent.maxX ||
+            extent.maxY !== effectsExtent.maxY)
+        ) {
+          effectsExtent = extent;
+          uEffectsExtent.value.set(extent.minX, extent.minY, extent.maxX, extent.maxY);
+          envLight.setSceneRect(extent);
+        }
+      }
       // envLight's SHARED screen→world rect — MOVED HERE 2026-08-15, one call
       // ahead of the pass plan below, not left beside `setAmbient` inside
       // `runLightAccumulatePass` where it used to live. THE BUG THIS FIXES:
@@ -21288,6 +22836,10 @@ async function startVtPanViewerUnserialized({
      * there is nothing left newly-visible to compile.
      */
     let postContentWarmUpPasses = 0;
+    /** The weather warm-up (`warmUpWeatherStates`) runs once per viewer; this latches it. */
+    let weatherWarmStarted = false;
+    /** Pipelines the weather warm-up created, handed to `postContentPipelinesCreated` by the pass that ran it. */
+    let weatherWarmCreated = 0;
     /** Pipelines created by the post-content warm-up — evidence it did real work. */
     let postContentPipelinesCreated = null;
 
@@ -21406,6 +22958,10 @@ async function startVtPanViewerUnserialized({
       const currentViewRect = viewToWorldRect(view, canvasW / canvasH);
       const windSpawnRect = clampRectToBounds(currentViewRect, dimensions.sceneRect);
       const tMs = uGlobalTimeMs.value;
+      // The wind-field bake's own pipeline compiles HERE, behind the curtain (it is the one place the
+      // noise still lives), and the targets hold a real field before the first consumer draws.
+      tickWindFieldBake(tMs);
+      tickGustHistory(tMs);
       if (windParticlesEnabled && particleEngine) {
         particleEngine.step(renderer, { dtSec: WARM_UP_SIM_DT_SEC, tMs, worldRect: windSpawnRect });
       }
@@ -21421,8 +22977,9 @@ async function startVtPanViewerUnserialized({
       if (smellyFliesSubsystem) smellyFliesSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);
       if (maggotsSubsystem) maggotsSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);
       if (firefliesSubsystem) firefliesSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);
+      if (dustSubsystem) dustSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect, null);
       if (precipitationSubsystem) {
-        precipitationSubsystem.sync(renderer, WARM_UP_SIM_DT_SEC, tMs, windSpawnRect);
+        precipitationSubsystem.sync(renderer, WARM_UP_SIM_DT_SEC, tMs, windSpawnRect, currentViewRect);
       }
       const after = readPipelineCount();
       warmUpSimPipelinesCreated =
@@ -21559,6 +23116,17 @@ async function startVtPanViewerUnserialized({
           workMs += perfNowMs() - t0;
         }
         if (recordStats) warmUpMs = Math.round(workMs);
+        // The big per-frame pipelines were launched on worker threads and their draws skipped; the curtain
+        // stays up until they exist (epic mmp-fpu), so the first frame a person sees has everything in it.
+        if (pipelineGovernor.inFlight() > 0) {
+          onLoadProgress?.({
+            phase: 'warming',
+            done: totalBatches,
+            total: totalBatches,
+            detail: `compiling ${pipelineGovernor.inFlight()} large shader(s)`,
+          });
+        }
+        await settleCompiles('warm-up');
       } catch (err) {
         log.warn('chunked warm-up draw failed — pipelines will compile lazily on first real draw:', err);
         if (recordStats) {
@@ -21599,7 +23167,9 @@ async function startVtPanViewerUnserialized({
       // classic shape of a gate that waits for itself.
       let othersOutstanding = 0;
       for (const [k, v] of Object.entries(raw || {})) {
-        if (k === 'effectContentWarmUp') continue;
+        // Neither of these is content ARRIVING: one is this warm-up's own marker, the other is compile work
+        // already running on a worker thread (it will finish without help, and may be waiting on nothing).
+        if (k === 'effectContentWarmUp' || k === 'pipelineCompiles') continue;
         othersOutstanding += Number(v) || 0;
       }
       if (othersOutstanding > 0) return;
@@ -21628,16 +23198,25 @@ async function startVtPanViewerUnserialized({
       // Fire-and-forget: this is called from the render loop, which cannot be
       // made async. Failure is swallowed and the latch is released either way —
       // warming is an optimisation and must never wedge readiness shut.
+      let afterPlan = null;
       warmUpDrawStateChunked({ recordStats: false })
+        .then(() => {
+          // Measured HERE, before the weather warm-up: convergence (below) asks "did the PASS PLAN still
+          // compile something", and the weather scenarios compiling things is not that answer.
+          afterPlan = readPipelineCount();
+          return warmUpWeatherStates();
+        })
         .catch((err) => {
           log.warn('post-content effect warm-up failed — effects will compile on first draw:', err);
         })
         .finally(() => {
-          const after = readPipelineCount();
+          const after = afterPlan ?? readPipelineCount();
           const created = Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : null;
           // ACCUMULATE across passes — the report wants the total this warm-up
           // moved behind the curtain, not whatever the last pass happened to do.
-          postContentPipelinesCreated = (postContentPipelinesCreated ?? 0) + (created ?? 0);
+          // The weather scenarios' pipelines are behind the same curtain, so they count here too.
+          postContentPipelinesCreated = (postContentPipelinesCreated ?? 0) + (created ?? 0) + weatherWarmCreated;
+          weatherWarmCreated = 0;
           postContentWarmUpPasses++;
           // GO ROUND AGAIN if that pass compiled anything: something became
           // visible that was not compiled before (water finishing its bake,
@@ -21647,6 +23226,120 @@ async function startVtPanViewerUnserialized({
           effectsWarmedAfterContent = converged || postContentWarmUpPasses >= POST_CONTENT_WARM_UP_MAX_PASSES;
           effectWarmUpRunning = false;
         });
+    }
+
+    /**
+     * COMPILE THE WEATHER SHADERS NOW, BEHIND THE CURTAIN, so that turning rain, snow, wind or a far zoom-out on
+     * later costs no pause (2026-10-28 — "every time I fiddle with the controls when testing I get an experience
+     * of what it would be like at the table"). Read `vt/weather-warm-plan.js` for the whole argument; this is the
+     * renderer half.
+     *
+     * Every effect it touches is ABSENT at load — clear sky, calm air, close camera — and absent means "no mesh
+     * submitted", so the ordinary warm-up never asked for its pipelines. Each scenario here forces ONE gate open
+     * for ONE synchronous block, draws the real pass that gate guards, and puts the gate back before any real
+     * frame can run:
+     *
+     *   - precipitation: `sync(.., {kind})` feeds the real code a full-strength storm of that kind (all of the
+     *     fall, splash, veil, storm fog and torrent are then built and drawn); `endWarm` empties it again and puts
+     *     the drip tails back. The mantle is never stepped, so no snow or puddles are baked from the fake storm.
+     *   - wind trails: wind speed is raised for the block only (`windTrailsActive` reads it), then restored.
+     *   - cloud tops: `cloudTopsAwake` is forced for the block only (the zoom gate would otherwise keep it asleep).
+     *
+     * ⚠️ THE BLOCK MUST NOT CONTAIN AN `await`. The forced state is not saved across a frame: a real `renderFrame`
+     * in the middle would draw the fake storm to the screen. `runPassPlan` is synchronous, so it holds.
+     *
+     * ⚠️ NOT `pipelineGovernor.blocking`. Heavy pipelines stay on worker threads and the per-task synchronous
+     * budget stays in force — the crash this must never reintroduce is the GPU process dying mid-compile. One
+     * scenario per animation frame keeps that budget fresh for each, and we wait for compiles in flight between.
+     *
+     * Failure is swallowed per scenario: warming is an optimisation, never a reason a scene fails to load.
+     */
+    async function warmUpWeatherStates() {
+      if (weatherWarmStarted || !view) return;
+      weatherWarmStarted = true;
+      const scenarios = planWeatherWarmUp({
+        precipKinds: precipitationSubsystem?.warmUpKinds?.() ?? [],
+        windTrails: !!getWindTrailsRenderState()?.enabled,
+        cloudTops: !!getCloudTopsRenderState?.()?.enabled,
+      });
+      if (scenarios.length === 0) return;
+      const before = readPipelineCount();
+      const t0 = perfNowMs();
+      const counts = {};
+      for (let i = 0; i < scenarios.length; i++) {
+        const scenario = scenarios[i];
+        onLoadProgress?.({
+          phase: 'warming',
+          done: i,
+          total: scenarios.length,
+          detail: formatWeatherWarmDetail(scenario),
+        });
+        // A frame first: a fresh task, so the governor's synchronous compile budget starts over for this scenario.
+        await nextAnimationFrame();
+        const scenarioBefore = readPipelineCount();
+        try {
+          warmWeatherScenario(scenario);
+        } catch (err) {
+          log.warn(`weather warm-up (${scenario.id}) failed — it will compile when first used:`, err);
+        }
+        await settleCompiles(`weather warm-up (${scenario.id})`);
+        const scenarioAfter = readPipelineCount();
+        counts[scenario.id] =
+          Number.isFinite(scenarioBefore) && Number.isFinite(scenarioAfter) ? scenarioAfter - scenarioBefore : null;
+      }
+      onLoadProgress?.({ phase: 'warming', done: scenarios.length, total: scenarios.length });
+      const after = readPipelineCount();
+      weatherWarmCreated = Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : 0;
+      log.info(
+        `weather shaders compiled behind the curtain: ${weatherWarmCreated} pipeline(s) in ${Math.round(perfNowMs() - t0)} ms`,
+        counts
+      );
+    }
+
+    /** One scenario of {@link warmUpWeatherStates}: force the gate, draw its pass(es), put the gate back. No `await`. */
+    function warmWeatherScenario(scenario) {
+      const currentViewRect = viewToWorldRect(view, canvasW / canvasH);
+      const windSpawnRect = clampRectToBounds(currentViewRect, dimensions.sceneRect);
+      const tMs = uGlobalTimeMs.value;
+      if (scenario.type === 'precip') {
+        try {
+          precipitationSubsystem.sync(
+            renderer,
+            WARM_UP_SIM_DT_SEC,
+            tMs,
+            windSpawnRect,
+            currentViewRect,
+            frameSceneEye,
+            { kind: scenario.kind }
+          );
+          runPassPlan(scenario.passes, passImpls, {}, undefined);
+        } finally {
+          precipitationSubsystem.endWarm();
+        }
+      } else if (scenario.type === 'windTrails') {
+        const calmWind = uWindSpeed01.value;
+        if (!(calmWind > 0)) uWindSpeed01.value = 0.5;
+        try {
+          syncWindTrailEngine(windSpawnRect);
+          trailEngine.step(renderer, {
+            dtSec: WARM_UP_SIM_DT_SEC,
+            tMs,
+            worldRect: windSpawnRect,
+            sceneLight01: getSceneLight01(),
+          });
+          runPassPlan(scenario.passes, passImpls, {}, undefined);
+        } finally {
+          uWindSpeed01.value = calmWind;
+        }
+      } else if (scenario.type === 'cloudTops') {
+        const wasAwake = cloudTopsAwake;
+        cloudTopsAwake = true;
+        try {
+          runPassPlan(scenario.passes, passImpls, {}, undefined);
+        } finally {
+          cloudTopsAwake = wasAwake;
+        }
+      }
     }
 
     function sampleSceneSettle(nowMs) {
@@ -21684,7 +23377,8 @@ async function startVtPanViewerUnserialized({
       // wholesale-disposal-every-pass bug this pool exists to stop (see
       // depth-proxy-material-pool.js's own header for the mechanism).
       for (const entry of depthProxyEntries) {
-        depthScene.remove(entry.mesh);
+        // `removeFromParent`: a canopy proxy lives in `vegetationDepthScene`.
+        entry.mesh.removeFromParent();
         if (!entry.pooled) entry.material.dispose();
       }
       depthProxyEntries = [];
@@ -21851,7 +23545,9 @@ async function startVtPanViewerUnserialized({
             tex: overlay.tex,
             alphaThreshold: 0.75,
             floorIndex,
-            flags: 0,
+            // Tags the canopy as foliage (and tree vs bush) so a point light
+            // below it is dimmed rather than blocked — `canopy-light.js`.
+            flags: computeVegetationDepthFlags(vegKind?.id),
             positionNode: nodeEntry?.positionNode,
             // Distinguishes THIS canopy's node graph from every other one —
             // required by the pool whenever a positionNode is present.
@@ -21927,59 +23623,24 @@ async function startVtPanViewerUnserialized({
           // unconditionally.
           overlay.uDepthOcclusionAmount = material.uLiveOcclusionAmount;
           const mesh = buildSceneDepthProxyMesh({ THREE, geometry: overlay.geometry, material, z });
-          depthScene.add(mesh);
+          // NOT `depthScene` — see `vegetationDepthScene`'s own header. Drawn
+          // after the world draw, so the ground's occlusion discard never sees
+          // a canopy and always paints the ground under it.
+          vegetationDepthScene.add(mesh);
           depthProxyEntries.push({ mesh, material, pooled: true });
-          // The canopy's own alpha-tested silhouette must occlude in the
-          // prepass exactly as it already does through `maskNode` today —
-          // otherwise floor interiors would draw THROUGH solid canopy. Pooled
-          // too now: the twin shares this same cached positionNode (the
-          // prepass and the real proxy MUST animate identically, or the canopy
-          // would occlude where it is not drawn — see
-          // `feedback_depth_proxy_needs_the_same_animation`).
-          //
-          // ⚠️ NOW BUILT FROM `liveWriterArgs`, NOT `writerArgs` (mythica-
-          // machina-press#470, SIXTH round — live report, verbatim: "solid
-          // black shape which appears when the vegetation fades... Placing a
-          // light there has absolutely no effect... not a 'darkening'
-          // effect... solid black pixels"). The comment this replaced argued
-          // for leaving this twin OFF the live gate because "nothing would
-          // ever push a live value into it" — true when written, and exactly
-          // the gap that caused this: this twin feeds STAGE 1's own
-          // `scene.color` depth attachment, which the WORLD DRAW then tests
-          // with hardware `EqualDepth` for every 'interior'-classified tile
-          // (`applyEarlyZTileState`) — typically the ground THIS canopy sits
-          // on, since a fully-opaque, non-occludable floor texture is exactly
-          // what reaches 'interior'. Before this fix, this twin's own
-          // discard was gated ONLY on the STATIC art alpha (`alphaThreshold`
-          // vs. the texture's OWN, unfading alpha — see
-          // `buildSceneDepthWriterMaterial`'s discard, scene-depth.js) with NO
-          // connection to the canopy's LIVE, hover-fade-reduced render alpha —
-          // so it kept claiming the depth-prepass "win" under the canopy's
-          // full silhouette FOREVER, hover or not. The ground tile's
-          // 'interior' EqualDepth redraw was therefore discarded there every
-          // frame, so `scene.color` never received the ground's real texture
-          // at those pixels — invisible while the canopy was opaque (its own
-          // alpha=1 draw fully overwrites the gap right after), but once
-          // hover-fade lowered the canopy's alpha, blending mixed the fading
-          // canopy against that NEVER-WRITTEN pixel instead of the ground's
-          // real color. `scene.color` is later used as this frame's albedo
-          // and MULTIPLIED by illumination (`environmental-light.js`:
-          // `litSrgb = mapSrgb.mul(illumWithUiShadow)`), so a pixel that was
-          // never given any albedo stays literal (0,0,0) — solid black —
-          // no matter how much light reaches it, exactly the "a light has
-          // absolutely no effect" report. This is a COMPLETELY SEPARATE
-          // mechanism from `buf:scene.depth` (the point-light gate the FIFTH
-          // round's `liveOcclusionGate` fix targeted, a few lines up) — same
-          // shape, different buffer, which is exactly why that fix's own
-          // byte-for-byte-unchanged promise for THIS twin left this bug
-          // standing. `overlay.uDepthPrepassOcclusionAmount` is pushed the
-          // SAME `vegWeights.fade` value every frame as `uDepthOcclusionAmount`
-          // above (`runMaskOcclusionPass`), so the ground's paint and the
-          // canopy's own visible fade can no longer disagree about whether
-          // the canopy is "there" this frame, mirroring the fifth round's own
-          // guarantee for lighting.
-          const prepassMaterial = addDepthPrepassTwin(liveWriterArgs, overlay.geometry, z, true);
-          overlay.uDepthPrepassOcclusionAmount = prepassMaterial?.uLiveOcclusionAmount ?? null;
+          // NO EARLY-Z PREPASS TWIN for a canopy (removed 2026-10-28). The
+          // twin claimed `scene.color`'s depth under the canopy's STATIC
+          // silhouette, so the 'interior' ground's `EqualDepth` draw skipped
+          // those pixels; the flutter, the indoor clip and the scene-edge clip
+          // all move or drop the real leaves inside the fragment shader, which
+          // a depth-only twin cannot follow, and each gap showed the clear
+          // colour (the author's grey). Mythica-machina-press#470's sixth round
+          // (solid black on hover-fade) was the same bug through a different
+          // door. The ground now paints under every canopy and the canopy
+          // blends over it — a little ground shading under foliage, the price
+          // of never punching a hole. Kept null so the per-frame fade push
+          // (`runMaskOcclusionPass`) skips it.
+          overlay.uDepthPrepassOcclusionAmount = null;
           continue;
         }
         const state = itemStates.get(item.id);
@@ -22300,7 +23961,22 @@ async function startVtPanViewerUnserialized({
           // different revert behaviours instead of the one flag this whole
           // feature is built to revert with (Law 5).
           let material;
-          if (earlyZComposition && t.cellSplit) {
+          // A SELF-VEGETATION TILE (Case 1 — a `_Bush`/`_Tree` file placed as a
+          // tile) is a canopy too, with the same problem `vegetationDepthScene`'s
+          // header describes, only worse (2026-10-28, author screenshot after the
+          // overlay fix: a whole plant-shaped grey blob beside a leaning plant):
+          // this proxy carries no wind sway at all, so it sits at the plant's
+          // REST outline. Before the world draw it told the ground under that
+          // whole outline not to paint, and any lean showed the clear colour.
+          // So: drawn after the world draw, and no prepass twin — never split.
+          if (t.vegActive) {
+            material = depthProxyMaterialPool.get(computeDepthProxyMaterialSignature(writerArgs), () =>
+              buildSceneDepthWriterMaterial(writerArgs)
+            );
+            const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material, z });
+            vegetationDepthScene.add(mesh);
+            depthProxyEntries.push({ mesh, material, pooled: true });
+          } else if (earlyZComposition && t.cellSplit) {
             const interiorWriterArgs = { ...writerArgs, alwaysOpaque: true };
             const interiorMaterial = depthProxyMaterialPool.get(
               computeDepthProxyMaterialSignature(interiorWriterArgs),
@@ -22484,6 +24160,15 @@ async function startVtPanViewerUnserialized({
         if (state.wholeImage) {
           for (const t of state.wholeImage.tiles) {
             if (t.mesh) t.mesh.visible = false;
+            // CASE 1's ground shadow is a twin mesh on the same record (live bug,
+            // 2026-10-28: middle-floor trees' shadows showed on the opaque ground
+            // floor below). `residentVisible` MUST be cleared too, not just the
+            // mesh: `syncAllVegetationMotionForFrame` rewrites `mesh.visible` every
+            // frame from it, so a stale `true` resurrects the shadow immediately.
+            if (t.shadow) {
+              t.shadow.residentVisible = false;
+              if (t.shadow.mesh) t.shadow.mesh.visible = false;
+            }
           }
         }
         // VEGETATION CASE 2 — a THIRD mesh location this same cleanup missed
@@ -22513,7 +24198,9 @@ async function startVtPanViewerUnserialized({
       }
       profiler?.end(Z.residencyStaleRelease);
 
-      const worldRect = viewToWorldRect(view, canvasW / canvasH);
+      // PARALLAX (2026-10-28): reached out by how far the lowest layer shrinks, so a lower floor's tiles
+      // just past the edge are loaded before they slide into view. The view rect itself when it is off.
+      const worldRect = parallaxCullRect(viewToWorldRect(view, canvasW / canvasH));
 
       // PHASE 1 — lock in EVERY item's COARSE pins before ANY item's view-tier
       // streaming (real live bug, 2026-07-16: whole-screen MAGENTA under the
@@ -23598,7 +25285,10 @@ async function startVtPanViewerUnserialized({
       if (warmUpRestore.length > 0 || effectsNeedWarmUp) {
         for (const e of tileEffects) e.setWarmUpVisible(true);
         try {
-          warmUpDrawState({ includePresent: false });
+          // BLOCKING: this block's whole safety argument is that it is one synchronous run with no yield point,
+          // and that everything it drew is compiled when it returns. A deferred (asynchronous) pipeline would
+          // break the second half, so inside it every pipeline is created the old way.
+          pipelineGovernor.blocking(() => warmUpDrawState({ includePresent: false }));
         } finally {
           for (const e of tileEffects) e.setWarmUpVisible(false);
         }
@@ -24055,12 +25745,25 @@ async function startVtPanViewerUnserialized({
     // contract already proven for LOAD_PHASES.DEVICE a few hundred lines up,
     // is enough: it opens the WARMING span here, so the text left on screen
     // during the freeze below actually describes what is happening.
-    onLoadProgress?.({
-      phase: 'warming',
-      done: 0,
-      total: 1,
-      detail: 'Compiling shaders — the screen may pause briefly',
-    });
+    // No `total`: compileAsync is one opaque promise, so "0 of 1" was a placeholder that sat at
+    // 0 for the whole compile (author, 2026-10-27: the bar "thinks we're only loading a single
+    // shader"). Report what IS countable instead — elapsed time and shaders built so far — and
+    // let the curtain's whole-load estimate keep the bar moving (ui/load-progress.js).
+    const compileBaseline = readPipelineCount();
+    const compileStartedAt = perfNowMs();
+    const reportCompile = () => {
+      const built = readPipelineCount();
+      const made =
+        Number.isFinite(built) && Number.isFinite(compileBaseline) ? Math.max(0, built - compileBaseline) : null;
+      onLoadProgress?.({
+        phase: 'warming',
+        detail:
+          `Compiling shaders${made ? ` — ${made} built` : ''} (${((perfNowMs() - compileStartedAt) / 1000).toFixed(0)}s)` +
+          ' — the screen may pause briefly',
+      });
+    };
+    reportCompile();
+    const compileTicker = setInterval(reportCompile, 400);
     try {
       const t0 = perfNowMs();
       await renderer.compileAsync(scene, camera);
@@ -24070,6 +25773,8 @@ async function startVtPanViewerUnserialized({
       // scene. The programs will compile lazily on first draw exactly as before.
       console.warn('[vt-pan-viewer] shader precompile failed — falling back to lazy compile:', err);
       shaderCompileMs = null;
+    } finally {
+      clearInterval(compileTicker);
     }
 
     // PARALLEL-COMPILE CAPABILITY (mythica-machina-press#534) — read-only,
@@ -24185,6 +25890,8 @@ async function startVtPanViewerUnserialized({
         // mid-session). particle-runtime.js's own GALE_MPS uses this to turn
         // windSpeed01 into an actual, physically-real world-px/sec ceiling.
         pxPerMeter: readGridDistancePixels().distancePixels,
+        // Darkened by building shadows like the ground (lighting/weather-shade.js).
+        illumTexture: sceneIllum.texture,
       });
     }
     if (windParticlesEnabled) constructParticleEngineIfNeeded();
@@ -24202,6 +25909,7 @@ async function startVtPanViewerUnserialized({
         zDepth: 0,
         windHandle,
         pxPerMeter: readGridDistancePixels().distancePixels,
+        illumTexture: sceneIllum.texture,
       });
     }
     if (windGustsEnabled) constructGustEngineIfNeeded();
@@ -24248,6 +25956,10 @@ async function startVtPanViewerUnserialized({
     } else {
       warmUpDrawState();
     }
+    // Either warm-up launches the big per-frame pipelines on worker threads and skips their draws (the chunked
+    // one has already waited, so for it this returns at once). Behind the curtain, wait: the loop starts below
+    // with everything compiled.
+    await settleCompiles('warm-up');
 
     loopActive = true;
     renderer.setAnimationLoop(renderFrame);
@@ -26102,7 +27814,7 @@ async function startVtPanViewerUnserialized({
       disposeSceneDepth() {
         allocator.dispose(sceneDepth);
         for (const entry of depthProxyEntries) {
-          depthScene.remove(entry.mesh);
+          entry.mesh.removeFromParent(); // depthScene or vegetationDepthScene
           if (!entry.pooled) entry.material.dispose();
         }
         for (const entry of depthPrepassEntries) {
@@ -26221,6 +27933,7 @@ async function startVtPanViewerUnserialized({
       disposeWindowLight() {
         for (const surface of windowSurfacesByFloor.values()) surface.dispose();
         windowSurfacesByFloor.clear();
+        roomMapCache.drop();
         // mythica-machina-press#538/#539 — the per-TILE population, same
         // leak risk, same cadence as the per-floor loop just above.
         windowTileSurface.dispose();
@@ -26323,11 +28036,13 @@ async function startVtPanViewerUnserialized({
         smellyFlies: smellyFliesSubsystem.getStatus(),
         maggots: maggotsSubsystem.getStatus(),
         fireflies: firefliesSubsystem.getStatus(),
+        dust: dustSubsystem.getStatus(),
       }),
       disposeCritters: () => {
         smellyFliesSubsystem.dispose();
         maggotsSubsystem.dispose();
         firefliesSubsystem.dispose();
+        dustSubsystem.dispose();
       },
       /** PRECIPITATION's own status — every factor that decides whether a drop
        * is visible, plus the sky-reach bake's own result. */
@@ -26410,6 +28125,7 @@ async function startVtPanViewerUnserialized({
       setPrecipKind,
       /** The sky-light lever, 0..1. 0 = exact Foundry parity. */
       setSkyRealism,
+      setSkyLook,
       /** The environmental grade strength, 0..1 (the ToD/weather look + cloud
        * desaturation). 0 = neutral. docs/planning/Grade.md. */
       setGradeEnvStrength,
@@ -27006,6 +28722,8 @@ async function startVtPanViewerUnserialized({
         // Is the composite actually reading the mask? This is compiled in at
         // material-build time, so it does NOT change without a viewer restart.
         owningVision: visionOwnershipEnabled,
+        // Is the present keeping its grade out of the fog (2026-10-27)?
+        fogHold: gradePresent.fogHoldCompiled(),
         // ...and the rasteriser runs regardless, so its numbers are real even
         // while `owningVision` is false. That is deliberate: the cost and the
         // pool health are observable BEFORE the flag is ever flipped.
@@ -27059,6 +28777,14 @@ async function startVtPanViewerUnserialized({
         mapOnlyProbe: lastMapOnlyProbe,
       }),
 
+      getTableInfo: () => tableSubsystem.info(),
+      getParallaxInfo: () => parallaxSubsystem.info(),
+      getParallaxFloorStep: (fromIndex, toIndex) => parallaxSubsystem.stepScale(fromIndex, toIndex),
+      getTemperatureEffectsInfo: () =>
+        lastTemperatureFx
+          ? { available: true, ...lastTemperatureFx, noiseBaked: !!temperatureNoiseTexture }
+          : { available: false },
+
       getEnvSnapshotInfo: () => {
         if (!lastEnvSnapshot) return { available: false, status: 'future' };
         return {
@@ -27095,6 +28821,9 @@ async function startVtPanViewerUnserialized({
           // `active`/`liveMax` are what Foundry is actually deciding with.
           // Read `active` to answer "is ambient daylight vision on right now".
           foundryGlobalLight: lastFoundryGlobalLight ?? readSceneGlobalLightRaw(),
+          // true ⇒ the game system replaced MSA's window (PF2e), so MSA sends
+          // darkness only and the window above is the system's own rule.
+          globalLightSystemOwned,
           minDarknessRegionFloor: lastMinDarknessRegionFloor,
           ambientSource: lastEnvSnapshot.ambient?.source ?? null,
           ambientReason: lastEnvSnapshot.ambient?.reason ?? null,
@@ -27198,7 +28927,7 @@ async function startVtPanViewerUnserialized({
             const rawWindSpeed01 = uWindSpeed01.value;
             const effectiveWindSpeed01 = Math.max(cloudMinWindSpeed01, rawWindSpeed01);
             const windSpeedPxPerSec =
-              metresPerSecondForSpeed01(effectiveWindSpeed01) * sceneScale.pixelsPerMetre * cloudSpeedMul;
+              cloudDriftMetresPerSecond(rawWindSpeed01) * sceneScale.pixelsPerMetre * cloudSpeedMul;
 
             const nowMs = perfNowMs();
             const sample = { atMs: nowMs, driftX: cloudDriftX, driftY: cloudDriftY, boil: cloudBoil };
@@ -28207,6 +29936,7 @@ async function startVtPanViewerUnserialized({
           warmUpPipelinesCreated,
           warmUpSimPipelinesCreated,
           postContentPipelinesCreated,
+          pipelineGovernor,
           warmUpError,
           warmUpSimError,
           prefetchSkippedPacks,
@@ -28421,10 +30151,56 @@ export function isVtPanViewerFloorPrepared(floorIndex) {
  * @param {() => void} fn
  * @returns {boolean}
  */
+/**
+ * A copy of the viewer's next rendered frame, for a transition still. Taken inside that frame's
+ * own task (via the after-next-frame callbacks), the only time a WebGPU canvas's image is still
+ * readable. `null` if no viewer is running or no frame renders in time.
+ * @param {{timeoutMs?: number}} [opts]
+ * @returns {Promise<HTMLCanvasElement|null>}
+ */
+export function captureVtPanViewerFrame({ timeoutMs = 500 } = {}) {
+  if (!_active?.afterNextFrame || !_active.canvas || typeof document === 'undefined') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(null);
+    }, timeoutMs);
+    _active.afterNextFrame(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        const src = _active?.canvas;
+        const copy = document.createElement('canvas');
+        copy.width = src.width;
+        copy.height = src.height;
+        copy.getContext('2d').drawImage(src, 0, 0);
+        resolve(copy);
+      } catch (err) {
+        log.warn('could not copy the viewer frame for a transition:', err);
+        resolve(null);
+      }
+    });
+  });
+}
+
 export function afterNextVtPanViewerFrame(fn) {
   if (!_active?.afterNextFrame) return false;
   _active.afterNextFrame(fn);
   return true;
+}
+
+/**
+ * How big floor `fromIndex`'s plane looks from floor `toIndex` under Parallax (below 1 = receded, above 1 =
+ * risen toward the eye), or `null` when Parallax is off or nothing is running. The floor-change transition
+ * moves the outgoing view's still by it, so the old floor leaves the way the stack says it should.
+ * @param {number} fromIndex @param {number} toIndex
+ * @returns {number|null}
+ */
+export function getVtPanViewerParallaxStep(fromIndex, toIndex) {
+  return _active?.getParallaxFloorStep?.(fromIndex, toIndex) ?? null;
 }
 
 /**
@@ -28966,6 +30742,24 @@ function stopAndDetachTileVideo(t) {
 const ART_TEXTURE_ANISOTROPY = 16;
 
 /**
+ * TOKEN SHARPNESS (author, 2026-10-27: "the token's artwork is fuzzy, low
+ * resolution and blurred — the actual artwork is high resolution").
+ *
+ * A token takes the SAME load path and material as the map albedo (compressed
+ * mip chain, trilinear, 16x anisotropy, CAS clarity) — what differs is the
+ * SCALE. Ground art is shown at roughly 1-3 source texels per pixel; a
+ * 1000px portrait on a 100px token is 5-10, so it lives at mip 2-3 and trilinear
+ * blends two of those levels together, a blur on top of the downsample. And the
+ * clarity gate's far roll-off (written to stop the ground's texel grid reading
+ * as pixelation) cuts the sharpen to 35% right where a token sits.
+ *
+ * Two token-only corrections: sample half a stop-plus sharper than the
+ * hardware's pick (the Lanczos mip chain is clean enough to afford it), and
+ * keep the sharpen at full strength — a portrait has no texel grid to protect.
+ */
+const TOKEN_SHARP_LOD_BIAS = -0.75;
+
+/**
  * INTERNAL RENDER SCALE WHILE THE COLD-LOAD CURTAIN IS UP
  * (mythica-machina-press#589), or `null` for "no clamp".
  *
@@ -29352,6 +31146,15 @@ export function getVtPanViewerTodHour() {
 export function setVtPanViewerSkyRealism(realism01) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setSkyRealism(realism01);
+}
+
+/**
+ * GOLDEN-HOUR and MOONLIGHT levers, 0..1 (effects/sky-access.js).
+ * @param {{goldenHour01?: number, moonlight01?: number}} look
+ */
+export function setVtPanViewerSkyLook(look) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setSkyLook(look);
 }
 
 /**

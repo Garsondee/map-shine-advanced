@@ -963,9 +963,12 @@ export function buildRealFloorAttrMrtNode({
     receiverHeightFt,
   });
   const { uFloorIndex01, uPresenceBits01 } = floorAttrUniforms;
+  // The item's OWN place on the map (its vertices are baked in world px), never where Parallax lifted
+  // it to: a roof raised out over the street is still the roof's outdoors value.
   const outdoors01 = buildWorldSpaceOutdoorsGate(THREE.TSL, {
     uOutdoorsRect: envLight.uOutdoorsRect,
     outdoorsTexNode: envLight.outdoorsTexNode,
+    worldXY: THREE.TSL.positionGeometry?.xy ?? null,
   });
   const mrtNode = mrt({
     attr: packFloorAttr(THREE.TSL, {

@@ -74,3 +74,4 @@ Config lives at repo root: `.eslintrc.json`, `.prettierrc.json`, `.prettierignor
 
 - Nothing is ever allocated at world resolution — enforced physically by `ThreeAllocator`'s law (`LAW_MAX_WORLD_RES_DIM`), not just documented.
 - An absent feature fails loudly; it never silently routes to a fallback path.
+- A per-frame effect's materials carry `markCompileDeferrable`, read the wind through the baked field (`baked: 'now'`), and stay inside their entry in `src/effects/__tests__/shader-budgets.json`. One synchronous 20 s shader compile kills the GPU process and every context on the page — see `src/GPU-SAFETY.md`.

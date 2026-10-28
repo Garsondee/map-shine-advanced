@@ -46,10 +46,23 @@ export const WINDOW_PARAMS = Object.freeze({
     // own max back toward neutral; the author's own dialled-in scene,
     // recorded exactly. Was RAISED 1 → 3 (2026-09-09) before this round.
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
-    default: 1.5, // 2026-10-19 author's Studio export (was 1)
+    default: 1, // 2026-10-27 author's Studio export (was 1.5)
     category: 'Look',
     label: 'Window light',
-    help: 'Master strength of every light cookie this effect draws. Turn it to 0 to see the map with no window light at all.',
+    help: 'How much of the outdoor light the painted cookie lets in — higher saturates the painted falloff toward full sunlight sooner. Turn it to 0 to see the map with no window light at all.',
+  },
+  // THE OUTDOOR MATCH (2026-10-27, `window-weather.js#windowTargetLight`) —
+  // author, on the Mansion greenhouse: "it should end up roughly the same
+  // brightness as the outdoors around it, neither much darker nor brighter."
+  outdoorMatch: {
+    type: 'float',
+    min: 0.5,
+    max: 2.5,
+    step: 0.01,
+    default: 2, // 2026-10-27 author's Studio export (was 1.1)
+    category: 'Look',
+    label: 'Brightness vs outdoors',
+    help: 'How bright a fully painted (white) window patch is compared with the open ground outside, at every hour — noon sun, golden hour, moonlight. 1 = exactly as lit as outdoors; above 1 adds glare.',
   },
   contrast: {
     type: 'float',
@@ -61,7 +74,7 @@ export const WINDOW_PARAMS = Object.freeze({
     // header (window-render.js). Was LOWERED 1 → 0.69 (2026-09-08, recovered
     // from a stash that missed both this file's own commit and the 0.6.4
     // release; applied 2026-09-18) before this round.
-    default: 1.72, // 2026-10-19 author's Studio export (was 1)
+    default: 1.5, // 2026-10-27 author's Studio export (was 1)
     category: 'Look',
     label: 'Patch contrast',
     help: 'Gamma on the painted falloff. Above 1 sharpens the cookie toward a hard-edged patch; below 1 softens it toward a broad glow. 1 = exactly what you painted.',
@@ -69,18 +82,306 @@ export const WINDOW_PARAMS = Object.freeze({
   dawnDuskTint: {
     type: 'color',
     space: 'srgb',
-    default: '#ff8a3d',
+    // 2026-10-27: deeper gold (was #ff8a3d) — author: golden hour "could be
+    // pushed into the more dramatic".
+    default: '#ffa570', // 2026-10-27 author's Studio export (was #ff6a14)
     category: 'Look',
     label: 'Dawn / dusk colour',
     help: 'The colour the window light leans toward, driven by the astrolabe, around sunrise and sunset. Fades to no tint by noon.',
   },
+  tintAmount: {
+    type: 'float',
+    min: 0,
+    max: 1.5,
+    step: 0.01,
+    default: 0.7,
+    category: 'Look',
+    label: 'Dawn / dusk colour strength',
+    help: 'Scales how far the window light leans toward the Dawn / dusk and Night colours. 1 = as set, 0 = no lean at all (the light is just the outdoor light). Turn down if golden hour is too red.',
+  },
+  outdoorHue: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.7,
+    category: 'Look',
+    label: 'Outdoor colour carried in',
+    help: "How much of the outdoor light's own colour comes through the window. At golden hour the outdoors is already strongly orange-red; lower this to keep the brightness but drain that colour. 0 = neutral light.",
+  },
   nightTint: {
     type: 'color',
     space: 'srgb',
-    default: '#5c7cff',
+    // 2026-10-27: colder moonlight (was #5c7cff) — author: night "should be
+    // more dramatically cool in temp".
+    default: '#8095ff', // 2026-10-27 author's Studio export (was #3a5cff)
     category: 'Look',
     label: 'Night colour',
     help: 'The colour the window light leans toward, driven by the astrolabe, once the sun is down.',
+  },
+  // ── WEATHER (2026-10-27, `window-weather.js`) — the outside world played
+  // dramatically: "dramatic, never dull". All four act AFTER the highlight
+  // shoulder, so they really show on a bright white `_Window`.
+  goldenBoost: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 2, // 2026-10-27 author's Studio export (was 0.9)
+    category: 'Weather',
+    label: 'Golden hour boost',
+    help: 'How much harder the window light leans into the dawn/dusk colour with the sun low and golden. Colour only — the brightness follows the outdoors (see Brightness vs outdoors).',
+  },
+  weatherBreakFill: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 1, // 2026-10-27 author's Studio export (was 0.1)
+    category: 'Weather',
+    label: 'Overcast fill',
+    help: 'Under heavy cloud, light comes through drifting sun breaks at full strength; this is how much reaches the rest of the window. 0 = only the breaks, 1 = cloud never darkens window light.',
+  },
+  weatherBreakSizeM: {
+    type: 'float',
+    min: 2,
+    max: 60,
+    step: 1,
+    default: 20, // 2026-10-27 author's Studio export (was 16)
+    category: 'Weather',
+    label: 'Sun break size (m)',
+    help: 'How large the drifting sun breaks are under heavy cloud, in metres. Smaller = more, tighter shafts.',
+  },
+  weatherStormDarken: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.16, // 2026-10-27 author's Studio export (was 0.85)
+    category: 'Rain waves',
+    label: 'Wave darkness',
+    help: 'How dark window light goes as each wave of heavy rain passes — the same waves the rain itself brightens on, travelling with the wind. 0 = rain never darkens window light.',
+  },
+
+  // ── RAIN WAVES (2026-10-27, `window-weather.js`) — how much the wind-driven
+  // rain darkens window light. Author: *"give me controls so that I can change
+  // how much the wind driven rain shader is effecting windows, give me a nice
+  // range of controls in their own section"*. The waves are the wind field's own
+  // gust fronts (the ones the torrent/curtain rain brightens on), so these shape
+  // the RESPONSE, never the waves' size or speed — that stays locked to the wind.
+  rainWaveBaseDarken: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.06, // 2026-10-27 author's Studio export (was 0.3)
+    category: 'Rain waves',
+    label: 'Overall rain dim',
+    help: 'How much any heavy rain dims window light everywhere, before a wave even arrives. 0 = only the waves darken.',
+  },
+  rainWaveThreshold: {
+    type: 'float',
+    min: 0.3,
+    max: 2,
+    step: 0.01,
+    default: 0.41, // 2026-10-27 author's Studio export (was 0.75)
+    category: 'Rain waves',
+    label: 'Wave threshold',
+    help: 'How strong a gust has to be before it counts as a rain wave (1 = the average wind). Lower = more of the map is inside a wave; higher = only the strongest fronts.',
+  },
+  rainWaveSoftness: {
+    type: 'float',
+    min: 0.05,
+    max: 2,
+    step: 0.01,
+    default: 2, // 2026-10-27 author's Studio export (was 0.85)
+    category: 'Rain waves',
+    label: 'Wave softness',
+    help: 'How gradually a wave darkens from its edge to its heart. Small = a hard, sharp front; large = a slow swell of gloom.',
+  },
+  rainWaveFloor: {
+    type: 'float',
+    min: 0,
+    max: 0.5,
+    step: 0.01,
+    default: 0.03,
+    category: 'Rain waves',
+    label: 'Darkest light',
+    help: 'The least light a window keeps in the heart of the heaviest wave. 0 = it can go fully dark.',
+  },
+  rainWaveStartPrecip: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.15,
+    category: 'Rain waves',
+    label: 'Starts at rain',
+    help: 'The precipitation level at which rain begins to darken windows.',
+  },
+  rainWaveFullPrecip: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.85,
+    category: 'Rain waves',
+    label: 'Full at rain',
+    help: 'The precipitation level at which the darkening reaches its full strength.',
+  },
+  rainWaveSnowShare: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.7,
+    category: 'Rain waves',
+    label: 'Snow & hail share',
+    help: 'How strongly snow and hail darken windows compared with rain. 1 = the same as rain.',
+  },
+  rainWaveTint: {
+    type: 'color',
+    space: 'srgb',
+    default: '#8fa6c8',
+    category: 'Rain waves',
+    label: 'Wave colour',
+    help: 'The colour window light shifts toward inside a rain wave — a cold storm grey by default.',
+  },
+  rainWaveTintAmount: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.5,
+    category: 'Rain waves',
+    label: 'Wave colour amount',
+    help: 'How far the light shifts toward Wave colour in the heart of a wave. 0 = no colour change.',
+  },
+  rainWaveLeadGlow: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0,
+    category: 'Rain waves',
+    label: 'Glow before the wave',
+    help: 'A brief brightening just ahead of each wave front — the strange bright moment before a squall hits. 0 = off.',
+  },
+
+  // ── SUN & ROOMS (2026-10-28, `window-room-light.js` over `scene/room-map.js`) ──
+  // Author: *"what would be really nice is if the _Window light also moved and smeared at different times of day.
+  // HOWEVER, what we never want is for that light to move accidentally into another room or outside the building …
+  // Be sure to give me a section under _Window for these variables so that I can edit them to fine tune the look."*
+  // Defaults mirror `WINDOW_ROOM_DEFAULTS`.
+  sunDrift: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 1,
+    category: 'Sun & rooms',
+    label: 'Sun drift',
+    help: 'How far window light slides away from the sun as it moves across the sky — long at dawn and dusk, short at noon. 0 = the light stays exactly where it is painted.',
+  },
+  sunThrowHeightPx: {
+    type: 'float',
+    min: 0,
+    max: 400,
+    step: 1,
+    default: 120,
+    category: 'Sun & rooms',
+    label: 'Window height (px)',
+    help: 'How high the windows are, in map pixels. Taller windows throw their light further across the floor for the same sun — the same rule as building shadows.',
+  },
+  sunMaxDriftPx: {
+    type: 'float',
+    min: 0,
+    max: 1200,
+    step: 5,
+    default: 360,
+    category: 'Sun & rooms',
+    label: 'Longest drift (px)',
+    help: 'The furthest the light can slide, in map pixels, however low the sun gets.',
+  },
+  sunSmear: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.65,
+    category: 'Sun & rooms',
+    label: 'Smear',
+    help: 'How much the light stretches out along its drift instead of sliding as one patch. 0 = the whole patch moves; 1 = a long streak from where it is painted to where it has drifted.',
+  },
+  sunSmearKeep: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.55,
+    category: 'Sun & rooms',
+    label: 'Smear brightness',
+    help: 'How bright the stretched light stays. 0 = a longer patch is a dimmer one (the same light spread wider); 1 = the streak keeps the full brightness of the painted light.',
+  },
+  roomWallFadePx: {
+    type: 'float',
+    min: 0,
+    max: 240,
+    step: 1,
+    default: 48,
+    category: 'Sun & rooms',
+    label: 'Wall fade (px)',
+    help: 'How far from a wall the moving light starts to fade, in map pixels — the soft shadow along every wall that keeps the light from ending on a hard line. Light never crosses into another room or outside either way.',
+  },
+  roomWallFadeStrength: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 1,
+    category: 'Sun & rooms',
+    label: 'Wall fade strength',
+    help: 'How dark that soft shadow along the walls gets. 0 = no fade (the light stops sharply at the wall).',
+  },
+  sunSideBoost: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 0.5,
+    category: 'Sun & rooms',
+    label: 'Sunny side boost',
+    help: 'How much brighter the rooms whose windows face the sun get while the sun is low — the east rooms at dawn, the west rooms at dusk. 0.5 = half as bright again.',
+  },
+  sunSideDim: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.45,
+    category: 'Sun & rooms',
+    label: 'Shaded side dim',
+    help: 'How much darker the rooms whose windows face away from the sun get while it is low. 1 = they go dark.',
+  },
+  sunLowDeg: {
+    type: 'float',
+    min: 5,
+    max: 90,
+    step: 1,
+    default: 50,
+    category: 'Sun & rooms',
+    label: 'Low sun below (°)',
+    help: 'The sun elevation, in degrees, under which the sunny and shaded sides start to differ. They differ most with the sun on the horizon and not at all above this.',
+  },
+  roomWallThicknessPx: {
+    type: 'float',
+    min: 2,
+    max: 40,
+    step: 1,
+    default: 10,
+    category: 'Sun & rooms',
+    label: 'Wall seal (px)',
+    help: 'How thick walls are drawn when the scene is divided into rooms. Raise it if two rooms leak into each other through a small gap between wall ends (debug view 16 shows the rooms).',
   },
 
   // ── THE GLASS (effects/window/window-glass.js) ────────────────────────────
@@ -95,7 +396,7 @@ export const WINDOW_PARAMS = Object.freeze({
     step: 0.5,
     // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; the author's
     // own dialled-in scene, recorded exactly.
-    default: 28, // 2026-10-19 author's Studio export (was 3.5)
+    default: 12.5, // 2026-10-27 author's Studio export (was 10)
     category: 'Glass',
     label: 'Glass thickness',
     help: 'How much the uneven pane bends the light, as a maximum shift in world pixels. 0 = perfectly flat modern glass: no distortion, no prism, no caustics. Raise it for thick, wavy, hand-blown panes.',
@@ -105,7 +406,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1,
+    default: 0.59, // 2026-10-27 author's Studio export (was 1)
     category: 'Glass',
     label: 'Prism split',
     help: 'How far apart the red and blue ends of the light are pulled as they refract. 0 = the light distorts but keeps its colour; 1 = a strong rainbow fringe along every edge. Needs some Glass thickness to have anything to split.',
@@ -115,7 +416,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 8,
     max: 400,
     step: 1,
-    default: 249, // 2026-10-17 author's live-tuned defaults (was 400)
+    default: 400, // 2026-10-27 author's Studio export (was 181)
     category: 'Glass',
     label: 'Blob size',
     help: 'The size of the lumps in the glass, in world pixels. Small = a fine rippled or seeded pane; large = a few broad rolling waves, like a big crown-glass round.',
@@ -155,7 +456,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 2,
+    default: 2, // 2026-10-27 author's Studio export (was 0.25)
     category: 'Glass',
     label: 'Caustic highlight',
     help: 'How strongly the thick spots focus light into bright knots, the way a glass of water throws a highlight. 0 = off. The dark bands between knots come with it — they are where that light went.',
@@ -198,7 +499,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0.75,
     max: 8,
     step: 0.05,
-    default: 4.9, // was 1.2
+    default: 5.45, // 2026-10-27 author's Studio export (was 3)
     category: 'Rain',
     label: 'Drop size',
     help: 'The radius of a bead of water, in map pixels. Beads are all close to this size with a little variation, and each has a ragged edge. Drops too small to see at the current zoom fade away.',
@@ -218,7 +519,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 0.99, // was 1
+    default: 0.78, // 2026-10-27 author's Studio export (was 0.99)
     category: 'Rain',
     label: 'Drop lens',
     help: 'How much each bead bends the light behind it, the wobble you see in the light pool. 0 leaves the light shape alone.',
@@ -228,7 +529,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 1.81, // was 0.8
+    default: 0.65, // 2026-10-27 author's Studio export (was 2)
     category: 'Rain',
     label: 'Drop highlight',
     help: 'The bright spot each bead of water focuses into the light.',
@@ -238,7 +539,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.2, // was 0.35
+    default: 0.1, // 2026-10-27 author's Studio export (was 0.46)
     category: 'Rain',
     label: 'Drop shadow',
     help: 'How dark the edge of each bead and each wet streak is. This is the small, varying dimming the light gets under rain.',
@@ -258,7 +559,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.01,
-    default: 0.99, // was 1
+    default: 3, // 2026-10-27 author's Studio export (was 2.12)
     category: 'Rain',
     label: 'Run speed',
     help: 'How fast the running drops slide, as a multiple of the storm pace (a storm runs at about 200 px per second). They stick, then slip, then stick again; the harder it rains the less they stick, and the wind carries them sideways.',
@@ -288,7 +589,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 6,
     step: 0.1,
-    default: 1.5,
+    default: 6, // 2026-10-27 author's Studio export (was 1.5)
     category: 'Rain',
     label: 'Drop wobble (px)',
     help: 'How far a running drop sways from side to side as it runs, in map pixels. Every drop sways its own way, so no two follow the same route. 0 = perfectly straight runs.',
@@ -308,7 +609,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1, // was 0.6
+    default: 1, // 2026-10-27 author's Studio export (was 0.09)
     category: 'Rain',
     label: 'Wind-driven rain',
     help: 'How much the wind decides which windows get wet. At 1 the windows facing into the wind stream with water and the sheltered ones stay almost dry.',
@@ -318,7 +619,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1, // was 0.6
+    default: 1, // 2026-10-27 author's Studio export (was 0.2)
     category: 'Rain',
     label: 'Storm sheeting',
     help: 'In the heaviest rain, a slow sheet of water runs over the glass and dims the light unevenly. 0 = none.',
@@ -328,7 +629,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 2,
     max: 180,
     step: 1,
-    default: 40,
+    default: 7, // 2026-10-27 author's Studio export (was 40)
     category: 'Rain',
     label: 'Drying time',
     help: 'How long beads cling to the glass after the rain stops, in seconds. Longer is a window that stays wet.',
@@ -338,10 +639,82 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 100,
     step: 1,
-    default: 100,
+    default: 50, // 2026-10-27 author's Studio export (was 80)
     category: 'Rain',
     label: 'Rain only in the brightest (%)',
     help: 'Shows the raindrops only in the brightest part of the window light. 100 = drops everywhere the window light is (the normal look). 30 = drops only in the brightest 30% of the light, fading out smoothly where it is dimmer. 0 = only the very brightest spots.',
+  },
+  // ── COLOUR (the CC, 2026-10-27, `window-grade.js`) — grades the FINISHED
+  // window light, last of all. Author: *"a new CC section at the end which is
+  // designed to let me fine tune the visual appearance of the whole window
+  // effect."*
+  ccExposure: {
+    type: 'float',
+    min: -3,
+    max: 3,
+    step: 0.05,
+    default: 0,
+    category: 'Colour',
+    label: 'Exposure (EV)',
+    help: 'Brightens or darkens the whole window effect, in photographic stops. +1 = twice as bright.',
+  },
+  ccContrast: {
+    type: 'float',
+    min: 0.25,
+    max: 3,
+    step: 0.01,
+    default: 1,
+    category: 'Colour',
+    label: 'Contrast',
+    help: 'Pushes bright window light brighter and dim light dimmer (above 1), or evens them out (below 1).',
+  },
+  ccSaturation: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 1,
+    category: 'Colour',
+    label: 'Saturation',
+    help: 'How colourful the window light is. 0 = grey light, 2 = very rich colour.',
+  },
+  ccTemperature: {
+    type: 'float',
+    min: -1,
+    max: 1,
+    step: 0.01,
+    default: 0,
+    category: 'Colour',
+    label: 'Temperature',
+    help: 'Cools (−) or warms (+) the whole window effect.',
+  },
+  ccTint: {
+    type: 'float',
+    min: -1,
+    max: 1,
+    step: 0.01,
+    default: 0,
+    category: 'Colour',
+    label: 'Tint',
+    help: 'Shifts the whole window effect toward green (−) or magenta (+).',
+  },
+  ccColorFilter: {
+    type: 'color',
+    space: 'srgb',
+    default: '#ffffff',
+    category: 'Colour',
+    label: 'Colour filter',
+    help: 'A colour multiplied over the whole window effect, like a gel over the glass. White = none.',
+  },
+  ccGamma: {
+    type: 'float',
+    min: 0.3,
+    max: 3,
+    step: 0.01,
+    default: 1,
+    category: 'Colour',
+    label: 'Gamma',
+    help: 'Lifts (above 1) or deepens (below 1) the mid-tones of the window light without moving its brightest point much.',
   },
 });
 
@@ -518,6 +891,41 @@ export const WINDOW_DEBUG_CHANNELS = Object.freeze([
       'Nothing at all while it is raining means the rain amount is 0 (check Rain on the glass and the ' +
       'weather) or this tier does not compile rain.',
   }),
+  Object.freeze({
+    n: 16,
+    id: 'rooms',
+    label: '16 · Rooms (one colour per room)',
+    reads:
+      'THE ROOM MAP — every room the Foundry walls divide this floor into, filled with its own colour (walls dark ' +
+      'grey, outdoor rooms dimmed). Two rooms showing the SAME colour across a wall means a gap in the walls let ' +
+      'them merge: raise "Wall seal" or close the gap. All black = no room map yet (no walls on this floor?).',
+  }),
+  Object.freeze({
+    n: 17,
+    id: 'roomWallDist',
+    label: '17 · Distance to the nearest wall',
+    reads:
+      'Grey ramp: black on a wall, white 200 px or more away. This is what "Wall fade" fades the moving light by, ' +
+      'so the light thins out against a wall instead of stopping on a line.',
+  }),
+  Object.freeze({
+    n: 18,
+    id: 'roomSun',
+    label: '18 · Sun side (R=facing, G=has a window, B=low sun)',
+    reads:
+      'Per pixel: RED = how squarely the window nearest to it (through its own room) faces the sun right now — that ' +
+      'share of the light moves and brightens, the rest stays and dims. GREEN = it has a window to judge by (black = ' +
+      'an interior or outdoor room: the light there never moves). BLUE = how low the sun is (the strength of the ' +
+      'sunny/shaded difference; black at noon and night). Red should turn smoothly around a corner between windows.',
+  }),
+  Object.freeze({
+    n: 19,
+    id: 'roomGate',
+    label: '19 · Room gate (share of the smear that counts)',
+    reads:
+      'White = every smear tap read light from this same room; darker = taps fell into another room, outside, or ' +
+      'against a wall and were dropped or faded. With the sun high (no drift) this is white everywhere.',
+  }),
 ]);
 
 /** Channel 12's (and 11's) amplification — see their own reading guides above. */
@@ -592,7 +1000,10 @@ export const WINDOW = Object.freeze({
         'the profile a player has NOT opted below. RAIN ON THE GLASS rides this rung too ' +
         '(window-rain.js): when the weather is rain, beads of water lens the light, drops run down the ' +
         'pane toward the wall, and a storm sheets water over it. It costs nothing dry (one uniform ' +
-        'branch) and is not compiled below this rung.',
+        'branch) and is not compiled below this rung. SUN & ROOMS rides it as well (window-room-light.js over ' +
+        'scene/room-map.js, 2026-10-28): the cookie drifts away from the sun by the building-shadow throw and smears ' +
+        'back toward where it is painted, every tap kept inside its own Foundry-wall room and faded near walls, and ' +
+        'each room brightens or dims by whether its windows face the low sun — the old `drift` and `stretch` rungs.',
     }),
   ]),
   deferredRungs: Object.freeze([
@@ -605,13 +1016,6 @@ export const WINDOW = Object.freeze({
         "light's CHARACTER rather than just its level (Windows.md §3.3). NOT the same thing as tier 0's " +
         'own daylightTint param above: that is a flat authored-colour lerp keyed to dayFactor01/' +
         'twilight01; this rung is a physically-modelled two-lobe sample of the sky itself.',
-    }),
-    Object.freeze({
-      name: 'drift',
-      note:
-        'One global UV offset sliding the cookie along the sun own throw as the hour changes — ' +
-        'delegated verbatim from the sun shadow formula (marchDirectionToSun, heightPx/tan(elevation)), ' +
-        'never re-derived (Windows.md §5.1).',
     }),
     Object.freeze({
       name: 'moon',
@@ -665,12 +1069,6 @@ export const WINDOW = Object.freeze({
       note:
         'The cookie cut by what blocks the sun outside — a neighbouring building shadow lying across ' +
         'the window kills its light. Reads the caster-height field sun-occlusion.js already marches.',
-    }),
-    Object.freeze({
-      name: 'stretch',
-      note:
-        'Per-patch elongation at low sun, pivoting on each cookie own centroid — needs the connected- ' +
-        'component table tier 0 does not build yet.',
     }),
     Object.freeze({
       name: 'bounce',

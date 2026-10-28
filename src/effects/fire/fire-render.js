@@ -39,6 +39,7 @@
  */
 import { fbmFloat, fbmVec3, rotate2d } from '../lighting/animations/tsl-noise-toolkit.js';
 import { fireRampStops, FIRE_SMOKE_RAMP, hexToRgb01, fireShearSeconds } from './fire-geometry.js';
+import { markCompileDeferrable } from '../../core/compile-policy.js';
 
 /**
  * Size classes are OCTAVES of diameter: a class covers [d, 2d), so an in-class
@@ -427,6 +428,8 @@ export function buildFireMaterial({
 
   const material = new THREE.NodeMaterial();
 
+  markCompileDeferrable(material, 'fire');
+
   material.fragmentNode = Fn(() => {
     // Quad-fraction coordinate, −1..1, centred on the fire. The quad is CENTRED
     // on the fire by construction (`computeFireQuadArrays`), so the plume spine
@@ -454,6 +457,7 @@ export function buildFireMaterial({
       const gust = windHandle.node(TSL, {
         centerXY: aCenter,
         time: uGlobalTimeMs,
+        baked: 'now', // READ the per-frame baked field — no noise in the fire's shader (epic mmp-fpu)
       });
       // gust → px/s → (× shear seconds, per slice) → px → quad fraction.
       leanFrac = gust.mul(uWindResponse).mul(float((WIND_PX_PER_SEC * WIND_ORGANIC_DAMP) / Math.max(quadHalfPx, 1e-3)));

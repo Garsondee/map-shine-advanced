@@ -224,10 +224,13 @@ export const PRECIP_SPECIES = Object.freeze({
        * was mine, and the lab is what caught it rather than a live session.
        */
       streakPerPxS: 0.0065,
-      /** V2 `:5002` — the cool ramp, head to tail. Head is near-white, tail
-       * fades to a desaturated blue. Linear-space RGB + alpha. */
-      headRgba: Object.freeze([0.96, 0.98, 1.0, 1.0]),
-      tailRgba: Object.freeze([0.48, 0.6, 0.88, 0.38]),
+      /** V2 `:5002` — the cool ramp, head to tail, tinted to match the roof
+       * drips. The head WAS near-white (0.96, 0.98, 1.0), so falling rain and
+       * the drips it feeds read as two different liquids. It now sits just above
+       * the drips' body colour (`precip-drip-runtime.js`, 0.74, 0.84, 0.96) and
+       * the tail fades to the same cool blue. Linear-space RGB + alpha. */
+      headRgba: Object.freeze([0.78, 0.87, 0.98, 1.0]),
+      tailRgba: Object.freeze([0.5, 0.62, 0.88, 0.38]),
       /** V2 `:1466` — `pow(rand, 0.72)`. A mid-tone skew with rare bright
        * glints, NOT a uniform distribution. This one exponent is most of why
        * V2's rain read as a real curtain instead of a screen of equal dots. */
@@ -258,6 +261,12 @@ export const PRECIP_SPECIES = Object.freeze({
        * ordinary heavy rain. Same `threshold` shape as `veil`, one axis, a
        * later gate — not a second idea of intensity. */
       fog: Object.freeze({ kind: 'threshold', at: 0.7, from: 0, to: 1 }),
+      /** ⭐ THE TORRENT (`torrent-render.js`, 2026-10-27) — screen-space,
+       * wind-driven rain sheets, the top of the rain fader only: *"Towards the
+       * upper end of the vertical rain slider"*. Later still than `fog`, so
+       * the fader's last quarter is where the weather goes from heavy to
+       * torrential. Rain only — snow has its white-out instead. */
+      torrent: Object.freeze({ kind: 'threshold', at: 0.75, from: 0, to: 1 }),
     }),
 
     /** §3.5 — V2's proven scalar lighting (`:104-113`), harvested exactly.
@@ -1215,6 +1224,9 @@ export function isBuiltSpecies(id) {
   return Object.hasOwn(PRECIP_SPECIES, id);
 }
 
+/** No golden-hour colour: multiplying by this changes nothing. */
+const NEUTRAL_TINT = Object.freeze([1, 1, 1]);
+
 /**
  * Everything the runtime needs for one frame of one species, derived from the
  * weather axes. PURE — no THREE, no GPU, no clock — so the whole response
@@ -1242,6 +1254,16 @@ export function resolveSpeciesFrame(species, axes, tierScale = 1) {
   const storm01 = clamp01(axes?.stormActivity01);
   const day01 = Number.isFinite(axes?.dayFactor01) ? clamp01(axes.dayFactor01) : 1;
   const flash01 = clamp01(axes?.flash01);
+  // How lit the scene is (environmental-light.js#sceneLightLevel). Rain is drawn
+  // AFTER the lighting multiply, so without this it glows at full brightness in
+  // a pitch-black scene. Absent => 1 (unmeasured must not delete the weather).
+  const sceneLight01 = Number.isFinite(axes?.sceneLight01) ? clamp01(axes.sceneLight01) : 1;
+  // The golden-hour colour of the light, from `sky-access.js#lightGoldenTint`: weather is drawn AFTER the lighting
+  // multiply, so it needs the sky's colour handed to it or it stays white in a golden scene. Absent => neutral.
+  const skyTintRgb =
+    Array.isArray(axes?.skyTintRgb) && axes.skyTintRgb.length === 3 && axes.skyTintRgb.every(Number.isFinite)
+      ? Object.freeze([...axes.skyTintRgb])
+      : NEUTRAL_TINT;
   const scale = Number.isFinite(tierScale) && tierScale > 0 ? Math.min(1, tierScale) : 1;
 
   const countFrac = evalCurve(species.respond.count, precip01);
@@ -1251,6 +1273,7 @@ export function resolveSpeciesFrame(species, axes, tierScale = 1) {
   // Day/night is a LERP, not a branch — see `dayFactor01` above.
   const alphaMul = L.nightAlphaMul + (L.dayAlphaMul - L.nightAlphaMul) * day01;
   const rgbMul = L.nightRgbMul + (L.dayRgbMul - L.nightRgbMul) * day01;
+  const rgbMulUnlit = rgbMul + (rgbMul * L.flashRgbMul - rgbMul) * flash01;
 
   return Object.freeze({
     /** How many slots the DRAW should show. Zero is a legitimate, common
@@ -1271,6 +1294,9 @@ export function resolveSpeciesFrame(species, axes, tierScale = 1) {
      * `evalCurve`'s own fail-open floor returns exactly 0 — free, no special
      * case needed here. */
     fog01: evalCurve(species.respond.fog, precip01),
+    /** ⭐ THE TORRENT layer's weight (`torrent-render.js`). Rain only; every
+     * other row has no `respond.torrent` and reads exactly 0, like `fog01`. */
+    torrent01: evalCurve(species.respond.torrent, precip01),
     /** Snow only — 1 at calm, →0.15 in a blizzard. `1` for species with no
      * storm response, so the kernel multiplies unconditionally. */
     flutterMul: species.respondStorm?.flutter ? evalCurve(species.respondStorm.flutter, storm01) : 1,
@@ -1278,7 +1304,16 @@ export function resolveSpeciesFrame(species, axes, tierScale = 1) {
      * is a LERP toward the boosted value, so a half-strength flash is half a
      * flash rather than an on/off. */
     alphaMul: alphaMul + (alphaMul * L.flashAlphaMul - alphaMul) * flash01,
-    rgbMul: rgbMul + (rgbMul * L.flashRgbMul - rgbMul) * flash01,
+    // Colour only: darkness dims what a body REFLECTS, it does not make a
+    // streak any less there, so the alpha (and the count) are untouched.
+    rgbMul: rgbMulUnlit * sceneLight01,
+    /** `rgbMul` BEFORE the scene's light, and the light on its own — for a
+     * consumer (the torrent) that reshapes `rgbMul` (a square root) and so must
+     * apply the light AFTER, not inside, or darkness would only be half felt. */
+    rgbMulUnlit,
+    sceneLight01,
+    /** The golden-hour colour every body/veil/fog layer multiplies in; [1,1,1] when none. */
+    skyTintRgb,
   });
 }
 

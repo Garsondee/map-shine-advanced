@@ -33,6 +33,7 @@ import { installWindPopover } from './wind-popover.js';
 import { renderAstrolabePanel } from './astrolabe-panel.js';
 import { renderWeatherBoard } from './weather-board.js';
 import { renderPlayerLightBoard } from './player-light-board.js';
+import { renderTransitionBoard } from './transition-board.js';
 import { renderCueDeck } from './cue-deck.js';
 import { renderDebugStrip } from './debug-strip.js';
 import { listRemoteSections, onRemoteSectionsChanged, buildRemoteKit } from './extension-sections.js';
@@ -313,6 +314,8 @@ export function installRemote(opts = {}) {
   let cueDeckHandle = null;
   /** @type {{refresh: () => void}|null} */
   let playerLightBoardHandle = null;
+  /** @type {{refresh: () => void}|null} */
+  let transitionBoardHandle = null;
   /** @type {{syncFlowState: () => void}|null} */
   let astrolabePanelHandle = null;
   /** @type {{update: () => void}|null} */
@@ -420,6 +423,17 @@ export function installRemote(opts = {}) {
       plHost.className = 'msa-wx-host';
       body.append(sepPl, plHost);
       playerLightBoardHandle = renderPlayerLightBoard(plHost, opts.playerLight);
+    }
+
+    // THE TRANSITIONS BOARD (2026-10-26) — the table-wide default for every cut, and the
+    // armed override for the next scene change (transition-board.js).
+    if (opts.transitionBoard) {
+      const sepTr = document.createElement('div');
+      sepTr.className = 'msa-remote-sep';
+      const trHost = document.createElement('div');
+      trHost.className = 'msa-wx-host';
+      body.append(sepTr, trHost);
+      transitionBoardHandle = renderTransitionBoard(trHost, opts.transitionBoard);
     }
 
     if (opts.cueDeck) {
@@ -593,6 +607,11 @@ export function installRemote(opts = {}) {
      * board was supplied. */
     refreshPlayerLightBoard() {
       playerLightBoardHandle?.refresh();
+    },
+    /** Re-sync the transitions board (a setting changed: this GM, another GM, or an armed
+     * override being used up). No-op before the body exists. */
+    refreshTransitionBoard() {
+      transitionBoardHandle?.refresh();
     },
     /** Repaint just the GM's "Carried Light" picker (their token selection
      * changed, or a token's light flag did) without rebuilding the board's

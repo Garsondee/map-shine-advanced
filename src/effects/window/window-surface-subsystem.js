@@ -47,6 +47,7 @@ import {
 } from './window-render.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 import { computeSeedOffset } from './window-glass.js';
+import { windowDaylightTint, windowTargetLight } from './window-weather.js';
 import { WINDOW_DEFAULT_AMBIENT_CEILING, WINDOW_ALPHA_EPSILON } from './window-cookie.js';
 import {
   createWindowRain,
@@ -57,7 +58,8 @@ import {
   RAIN_TUNE,
 } from './window-rain.js';
 import { deriveWindowRainField, buildWindowPresenceGrid, RAIN_FIELD_DEFAULT_EASE_PX } from './window-rain-field.js';
-import { windFlowVector } from '../../world/index.js';
+import { windFlowVector, windStrength01ForSpeed01 } from '../../world/index.js';
+import { createWindowRoomLight, resolveRoomLook, resolveRoomSunFrame } from './window-room-light.js';
 
 const log = createLogger('WindowSurface');
 
@@ -134,10 +136,6 @@ const WINDOW_BOUNDS_PAD_PX = 8;
  * @param {readonly number[]} a @param {readonly number[]} b @param {number} t
  * @returns {number[]}
  */
-function lerpRgb(a, b, t) {
-  const s = Math.min(1, Math.max(0, t));
-  return [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s];
-}
 
 /**
  * THREE's `Material.side` numeric constants, decoded for `getStatus()`'s own
@@ -188,6 +186,7 @@ const WINDOW_MATERIAL_SIDE_NAMES = Object.freeze({ 0: 'front', 1: 'back', 2: 'do
  * @param {*} [args.cloudOvercastMinStrengthNode] - see `window-render.js`'s
  *   header. Passed straight through.
  * @param {*} [args.cloudNoonBoostNode] - see `window-render.js`'s header.
+ * @param {*} [args.weatherGainNode] - see `window-weather.js` (sun breaks + rain-wave darkness).
  *   Passed straight through.
  * @param {() => object} [args.getWindowRenderState] - the look/enable seam.
  * @param {() => object|null} [args.getEnvSun] - `world/sun.js#computeSun`'s
@@ -202,13 +201,23 @@ const WINDOW_MATERIAL_SIDE_NAMES = Object.freeze({ 0: 'front', 1: 'back', 2: 'do
  *   `runLightAccumulatePass()` call, so capturing it here would freeze the
  *   window-light ceiling at whatever the sky looked like at construction.
  *   `null`/malformed falls back to `WINDOW_DEFAULT_AMBIENT_CEILING` — see
- *   `window-render.js#uAmbientCeiling`'s own doc.
+ *   `window-render.js#uAmbientCeiling`'s own doc. It is also the INDOOR light
+ *   the outdoor match blends away from (the illum fill holds exactly this
+ *   indoors).
+ * @param {() => (readonly number[]|null)} [args.getOutdoorLightRgb] - a GETTER
+ *   for the light the open ground is lit by: the ambient fill × the sky's
+ *   colour + the moon (`vt-pan-viewer.js`). What a fully painted `_Window`
+ *   pulls its room toward (`window-weather.js#windowTargetLight`). `null`
+ *   falls back to the indoor light — a window that matches its own room.
  * @param {() => (object|null)} [args.getEnv] - a GETTER for the viewer's env snapshot (`world/environment.js`), for
  *   the rain: `weather.precip01`/`precipKind`/`precipMixWeight`, `time.tMs`/`dtSec`, `wind.*`. A getter for the same
  *   reason as `getEnvSun`: the viewer REASSIGNS its snapshot every frame. `null` means a dry, still day.
  * @param {(floorIndex: number) => ({spec: object, data: Uint8Array, version: number}|null)} [args.getWindowOutdoorsGrid]
  *   - `window-seams.js#getWindowOutdoorsGrid`: the floor's `_Outdoors` grid, from which the rain's "which way is down
  *   the pane" field is derived (only when it first rains). `null` means windows get splashes and no running drops.
+ * @param {(floorIndex: number, opts: {thicknessPx: number}) => ({map: object, texture: *, version: number}|null)} [args.getRoomMap]
+ *   - the shared room map (`scene/room-map.js#createRoomMapCache#get`): this floor's rooms, built from its walls.
+ *   `null` (no walls, no scene yet, or unwired) leaves SUN & ROOMS neutral: nothing drifts, nothing changes.
  * @param {*} [args.profiler] - so `sync()` can bracket its own per-frame cost
  *   (`light.windowSync` — perf-instrumentation-audit-2026-08-12: this ran
  *   with zero profiler coverage despite pushing a per-frame depth-authority
@@ -235,11 +244,14 @@ export function createWindowSurfaceSubsystem({
   cloudOvercastContrastSoftenNode = null,
   cloudOvercastMinStrengthNode = null,
   cloudNoonBoostNode = null,
+  weatherGainNode = null,
   getWindowRenderState,
   getEnvSun,
   getAmbientCeilingRgb,
+  getOutdoorLightRgb,
   getEnv,
   getWindowOutdoorsGrid,
+  getRoomMap,
   profiler = null,
 }) {
   // ⚠️ `seams/viewer-wired` exists because water shipped exactly this shape
@@ -248,8 +260,10 @@ export function createWindowSurfaceSubsystem({
   getWindowRenderState ??= () => ({ enabled: true, params: {}, debugChannel: 0 });
   getEnvSun ??= () => null;
   getAmbientCeilingRgb ??= () => null;
+  getOutdoorLightRgb ??= () => null;
   getEnv ??= () => null;
   getWindowOutdoorsGrid ??= () => null;
+  getRoomMap ??= () => null;
   resolveExpectedDepth ??= () => 0;
 
   /** A dedicated scene — see the header. */
@@ -346,6 +360,33 @@ export function createWindowSurfaceSubsystem({
     });
   }
 
+  // ── SUN & ROOMS ───────────────────────────────────────────────────────────
+  // Declared before the first `buildSurfaceForTier` for the same TDZ reason as the rain's state above.
+  /** Neutral 1x1 room map (room 0, no outlook) until a real map lands: nothing faces the sun, nothing moves. */
+  let neutralRoom = null;
+  let neutralField = null;
+  const roomState = {
+    /** The cache entry last pushed, and the handle it was pushed to (a tier rebuild makes a new handle). */
+    entry: null,
+    pushedTo: null,
+    lookKey: '',
+    /** Extra world px the quad is grown by, so drifted light is not clipped at the painted AABB. */
+    padPx: 0,
+    frame: null,
+  };
+
+  function ensureNeutralRoomTextures() {
+    if (neutralRoom) return;
+    neutralRoom = createMaskTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'nearest');
+    // Far from any wall, outlook (0, 0): faces nothing, nothing moves.
+    neutralField = createMaskTexture(new Uint8Array([255, 128, 128, 255]), 1, 1, 'nearest');
+  }
+
+  function createRoomHandle() {
+    ensureNeutralRoomTextures();
+    return createWindowRoomLight({ THREE, roomTexture: neutralRoom, fieldTexture: neutralField });
+  }
+
   /**
    * Rebuilds the whole material for a new ladder rung — closes over the
    * subsystem's OWN current `maskTexture` rather than taking it as a
@@ -360,6 +401,8 @@ export function createWindowSurfaceSubsystem({
       THREE,
       // A JS-time branch like `glass`: below the glass rung no rain node is ever constructed.
       rain: tier >= WINDOW_RAIN_MIN_TIER ? createRainHandle() : null,
+      // SUN & ROOMS rides the same rung as the rain (a JS-time branch: the bare cookie compiles none of it).
+      roomLight: tier >= WINDOW_RAIN_MIN_TIER ? createRoomHandle() : null,
       maskTexture,
       depthTexture,
       depthFlagsTexture,
@@ -370,6 +413,7 @@ export function createWindowSurfaceSubsystem({
       cloudOvercastContrastSoftenNode,
       cloudOvercastMinStrengthNode,
       cloudNoonBoostNode,
+      weatherGainNode,
       // Every floor's window mesh stays visible for as long as that floor
       // exists in the scene (see this file's own header), not just while it is
       // the VIEWED floor — so on a multi-floor map, every hidden floor was
@@ -584,12 +628,67 @@ export function createWindowSurfaceSubsystem({
     if (!b) return null;
     const w = rect.maxX - rect.minX;
     const h = rect.maxY - rect.minY;
+    // + the sun drift's reach (SUN & ROOMS): light read from a painted spot lands up to that far beyond it.
+    const pad = WINDOW_BOUNDS_PAD_PX + roomState.padPx;
     return {
-      minX: Math.max(rect.minX, rect.minX + b.minU * w - WINDOW_BOUNDS_PAD_PX),
-      minY: Math.max(rect.minY, rect.minY + b.minV * h - WINDOW_BOUNDS_PAD_PX),
-      maxX: Math.min(rect.maxX, rect.minX + b.maxU * w + WINDOW_BOUNDS_PAD_PX),
-      maxY: Math.min(rect.maxY, rect.minY + b.maxV * h + WINDOW_BOUNDS_PAD_PX),
+      minX: Math.max(rect.minX, rect.minX + b.minU * w - pad),
+      minY: Math.max(rect.minY, rect.minY + b.minV * h - pad),
+      maxX: Math.min(rect.maxX, rect.minX + b.maxU * w + pad),
+      maxY: Math.min(rect.maxY, rect.minY + b.maxV * h + pad),
     };
+  }
+
+  /** Re-crop the quad (and the mask lookup that rides on it) after the drift pad changed. */
+  function recropForPad() {
+    if (!loadedContentBoundsUv || !loadedMaskRect) return;
+    contentBoundsWorld = toWorldBounds(loadedContentBoundsUv, loadedMaskRect);
+    paddedBoundsUv = toUvBounds(contentBoundsWorld, loadedMaskRect);
+    if (paddedBoundsUv) {
+      surface.setMaskUvBounds(paddedBoundsUv);
+      pushUvPerWorldPx();
+    }
+    cropGeometry();
+  }
+
+  /**
+   * SUN & ROOMS, once per frame: the dials, the floor's room map (built by the shared cache only when its walls or
+   * `_Outdoors` change), the sun, and the quad pad. Uniforms only — never a material rebuild.
+   * @param {number} floorIndex @param {object} state
+   */
+  function syncRoom(floorIndex, state) {
+    const room = surface.roomLight;
+    if (!room) return;
+    const look = resolveRoomLook(state.params ?? {});
+    const lookKey = [
+      look.smear,
+      look.smearKeep,
+      look.wallFadePx,
+      look.wallFadeStrength,
+      look.sideBoost,
+      look.sideDim,
+    ].join('|');
+    if (lookKey !== roomState.lookKey || roomState.pushedTo !== room) {
+      roomState.lookKey = lookKey;
+      room.setLook(look);
+    }
+
+    const entry = getRoomMap(floorIndex, { thicknessPx: look.wallThicknessPx });
+    const mapChanged = !!entry && entry !== roomState.entry;
+    if (mapChanged) roomState.entry = entry;
+    if (entry && entry.texture && (mapChanged || roomState.pushedTo !== room)) {
+      room.setRoomMap({ roomTexture: entry.texture, fieldTexture: entry.fieldTexture, spec: entry.map.spec });
+      roomState.pushedTo = room;
+    }
+
+    const frame = resolveRoomSunFrame(getEnvSun(), look);
+    room.setFrame(frame);
+    roomState.frame = frame;
+
+    const padPx = roomState.entry ? Math.ceil(look.maxDriftPx * look.drift) : 0;
+    if (padPx !== roomState.padPx) {
+      roomState.padPx = padPx;
+      recropForPad();
+    }
   }
 
   /**
@@ -783,7 +882,8 @@ export function createWindowSurfaceSubsystem({
       rain01,
       wet01,
       look,
-      windSpeed01: Number.isFinite(wind?.speed01) ? wind.speed01 : 0,
+      // Beaufort strength — tuned on the old dial (2026-10-27).
+      windSpeed01: Number.isFinite(wind?.speed01) ? windStrength01ForSpeed01(wind.speed01) : 0,
       gust01: Number.isFinite(wind?.gustiness01) ? wind.gustiness01 : 0,
     });
     slideClock =
@@ -854,6 +954,7 @@ export function createWindowSurfaceSubsystem({
 
     ensureMaskImage(floorIndex);
     syncRain(floorIndex, state);
+    syncRoom(floorIndex, state);
 
     // THE EXPECTED DEPTH (2026-08-05). Pushed every frame and NEVER gated on
     // a cached key, unlike the old `uFloorIndex01` (a static property of
@@ -884,10 +985,18 @@ export function createWindowSurfaceSubsystem({
     // changes continuously as day turns to night, but only needs a real
     // uniform WRITE when the resolved number actually moves.
     const rawAmbientRgb = getAmbientCeilingRgb();
-    ambientCeiling =
-      Array.isArray(rawAmbientRgb) && rawAmbientRgb.length === 3 && rawAmbientRgb.every(Number.isFinite)
-        ? Math.max(rawAmbientRgb[0], rawAmbientRgb[1], rawAmbientRgb[2], 0)
-        : WINDOW_DEFAULT_AMBIENT_CEILING;
+    const ambientValid =
+      Array.isArray(rawAmbientRgb) && rawAmbientRgb.length === 3 && rawAmbientRgb.every(Number.isFinite);
+    ambientCeiling = ambientValid
+      ? Math.max(rawAmbientRgb[0], rawAmbientRgb[1], rawAmbientRgb[2], 0)
+      : WINDOW_DEFAULT_AMBIENT_CEILING;
+    // THE OUTDOOR MATCH's two ends (`window-weather.js#windowTargetLight`).
+    const indoorRgb = ambientValid ? rawAmbientRgb : [ambientCeiling, ambientCeiling, ambientCeiling];
+    const rawOutdoorRgb = getOutdoorLightRgb();
+    const outdoorRgb =
+      Array.isArray(rawOutdoorRgb) && rawOutdoorRgb.length === 3 && rawOutdoorRgb.every(Number.isFinite)
+        ? rawOutdoorRgb
+        : indoorRgb;
     const key = [
       state.enabled ? 1 : 0,
       state.debugChannel ?? 0,
@@ -895,9 +1004,22 @@ export function createWindowSurfaceSubsystem({
       p.contrast,
       p.dawnDuskTint,
       p.nightTint,
+      p.goldenBoost,
+      p.tintAmount,
+      p.outdoorHue,
+      p.ccExposure,
+      p.ccContrast,
+      p.ccSaturation,
+      p.ccTemperature,
+      p.ccTint,
+      p.ccColorFilter,
+      p.ccGamma,
       dayFactor01.toFixed(4),
       twilight01.toFixed(4),
       ambientCeiling.toFixed(4),
+      indoorRgb.map((v) => v.toFixed(4)).join(','),
+      outdoorRgb.map((v) => v.toFixed(4)).join(','),
+      p.outdoorMatch,
       p.glassWarpPx,
       p.glassDispersion,
       p.glassScale,
@@ -932,8 +1054,31 @@ export function createWindowSurfaceSubsystem({
       // `sky-access.js`'s own fill-hue chain uses over the same two signals.
       const dawnDusk = Array.isArray(p.dawnDuskTint) ? p.dawnDuskTint : WINDOW_DEFAULT_DAWN_DUSK_TINT_RGB;
       const night = Array.isArray(p.nightTint) ? p.nightTint : WINDOW_DEFAULT_NIGHT_TINT_RGB;
-      const nightToTwilight = lerpRgb(night, dawnDusk, twilight01);
-      surface.setDaylightTint(lerpRgb(nightToTwilight, [1, 1, 1], dayFactor01));
+      // …as a unit-luminance HUE leaning the outdoor light (2026-10-27,
+      // `window-weather.js#windowDaylightTint`) — the light a fully painted
+      // texel lets in is the outdoors, not a brighter light of its own.
+      const hue = windowDaylightTint({
+        dawnDusk,
+        night,
+        twilight01,
+        dayFactor01,
+        goldenBoost: p.goldenBoost,
+        tintAmount: p.tintAmount,
+      });
+      surface.setIndoorLight(indoorRgb);
+      surface.setTargetLight(
+        windowTargetLight({ outdoorRgb, hueRgb: hue, outdoorMatch: p.outdoorMatch, outdoorHue: p.outdoorHue })
+      );
+      surface.setColor({
+        exposure: p.ccExposure,
+        contrast: p.ccContrast,
+        saturation: p.ccSaturation,
+        temperature: p.ccTemperature,
+        tint: p.ccTint,
+        filter: p.ccColorFilter,
+        gamma: p.ccGamma,
+      });
+      surface.setDaylightTint(hue);
       debugChannel = Number.isFinite(state.debugChannel) ? Math.max(0, Math.round(state.debugChannel)) : 0;
       surface.setDebugChannel(debugChannel);
       enabled = state.enabled !== false;
@@ -977,7 +1122,15 @@ export function createWindowSurfaceSubsystem({
      * per-floor by construction, unlike specular's single shared instance,
      * which is why THIS effect gets this hook and specular does not).
      */
-    prefetchMask: ensureMaskImage,
+    prefetchMask(floorIndex) {
+      ensureMaskImage(floorIndex);
+      // The room map is a floor-indexed scene fact like the mask URL (no depth-authority read), so it is safe to
+      // warm here too — the commit frame then finds it built instead of paying for the bake.
+      if (getWindowMaskUrl(floorIndex)) {
+        const look = resolveRoomLook(getWindowRenderState().params ?? {});
+        getRoomMap(floorIndex, { thicknessPx: look.wallThicknessPx });
+      }
+    },
     /** True when there is genuinely something to draw — lets the pass take a
      * true JS early-return rather than issuing a render call for a hidden
      * mesh (Effects.md Law 4: gating by uniform is not gating). */
@@ -1026,6 +1179,15 @@ export function createWindowSurfaceSubsystem({
             litCells: rainFlow.litCells,
             levels: rainFlow.levels,
           },
+        },
+        // SUN & ROOMS: is it compiled, did the room map land, and what the sun is doing to it right now.
+        rooms: {
+          compiled: !!surface.roomLight,
+          map: roomState.entry ? { ...roomState.entry.map.stats, buildMs: roomState.entry.buildMs } : null,
+          throwPx: roomState.frame ? +roomState.frame.throwLenPx.toFixed(1) : 0,
+          lowSun01: roomState.frame ? +roomState.frame.lowSun01.toFixed(3) : 0,
+          padPx: roomState.padPx,
+          uniforms: surface.roomLight ? surface.roomLight.snapshot() : null,
         },
         /** POOL HEALTH — see maskReloadHits' own declaration for the exact
          * hit/miss doctrine. */
@@ -1077,6 +1239,9 @@ export function createWindowSurfaceSubsystem({
       rainFlow.auxTex?.dispose?.();
       neutralDirs?.dispose?.();
       neutralAux?.dispose?.();
+      // The room map texture belongs to the shared cache; only the placeholder is ours.
+      neutralRoom?.dispose?.();
+      neutralField?.dispose?.();
     },
   };
 }

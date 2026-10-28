@@ -122,6 +122,29 @@
  *      chaotic curvature/scatter near doorway transitions and (more subtly,
  *      larger-scale) outdoors, scaling up with overall wind speed.
  *
+ * ============================================================================
+ * 2026-10-27 — REAL SPEED, AND A SECOND COSTUME (WIND TRAILS)
+ * ============================================================================
+ * The author: *"Almost nothing seemed to be reacting in time with these high
+ * red large arrow waves"* and *"a grid space in Foundry in PF2E is 5ft x 5ft -
+ * so you could try and find real world values"*. This engine used to turn the
+ * field into px/s with `GALE_MPS × pxPerMeter × outdoorGaleBoost`, where
+ * `pxPerMeter` was in fact Foundry's px per GRID DISTANCE UNIT — px per FOOT on
+ * a 5 ft map — so every ribbon crawled at ~1/3.3 of the speed it claimed, and a
+ * hand-set 2× boost sat on top. Now a head's target velocity is the field's own
+ * vector converted at the scene's real px/m (`world/wind-field.js#
+ * windFieldPxPerSecPerUnit`, the handle's live `ambient.pixelsPerMetre`): the
+ * heads move EXACTLY as fast as the air the overlay draws, gusts included. The
+ * visibility gate is in real m/s too.
+ *
+ * The same engine now also draws WIND TRAILS (`effects/wind-trails.js`) —
+ * short-lived (1-2 s), fat, tapered white strokes that curl as they die. The
+ * differences are all declaration params read below (all optional; WIND_GUSTS
+ * omits them and keeps its own look): `profile: 'spindle'` (fat body, pointed
+ * both ends), `swirl` (each trail curls one way, harder as it ages),
+ * `segmentSec` (the history is sampled on a fixed clock, so a trail's length is
+ * seconds-of-path at any frame rate), `lifeJitter`, and `blending: 'normal'`.
+ *
  * @module effects/particles/gust-runtime
  */
 
@@ -134,8 +157,14 @@ import {
   WALL_MOMENTUM_GUARD_LOW,
   WALL_MOMENTUM_GUARD_HIGH,
   WALL_IMPACT_CHAOS_GAIN,
+  WIND_DEFAULT_PIXELS_PER_METRE,
+  WIND_GUST_PEAK,
+  windFieldPxPerSecPerUnit,
+  windStrength01ForSpeed01,
+  windTravelPxPerSec,
 } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
+import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
 
 const log = createLogger('gust-runtime');
 
@@ -143,14 +172,14 @@ const log = createLogger('gust-runtime');
  * than dead-still ribbons (see candle-flame-render.js's own identical constant). */
 const TIER0_WIND_HANDLE = createWindHandle();
 
-/**
- * GALE-FORCE CALIBRATION — identical anchor to particle-runtime.js's own
- * `GALE_MPS` (Beaufort 8, `v ≈ 0.836 × B^1.5 m/s` ≈ 18.92 m/s, docs/reference/
- * wind-simulation-research.md §5.5). Kept as its own const rather than imported
- * so the two runtimes stay independently readable; if a third place needs it,
- * promote it to a shared constant then.
- */
-const GALE_MPS = 0.836 * Math.pow(8, 1.5); // ≈ 18.92 m/s
+/** A trail's loop radius, metres (≈ 1 square on a 5 ft grid), ±25% per trail —
+ *  small enough that a whole loop fits inside the visible stroke. */
+const SWIRL_RADIUS_M = 1.5;
+/** Share of trails that loop at all; the rest sweep straight through. */
+const SWIRL_LOOP_SHARE = 0.55;
+
+/** Field magnitude → m/s (the dial is linear to 70 m/s — `world/wind-scale.js`). */
+const MPS_PER_FIELD_UNIT = windFieldPxPerSecPerUnit(1);
 
 /**
  * Build the ribbon-trail engine for a single declared gust system.
@@ -161,7 +190,7 @@ const GALE_MPS = 0.836 * Math.pow(8, 1.5); // ≈ 18.92 m/s
  * @param {{minX:number,minY:number,maxX:number,maxY:number}} opts.worldRect - where heads live (a head that drifts out respawns within it, so gusts stay present as the camera pans/zooms — the same exit-test the dot engine uses).
  * @param {number} [opts.zDepth] - world z for the ribbons (must be inside the camera frustum).
  * @param {object} [opts.windHandle] - THE wind handle (`world/wind-access.js`, Wind.md §5.1) — the live ambient uniform nodes AND the geometry-derived per-cell arrays, as one object. Its `kernel()` shape owns the nearest-cell lookup and the ambient-bias arithmetic this file used to carry its own copy of. Refresh on a later rebake via {@link updateWind}.
- * @param {number} [opts.pxPerMeter] - Foundry's real px-per-grid-distance-unit (construction-time only), turning windSpeed01 into a physical world-px/sec ceiling.
+ * @param {number} [opts.pxPerMeter] - RETIRED 2026-10-27 (it was px per grid-distance UNIT — feet on most maps — not per metre). Ignored when the handle carries `ambient.pixelsPerMetre`; otherwise a fallback.
  * @returns {{scene:*, capacity:number, init:(r:*)=>void, step:(r:*, frame:object)=>void, setWorldRect:(rect:object)=>void, updateWind:(h:object|null)=>void, debugState:()=>object}}
  */
 export function createGustEngine({
@@ -170,7 +199,9 @@ export function createGustEngine({
   worldRect,
   zDepth = 0,
   windHandle = TIER0_WIND_HANDLE,
-  pxPerMeter = 100,
+  pxPerMeter = WIND_DEFAULT_PIXELS_PER_METRE,
+  /** `buf:scene.illum` — ribbons darken in a building's shadow like the ground. Absent ⇒ compiled out. */
+  illumTexture = null,
 }) {
   const TSL = THREE.TSL;
   const {
@@ -189,6 +220,7 @@ export function createGustEngine({
     pow,
     attribute,
     Loop,
+    max,
   } = TSL;
 
   const p = system?.params ?? {};
@@ -199,6 +231,13 @@ export function createGustEngine({
   const SEG = Math.max(2, Math.floor(p.segments ?? 32));
   const respawnCandidates = Math.max(1, Math.floor(p.respawnCandidates ?? 2));
   const colorRGB = Array.isArray(p.colorRGB) && p.colorRGB.length === 3 ? p.colorRGB : [0.86, 0.92, 1.0];
+  // The trail costume's switches (see this file's 2026-10-27 header). Each is
+  // a JS-time choice — a different graph, never a uniform gate.
+  const spindle = p.profile === 'spindle';
+  const swirlOn = Number.isFinite(p.swirl) && p.swirl >= 0;
+  let segmentSec = Number.isFinite(p.segmentSec) && p.segmentSec > 0 ? p.segmentSec : 0;
+  const lifeJitter = Number.isFinite(p.lifeJitter) ? Math.min(0.9, Math.max(0, p.lifeJitter)) : 0;
+  const maxLengthM = Number.isFinite(p.maxLengthM) && p.maxLengthM > 0 ? p.maxLengthM : 0;
 
   // --- the arena: ONE row per TRAIL (head = a normal particle) --------------
   const arena = new ParticleArena({ budgetBytes: BYTES_PER_PARTICLE * capacity });
@@ -252,13 +291,17 @@ export function createGustEngine({
   const uRectMin = uniform(vec2(worldRect.minX, worldRect.minY));
   const uRectSize = uniform(vec2(worldRect.maxX - worldRect.minX, worldRect.maxY - worldRect.minY));
   const uWindGain = uniform(float(p.windGain ?? 0.9));
-  const uOutdoorGaleBoost = uniform(float(p.outdoorGaleBoost ?? 2));
-  const uMaxSpeedAtGalePxPerSec = float(pxPerMeter * GALE_MPS);
+  // THE REAL SCALE — the handle's live px/m uniform (refreshed per scene by the
+  // viewer), or a construction-time fallback for a handle-less engine.
+  const pixelsPerMetreNode = windHandle?.ambient?.pixelsPerMetre ?? float(pxPerMeter);
+  const pxPerSecPerFieldUnit = windFieldPxPerSecPerUnit(pixelsPerMetreNode);
+  // Visibility thresholds in REAL m/s of local flow.
+  const uGateLoMps = uniform(float(p.gateLoMps ?? 8));
+  const uGateHiMps = uniform(float(Math.max((p.gateLoMps ?? 8) + 0.1, p.gateHiMps ?? 18)));
+  const uSwirl = uniform(float(swirlOn ? p.swirl : 0));
   const uAccelToMaxSeconds = uniform(float(Math.max(0.05, p.accelToMaxSeconds ?? 1.2)));
   const uLifeMs = uniform(float(Math.max(1, p.lifeMs ?? 4000)));
   const uFadeMs = uniform(float(Math.min(p.fadeMs ?? 1200, (p.lifeMs ?? 4000) / 2)));
-  const uFlowLo = uniform(float(p.flowLo ?? 0.12));
-  const uFlowHi = uniform(float(Math.max((p.flowLo ?? 0.12) + 1e-3, p.flowHi ?? 0.35)));
   const uWidthPx = uniform(float(p.widthPx ?? 12));
   const uOpacityMax = uniform(float(p.opacityMax ?? 0.7));
   // Active-trail count (set from windSpeed01 each frame in step()) — a trail
@@ -269,8 +312,17 @@ export function createGustEngine({
   // the kernel appends this frame's head position at exactly one slot and the
   // draw reads the ring relative to it.
   const uHeadSlot = uniform(0);
+  // How many ring slots the strip is drawn over (≤ SEG−1). The ring can only
+  // advance once a frame, so when the wanted history clock is faster than the
+  // frame clock each slot holds MORE path than asked for; drawing over fewer
+  // slots (interpolated) keeps the stroke the length it should be.
+  const uSegSpan = uniform(float(SEG - 1));
 
-  const color = vec3(colorRGB[0], colorRGB[1], colorRGB[2]);
+  // A uniform (not a constant) so Wind Trails' colour control is live.
+  const color = uniform(new THREE.Color(colorRGB[0], colorRGB[1], colorRGB[2]));
+  // How lit the scene is (environmental-light.js#sceneLightLevel). Ribbons draw
+  // after the lighting multiply, so they dim by it themselves.
+  const uSceneLight = uniform(float(1));
 
   // A tiny self-contained hash → [0,1). Same fract(sin(·)) idiom the dot engine
   // uses (deliberately not depending on TSL.hash being exported).
@@ -322,6 +374,13 @@ export function createGustEngine({
     };
   };
 
+  // Each trail's own lifetime — `lifeJitter` spreads them so a population never
+  // pulses in step. Seed-hashed, so it is stable for a trail's whole life.
+  const lifeOf = (seedF) =>
+    lifeJitter > 0
+      ? uLifeMs.mul(float(1 - lifeJitter).add(hash11(seedF.mul(5.31).add(2.9)).mul(float(2 * lifeJitter))))
+      : uLifeMs;
+
   // A random world point inside the current rect, from two hash salts.
   const randPointInRect = (sa, sb) =>
     vec2(uRectMin.x.add(uRectSize.x.mul(hash11(sa))), uRectMin.y.add(uRectSize.y.mul(hash11(sb))));
@@ -340,7 +399,7 @@ export function createGustEngine({
     seed.element(i).assign(fi);
     // Stagger ages across the FULL lifetime so the population starts mid-cycle,
     // not all fading in from birth in lockstep.
-    age.element(i).assign(hash11(fi.mul(3.7)).mul(uLifeMs));
+    age.element(i).assign(hash11(fi.mul(3.7)).mul(lifeOf(fi)));
     custom.element(i).assign(vec4(0, 0, 1, 0));
     const base = int(i).mul(int(SEG));
     Loop(SEG, ({ i: k }) => {
@@ -363,6 +422,7 @@ export function createGustEngine({
     // different question from "what is the wind vector here", which is why the
     // handle exposes it (see its `ambient` field's own doc).
     const windSpeed01 = windHandle.ambient ? windHandle.ambient.speed01 : float(1);
+    const lifeMs = lifeOf(s);
 
     // TARGET velocity (real world px/sec): coherent flow PLUS turbulence, as
     // two SEPARATELY-scaled terms (2026-07-23, see this module's own header,
@@ -376,12 +436,16 @@ export function createGustEngine({
     // coherent term and the ceiling together, keeping the ceiling
     // location-independent (the same coherent/chaos separation
     // particle-runtime.js's own target-velocity assembly already uses).
-    const targetRaw = flowVec
-      .mul(uMaxSpeedAtGalePxPerSec)
-      .mul(uWindGain)
-      .mul(uOutdoorGaleBoost)
-      .add(turbulenceVec.mul(uMaxSpeedAtGalePxPerSec).mul(uWindGain));
-    const ceilingPxPerSec = uMaxSpeedAtGalePxPerSec.mul(windSpeed01).mul(uOutdoorGaleBoost).max(float(1));
+    //
+    // ⭐ 2026-10-27: REAL SPEED. The field's own vector × the scene's px/s per
+    // unit — the air's actual velocity here, gust included, so a head keeps
+    // pace with the overlay's waves. The ceiling is the strongest a gust can
+    // make the prevailing wind (plus headroom for turbulence on top of it).
+    const targetRaw = flowVec.add(turbulenceVec).mul(pxPerSecPerFieldUnit).mul(uWindGain);
+    const ceilingPxPerSec = windSpeed01
+      .mul(pxPerSecPerFieldUnit)
+      .mul(float(WIND_GUST_PEAK * 1.6))
+      .max(float(1));
     const targetSpeed = targetRaw.length();
     const overCeiling = targetSpeed.greaterThan(ceilingPxPerSec);
     const clamped = targetRaw.mul(ceilingPxPerSec.div(targetSpeed.max(float(1))));
@@ -462,7 +526,43 @@ export function createGustEngine({
         chaosAmount: momentumGuardProximity.mul(float(WALL_IMPACT_CHAOS_GAIN)),
       });
     }
-    const next = pos.add(vel.mul(uDtSec));
+    //
+    // THE CURL (swirl). Each trail runs with the air, then — over the back part
+    // of its life — HOOKS into a curl of a fixed real-world radius, turning one
+    // way (seed-picked). A curl's look depends on its radius, not its speed, so
+    // the turn rate is `|v| / R`: a hurricane trail and a breeze trail curl into
+    // the same-sized loop, the fast one just gets there sooner. The heading
+    // offset is integrated in `custom.w` and applied to the MOVE only — the
+    // stored velocity keeps following the field, so the momentum maths above
+    // never fights the curl. (A first cut rotated the target by an angle that
+    // grew with age; at real speeds that drew long straight sticks at random
+    // angles, because the turn was spread over metres of travel.)
+    let moveVel = vel;
+    let swirlTheta = float(0);
+    if (swirlOn) {
+      const ageFrac = age.element(i).div(lifeMs).clamp(float(0), float(1));
+      const turnSign = hash11(s.mul(3.91).add(0.7)).greaterThan(float(0.5)).select(float(1), float(-1));
+      const radiusPx = pixelsPerMetreNode
+        .mul(float(SWIRL_RADIUS_M))
+        .mul(float(0.75).add(hash11(s.mul(7.3)).mul(float(0.5))));
+      // ONE LOOP, measured in ANGLE (the anime wind-line loop): from a third of
+      // the way through its life a looping trail turns at `|v| / R` until it has
+      // turned `swirl × 2π`, then carries on straight. Counting angle rather than
+      // time makes it the same loop at any wind speed.
+      const loops = hash11(s.mul(2.71).add(4.1)).lessThan(float(SWIRL_LOOP_SHARE)).select(uSwirl, float(0));
+      const turned = custom.element(i).w.abs();
+      const stillTurning = turned.lessThan(loops.mul(float(Math.PI * 2))).select(float(1), float(0));
+      const omega = vel
+        .length()
+        .div(radiusPx.max(float(1)))
+        .mul(stillTurning)
+        .mul(smoothstep(float(0.28), float(0.36), ageFrac));
+      swirlTheta = custom.element(i).w.add(turnSign.mul(omega).mul(uDtSec));
+      const ct = cos(swirlTheta);
+      const st = sin(swirlTheta);
+      moveVel = vec2(vel.x.mul(ct).sub(vel.y.mul(st)), vel.x.mul(st).add(vel.y.mul(ct)));
+    }
+    const next = pos.add(moveVel.mul(uDtSec));
 
     // Respawn on leaving the rect OR ageing out (same visual: fresh random spot).
     const outOfBounds = next.x
@@ -470,7 +570,7 @@ export function createGustEngine({
       .or(next.x.greaterThan(uRectMin.x.add(uRectSize.x)))
       .or(next.y.lessThan(uRectMin.y))
       .or(next.y.greaterThan(uRectMin.y.add(uRectSize.y)));
-    const ageExpired = age.element(i).greaterThanEqual(uLifeMs);
+    const ageExpired = age.element(i).greaterThanEqual(lifeMs);
     const shouldRespawn = outOfBounds.or(ageExpired);
 
     // BIASED reseed: pick the windiest of `respawnCandidates` random points, so
@@ -516,10 +616,15 @@ export function createGustEngine({
     // chaos bonus needed here anymore (see this module's own header,
     // checklist item 6, for what used to be here).
     const finalFlow = sampleFlow(finalPos);
-    const gate = smoothstep(uFlowLo, uFlowHi, finalFlow.flowMag.mul(windSpeed01));
+    // In REAL m/s of local flow (2026-10-27) — was `flowMag × windSpeed01`,
+    // which squared the dial and meant nothing physical.
+    const gate = smoothstep(uGateLoMps, uGateHiMps, finalFlow.flowMag.mul(float(MPS_PER_FIELD_UNIT)));
     // x = gate (READ BY THE DRAW's opacityNode below — must stay this exact
     // slot); y/z/w are diagnostic-only (flowMag, openness, head speed).
-    custom.element(i).assign(vec4(gate, finalFlow.flowMag, finalFlow.openness, vel.length()));
+    // w = the curl's integrated heading for a swirling engine (reset to 0 on
+    // respawn), the head speed otherwise.
+    const wSlot = swirlOn ? shouldRespawn.select(float(0), swirlTheta) : vel.length();
+    custom.element(i).assign(vec4(gate, finalFlow.flowMag, finalFlow.openness, wSlot));
 
     // APPEND to the ring: write finalPos to the head slot; on respawn overwrite
     // EVERY slot (collapse the ribbon onto the new spawn point). One branchless
@@ -549,11 +654,20 @@ export function createGustEngine({
   // and `aSide` (-1/+1, which edge) drive positionNode; the actual world
   // position comes from the history buffer, not this template's `position`
   // (which is a required-but-unused dummy). instanceCount = capacity (trails).
-  const vertCount = SEG * 2;
+  //
+  // The strip's cross-section count (`MESH`) is its own number, NOT the history
+  // ring's `SEG`: the ring holds recorded head positions (one per frame at best),
+  // the strip is how many points the line is DRAWN through, read off a
+  // Catmull-Rom curve fitted through those recordings. A fast trail's recordings
+  // are far apart and a straight lerp between them draws corners; a denser strip
+  // over a spline draws the curve the head really took. `meshSegments` therefore
+  // scales with the graphics profile (wind-trails.js), the ring does not need to.
+  const MESH = Math.max(2, Math.floor(p.meshSegments ?? SEG));
+  const vertCount = MESH * 2;
   const positions = new Float32Array(vertCount * 3); // dummy; real pos from the node
   const aSeg = new Float32Array(vertCount);
   const aSide = new Float32Array(vertCount);
-  for (let k = 0; k < SEG; k++) {
+  for (let k = 0; k < MESH; k++) {
     for (let sdx = 0; sdx < 2; sdx++) {
       const vi = k * 2 + sdx;
       aSeg[vi] = k;
@@ -562,7 +676,7 @@ export function createGustEngine({
   }
   // Two triangles per gap between adjacent cross-sections (SEG-1 gaps).
   const indices = [];
-  for (let k = 0; k < SEG - 1; k++) {
+  for (let k = 0; k < MESH - 1; k++) {
     const a = k * 2; // left  @ k
     const b = k * 2 + 1; // right @ k
     const c = (k + 1) * 2; // left  @ k+1
@@ -578,7 +692,8 @@ export function createGustEngine({
 
   const segNode = attribute('aSeg', 'float');
   const sideNode = attribute('aSide', 'float');
-  const segMax = float(SEG - 1);
+  const segMax = float(SEG - 1); // last RING slot
+  const meshMax = float(MESH - 1); // last strip cross-section
 
   // Ring slot for a given segment index (0=tail .. SEG-1=head). The head reads
   // the slot written THIS frame (uHeadSlot); older segments read progressively
@@ -597,15 +712,44 @@ export function createGustEngine({
         .add(int(ringOf(segF)))
     );
 
+  // A strip vertex's position along the drawn span, in (fractional) ring slots
+  // (strip index 0..MESH-1 maps onto the drawn span's tail..head).
+  const spanSeg = (segF) => segMax.sub(meshMax.sub(segF).mul(uSegSpan.div(meshMax)));
+  // The ring read through a uniform Catmull-Rom spline between the two slots
+  // either side of the vertex, with the exact curve tangent. Returns
+  // vec4(position.xy, tangent.xy). Neighbour slots clamp at the ring ends.
+  const readSegCurve = (segF) => {
+    const f = spanSeg(segF).clamp(float(0), segMax);
+    const lo = f.floor();
+    const k = f.sub(lo);
+    const at = (j) => readSeg(j.clamp(float(0), segMax));
+    const p0 = at(lo.sub(float(1)));
+    const p1 = at(lo);
+    const p2 = at(lo.add(float(1)));
+    const p3 = at(lo.add(float(2)));
+    const b = p2.sub(p0);
+    const c = p0
+      .mul(float(2))
+      .sub(p1.mul(float(5)))
+      .add(p2.mul(float(4)))
+      .sub(p3);
+    const d = p1
+      .mul(float(3))
+      .sub(p0)
+      .sub(p2.mul(float(3)))
+      .add(p3);
+    const k2 = k.mul(k);
+    const k3 = k2.mul(k);
+    const pos = p1.mul(float(2)).add(b.mul(k)).add(c.mul(k2)).add(d.mul(k3)).mul(float(0.5));
+    const tn = b.add(c.mul(k.mul(float(2)))).add(d.mul(k2.mul(float(3))));
+    return vec4(pos.x, pos.y, tn.x, tn.y);
+  };
+
   const material = new THREE.NodeMaterial();
   material.positionNode = Fn(() => {
-    const center = readSeg(segNode);
-    // Tangent from the neighbouring cross-sections (clamped at the ends).
-    const prevSeg = segNode.sub(float(1)).max(float(0));
-    const nextSeg = segNode.add(float(1)).min(segMax);
-    const a = readSeg(prevSeg);
-    const b = readSeg(nextSeg);
-    const tan = b.sub(a);
+    const curve = readSegCurve(segNode);
+    const center = curve.xy;
+    const tan = curve.zw;
     const tanLen = tan.length();
     // Degenerate (collapsed fresh trail): fall back to the head's velocity
     // direction, then to +x, so normalize never divides by zero.
@@ -615,13 +759,32 @@ export function createGustEngine({
     const tDir = tanLen.greaterThan(float(1e-4)).select(tan.div(tanLen.max(float(1e-4))), vDir);
     const normal = vec2(tDir.y.negate(), tDir.x);
     // Comet taper: full width at the head (t01=1), → 0 at the tail (t01=0).
-    const t01 = segNode.div(segMax);
-    const halfW = uWidthPx.mul(pow(t01, float(0.7))).mul(float(0.5));
+    // SPINDLE (trails): pointed at BOTH ends like an anime wind line —
+    // `sin(πt)^0.85`, symmetric, so the head is as sharp as the tail (author,
+    // 2026-10-27: "Those lines aren't tapered at both ends") — and thinning
+    // as the trail fades.
+    const t01 = segNode.div(meshMax);
+    let halfW;
+    if (spindle) {
+      const body = pow(sin(t01.mul(float(Math.PI))).max(float(0)), float(0.85));
+      const ageMs = age.element(instanceIndex);
+      const lifeMsDraw = lifeOf(seed.element(instanceIndex));
+      const fadeIn = ageMs.div(uFadeMs).clamp(float(0), float(1));
+      const fadeOut = lifeMsDraw.sub(ageMs).div(uFadeMs).clamp(float(0), float(1));
+      const thin = pow(fadeIn.min(fadeOut), float(0.6));
+      halfW = uWidthPx.mul(body).mul(thin).mul(float(0.5));
+    } else {
+      halfW = uWidthPx.mul(pow(t01, float(0.7))).mul(float(0.5));
+    }
     const world = center.add(normal.mul(sideNode).mul(halfW));
     return vec3(world.x, world.y, float(zDepth));
   })();
 
-  material.colorNode = color;
+  const shade = buildWeatherShadeNode(TSL, {
+    illumTexNode: illumTexture ? TSL.texture(illumTexture) : null,
+    uSceneLight,
+  });
+  material.colorNode = shade ? color.mul(uSceneLight).mul(shade) : color.mul(uSceneLight);
 
   // Per-vertex fade data carried to the fragment stage (storage/attribute reads
   // are vertex-stage only on this renderer — same reason the dot engine bundles
@@ -632,9 +795,9 @@ export function createGustEngine({
     const active = float(trail).lessThan(uActiveTrails).select(float(1), float(0));
     const ageMs = age.element(trail);
     const fadeIn = ageMs.div(uFadeMs).clamp(float(0), float(1));
-    const fadeOut = uLifeMs.sub(ageMs).div(uFadeMs).clamp(float(0), float(1));
+    const fadeOut = lifeOf(seed.element(trail)).sub(ageMs).div(uFadeMs).clamp(float(0), float(1));
     const lifeFade = fadeIn.min(fadeOut);
-    const t01 = segNode.div(segMax);
+    const t01 = segNode.div(meshMax);
     return vec4(t01, gate.mul(active), lifeFade, sideNode);
   })().toVarying('vGust');
 
@@ -645,16 +808,21 @@ export function createGustEngine({
     const side = vGust.w;
     // Soft edges across the ribbon width: side interpolates -1..+1, so
     // |side| is 0 at the centre-line and 1 at the two edges.
-    const edgeSoft = float(1).sub(side.abs());
-    // Head brighter than tail (comet).
-    const tailAlpha = pow(t01.clamp(float(0), float(1)), float(1.2));
+    // A spindle's edge is a smooth round falloff (sleek), a comet's linear.
+    const edgeSoft = spindle ? max(float(1).sub(side.mul(side)), float(0)) : float(1).sub(side.abs());
+    // Head brighter than tail (comet); a spindle only fades its last stretch.
+    const tailAlpha = spindle
+      ? smoothstep(float(0), float(0.2), t01.clamp(float(0), float(1)))
+      : pow(t01.clamp(float(0), float(1)), float(1.2));
     return gateActive.mul(lifeFade).mul(edgeSoft).mul(tailAlpha).mul(uOpacityMax);
   })();
 
   material.transparent = true;
   material.depthTest = false;
   material.depthWrite = false;
-  material.blending = THREE.AdditiveBlending;
+  // Trails are WHITE strokes and must read as white over a bright map too, so
+  // they composite normally; the gust ribbons stay additive light.
+  material.blending = p.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending;
   // DoubleSide sidesteps winding under the flipped camera — the same fix the
   // candle billboard and the dot engine both needed (a wrong winding culls the
   // whole ribbon silently under FrontSide).
@@ -667,9 +835,14 @@ export function createGustEngine({
 
   let seeded = false;
   let headSlot = 0;
+  // Fixed-clock history (segmentSec): time since the ring last advanced.
+  let segmentAccSec = 0;
+  let slotSecEma = 1 / 60;
   let lastRectArea = null;
-  const minTrails = Math.max(1, Math.floor(p.minTrails ?? 3));
-  const maxTrails = Math.max(minTrails, Math.floor(p.maxTrails ?? 24));
+  const minTrails = Math.max(0, Math.floor(p.minTrails ?? 3));
+  const maxTrails = Math.max(minTrails, Math.min(capacity, Math.floor(p.maxTrails ?? 24)));
+  // Live look controls (Wind Trails' Studio card) — see `setLook`.
+  let densityMul = 1;
 
   return {
     scene,
@@ -686,21 +859,53 @@ export function createGustEngine({
     /**
      * Advance one frame. Synchronous compute (never in-frame readback).
      * @param {*} renderer
-     * @param {{dtSec:number, tMs:number, worldRect?:object}} frame
+     * @param {{dtSec:number, tMs:number, worldRect?:object, sceneLight01?:number}} frame
      */
-    step(renderer, { dtSec, tMs, worldRect: rect }) {
+    step(renderer, { dtSec, tMs, worldRect: rect, sceneLight01 }) {
       if (rect) this.setWorldRect(rect);
+      if (Number.isFinite(sceneLight01)) uSceneLight.value = Math.min(1, Math.max(0, sceneLight01));
       uDtSec.value = Math.min(0.05, Math.max(0, dtSec || 0));
       uTimeMs.value = tMs || 0;
       // Advance the ring write-head BEFORE the kernel appends, so this frame's
       // head position lands in `headSlot` and the draw (later this frame) reads
       // the ring relative to the same value.
-      headSlot = (headSlot + 1) % SEG;
+      //
+      // With `segmentSec` the ring advances on a fixed clock instead of every
+      // frame; between advances the kernel keeps overwriting the SAME head slot,
+      // so the head still moves smoothly and the trail spans
+      // `SEG × segmentSec` seconds of path at any frame rate.
+      if (segmentSec > 0) {
+        // `maxLengthM` caps how long a trail can be on the MAP: at hurricane
+        // speed a fixed seconds-of-path would draw strokes many squares long.
+        // Past the cap the history clock runs faster instead.
+        let segDt = segmentSec;
+        if (maxLengthM > 0) {
+          const ppm = Number(windHandle.ambient?.pixelsPerMetre?.value ?? pxPerMeter);
+          const pxs = Math.max(1, windTravelPxPerSec(windHandle.ambient?.speed01?.value ?? 0, ppm));
+          segDt = Math.min(segmentSec, (maxLengthM * ppm) / (pxs * SEG));
+        }
+        segmentAccSec += uDtSec.value;
+        if (segmentAccSec >= segDt) {
+          segmentAccSec = Math.min(segmentAccSec - segDt, segDt);
+          headSlot = (headSlot + 1) % SEG;
+        }
+        // Each slot really spans max(segDt, frame dt) of path — draw only as
+        // many as make up the wanted `SEG × segDt` seconds.
+        slotSecEma += (Math.max(segDt, uDtSec.value) - slotSecEma) * 0.1;
+        uSegSpan.value = Math.max(2, Math.min(SEG - 1, ((SEG - 1) * segDt) / Math.max(1e-4, slotSecEma)));
+      } else {
+        headSlot = (headSlot + 1) % SEG;
+      }
       uHeadSlot.value = headSlot;
-      // "A few, more when windier": active count follows windSpeed01 on a sqrt
-      // curve (mid settings pulled up so a breeze already reads busier than calm).
-      const w = Math.max(0, Math.min(1, windHandle.ambient?.speed01?.value ?? 1));
-      uActiveTrails.value = Math.round(minTrails + (maxTrails - minTrails) * Math.sqrt(w));
+      // "A few, more when windier": active count follows the wind's Beaufort
+      // strength on a sqrt curve (mid settings pulled up so a breeze already
+      // reads busier than calm). Strength, not the raw dial, so the count at a
+      // given real speed is what it was tuned to (`windStrength01ForSpeed01`).
+      const w = windStrength01ForSpeed01(windHandle.ambient?.speed01?.value ?? 1);
+      uActiveTrails.value = Math.min(
+        capacity,
+        Math.round((minTrails + (maxTrails - minTrails) * Math.sqrt(w)) * densityMul)
+      );
       if (!seeded) this.init(renderer);
       renderer.compute(updateKernel);
     },
@@ -742,12 +947,37 @@ export function createGustEngine({
       windHandleVersion = nextHandle.version;
     },
 
+    /**
+     * Live look controls (Wind Trails' Studio card) — uniforms only, so a
+     * slider never rebuilds a kernel. Every field optional.
+     * @param {{density?:number, widthPx?:number, opacity?:number, swirl?:number,
+     *   lifeSec?:number, minSpeedMps?:number, colorRGB?:number[], lengthSec?:number}} look
+     */
+    setLook(look = {}) {
+      if (Number.isFinite(look.density)) densityMul = Math.max(0, look.density);
+      if (Number.isFinite(look.widthPx)) uWidthPx.value = Math.max(0, look.widthPx);
+      if (Number.isFinite(look.opacity)) uOpacityMax.value = Math.max(0, Math.min(1, look.opacity));
+      if (Number.isFinite(look.swirl) && swirlOn) uSwirl.value = Math.max(0, look.swirl);
+      if (Number.isFinite(look.lifeSec) && look.lifeSec > 0) {
+        uLifeMs.value = look.lifeSec * 1000;
+        uFadeMs.value = Math.min(uFadeMs.value, uLifeMs.value / 2);
+      }
+      if (Number.isFinite(look.minSpeedMps)) {
+        uGateLoMps.value = Math.max(0, look.minSpeedMps);
+        uGateHiMps.value = uGateLoMps.value * 1.8 + 1;
+      }
+      if (Array.isArray(look.colorRGB) && look.colorRGB.length === 3) color.value.setRGB(...look.colorRGB);
+      // Trail LENGTH in seconds of path — only for a fixed-clock engine.
+      if (Number.isFinite(look.lengthSec) && look.lengthSec > 0 && segmentSec > 0) segmentSec = look.lengthSec / SEG;
+    },
+
     /** For the debug panel: prove the engine is alive without a screenshot. */
     debugState() {
       return {
         system: system.id,
         capacity,
         segments: SEG,
+        meshSegments: MESH,
         seeded,
         activeTrails: uActiveTrails.value,
         headSlot,

@@ -24,6 +24,8 @@ import {
   massSmokeKeep,
   massSootiness,
   viewCameraHeight,
+  billowCameraHeight,
+  BILLOW_CAMERA_PER_EYE,
   MAX_CLUSTER_RADIUS_M,
 } from '../fire-billow-engine.js';
 import { LOBE_STRIDE, KIND_FLAME, KIND_SMOKE, KIND_COAL, MASS_SMOKE_MAX } from '../fire-billow-geometry.js';
@@ -717,7 +719,8 @@ export function run(t) {
       return n ? sum / n : 0;
     };
     const calm = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 0, dirDeg }));
-    const gale = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 0.6, dirDeg }));
+    // 0.25 = 17.5 m/s, a Beaufort 8 gale on the linear-to-70 dial (2026-10-27).
+    const gale = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 0.25, dirDeg }));
     const hurricane = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 1, dirDeg }));
     const sealed = centroidAlongWind(makeWind({ openness: 0, sky: 0, speed01: 1, dirDeg }));
     const doorway = centroidAlongWind(makeWind({ openness: 0.5, sky: 0, speed01: 1, dirDeg }));
@@ -858,6 +861,25 @@ export function run(t) {
     t.ok(
       'the author’s hue shift (degrees) reaches the look in radians',
       near(fuelHue, Math.PI / 2, 1e-6) || Math.abs(fuelHue) > 0
+    );
+  }
+
+  // ── THE SHARED EYE (2026-10-28): the billows' camera is a fixed multiple of the scene eye ──
+  {
+    const rect = { minX: 0, maxX: 2400 };
+    t.ok(
+      'with an eye, the camera is the eye times the billows’ ratio',
+      billowCameraHeight(rect, { height: 1500 }) === 1500 * BILLOW_CAMERA_PER_EYE
+    );
+    t.ok('without one, the old view-width camera', billowCameraHeight(rect, null) === viewCameraHeight(rect));
+    t.ok('a bad eye falls back too', billowCameraHeight(rect, { height: 0 }) === viewCameraHeight(rect));
+    // At a 16:9 view and the default 45° eye (2.414 half-heights), the ratio reproduces the old 3 half-widths.
+    const halfH = 675;
+    const eyeH = halfH / Math.tan((22.5 * Math.PI) / 180);
+    const old = viewCameraHeight({ minX: 0, maxX: 2 * halfH * (16 / 9) });
+    t.ok(
+      '⭐ the ratio keeps the tuned lean at 16:9 and 45°',
+      Math.abs(billowCameraHeight(rect, { height: eyeH }) / old - 1) < 0.02
     );
   }
 

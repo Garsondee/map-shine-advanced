@@ -299,11 +299,13 @@ export function createFireSubsystem({
    * @param {*} renderer - REQUIRED; `renderer.compute()` has no other source.
    * @param {number} nowMs @param {number} dtSec
    * @param {object} [worldRect] - the visible rect.
+   * @param {{x:number,y:number,height:number}|null} [eye] - the frame's scene eye (`scene/scene-eye.js`), the one
+   *   perspective the flames, embers, Table and floors share. Absent ⇒ each engine's own camera.
    */
-  function sync(renderer, nowMs, dtSec, worldRect) {
+  function sync(renderer, nowMs, dtSec, worldRect, eye = null) {
     profiler?.beginById('light.fireSync');
     try {
-      syncUnguarded(renderer, nowMs, dtSec, worldRect);
+      syncUnguarded(renderer, nowMs, dtSec, worldRect, eye);
     } finally {
       profiler?.endById('light.fireSync');
     }
@@ -329,7 +331,7 @@ export function createFireSubsystem({
    * whole function would force re-indenting every line, and a thrown error must still close the bracket regardless of
    * which of this function's several early returns would otherwise have skipped that.
    */
-  function syncUnguarded(renderer, nowMs, dtSec, worldRect) {
+  function syncUnguarded(renderer, nowMs, dtSec, worldRect, eye = null) {
     const state = getFireRenderState() ?? {};
     const windHandle = getWindHandle?.() ?? null;
     const fires = firesWithGeometricWindExposure(Array.isArray(state.fires) ? state.fires : [], windHandle);
@@ -426,6 +428,7 @@ export function createFireSubsystem({
         mPerPx,
         quality: firePlan.spriteCountScale,
         expectedDepth,
+        eye,
       });
       lifeByFire = res.lifeByFire;
     }
@@ -493,7 +496,7 @@ export function createFireSubsystem({
           (tune.activeCount ?? PER_FIRE[kind]) * Math.max(1, fireCount) * firePlan.spriteCountScale
         ),
       });
-      engine.step(renderer, { dtSec, tMs: nowMs, worldRect });
+      engine.step(renderer, { dtSec, tMs: nowMs, worldRect, eye });
     }
 
     // THE LIGHT IS THE FLAMES' OWN BRIGHTNESS (2026-10-20, mmp-26u), now scaled by each fire's LIFE: a fire the rain has

@@ -13,7 +13,7 @@
  * durations under 300ms, nothing scales from 0, press feedback on every
  * pressable thing, hover only where hover exists.
  */
-import { studioCss, POPOUT_CLASS } from '../rooms/studio/studio-style.js';
+import { studioCss } from '../rooms/studio/studio-style.js';
 
 const ROOM = 'msa-studio';
 const ACCENTS = ['--shine', '--c-particles', '--c-atmos', '--c-post', '--c-system'];
@@ -46,8 +46,9 @@ export function run(t) {
     css.split('{').length === css.split('}').length
   );
   ok(
-    'the pop-out class is exported and its rules are present',
-    POPOUT_CLASS === 'msa-studio-pop' && css.includes(`.${POPOUT_CLASS}{`)
+    'the Effects library and its one-effect editor have their rules (tiles, groups, sticky jump bar)',
+    ['.msa-etile{', '.msa-libgrid{', '.msa-libhead{', '.msa-jump{', '.msa-section{'].every((s) => css.includes(s)) &&
+      /\.msa-jump\{position:sticky/.test(css)
   );
 
   // ---- motion ----------------------------------------------------------------

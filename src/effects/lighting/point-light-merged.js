@@ -46,7 +46,8 @@
  * @module effects/lighting/point-light-merged
  */
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
-import { buildPointLightSharedTerms } from './point-light-illumination.js';
+import { getSafeProfile } from '../../core/safe-mode.js';
+import { buildPointLightSharedTerms, softEdgeEnvelope } from './point-light-illumination.js';
 
 /**
  * @param {object} args
@@ -164,17 +165,28 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
 
   let illumFinalColor = illumDefaultSeed;
   let skipExposure = false;
+  let presence01 = null;
   if (animation?.buildIlluminationSeed) {
     const { speedRaw: uSpeedRaw, reverseSign: uReverseSign, seed: uSeed, intensityRaw: uIntensityRaw } = anim;
     const time = buildAnimationTimeNode(THREE.TSL, { uSpeedRaw, uReverseSign, uSeed, uGlobalTimeMs });
     let wind;
+    let windHistory;
     let uWindResponse;
-    if (windInputs) {
+    if (windInputs && getSafeProfile().lightWind) {
       uWindResponse = windInputs.response;
-      wind = windHandle.node(THREE.TSL, {
+      wind = windHandle.strengthNode(THREE.TSL, {
         centerXY: windInputs.center,
         time: uGlobalTimeMs,
+        baked: 'now', // READ the per-frame baked field (epic mmp-fpu)
       });
+      // THE CANDLE'S MEMORY (2026-10-27, `effects/candle-wind-state.js`) — the
+      // field's gusts at the same point at any past moment, so a candle light can
+      // stay out after a snuff and regrow with its flame.
+      windHistory = {
+        at: windHandle.gustMagnitudeAt(THREE.TSL, { centerXY: windInputs.center }),
+        history: windHandle.gustHistory?.(THREE.TSL, { centerXY: windInputs.center }),
+        timeMs: uGlobalTimeMs,
+      };
     }
     const seeded = animation.buildIlluminationSeed({
       THREE,
@@ -190,10 +202,12 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
       computeSwitchColorBand,
       quality: animationQuality,
       wind,
+      windHistory,
       windResponse: uWindResponse,
     });
     illumFinalColor = seeded.finalColor;
     skipExposure = seeded.skipExposure === true;
+    presence01 = seeded.presence01 ?? null;
   }
 
   let illumFinalColorExposed;
@@ -256,7 +270,9 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     backgroundFloor = backgroundFloor.mul(cloudVis);
   }
 
-  const illumFinal = mix(backgroundFloor, illumFinalColorExposed, combinedFalloff);
+  // Soft rim + snuffed flame fade to black — see point-light-illumination.js#softEdgeEnvelope.
+  let illumFinal = mix(backgroundFloor, illumFinalColorExposed, combinedFalloff).mul(softEdgeEnvelope(THREE.TSL, dist));
+  if (presence01) illumFinal = illumFinal.mul(presence01);
   const illumAlpha = float(1);
 
   // ============================================================================
@@ -273,13 +289,23 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     const { speedRaw: uSpeedRaw, reverseSign: uReverseSign, seed: uSeed, intensityRaw: uIntensityRaw } = anim;
     const time = buildAnimationTimeNode(THREE.TSL, { uSpeedRaw, uReverseSign, uSeed, uGlobalTimeMs });
     let wind;
+    let windHistory;
     let uWindResponse;
-    if (windInputs) {
+    if (windInputs && getSafeProfile().lightWind) {
       uWindResponse = windInputs.response;
-      wind = windHandle.node(THREE.TSL, {
+      wind = windHandle.strengthNode(THREE.TSL, {
         centerXY: windInputs.center,
         time: uGlobalTimeMs,
+        baked: 'now', // READ the per-frame baked field (epic mmp-fpu)
       });
+      // THE CANDLE'S MEMORY (2026-10-27, `effects/candle-wind-state.js`) — the
+      // field's gusts at the same point at any past moment, so a candle light can
+      // stay out after a snuff and regrow with its flame.
+      windHistory = {
+        at: windHandle.gustMagnitudeAt(THREE.TSL, { centerXY: windInputs.center }),
+        history: windHandle.gustHistory?.(THREE.TSL, { centerXY: windInputs.center }),
+        timeMs: uGlobalTimeMs,
+      };
     }
     const seeded = animation.buildColorationSeed({
       THREE,
@@ -293,6 +319,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
       uRatio,
       quality: animationQuality,
       wind,
+      windHistory,
       windResponse: uWindResponse,
     });
     colorSeed = seeded.finalColor;

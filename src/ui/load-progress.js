@@ -218,6 +218,86 @@ export const PHASE_LABELS = Object.freeze({
   [LOAD_PHASES.WARMING]: 'Warming up',
 });
 
+/** Phases in the order a cold load runs them — the order the overall bar walks. */
+export const PHASE_ORDER = Object.freeze([
+  LOAD_PHASES.DEVICE,
+  LOAD_PHASES.SCENE,
+  LOAD_PHASES.MASKS,
+  LOAD_PHASES.ART,
+  LOAD_PHASES.FIRST_FRAME,
+  LOAD_PHASES.WARMING,
+]);
+
+/**
+ * How long each phase usually takes, in ms — the weights of the WHOLE-LOAD bar
+ * (2026-10-27, author: the bar "thinks we're only loading a single shader",
+ * "mostly stationary and then it ends without showing any progress").
+ *
+ * These are only the first-ever-load defaults. `loading-screen.js` replaces them with the
+ * durations the previous load on this machine actually measured, so the bar
+ * learns what a load costs HERE. Warming dominates on purpose: shader compile is
+ * most of a cold load.
+ */
+export const DEFAULT_PHASE_EXPECTED_MS = Object.freeze({
+  [LOAD_PHASES.DEVICE]: 1500,
+  [LOAD_PHASES.SCENE]: 500,
+  [LOAD_PHASES.MASKS]: 1000,
+  [LOAD_PHASES.ART]: 6000,
+  [LOAD_PHASES.FIRST_FRAME]: 2000,
+  [LOAD_PHASES.WARMING]: 15000,
+});
+
+/** A phase with no real counter never claims more than this of its own share. */
+const CREEP_CEILING = 0.97;
+
+/**
+ * THE WHOLE-LOAD FRACTION — an ESTIMATE, and labelled as one wherever it is shown.
+ *
+ * The header's rule against cross-phase weighting was written to stop a made-up
+ * 98% gate. This is not that: the per-phase `fraction` stays exact and untouched,
+ * and this is a separate number whose weights are measured durations of earlier
+ * loads. Inside a phase it uses the real counter when there is one; when there is
+ * none (or it is a 1-unit placeholder like "compiling shaders: 0 of 1") it creeps
+ * along the phase's expected duration, slowing as it nears its share but never
+ * stopping, so a long step still visibly moves. It never goes backwards.
+ *
+ * @param {LoadState} state @param {number} nowMs
+ * @returns {{overall:number, stepIndex:number, stepCount:number}|null}
+ */
+export function overallProgress(state, nowMs) {
+  const idx = PHASE_ORDER.indexOf(state?.phase);
+  if (idx < 0) return null;
+  const expected = (p) => {
+    const v = state.phaseExpectedMs?.[p];
+    return Number.isFinite(v) && v > 0 ? v : DEFAULT_PHASE_EXPECTED_MS[p];
+  };
+  let sum = 0;
+  let before = 0;
+  PHASE_ORDER.forEach((p, i) => {
+    const e = expected(p);
+    sum += e;
+    if (i < idx) before += e;
+  });
+
+  const realTotal = typeof state.total === 'number' && state.total > 0;
+  const hasCounter = realTotal && (state.total > 1 || state.done >= state.total);
+  let within;
+  if (hasCounter) {
+    within = Math.max(0, Math.min(1, state.done / state.total));
+  } else {
+    const open = state.phases.find((p) => p.endMs === null);
+    const inPhaseMs =
+      open && Number.isFinite(open.startMs) && Number.isFinite(nowMs)
+        ? Math.max(0, nowMs - state.startedAtMs - open.startMs)
+        : 0;
+    within = CREEP_CEILING * (1 - Math.exp(-inPhaseMs / expected(state.phase)));
+  }
+
+  const raw = Math.min(0.99, (before + within * expected(state.phase)) / sum);
+  state.overallMax = Math.max(state.overallMax ?? 0, raw);
+  return { overall: state.overallMax, stepIndex: idx + 1, stepCount: PHASE_ORDER.length };
+}
+
 /**
  * @typedef {object} LoadState
  * @property {string} sceneId
@@ -275,8 +355,12 @@ export const PHASE_LABELS = Object.freeze({
  * @param {{sceneId:string, sceneName:string, nowMs:number}} args
  * @returns {LoadState}
  */
-export function createLoadState({ sceneId, sceneName, nowMs }) {
+export function createLoadState({ sceneId, sceneName, nowMs, phaseExpectedMs = null }) {
   return {
+    /** Measured per-phase durations from earlier loads (see {@link overallProgress}). */
+    phaseExpectedMs,
+    /** The whole-load bar's high-water mark — it only ever moves forward. */
+    overallMax: 0,
     sceneId,
     sceneName,
     startedAtMs: nowMs,
@@ -588,6 +672,33 @@ export function blockerSignature(blockers) {
 }
 
 /**
+ * THE NO-PROGRESS COUNT, ADVANCED BY ONE POLL — and a hidden tab never advances it
+ * (mythica-machina-press#587, with #582's rule).
+ *
+ * `waitForSceneReady` gives up on a wait that has stopped making progress: the same
+ * blockers for N polls in a row, once the ordinary deadline has passed. A hidden tab
+ * cannot make progress by construction — the browser stops `requestAnimationFrame`, so a
+ * blocker that waits on a frame (the effects' warm-up parks on one) cannot clear — while
+ * the polls, which run on `setTimeout`, carry on at about 1 Hz. Counted naively, twenty
+ * seconds in the background reads as "no progress", the curtain lifts on a scene whose
+ * effects have not compiled, and the user finds out when they look back. That is the
+ * mistake `hardRevealDue` and `waitForFirstPaint` already refuse: a hidden tab is not a
+ * slow load.
+ *
+ * So a poll taken while hidden proves nothing and zeroes the count. Coming back starts a
+ * fresh run of VISIBLE polls for the load to show movement in; it must not inherit the
+ * silence that was the tab's, not the load's.
+ *
+ * @param {number} unchangedPolls - consecutive polls that reported the same blockers.
+ * @param {{sameSignature: boolean, tabHidden: boolean}} poll - this poll's facts.
+ * @returns {number} the new count.
+ */
+export function nextNoProgressCount(unchangedPolls, { sameSignature, tabHidden }) {
+  if (tabHidden || !sameSignature) return 0;
+  return unchangedPolls + 1;
+}
+
+/**
  * The tab became hidden or visible. Pure, like everything else here — the
  * browser event lives in `loading-screen.js`.
  *
@@ -670,6 +781,9 @@ export function describeLoad(state, nowMs) {
       title: state.forcedReveal ? 'Still working — showing you the map anyway' : 'Ready',
       detail: null,
       fraction: state.forcedReveal ? null : 1,
+      overall: state.forcedReveal ? state.overallMax : 1,
+      stepIndex: null,
+      stepCount: null,
       elapsedMs,
       stallNote: null,
       blockers: state.forcedReveal ? [...state.blockers] : [],
@@ -703,10 +817,15 @@ export function describeLoad(state, nowMs) {
       ? `still working — the last step took ${(state.lastStallMs / 1000).toFixed(1)}s`
       : null;
 
+  const whole = overallProgress(state, nowMs);
+
   return {
     title,
     detail: parts.length ? parts.join(' · ') : null,
     fraction,
+    overall: whole ? whole.overall : null,
+    stepIndex: whole ? whole.stepIndex : null,
+    stepCount: whole ? whole.stepCount : null,
     elapsedMs,
     stallNote,
     // Copied, not handed out by reference: `state.blockers` is mutated in place

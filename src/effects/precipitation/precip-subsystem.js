@@ -35,6 +35,7 @@ import { createMantleRuntime, STEP_INTERVAL_SEC as MANTLE_STEP_INTERVAL_SEC } fr
 import { deriveTokenMotion, buildTrampleStamps } from '../../world/index.js';
 import { createPrecipCurtain, VEIL_TINT, DEFAULT_TINT } from './curtain-render.js';
 import { createStormFog } from './storm-fog-render.js';
+import { createTorrent } from './torrent-render.js';
 import { createPrecipDripEngine } from '../particles/precip-drip-runtime.js';
 import {
   PRECIP_SPECIES,
@@ -68,6 +69,21 @@ const KIND_TO_SPECIES = Object.freeze({
    * that would look like orange snow with nothing burning. */
   embers: null,
 });
+
+/**
+ * The kinds the load-time shader warm-up draws, in order — one task each. Every kind a GM can reach that owns a
+ * material of its own (sleet is rain plus snow, `embers` is ash's companion), kept only if its species is built.
+ */
+const WARM_UP_KINDS = Object.freeze(['rain', 'snow', 'hail', 'ash']);
+
+/**
+ * The weather a warm-up frame is fed: the real sky with a full-strength storm of `kind` laid over it, so every
+ * response threshold (veil, storm fog, torrent) is crossed. A copy — the snapshot's own weather is frozen.
+ * @param {object|undefined} weather @param {string} kind
+ */
+export function warmWeatherFor(weather, kind) {
+  return { ...(weather ?? {}), precip01: 1, precipKind: kind, precipMixWeight: 0 };
+}
 
 /**
  * ⭐ WHICH POPULATIONS SHOULD DRAW — plural, weighted.
@@ -235,6 +251,8 @@ export function createPrecipitationSubsystem({
    * tier then SLEEPS and the curtain carries the picture alone.
    */
   let specimenAwake = true;
+  /** The drip engines' tails as they were before a rain warm-up forced them — `endWarm` puts them back. */
+  let warmTails = null;
   let lastZoom = null;
   let lastReason = null;
   const seededEngines = new Set();
@@ -242,6 +260,9 @@ export function createPrecipitationSubsystem({
   /** The floor's baked sky-reach texture + its world rect, held so an engine
    * built LATER (a species that first appears mid-session) still gets it. */
   let skyReach = { texture: null, rect: null };
+  /** The floor's baked occluder-height field, which sizes each splash by the height
+   * of what it strikes. Held for engines built later, like `skyReach`. */
+  let strikeHeight = { texture: null, rect: null, scalePx: 0 };
   /** The plain outdoors gate for the ATMOSPHERIC layers (veil + storm fog).
    * Unlike `skyReach` it ignores overhead tiles: a roof over open ground does
    * not make the air clear, only a genuinely indoor pixel does. Falls back to
@@ -315,6 +336,8 @@ export function createPrecipitationSubsystem({
     lastGlintKey = key;
     lastTuning = { ...(lastTuning ?? {}), ...g };
     for (const engine of engines.values()) engine.setTuning(g);
+    // The torrent's saved strength rides the same door (`torrentStrength`).
+    torrent?.setTuning(g);
   }
   /** ONE mantle, for the floor currently in view. Built lazily on the first
    * frame that has real scene bounds — the buffer is sized from them, so
@@ -356,6 +379,9 @@ export function createPrecipitationSubsystem({
    * posture the mantle and every curtain already use.
    */
   let stormFog = null;
+  /** ⭐ THE TORRENT (`torrent-render.js`) — ONE combined instance, storm-fog's
+   * own shape and for its reason; built lazily on scene bounds. */
+  let torrent = null;
   let mantleReason =
     createMantleTarget && renderMantleStep
       ? 'not built yet — waiting for scene bounds'
@@ -385,6 +411,8 @@ export function createPrecipitationSubsystem({
       // rain. See its own header.
       renderOrder: renderOrder - 0.5,
       openSkyTexture,
+      // Weather shade (`lighting/weather-shade.js`) — darkened by building shadows like the ground.
+      illumTexture,
     });
     if (fogGate().texture) curtain.setSkyReachTexture(fogGate().texture, fogGate().rect);
     if (lastTuning) curtain.setTuning(lastTuning);
@@ -410,11 +438,30 @@ export function createPrecipitationSubsystem({
       // drips' own "+1 = nearest the eye" convention regardless.
       renderOrder: renderOrder + 2,
       openSkyTexture,
+      illumTexture,
     });
     if (fogGate().texture) stormFog.setSkyReachTexture(fogGate().texture, fogGate().rect);
     if (lastTuning) stormFog.setTuning(lastTuning);
     log.info('built the storm-fog quad over the scene rect');
     return stormFog;
+  }
+
+  /** Build the ONE torrent quad on first use — {@link stormFogQuadFor}'s twin. */
+  function torrentQuadFor(sceneBounds) {
+    if (torrent) return torrent;
+    if (!sceneBounds || !(sceneBounds.maxX > sceneBounds.minX)) return null;
+    torrent = createTorrent({
+      THREE,
+      worldRect: sceneBounds,
+      // Nearest the eye of all — in front of the fog (see `scenes`).
+      renderOrder: renderOrder + 3,
+      openSkyTexture,
+      illumTexture,
+    });
+    if (fogGate().texture) torrent.setSkyReachTexture(fogGate().texture, fogGate().rect);
+    if (lastTuning) torrent.setTuning(lastTuning);
+    log.info('built the torrent quad over the scene rect');
+    return torrent;
   }
 
   /**
@@ -454,7 +501,7 @@ export function createPrecipitationSubsystem({
    * body count describing the same weather. Two resolves is two opinions about
    * how hard it is raining, free to disagree by a frame.
    */
-  function frameFor(species, weather, st, precip01) {
+  function frameFor(species, weather, st, precip01, sceneLight01 = st.sceneLight01 ?? 1) {
     return resolveSpeciesFrame(
       species,
       {
@@ -462,6 +509,8 @@ export function createPrecipitationSubsystem({
         stormActivity01: weather.stormActivity01 ?? 0,
         dayFactor01: st.dayFactor01 ?? 1,
         flash01: st.flash01 ?? 0,
+        sceneLight01,
+        skyTintRgb: st.skyTintRgb,
       },
       st.tierScale ?? 1
     );
@@ -476,7 +525,7 @@ export function createPrecipitationSubsystem({
    * push is added to one and forgotten on the other, which is exactly the
    * hand-maintained-list disease this codebase has now paid for four times.
    */
-  function stepPopulation(renderer, speciesId, frame, rect, st, dtRealSec, nowMs) {
+  function stepPopulation(renderer, speciesId, frame, rect, st, dtRealSec, nowMs, eye = null) {
     const engine = engineFor(speciesId);
     // ⚠️ PER-ENGINE, not one shared flag. A single `seeded` boolean meant the
     // FIRST species to run consumed it and every later one drew from
@@ -493,7 +542,12 @@ export function createPrecipitationSubsystem({
       // other job it does.
       engine.setViewRect(rect);
     }
-    if (st.sceneBounds !== undefined) engine.setSceneBounds(st.sceneBounds);
+    // THE SHARED EYE (scene/scene-eye.js) — after the rect, which still sets the pace and sizes.
+    if (eye) engine.setEye(eye);
+    // The falling drops may reach past the map (`fallBounds`: the Table's effects extent, over a parallax
+    // canopy overhanging the recess wall); the splashes below stay on the ground, inside the scene rect.
+    const fallBounds = st.fallBounds !== undefined ? st.fallBounds : st.sceneBounds;
+    if (fallBounds !== undefined) engine.setSceneBounds(fallBounds);
     engine.setFrame(frame);
     // mmp-row — the scene's light level, for the rain glint (day fade + "light
     // above the ambient").
@@ -544,14 +598,30 @@ export function createPrecipitationSubsystem({
    *   so always-mode can force the rate to 1 without also pretending it is
    *   raining for lighting purposes.
    */
-  function stepOneDripEngine(engine, renderer, dtRealSec, nowMs, rate, framePrecip01, st, weather, viewRect) {
+  function stepOneDripEngine(
+    engine,
+    renderer,
+    dtRealSec,
+    nowMs,
+    rate,
+    framePrecip01,
+    st,
+    weather,
+    viewRect,
+    eye = null
+  ) {
     if (!engine) return;
     // ⚠️ THE CAMERA CENTRE, EVERY FRAME. M(h) magnifies ABOUT it, so a stale
     // centre makes every drip converge on where the camera used to be — the
     // same push the fall engine already gets from `setWorldRect`.
-    if (viewRect) engine.setCamera((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
+    if (eye) engine.setEye(eye);
+    else if (viewRect) engine.setCamera((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
     const species = PRECIP_SPECIES.rain;
-    engine.setFrame(dtRealSec, rate, frameFor(species, weather, st, Math.max(framePrecip01, 0.001)));
+    // Scene light 1: drips draw in the WORLD scene (`onDripMeshes`), so the
+    // lighting composite already darkens them — dimming here would do it twice.
+    // A drip scene drawn into `scene.lit` instead (no `onDripMeshes`) does need it.
+    const dripLight = onDripMeshes ? 1 : (st.sceneLight01 ?? 1);
+    engine.setFrame(dtRealSec, rate, frameFor(species, weather, st, Math.max(framePrecip01, 0.001), dripLight));
     if (!engine.hasContent) return;
     engine.step(renderer, dtRealSec, nowMs, getWindHandle());
   }
@@ -560,8 +630,8 @@ export function createPrecipitationSubsystem({
    * Rate === the weather's own liquid-gated precip01, unconditionally —
    * unchanged from before `stepOneDripEngine` existed (see that function's
    * own header: this is byte-identical to the inline version it replaced). */
-  function stepDrips(renderer, dtRealSec, nowMs, precip01, st, weather, viewRect) {
-    stepOneDripEngine(drips, renderer, dtRealSec, nowMs, precip01, precip01, st, weather, viewRect);
+  function stepDrips(renderer, dtRealSec, nowMs, precip01, st, weather, viewRect, eye = null) {
+    stepOneDripEngine(drips, renderer, dtRealSec, nowMs, precip01, precip01, st, weather, viewRect, eye);
   }
 
   /**
@@ -577,11 +647,21 @@ export function createPrecipitationSubsystem({
    *     (`precip01Raw`), so lighting stays consistent with the scene; only
    *     the rate is forced.
    */
-  function stepAuthoredDrips(renderer, dtRealSec, nowMs, precip01Liquid, precip01Raw, st, weather, viewRect) {
+  function stepAuthoredDrips(
+    renderer,
+    dtRealSec,
+    nowMs,
+    precip01Liquid,
+    precip01Raw,
+    st,
+    weather,
+    viewRect,
+    eye = null
+  ) {
     if (!authoredDrips) return;
     const alwaysOn = lastTuning?.dripAuthoredMode === 'always';
     const rate = alwaysOn ? 1 : precip01Liquid;
-    stepOneDripEngine(authoredDrips, renderer, dtRealSec, nowMs, rate, precip01Raw, st, weather, viewRect);
+    stepOneDripEngine(authoredDrips, renderer, dtRealSec, nowMs, rate, precip01Raw, st, weather, viewRect, eye);
   }
 
   /** Build one species' engine on first use — a clear map never allocates. */
@@ -632,8 +712,10 @@ export function createPrecipitationSubsystem({
       // in front of the drops that caused it.
       renderOrder: renderOrder - 1,
       openSkyTexture,
+      illumTexture,
     });
     if (skyReach.texture) engine.setSkyReachTexture(skyReach.texture, skyReach.rect);
+    if (strikeHeight.texture) engine.setHeightTexture(strikeHeight.texture, strikeHeight.rect, strikeHeight.scalePx);
     if (lastTuning) engine.setTuning(lastTuning);
     splashEngines.set(speciesId, engine);
     log.info(`built '${speciesId}' arrival engine (splashes: ${engine.ok}, capacity ${engine.capacity})`);
@@ -741,12 +823,16 @@ export function createPrecipitationSubsystem({
      * draws nothing (LAW 5's teeth).
      * @param {*} renderer @param {number} dtRealSec @param {number} nowMs
      */
-    sync(renderer, dtRealSec, nowMs, worldRect) {
-      const st = getPrecipRenderState?.() ?? null;
-      if (!st || st.enabled === false) {
+    sync(renderer, dtRealSec, nowMs, worldRect, viewRect = null, eye = null, warm = null) {
+      const real = getPrecipRenderState?.() ?? null;
+      if (!real || real.enabled === false) {
         activePopulations = [];
         return;
       }
+      // ⭐ A WARM FRAME (the load-time shader warm-up, `warmUpKinds`/`endWarm` below): the same code path as a
+      // real frame, fed a storm of the asked kind, so every material this kind uses is built and drawn once
+      // while the curtain is still up. Nothing here may outlive the warm-up — see the three `warm` guards.
+      const st = warm ? { ...real, weather: warmWeatherFor(real.weather, warm.kind) } : real;
       const weather = st.weather ?? {};
       const precip01 = Number.isFinite(weather.precip01) ? weather.precip01 : 0;
       syncGlintTuning(st.glintTuning);
@@ -760,7 +846,9 @@ export function createPrecipitationSubsystem({
       // dry, footprints heal. Returning early would freeze the world's memory
       // at whatever the last rainy frame left, and a scene would carry its
       // snow through a summer.
-      stepMantle(dtRealSec, st, weather, precip01);
+      // (1/3) WARM: the mantle is skipped. It would seed snow or puddle depth from the forced storm, and the
+      // ground would keep it.
+      if (!warm) stepMantle(dtRealSec, st, weather, precip01);
 
       // ⭐ BOTH DRIP LAYERS STEP **BEFORE** THE CLEAR-DAY EARLY-OUT, like the
       // mantle — and now for TWO reasons (mythica-machina-press#316 added the
@@ -785,17 +873,34 @@ export function createPrecipitationSubsystem({
       // blizzard. 'always' mode ignores this split entirely, by design — a
       // cave does not care whether it is snowing outside.
       const liquid = (weather.precipKind ?? 'rain') !== 'snow';
-      stepDrips(renderer, dtRealSec, nowMs, liquid ? precip01 : 0, st, weather, worldRect ?? st.worldRect ?? null);
-      stepAuthoredDrips(
-        renderer,
-        dtRealSec,
-        nowMs,
-        liquid ? precip01 : 0,
-        precip01,
-        st,
-        weather,
-        worldRect ?? st.worldRect ?? null
-      );
+      // (2/3) WARM: only a rain warm-up steps the drips (it is the one that draws them), and it first writes
+      // down each engine's tail — a forced storm raises it, and it drains over minutes, so `endWarm` puts it back.
+      if (warm?.kind === 'rain' && !warmTails) {
+        warmTails = [drips, authoredDrips].filter(Boolean).map((engine) => [engine, engine.debugState().tail.tail01]);
+      }
+      if (!warm || warm.kind === 'rain') {
+        stepDrips(
+          renderer,
+          dtRealSec,
+          nowMs,
+          liquid ? precip01 : 0,
+          st,
+          weather,
+          worldRect ?? st.worldRect ?? null,
+          eye
+        );
+        stepAuthoredDrips(
+          renderer,
+          dtRealSec,
+          nowMs,
+          liquid ? precip01 : 0,
+          precip01,
+          st,
+          weather,
+          worldRect ?? st.worldRect ?? null,
+          eye
+        );
+      }
 
       // ⚠️ A JS `if`, never a uniform set to zero (Effects.md Law 4). A clear
       // day must not allocate an engine, dispatch a kernel or submit a draw.
@@ -818,6 +923,8 @@ export function createPrecipitationSubsystem({
       // a zoom threshold. The heaviest population decides for both.
       const dominant = activePopulations.reduce((a, b) => (b.weight > a.weight ? b : a));
       updateZoomGate(PRECIP_SPECIES[dominant.speciesId], rectForZoom, st.viewportWidthPx);
+      // (3/3) WARM: awake whatever the zoom — the warm-up is for the materials a GM reaches by zooming in later.
+      if (warm) specimenAwake = true;
 
       const rect = worldRect ?? st.worldRect ?? null;
 
@@ -828,8 +935,12 @@ export function createPrecipitationSubsystem({
       // already makes for the identical reason: lerping two species' tints
       // produces a colour belonging to neither.
       let fogIntensity01 = 0;
+      // THE TORRENT's quantity — the same weighted sum, same reason.
+      let torrentIntensity01 = 0;
       let fogTint = DEFAULT_TINT;
       let fogRgbMul = 1;
+      let fogRgbMulUnlit = 1;
+      let fogSceneLight01 = st.sceneLight01 ?? 1;
       let fogAlphaMul = 1;
 
       for (const { speciesId, weight } of activePopulations) {
@@ -864,9 +975,12 @@ export function createPrecipitationSubsystem({
         // above takes the weight. Stepped whether or not the specimens are
         // awake, exactly like the curtain: fog is atmosphere, not a specimen.
         fogIntensity01 += base.fog01 * weight;
+        torrentIntensity01 += (base.torrent01 ?? 0) * weight;
         if (speciesId === dominant.speciesId) {
           fogTint = VEIL_TINT[speciesId] ?? DEFAULT_TINT;
           fogRgbMul = base.rgbMul;
+          fogRgbMulUnlit = base.rgbMulUnlit;
+          fogSceneLight01 = base.sceneLight01;
           fogAlphaMul = base.alphaMul;
         }
 
@@ -886,7 +1000,7 @@ export function createPrecipitationSubsystem({
           continue;
         }
 
-        stepPopulation(renderer, speciesId, frame, rect, st, dtRealSec, nowMs);
+        stepPopulation(renderer, speciesId, frame, rect, st, dtRealSec, nowMs, eye);
       }
 
       const stormFogQuad = stormFogQuadFor(st.sceneBounds ?? null);
@@ -895,9 +1009,28 @@ export function createPrecipitationSubsystem({
           intensity01: fogIntensity01,
           tint: fogTint,
           rgbMul: fogRgbMul,
+          skyTintRgb: st.skyTintRgb,
+          sceneLight01: fogSceneLight01,
           alphaMul: fogAlphaMul,
         });
         stormFogQuad.step(nowMs, getWindHandle());
+      }
+
+      // ⭐ THE TORRENT — screen space, so it needs the UNCLAMPED view rect
+      // (`viewRect`); the clamped spawn rect is the fallback for callers that
+      // predate it. Atmosphere like the fog: stepped awake or asleep.
+      const torrentQuad = torrentQuadFor(st.sceneBounds ?? null);
+      if (torrentQuad) {
+        torrentQuad.setView(viewRect ?? rect, st.viewportWidthPx);
+        torrentQuad.setFrame({
+          intensity01: torrentIntensity01,
+          tint: VEIL_TINT.rain,
+          rgbMul: fogRgbMulUnlit,
+          skyTintRgb: st.skyTintRgb,
+          sceneLight01: fogSceneLight01,
+          alphaMul: fogAlphaMul,
+        });
+        torrentQuad.step(nowMs, getWindHandle(), dtRealSec);
       }
     },
 
@@ -959,7 +1092,34 @@ export function createPrecipitationSubsystem({
       // own header for why: real heavy fog sits between the eye and literally
       // everything else, including nearby rain.
       if (stormFog?.hasContent) out.push(stormFog.scene);
+      // ⭐ THE TORRENT after even the fog — the nearest water to the eye.
+      if (torrent?.hasContent) out.push(torrent.scene);
       return out;
+    },
+
+    /**
+     * The kinds worth a load-time warm-up frame on this build (`sync`'s `warm` argument). Empty when the effect is
+     * off — a disabled effect is not warmed, so a low-end profile pays nothing for weather it will not draw.
+     * @returns {string[]}
+     */
+    warmUpKinds() {
+      const st = getPrecipRenderState?.() ?? null;
+      if (!st || st.enabled === false) return [];
+      return WARM_UP_KINDS.filter((kind) => isBuiltSpecies(KIND_TO_SPECIES[kind]));
+    },
+
+    /**
+     * Undo a warm-up frame: nothing is falling again, and the drip tails are what they were. Call right after the
+     * warm draw, in the same task — a real frame between the two would draw the forced storm.
+     */
+    endWarm() {
+      activePopulations = [];
+      if (!warmTails) return;
+      for (const [engine, tail01] of warmTails) {
+        engine.setTailLevel(tail01);
+        engine.setFrame(0, 0, null); // re-derives live count and visibility from the restored tail
+      }
+      warmTails = null;
     },
 
     /** The FALL's scene alone — kept for the shader lab, which renders the
@@ -984,6 +1144,15 @@ export function createPrecipitationSubsystem({
      * authority's products version moves, NEVER per frame.
      * @param {*} texture @param {object} rect
      */
+    /** The floor's `casterHeight` bake → splash size by strike height. Null clears it
+     * (every splash then draws at ground size). */
+    setStrikeHeightTexture(texture, rect, scalePx) {
+      strikeHeight = { texture: texture ?? null, rect: rect ?? null, scalePx: scalePx ?? 0 };
+      const results = {};
+      for (const [id, engine] of splashEngines) results[id] = engine.setHeightTexture(texture, rect, scalePx);
+      return results;
+    },
+
     setSkyReachTexture(texture, rect, floorIndex = null) {
       skyReach = { texture: texture ?? null, rect: rect ?? null };
       if (floorIndex !== null) gateFloorIndex = floorIndex;
@@ -1004,6 +1173,9 @@ export function createPrecipitationSubsystem({
       // The storm fog gates on the same mask too — LAW 3, restated a third
       // time: reduced visibility is outdoor weather, never an indoor pixel.
       if (stormFog) results.stormFog = stormFog.setSkyReachTexture(fogGate().texture, fogGate().rect);
+      // The torrent takes the ATMOSPHERE gate, like the fog: its water is the
+      // nearest to the eye, above any roof — only a genuine interior is dry.
+      if (torrent) results.torrent = torrent.setSkyReachTexture(fogGate().texture, fogGate().rect);
       return results;
     },
 
@@ -1019,6 +1191,7 @@ export function createPrecipitationSubsystem({
       for (const [id, c] of curtains)
         results[`${id}:curtain`] = c.setSkyReachTexture(fogGate().texture, fogGate().rect);
       if (stormFog) results.stormFog = stormFog.setSkyReachTexture(fogGate().texture, fogGate().rect);
+      if (torrent) results.torrent = torrent.setSkyReachTexture(fogGate().texture, fogGate().rect);
       return results;
     },
 
@@ -1169,6 +1342,7 @@ export function createPrecipitationSubsystem({
       authoredDrips?.setTuning(t);
       for (const curtain of curtains.values()) curtain.setTuning(t);
       stormFog?.setTuning(t);
+      torrent?.setTuning(t);
     },
 
     /**
@@ -1234,6 +1408,7 @@ export function createPrecipitationSubsystem({
          * different states with different causes (below every species' own
          * `respond.fog` threshold vs. no precipitation at all). */
         stormFog: stormFog ? stormFog.debugState() : { built: false, reason: 'waiting for scene bounds' },
+        torrent: torrent ? torrent.debugState() : { built: false, reason: 'waiting for scene bounds' },
       };
     },
   };

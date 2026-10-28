@@ -24,6 +24,7 @@ import { PERFORMANCE_PROFILES, ENABLE_OVERRIDES, DEFAULT_PERFORMANCE_PROFILE } f
 // `vt/render-scale-policy.js#resolveInternalScale` already applies on the
 // read side.
 import { SCALE_LADDER, SUPERSAMPLE_CHOICES } from '../graph/index.js';
+import { getSafeProfile } from '../core/safe-mode.js';
 
 /** The three GLOBAL (not per-effect) setting keys. */
 export const GLOBAL_SETTING_KEYS = Object.freeze({
@@ -63,9 +64,10 @@ export const GLOBAL_SETTING_KEYS = Object.freeze({
    * while `MAX_PIXEL_RATIO` still protects them from Foundry's own opaque
    * value regardless of which mode they pick. */
   renderScale: 'renderScale',
-  /** STUDIO PINNED EFFECTS (client, 2026-09-14) — a JSON-encoded array of
-   * effect ids pinned to the top of the Effects grid (`ui/rooms/studio/
-   * effects-department.js`). Hidden (`config: false`, describeEffectSettings)
+  /** STUDIO EFFECTS MEMORY (client) — `{open, recent}` JSON: the effect open
+   * in the Studio's Effects library and the last few opened (`ui/rooms/studio/
+   * effects-department.js`). The key keeps its 2026-09-14 name from when it
+   * held pinned cards, so no stored setting is orphaned. Hidden (`config: false`, describeEffectSettings)
    * — purely internal UI state, not something to hand-edit from Foundry's
    * own Settings dialog. String-typed like every non-bool descriptor this
    * adapter registers (`foundry/settings-adapter.js` has no array/object
@@ -119,6 +121,18 @@ export const GLOBAL_SETTING_KEYS = Object.freeze({
   /** How long the GM waits for players to finish preparing a scene before switching
    * anyway (world). */
   switchWaitSeconds: 'switchWaitSeconds',
+  /** THE ONE TRANSITION (world, 2026-10-26) — the preset every load, scene change and floor change
+   * plays (`ui/scene-transition.js#TRANSITION_PRESETS`), the pace that scales it, and the GM's
+   * armed one-shot override for the next scene change (JSON `{id, type, durationMs}`, or ''). */
+  transitionPreset: 'transitionPreset',
+  transitionPace: 'transitionPace',
+  transitionOverride: 'transitionOverride',
+  /** SAFE MODE (client, 2026-10-27, epic mmp-fpu) — the crash ladder's player-facing switch
+   * (`core/safe-mode.js`). `auto` (default): if a load ever ends because the graphics card stopped
+   * responding, the next load runs one rung lower and the module remembers the rung that worked.
+   * `off` never reduces anything; `careful` / `minimal` force a rung. `requiresReload`: the rung is
+   * read once, before any shader is built. */
+  safeMode: 'safeMode',
 });
 
 /**
@@ -237,8 +251,8 @@ export function describeEffectSettings(manifests = []) {
       kind: 'json',
       default: '[]',
       config: false,
-      name: 'Map Shine Studio — pinned effects (internal)',
-      hint: 'Internal UI state — which effect cards are pinned to the top of the Studio Effects grid.',
+      name: 'Map Shine Studio — effects library memory (internal)',
+      hint: 'Internal UI state — which effect is open in the Studio, and the ones opened recently.',
     },
     {
       key: GLOBAL_SETTING_KEYS.hidpiRendering,
@@ -305,6 +319,45 @@ export function describeEffectSettings(manifests = []) {
       hint: 'When you change scene, the switch waits for every player to finish preparing, up to this long, then goes ahead regardless. A player who has not finished simply sees their own loading screen.',
     },
     {
+      key: GLOBAL_SETTING_KEYS.transitionPreset,
+      scope: 'world',
+      kind: 'enum',
+      // A literal list: effects/ has no door into ui/ (ui/scene-transition.js#TRANSITION_PRESETS is the
+      // source of truth; scene-transition.test.mjs asserts the two agree). Quick -> dramatic.
+      choices: {
+        cut: 'Cut',
+        quick: 'Quick fade',
+        soft: 'Soft fade',
+        dissolve: 'Slow dissolve',
+        cinematic: 'Cinematic',
+        dramatic: 'Dramatic',
+        grand: 'Grand entrance',
+      },
+      default: 'cinematic',
+      config: true,
+      name: 'Map Shine — Transition (GM)',
+      hint: "How every load, scene change and floor change cuts, for everyone. Floors are always briskest. A scene's own transition (Configure Scene) still wins for that scene, and the Remote can arm a one-off for the next scene change.",
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.transitionPace,
+      scope: 'world',
+      kind: 'enum',
+      choices: { brisk: 'Brisk', measured: 'Measured', slow: 'Slow' },
+      default: 'measured',
+      config: true,
+      name: 'Map Shine — Transition pace (GM)',
+      hint: "Scales every transition's duration.",
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.transitionOverride,
+      scope: 'world',
+      kind: 'json',
+      default: '',
+      config: false,
+      name: 'Map Shine — armed transition (internal)',
+      hint: 'Internal: the one-off transition the GM armed in the Remote for the next scene change.',
+    },
+    {
       key: GLOBAL_SETTING_KEYS.theme,
       scope: 'client',
       kind: 'enum',
@@ -318,6 +371,25 @@ export function describeEffectSettings(manifests = []) {
       config: true,
       name: 'Map Shine — Theme',
       hint: 'The look of the Remote/Studio/Player panels themselves.',
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.safeMode,
+      scope: 'client',
+      kind: 'enum',
+      choices: {
+        auto: 'Automatic (recommended)',
+        off: 'Off — always full quality',
+        careful: 'Careful — lighter candles',
+        minimal: 'Minimal — lowest load',
+      },
+      default: 'auto',
+      config: true,
+      requiresReload: true,
+      name: 'Map Shine — Safe mode',
+      hint:
+        'If a load ever ends because your graphics card stopped responding, Automatic runs the next load with ' +
+        'a little less shader work and remembers what worked, so you are never stuck in a crash loop. ' +
+        'Choose Off to always run at full quality (and to try again after a crash). Requires a reload.',
     },
   ];
 
@@ -375,8 +447,11 @@ export function choiceLabels(choices = []) {
  */
 export function deriveEffectLayers(effectId, readSetting) {
   const read = typeof readSetting === 'function' ? readSetting : () => undefined;
+  // The crash ladder's lowest working rung overrides the player's profile FOR THIS LOAD ONLY — their
+  // stored setting is never rewritten, so leaving safe mode puts everything back exactly as it was.
+  const forced = getSafeProfile().forcePerformanceProfile;
   return {
-    profile: read(GLOBAL_SETTING_KEYS.profile),
+    profile: forced ?? read(GLOBAL_SETTING_KEYS.profile),
     reducePhotosensitive: read(GLOBAL_SETTING_KEYS.reducePhotosensitive) === true,
     gmEnable: read(effectEnableKey(effectId, 'gm')),
     playerEnable: read(effectEnableKey(effectId, 'player')),

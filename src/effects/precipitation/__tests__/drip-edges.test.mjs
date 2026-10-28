@@ -75,6 +75,36 @@ export function run(t) {
     );
   }
 
+  // ---- ⭐ THE OUTWARD NORMAL — water is thrown OFF the roof, never back onto it --
+  {
+    // Same off-centre roof. Every normal must point from the roof toward open
+    // ground, in WORLD orientation: the north eave (lowest y) points to -y, the
+    // west eave to -x. A flipped y would send the north eave's water south,
+    // back across the roof — the drip rebuild's own Y-flip, asserted here.
+    const grid = makeGrid({ rect: { x0: 2, x1: 6, y0: 1, y1: 4 } });
+    const out = extractDripEdges(grid);
+    t.ok('one unit normal per point', out.normals.length === out.count * 2);
+    const roofCx = 500;
+    const roofCy = 450;
+    let outward = 0;
+    let north = null;
+    let west = null;
+    for (let i = 0; i < out.count; i++) {
+      const px = out.points[i * 3];
+      const py = out.points[i * 3 + 1];
+      const nx = out.normals[i * 2];
+      const ny = out.normals[i * 2 + 1];
+      if ((px - roofCx) * nx + (py - roofCy) * ny > 0) outward++;
+      if (px === 450 && py === 350) north = [nx, ny]; // gx 3, gy 1: mid north eave
+      if (px === 350 && py === 450) west = [nx, ny]; // gx 2, gy 2: mid west eave
+    }
+    t.ok(`⭐ every normal points away from the roof (${outward}/${out.count})`, outward === out.count);
+    t.ok('⭐ the north eave throws its water north (-y)', north && Math.abs(north[0]) < 1e-6 && north[1] < -0.99);
+    t.ok('the west eave throws its water west (-x)', west && west[0] < -0.99 && Math.abs(west[1]) < 1e-6);
+    t.ok('the texel size rides along for the lip offset', out.texelPx === 100 && out.spacingPx === 100);
+    t.ok('an authored mask has no normals (a painted spot has no outward)', !extractDripMaskPoints(grid).normals);
+  }
+
   // ---- what counts as an edge -------------------------------------------------
   {
     const grid = makeGrid({ rect: { x0: 4, x1: 10, y0: 3, y1: 8 } });
@@ -159,6 +189,57 @@ export function run(t) {
     // "drips are broken" rather than "drips are tiered".
     const ys = Array.from({ length: capped.count }, (_, i) => capped.points[i * 3 + 1]);
     t.ok('a capped roofline still spans the whole roof', Math.max(...ys) - Math.min(...ys) > 0);
+  }
+
+  // ---- ⭐ A VOID IN THE FLOOR ABOVE IS NOT AN EAVE (the Mansion's south hall) --
+  {
+    // The upper floor covers gx 2..13 × gy 2..9 with a hole at gx 6..9 × gy 4..7
+    // — a double-height hall seen from the ground floor. This floor's outdoors
+    // says the whole footprint (gx 1..14 × gy 1..10) is INDOORS, so only the
+    // outer perimeter opens onto ground the rain can reach.
+    const w = 16;
+    const h = 12;
+    const cover = makeGrid({ w, h, rect: { x0: 2, x1: 14, y0: 2, y1: 10 } });
+    for (let gy = 4; gy < 8; gy++) for (let gx = 6; gx < 10; gx++) cover.data[gy * w + gx] = 0;
+    /** Outdoors everywhere except an indoor block `grow` texels wider than the cover. */
+    const indoorsBlock = (grow) => {
+      const g = makeGrid({ w, h });
+      g.data.fill(255);
+      for (let gy = 2 - grow; gy < 10 + grow; gy++) {
+        for (let gx = 2 - grow; gx < 14 + grow; gx++) g.data[gy * w + gx] = 0;
+      }
+      return g;
+    };
+    const outdoors = indoorsBlock(0);
+
+    const bare = extractDripEdges(cover);
+    const gated = extractDripEdges(cover, { outdoorsGrid: outdoors });
+    // Outer ring of a 12×8 block = 36; the hole's rim is 4 texels per side = 16
+    // (4-connected, so its corners touch no hole texel).
+    t.ok(`without an outdoors grid the hole rims drip (got ${bare.edgeTexels})`, bare.edgeTexels === 36 + 16);
+    t.ok(`⭐ with it, only the exterior eave drips (got ${gated.edgeTexels})`, gated.edgeTexels === 36);
+    t.ok('the dropped rim is reported, not silent', gated.indoorEdgeTexels === 16);
+    // World x of the hole: gx 5..10 centres ⇒ 650..1150; gy 3..8 ⇒ 550..1050.
+    let inHole = 0;
+    for (let i = 0; i < gated.count; i++) {
+      const x = gated.points[i * 3];
+      const y = gated.points[i * 3 + 1];
+      if (x > 600 && x < 1200 && y > 500 && y < 1100) inHole++;
+    }
+    t.ok('no drip spawns around the indoor void', inHole === 0);
+
+    // The `_Outdoors` block drawn one texel wider than the upper floor's art
+    // must not silence the real eave (DRIP_OUTDOORS_REACH)…
+    t.ok(
+      'a one-texel mask mismatch keeps the exterior eave',
+      extractDripEdges(cover, { outdoorsGrid: indoorsBlock(1) }).edgeTexels === 36
+    );
+    // …but the reach is bounded: a mask that marks the yard indoors too wins.
+    t.ok(
+      'ground indoors well past the edge silences it',
+      extractDripEdges(cover, { outdoorsGrid: indoorsBlock(2) }).edgeTexels === 0
+    );
+    t.ok('an absent outdoors grid changes nothing', extractDripEdges(cover, { outdoorsGrid: null }).edgeTexels === 52);
   }
 
   // ---- the signature notices a changed roofline -------------------------------

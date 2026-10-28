@@ -9,6 +9,22 @@ import { computeSun, normalizeHour, DEFAULT_SUN_CONFIG, SKY_PHASES, phaseBoundar
 export function run(t) {
   const close = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
+  // ---- the golden-hour bell (2026-10-27): skewed above the horizon -----------
+  {
+    t.ok('golden01: absent at noon and midnight', computeSun(12).golden01 === 0 && computeSun(0).golden01 === 0);
+    let best = { h: 0, g: -1 };
+    for (let h = 0; h < 12; h += 0.005) {
+      const g = computeSun(h).golden01;
+      if (g > best.g) best = { h, g };
+    }
+    t.ok(
+      'golden01: peaks at 1 with the sun a little ABOVE the horizon (~2°)',
+      close(best.g, 1, 1e-3) && Math.abs(computeSun(best.h).elevationDeg - 2) < 0.3
+    );
+    t.ok('golden01: already substantial at sunrise itself (0°)', computeSun(6).golden01 > 0.8);
+    t.ok('golden01: gone well before the sun is high', computeSun(9).golden01 === 0);
+  }
+
   // ---- the anchors (the author's own ToD anchor hours) ---------------------
   {
     const noon = computeSun(12);

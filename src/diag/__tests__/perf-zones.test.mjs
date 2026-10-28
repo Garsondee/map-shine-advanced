@@ -57,6 +57,7 @@ import { FIRE } from '../../effects/fire/fire.js';
 import { SMELLY_FLIES } from '../../effects/critters/smelly-flies.js';
 import { MAGGOTS } from '../../effects/critters/maggots.js';
 import { FIREFLIES } from '../../effects/critters/fireflies.js';
+import { DUST } from '../../effects/critters/dust.js';
 
 const MANIFESTS = [
   APERTURE_GOBO,
@@ -108,6 +109,7 @@ const MANIFESTS = [
   SMELLY_FLIES,
   MAGGOTS,
   FIREFLIES,
+  DUST,
 ];
 
 export function run(t) {

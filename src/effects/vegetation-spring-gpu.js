@@ -197,8 +197,8 @@ export function buildVegetationSpringIntegrateMaterial({
 
   const probeA = pivotXY.add(armDir.mul(armLenPx));
   const probeB = pivotXY.sub(armDir.mul(armLenPx));
-  const sampleA = windHandle.node(THREE.TSL, { centerXY: probeA, time });
-  const sampleB = windHandle.node(THREE.TSL, { centerXY: probeB, time });
+  const sampleA = windHandle.strengthNode(THREE.TSL, { centerXY: probeA, time, baked: 'now' });
+  const sampleB = windHandle.strengthNode(THREE.TSL, { centerXY: probeB, time, baked: 'now' });
 
   const diff = sampleA.sub(sampleB);
   // cross2D(diff, armDir) — the component of the differential that would

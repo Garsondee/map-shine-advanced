@@ -84,19 +84,20 @@ export function currentSceneId() {
 }
 
 /**
- * A scene's name as THIS user may see it — the rule Foundry's own loading bar uses
- * (`F:canvas/loader.mjs:263-264`): a GM, or a scene that is active, being viewed, or
- * listed and visible. Anyone else is told only "the next scene", so a prepare
- * notification can never reveal the name of a scene a player may not see.
- * @param {object} scene @returns {string}
+ * A scene's name as THIS user may see it in an announcement: the GM sees it, a player
+ * NEVER does (2026-10-28 — "we don't want to announce to players where they are going
+ * next"). Foundry's own loading bar is looser (`F:canvas/loader.mjs:263-264` also names
+ * an active/visible scene); ours is deliberately stricter. Returns `null` for a player,
+ * and callers word their message without a name (see `formatPrepareMessage`).
+ * @param {object} scene @returns {string|null}
  */
 export function sceneNameForUser(scene) {
   try {
-    const mayKnow = scene.active || scene.isView || (scene.navigation && scene.visible) || game.user?.isGM;
-    return mayKnow ? scene.navName || scene.name || 'the next scene' : 'the next scene';
+    if (!game.user?.isGM) return null;
+    return scene.navName || scene.name || 'the next scene';
   } catch (err) {
     log.error('could not work out a scene name for the notification:', err);
-    return 'the next scene';
+    return null;
   }
 }
 

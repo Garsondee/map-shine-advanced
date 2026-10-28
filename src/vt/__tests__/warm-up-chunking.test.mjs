@@ -128,7 +128,9 @@ export function run(t) {
     // What this pin defends is unchanged and is asserted by the block checks below: the call is
     // the plain SYNCHRONOUS warmUpDrawState with includePresent:false, and nothing between the
     // visible=true flip and its restore can yield.)
-    const FLOOR_SWITCH_CALL = 'warmUpDrawState({ includePresent: false });';
+    // (2026-10-27: the call runs inside the pipeline governor's blocking mode, so every pipeline the block
+    // draws is compiled when it returns — vt/pipeline-governor.js. Still synchronous, still never awaited.)
+    const FLOOR_SWITCH_CALL = 'pipelineGovernor.blocking(() => warmUpDrawState({ includePresent: false }));';
     ok(
       'the floor-switch call site still calls the plain synchronous warmUpDrawState, includePresent:false — verbatim',
       src.includes(FLOOR_SWITCH_CALL) && !/await\s+warmUpDrawState\(\{\s*includePresent: false/.test(src)
@@ -154,6 +156,11 @@ export function run(t) {
       'the floor-prepare warm-up block contains no `await` — the ENTIRE point of the safety comment above it ' +
         '(no yield point can exist between the visible=true flip and its restore)',
       !/\bawait\b/.test(floorPrepareBlock)
+    );
+    ok(
+      "the floor-prepare warm-up draws inside the pipeline governor's blocking mode — a deferred (asynchronous) " +
+        'pipeline would leave the new floor with a canopy or a light bucket that is not drawn yet',
+      floorPrepareBlock.includes('pipelineGovernor.blocking(')
     );
 
     // ---- Property: exactly one real invocation of the chunked path, and it lives at cold load ----
@@ -184,6 +191,11 @@ export function run(t) {
     ok(
       'the OFF path passes no options — the same bare `warmUpDrawState()` call as always (default includePresent:true)',
       /else\s*\{\s*\n\s*warmUpDrawState\(\);/.test(coldLoadBlock)
+    );
+    ok(
+      'after EITHER path the cold load waits for the pipeline governor to finish (the curtain stays up until every ' +
+        'large shader exists)',
+      coldLoadBlock.includes("await settleCompiles('warm-up');")
     );
   }
 

@@ -176,7 +176,8 @@ export function maxThrowForHeightPx(heightPx, maxOffsetPx = 4096) {
  * @property {number} azimuthDeg - where the light is (compass, cw from up).
  * @property {number} elevationDeg - light elevation above the horizon.
  * @property {number} cloudCover01
- * @property {number} dayFactor01 - 1 full day, 0 full night (eased across twilight).
+ * @property {number} dayFactor01 - 1 sun disc up, 0 sun down (a quick ramp across the horizon — NOT the ambient `dayFactor01`).
+ * @property {number} golden01 - 0..1 golden-hour bell; 0 when the sun carries none.
  * @property {number} softnessMul - multiplier applied to every caster's penumbra.
  * @property {number} strengthMul - multiplier applied to every caster's strength.
  */
@@ -196,7 +197,20 @@ export function maxThrowForHeightPx(heightPx, maxOffsetPx = 4096) {
 export function shadowAtmosphere(sun, weather) {
   const elevationDeg = Number.isFinite(sun?.elevationDeg) ? sun.elevationDeg : 90;
   const azimuthDeg = Number.isFinite(sun?.azimuthDeg) ? sun.azimuthDeg : 180;
-  const dayFactor01 = clamp01(sun?.dayFactor01 ?? 1);
+  // ⚠️ THE SHADOW'S OWN DAYLIGHT, NOT `dayFactor01` (2026-10-27, author: "building
+  // shadows should be very strong and very long at the golden hour but … aren't
+  // even visible"). `dayFactor01` eases in over −6°…+10° of elevation because it
+  // drives the AMBIENT level, so at golden hour (0–6°) it is only ~0.3–0.6 and
+  // the night fade below cut every shadow to half strength and double softness
+  // exactly when the sun is a hard, low, raking disc. A shadow only needs the
+  // DISC to be above the horizon, so it keys off a much quicker ramp: gone at
+  // the horizon, full by ~+3°. Falls back to `dayFactor01` when no elevation is
+  // given, so a caller that never supplied one behaves as before.
+  const hasElevation = Number.isFinite(sun?.elevationDeg);
+  const dayFactor01 = hasElevation
+    ? ((t) => t * t * (3 - 2 * t))(clamp01((elevationDeg + 0.5) / 3))
+    : clamp01(sun?.dayFactor01 ?? 1);
+  const golden01 = clamp01(sun?.golden01 ?? 0);
   const cloudCover01 = clamp01(weather?.cloudCover01 ?? 0);
 
   // CLOUD — softens and fades, independently. A diffuse sky both blurs the edge
@@ -214,6 +228,9 @@ export function shadowAtmosphere(sun, weather) {
     elevationDeg,
     cloudCover01,
     dayFactor01,
+    /** How golden-hour the light is, 0..1 (`world/sun.js#golden01`). The sun-shadow
+     * bake reads it to stretch and darken shadows at low raking sun. */
+    golden01,
     // Multiplicative, so night UNDER cloud compounds to the softest/faintest
     // case — the explicit ordering the author asked for ("during night shadows
     // will be softer too and softest if there are clouds").

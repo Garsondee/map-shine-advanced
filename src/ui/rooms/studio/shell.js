@@ -27,7 +27,7 @@
 import { installTokens } from '../../tokens.js';
 import { installIconSprite, iconMarkup } from '../../widgets/icon-sprite.js';
 import { makeDraggable } from '../../widgets/draggable.js';
-import { renderEffectsDepartment, closeAllPopouts } from './effects-department.js';
+import { renderEffectsDepartment, revealEffectCard } from './effects-department.js';
 import { renderPainterDepartment } from './painter-department.js';
 import { renderSceneDepartment } from './scene-department.js';
 import { renderCuesDepartment } from './cues-department.js';
@@ -359,8 +359,6 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
       rememberScroll();
       state.open = false;
       room.hidden = true;
-      // "Pop-outs are views — closing the Studio closes its children."
-      closeAllPopouts();
       for (const fn of openChangeListeners) fn(false);
     },
     toggle() {
@@ -393,7 +391,8 @@ export function installStudio({ debugPanel, ...roomCtx } = {}) {
 
   const palette = installSearchPalette({
     buildIndex: () => buildSearchIndex(effectCardFactories),
-    onOpenCard: (_effectId) => {
+    onOpenCard: (effectId) => {
+      revealEffectCard(effectId);
       controller.open();
       switchDepartment('effects');
     },

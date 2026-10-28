@@ -421,10 +421,18 @@ function sharpenCasCore(THREE, { eC, eL, eR, eU, eD }, strengthNode, linearCente
  *   padded width — not the logical width the uvScale crops back to.
  * @returns {{rgb:any, a:any}} linear rgb + the untouched source alpha.
  */
-export function buildAlbedoClarityNode(THREE, tex, uvNode, uTexSizeNode) {
+export function buildAlbedoClarityNode(THREE, tex, uvNode, uTexSizeNode, opts = {}) {
   const TSL = THREE.TSL;
-  const { vec3, float, texture, dFdx, dFdy } = TSL;
+  const { vec3, float, dFdx, dFdy } = TSL;
   const { sharpen: uSharpen, gate: uGate, farFloor: uFarFloor } = albedoClarityUniforms(THREE);
+  // SMALL-ART MODE (tokens): a negative mip bias and no far roll-off. See
+  // TOKEN_SHARP_LOD_BIAS in vt-pan-viewer.js for why a token portrait needs both.
+  const lodBias = opts.lodBias ?? 0;
+  const farRollOff = opts.farRollOff !== false;
+  const texture = (t, uvN) => {
+    const node = TSL.texture(t, uvN);
+    return lodBias === 0 ? node : node.bias(float(lodBias));
+  };
 
   // UNIFORM CONTROL FLOW: nothing may branch above these two lines.
   const duvdx = dFdx(uvNode).toVar();
@@ -442,7 +450,7 @@ export function buildAlbedoClarityNode(THREE, tex, uvNode, uTexSizeNode) {
   // mix(b, t, a) (memory: reference_tsl_method_chaining_trap).
   const rampIn = TSL.smoothstep(uGate.x, uGate.y, texelsPerPixel);
   const rollOff = TSL.smoothstep(uGate.z, uGate.w, texelsPerPixel);
-  const gate = rampIn.mul(TSL.mix(float(1), uFarFloor, rollOff)).toVar();
+  const gate = (farRollOff ? rampIn.mul(TSL.mix(float(1), uFarFloor, rollOff)) : rampIn).toVar();
 
   const c = texture(tex, uvNode).toVar();
   const sL = texture(tex, uvNode.sub(duvdx));
@@ -488,9 +496,10 @@ export function buildAlbedoClarityNode(THREE, tex, uvNode, uTexSizeNode) {
  * @param {*} THREE @param {*} tex @param {*} uvNode
  * @returns {{rgb:any, a:any}} SAME shape as `buildAlbedoClarityNode`'s own.
  */
-export function buildFlatAlbedoNode(THREE, tex, uvNode) {
-  const { vec3, texture, max } = THREE.TSL;
-  const c = texture(tex, uvNode);
+export function buildFlatAlbedoNode(THREE, tex, uvNode, opts = {}) {
+  const { vec3, float, texture, max } = THREE.TSL;
+  const lodBias = opts.lodBias ?? 0;
+  const c = lodBias === 0 ? texture(tex, uvNode) : texture(tex, uvNode).bias(float(lodBias));
   return { rgb: max(c.rgb, vec3(0)), a: c.a };
 }
 

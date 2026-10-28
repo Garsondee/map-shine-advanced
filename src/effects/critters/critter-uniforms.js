@@ -115,25 +115,79 @@ export const CRITTER_UNIFORM_DEFAULTS = Object.freeze({
   crawlChance: 0.55,
   crawlLength: 1,
   clustering: 0.25,
-  // ── fireflies ──
-  driftSpeed: 30,
-  wander: 1,
-  hoverHeight: 45,
-  range: 140,
-  restChance: 0.015,
-  liftChance: 0.05,
-  colorVariation: 0.2,
-  intensity: 5,
-  glowRadius: 18,
+  // ── fireflies ── (sparser, softer, wider-roaming tuning, 2026-10-28)
+  driftSpeed: 17,
+  wander: 0.75,
+  hoverHeight: 25,
+  range: 730,
+  restChance: 0.5,
+  liftChance: 0.045,
+  colorVariation: 0.3,
+  intensity: 6.2,
+  glowRadius: 8,
   coreSize: 1,
-  haloAmount: 1,
-  afterglow: 1,
-  restGlow: 0.3,
+  haloAmount: 0.1,
+  afterglow: 0.1,
+  restGlow: 0.05,
   flashPeriod: 3.6,
   synchrony: 0.25,
-  bodyVisibility: 0.7,
+  bodyVisibility: 0.5,
   flashStyleIndex: 0,
   colonyPhase: 0,
+  // ── dust motes (`dust.js`; the `mote` kind) ──
+  sparkle: 0.55,
+  sparkleSharpness: 9,
+  bokeh: 0.8,
+  focusHeight: 40,
+  beamContrast: 1.3,
+  colorFromLight: 0.8,
+  lowSunGlow: 1.2,
+  beamSlant: 0.55,
+  ambientGlow: 0.06,
+  swirl: 1,
+  swirlScale: 180,
+  tumble: 1,
+  updraft: 1,
+  // px/s a full gale carries a mote (read from the wind grid, per mote). The flies' and fireflies' own
+  // `windDrift` is a CPU-side input (`critter-weather.js#weatherDrive`) with the same meaning and its own
+  // defaults, which is why each kind restates it below: the table's value is the flies'.
+  windDrift: 140,
+  // dust controls (`dust.js`)
+  nightOpacity: 0.03,
+  nightLightColour: 1,
+  shapeIrregularity: 1,
+  flakeThinness: 0.4,
+  edgeOnSquash: 0.6,
+  pinpointTightness: 8,
+  bokehSize: 1.6,
+  starAmount: 1.5,
+  glintFloor: 0.2,
+  roomCutoff: 1.02,
+  hueLimit: 2.5,
+  minScreenSize: 1.5,
+  brightnessVariation: 0.3,
+  fadeInTime: 2,
+  wanderAmount: 0.3,
+  inertia: 1.5,
+  turbulenceGain: 0.6,
+  heightEase: 2,
+  eddySpeed: 0.13,
+  convection: 0.3,
+  tokenPush: 140,
+  tokenSpin: 110,
+  homing: 4,
+  minHeight: 0.05,
+  // The motes' per-frame plumbing (set by the subsystem / `step`): the view they are drawn into, where the
+  // sun's ray lands per px of height, how low the sun is, the room's own light, the window light's full range,
+  // and the unwrapped clock the wind field's noise runs on.
+  viewMin: [0, 0],
+  viewSize: [1, 1],
+  sunShift: [0, 0],
+  sunLow: 0,
+  night: 0,
+  lightBase: [0.3, 0.3, 0.3],
+  beamRef: 0.45,
+  windTimeMs: 0,
 });
 
 /**
@@ -143,14 +197,91 @@ export const CRITTER_UNIFORM_DEFAULTS = Object.freeze({
 export const CRITTER_KIND_DEFAULTS = Object.freeze({
   // `tokenStartleResponse`/`tokenStartleRadius` mirror smelly-flies.js's own defaults — a fly
   // startles hard and from a wide radius.
-  fly: Object.freeze({ tokenStartleResponse: 0.8, tokenStartleRadius: 140 }),
+  fly: Object.freeze({
+    size: 6,
+    shadowSoftness: 0.35,
+    flyHeight: 230,
+    landChance: 0.495,
+    landingTime: 1,
+    tokenStartleResponse: 1,
+    tokenStartleRadius: 480,
+  }),
   // `color` is the glow's in the table (a firefly's) and the skin's here; a maggot rests in longer
   // pauses than a fly. Maggots never read the token uniforms at all (critter-token.js's own
   // header), so no override is needed here for them.
   maggot: Object.freeze({ size: 6, sizeVariation: 0.65, color: [0.902, 0.863, 0.722], pauseMin: 0.9, pauseMax: 3.6 }),
-  // `tokenStartleResponse`/`tokenStartleRadius` mirror fireflies.js's own defaults — softer and
-  // closer-range than a fly's: wary, not panicked.
-  firefly: Object.freeze({ size: 3, sizeVariation: 0.2, tokenStartleResponse: 0.5, tokenStartleRadius: 110 }),
+  // `tokenStartleResponse`/`tokenStartleRadius` mirror fireflies.js's own defaults — wider-range
+  // than a fly's now (2026-10-28 retune), but still a lift-off, not a panic. `opacity`/
+  // `lightInfluence`/`perspective` are overridden too: despite living in the "shared by every
+  // kind" block above, each kind in fact declares its OWN schema default for these three
+  // (fireflies.js/smelly-flies.js/maggots.js each have their own `opacity` slider, etc.) — the
+  // "shared" comment recorded a coincidence (every kind defaulted to 1) that fireflies' own
+  // 2026-10-28 retune broke; fly's and maggot's schemas still say 1, so the shared block above
+  // stays 1 and only fireflies' own kind gets its retuned numbers here.
+  firefly: Object.freeze({
+    size: 3,
+    sizeVariation: 0.2,
+    windDrift: 60,
+    tokenStartleResponse: 1,
+    tokenStartleRadius: 200,
+    opacity: 0.5,
+    lightInfluence: 0.5,
+    perspective: 0.15,
+  }),
+  // Dust (`dust.js`): the schema's own defaults, so a mote engine that has not been pushed anything yet still
+  // looks like the shipped one. `color` is #fff1dc.
+  mote: Object.freeze({
+    size: 0.5,
+    sizeVariation: 0.05,
+    color: [1, 0.8, 0.502],
+    intensity: 20,
+    driftSpeed: 15,
+    range: 115,
+    hoverHeight: 60,
+    perspective: 0.05,
+    windDrift: 410,
+    haloAmount: 0.5,
+    colorVariation: 0.2,
+    tokenStartleResponse: 1,
+    tokenStartleRadius: 200,
+    bokehSize: 0.15,
+    minHeight: 0.01,
+    fadeInTime: 2,
+    tokenSpin: 110,
+    tokenPush: 140,
+    homing: 1.7,
+    heightEase: 5.3,
+    convection: 0.3,
+    eddySpeed: 0.55,
+    turbulenceGain: 1.3,
+    inertia: 0.6,
+    wanderAmount: 0.8,
+    updraft: 2.15,
+    tumble: 0.4,
+    swirlScale: 60,
+    swirl: 1.55,
+    speed: 0.35,
+    hueLimit: 1.2,
+    roomCutoff: 1,
+    ambientGlow: 0.1,
+    beamSlant: 2,
+    lowSunGlow: 1,
+    colorFromLight: 1,
+    beamContrast: 4,
+    minScreenSize: 1.5,
+    brightnessVariation: 0.75,
+    glintFloor: 0.04,
+    starAmount: 3.5,
+    pinpointTightness: 40,
+    edgeOnSquash: 0.5,
+    flakeThinness: 0.85,
+    shapeIrregularity: 0.55,
+    focusHeight: 180,
+    bokeh: 0,
+    sparkleSharpness: 40,
+    sparkle: 0.7,
+    opacity: 0.3,
+  }),
 });
 
 /**

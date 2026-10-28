@@ -33,6 +33,8 @@ import { run as runApertureGoboRender } from './aperture-gobo-render.test.mjs';
 import { run as runWindowReach } from './window-reach.test.mjs';
 import { run as runLightPolygonRepair } from './light-polygon-repair.test.mjs';
 import { run as runPlayerLightGeometry } from './player-light-geometry.test.mjs';
+import { run as runWeatherShade } from './weather-shade.test.mjs';
+import { run as runCanopyLight } from './canopy-light.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -86,6 +88,8 @@ const suites = [
   ['window-reach', runWindowReach],
   ['light-polygon-repair', runLightPolygonRepair],
   ['player-light-geometry', runPlayerLightGeometry],
+  ['weather-shade', runWeatherShade],
+  ['canopy-light', runCanopyLight],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

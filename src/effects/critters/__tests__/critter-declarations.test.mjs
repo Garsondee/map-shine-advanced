@@ -17,6 +17,7 @@ import {
 } from '../smelly-flies.js';
 import { MAGGOTS, MAGGOTS_PARAMS, MAGGOTS_PRESETS, MAGGOTS_FOH, maggotsPreset } from '../maggots.js';
 import { FIREFLIES, FIREFLIES_PARAMS, FIREFLIES_PRESETS, FIREFLIES_FOH, firefliesPreset } from '../fireflies.js';
+import { DUST, DUST_PARAMS, DUST_PRESETS, DUST_FOH, dustPreset } from '../dust.js';
 import { CATEGORY_ORDER, rohGroups, groupParamsByCategory } from '../../../ui/widgets/param-groups.js';
 import { FIREFLY_SYNC } from '../firefly-brain.js';
 import { MASK_GRID_MAX_DIM } from '../../../scene/mask-derive.js';
@@ -34,7 +35,7 @@ import {
   critterMarginPx,
 } from '../critter-species.js';
 
-/** The three effects: their manifest, schema, presets, and the mask kind each one paints. */
+/** The four effects: their manifest, schema, presets, and the mask kind each one paints. */
 export const CRITTER_EFFECTS = Object.freeze([
   {
     label: 'SMELLY_FLIES',
@@ -63,6 +64,15 @@ export const CRITTER_EFFECTS = Object.freeze([
     preset: firefliesPreset,
     kind: 'fireflies',
     foh: FIREFLIES_FOH,
+  },
+  {
+    label: 'DUST',
+    manifest: DUST,
+    params: DUST_PARAMS,
+    presets: DUST_PRESETS,
+    preset: dustPreset,
+    kind: 'dust',
+    foh: DUST_FOH,
   },
 ]);
 
@@ -173,15 +183,15 @@ export function run(t) {
     );
   }
 
-  // ---- three effects, three separate masks -------------------------------------------------------
+  // ---- four effects, four separate masks ---------------------------------------------------------
   t.ok(
-    'the three critter effects paint three DIFFERENT masks',
-    new Set(CRITTER_EFFECTS.map((e) => e.manifest.authoring.paint)).size === 3
+    'the four critter-engine effects paint four DIFFERENT masks',
+    new Set(CRITTER_EFFECTS.map((e) => e.manifest.authoring.paint)).size === 4
   );
   t.ok(
-    'the three effects have three different ids and titles',
-    new Set(CRITTER_EFFECTS.map((e) => e.manifest.id)).size === 3 &&
-      new Set(CRITTER_EFFECTS.map((e) => e.manifest.title)).size === 3
+    'the four effects have four different ids and titles',
+    new Set(CRITTER_EFFECTS.map((e) => e.manifest.id)).size === 4 &&
+      new Set(CRITTER_EFFECTS.map((e) => e.manifest.title)).size === 4
   );
   t.ok(
     'the flies carry no maggot controls any more (they are their own effect)',
@@ -248,7 +258,7 @@ export function run(t) {
   );
 
   // ---- species tables ----------------------------------------------------------------------------
-  t.ok('three kinds', CRITTER_KINDS.join() === 'fly,maggot,firefly');
+  t.ok('four kinds', CRITTER_KINDS.join() === 'fly,maggot,firefly,mote');
   t.ok(
     'every kind has a positive capacity',
     CRITTER_KINDS.every((k) => CRITTER_CAPACITY[k] > 0)
@@ -257,12 +267,14 @@ export function run(t) {
     'capacity covers the manifests’ own per-zone ceilings',
     CRITTER_CAPACITY.fly >= SMELLY_FLIES_PARAMS.fliesPerZone.max &&
       CRITTER_CAPACITY.maggot >= MAGGOTS_PARAMS.countPerZone.max &&
-      CRITTER_CAPACITY.firefly >= FIREFLIES_PARAMS.countPerZone.max
+      CRITTER_CAPACITY.firefly >= FIREFLIES_PARAMS.countPerZone.max &&
+      // the top rung deals half again as many
+      CRITTER_CAPACITY.mote >= DUST_PARAMS.countPerZone.max * 1.5
   );
   t.ok('the zone buffer holds a full 512² derived grid plus its 2-cell border', ZONE_MAX_CELLS === 516 * 516);
 
   // tier plans: monotone — a feature bought at one rung is never taken away higher up
-  for (const family of ['fly', 'firefly']) {
+  for (const family of ['fly', 'firefly', 'mote']) {
     const plans = Array.from({ length: CRITTER_TIER_COUNT }, (_, n) => critterTierPlan(family, n));
     const flags = Object.keys(plans[0]).filter((k) => typeof plans[0][k] === 'boolean');
     t.ok(

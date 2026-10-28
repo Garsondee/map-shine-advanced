@@ -243,8 +243,8 @@ const BASE_CSS = `
 .ico{width:1.1em;height:1.1em;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:-0.18em;flex:none}
 .num{font-variant-numeric:tabular-nums}
 :focus-visible{outline:2px solid var(--shine, #e7c368);outline-offset:2px;border-radius:4px}
-html[data-reduce-motion="1"] *,html[data-reduce-motion="1"] *::before,html[data-reduce-motion="1"] *::after{animation-duration:0.001s !important;transition-duration:0.001s !important}
-@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:0.001s !important;transition-duration:0.001s !important}}
+html[data-reduce-motion="1"] *:not(#pause):not(#pause *),html[data-reduce-motion="1"] *:not(#pause):not(#pause *)::before,html[data-reduce-motion="1"] *:not(#pause):not(#pause *)::after{animation-duration:0.001s !important;transition-duration:0.001s !important}
+@media (prefers-reduced-motion: reduce){*:not(#pause):not(#pause *),*:not(#pause):not(#pause *)::before,*:not(#pause):not(#pause *)::after{animation-duration:0.001s !important;transition-duration:0.001s !important}}
 `.trim();
 
 /**

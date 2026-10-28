@@ -5,6 +5,7 @@
  * kinds, thresholds and units are the sky's own, not numbers a test author typed in and believed.
  */
 import { buildEnvSnapshot } from '../../../world/environment.js';
+import { speed01FromLegacyBeaufortDial } from '../../../world/wind-scale.js';
 import {
   LOAD_SATURATION,
   skyFeel,
@@ -15,8 +16,12 @@ import {
   WEATHER_DRIVE_PARAMS,
 } from '../critter-weather.js';
 
+// Wind inputs here are written as the OLD dial (Beaufort force ÷ 12, the scale these thresholds were
+// tuned on); the dial went linear to 70 m/s on 2026-10-27, so they are converted to the same real speed.
+const legacyWind = (w = {}) =>
+  Number.isFinite(w.speed01) ? { ...w, speed01: speed01FromLegacyBeaufortDial(w.speed01) } : w;
 const sky = ({ weather = {}, wind = {} } = {}) =>
-  buildEnvSnapshot({ time: { frame: 1, tMs: 1000, dtSec: 0.016 }, todHour: 12, weather, wind });
+  buildEnvSnapshot({ time: { frame: 1, tMs: 1000, dtSec: 0.016 }, todHour: 12, weather, wind: legacyWind(wind) });
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
 export function run(t) {

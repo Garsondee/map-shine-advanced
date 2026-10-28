@@ -117,6 +117,19 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
   // — the ORIGINAL, unscaled behavior — so this uniform being un-set (a
   // shader-lab bench, e.g.) never silently changes anything.
   const uTapSpread = uniform(1.0);
+  // 2026-10-27 — PALE-BLUR FIX. scene.lit is linear and HDR, and a plain average
+  // of linear values is dominated by the brightest taps: a dark carpet crossed
+  // by gold trim, a lamp or the bloom halo averages to something much paler and
+  // brighter than the eye (or a real lens) would blend it to — every blurred
+  // lower floor read washed-out next to the sharp one. So the FIRST downsample
+  // step (scene.lit → mip0) encodes each tap into sqrt space (a cheap gamma-2
+  // stand-in) before the 13 taps are averaged, and every later step just
+  // averages the already-encoded mips; the composite squares the mixed result
+  // back to linear. 1 = encode this step's input (scene.lit), 0 = it is
+  // already encoded (a mip). Defaults to 0 so a bench that never sets it gets
+  // the plain average it always had — but then the composite's decode is
+  // wrong, so any caller that drives the composite must drive this too.
+  const uEncodeInput = uniform(0.0);
   const downsampleMaterial = new THREE.NodeMaterial();
   downsampleMaterial.depthTest = false;
   downsampleMaterial.depthWrite = false;
@@ -124,7 +137,10 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
     const base = uv();
     const x = uInvTexel.x.mul(uTapSpread);
     const y = uInvTexel.y.mul(uTapSpread);
-    const S = (ox, oy) => inputNode.sample(base.add(vec2(x.mul(ox), y.mul(oy)))).rgb;
+    const S = (ox, oy) => {
+      const raw = inputNode.sample(base.add(vec2(x.mul(ox), y.mul(oy)))).rgb;
+      return mix(raw, raw.max(0.0).sqrt(), uEncodeInput);
+    };
     // a b c / j k / d e f / l m / g h i — the same 13-tap pattern
     // bloom-render.js's own "plain" downsample proves looks good, without its
     // Karis firefly weighting (that exists only to protect a bright-pass
@@ -199,7 +215,11 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
   // radius. 2 texels is a deliberately conservative starting point; this is
   // the one constant to nudge up if a live look still reads too square, or
   // down if it reads noticeably softer than before.
-  const RING_RADIUS_TEXELS = 2.0;
+  // 2026-10-27 — 2.0 → 1.0: one floor down read ~50% too blurry. The ring is
+  // the dominant part of the kernel at the shallow end (the mip0 tap spread is
+  // only 0.35), so halving it, with DOF_MIP0_TAP_SPREAD halved to match in
+  // vt-pan-viewer.js, halves the blur extent per floor.
+  const RING_RADIUS_TEXELS = 1.0;
   // 2026-08-27, round 2 — Ingram's own live read of the ring-only version:
   // "no longer square but now 'bubble' shaped." Root cause: a ring of
   // samples with NOTHING at the center is, mathematically, a hollow-annulus
@@ -278,7 +298,10 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
     const lod0 = lod.floor();
     const lod1 = lod0.add(1.0).min(float(topLod));
     const frac = lod.sub(lod0);
-    const blurredColor = mix(pickFromRing(lod0), pickFromRing(lod1), frac);
+    const encodedBlur = mix(pickFromRing(lod0), pickFromRing(lod1), frac);
+    // Undo the sqrt-space encode the first downsample step applied (see
+    // uEncodeInput) — back to linear scene.lit units.
+    const blurredColor = encodedBlur.mul(encodedBlur);
 
     // Mirrors computeDofAlpha — a hard cut (0 or 1), never a ramp and never
     // `strength`-scaled: a below-floor pixel is always a full replace by ONE
@@ -287,7 +310,9 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
     // sample, not a sharp source, so strength/blurPerFloor/maxBlur landing
     // the ramp at exactly 0 must disable the replace outright, or "every
     // slider at zero" would still visibly blur via mip0's own softness.
-    const alpha = select(floorsBelow.greaterThan(0.0).and(lod.greaterThan(0.0)), float(1.0), float(0.0));
+    // Mid-glide (Parallax's floor change) `floorsBelow` is a fraction, so the blur arrives over the glide;
+    // at rest it is a whole number >= 1 and this is exactly 1 (computeDofAlpha mirrors it).
+    const alpha = select(floorsBelow.greaterThan(0.0).and(lod.greaterThan(0.0)), floorsBelow.min(1.0), float(0.0));
 
     return vec4(blurredColor, alpha);
   })();
@@ -295,7 +320,7 @@ export function buildDofMaterials({ THREE, depthColorTexture, mipTextures }) {
 
   return {
     downsampleMaterial,
-    downsample: { inputNode, uInvTexel, uTapSpread },
+    downsample: { inputNode, uInvTexel, uTapSpread, uEncodeInput },
     compositeMaterial,
     // Uniform handles the viewer writes each frame from the resolved params
     // (+ view.floorIndex for viewedFloorIndex).

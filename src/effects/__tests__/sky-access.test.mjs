@@ -8,7 +8,7 @@
  * the one job that IS a light's: the key/fill colour split, and that it ships as
  * a mathematical no-op.
  */
-import { createSkyHandle, luminance } from '../sky-access.js';
+import { createSkyHandle, lightGoldenTint, luminance } from '../sky-access.js';
 // The real sun, for the continuity sweep — a test is exempt from `zones/one-door`
 // and this is the ACTUAL input the handle receives in production.
 import { computeSun } from '../../world/sun.js';
@@ -128,8 +128,82 @@ export function run(t) {
       const jump = Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2]));
       maxRatePerHour = Math.max(maxRatePerHour, jump / STEP_H);
     }
-    // Measured worst: ~0.77/hour, at dusk. The bug this guards read ~100/hour.
-    t.ok('the sky colour never lurches — no hue pop anywhere in the real day', maxRatePerHour < 1.5);
+    // Measured worst: ~0.77/hour at dusk until the golden-hour grade (2026-10-27,
+    // "strong and exagerated") — that now swings neutral→deep orange across the
+    // hour the sun climbs through −6°…+2°, ~2.6/hour at its steepest. A smooth
+    // ramp, not a pop: the bug this guards read ~100/hour, so the bound still
+    // sits two orders of magnitude under it.
+    t.ok('the sky colour never lurches — no hue pop anywhere in the real day', maxRatePerHour < 4);
+  }
+
+  // GOLDEN HOUR (2026-10-27) — independent of realism01, off at noon, orange at dusk.
+  {
+    const noon = createSkyHandle({ sun: NOON, goldenHour01: 1 });
+    t.ok(
+      'golden grade is a no-op at noon even with the lever up',
+      noon.neutral === true && noon.ambientMultiplierRgb.every((v) => v === 1)
+    );
+    const gold = createSkyHandle({ sun: computeSun(18 - 0.4), realism01: 0 });
+    const m = gold.ambientMultiplierRgb;
+    // (2× since GOLDEN_EFFECT_SCALE took the grade 20% down, 2026-10-28 — it was 2.5× at full strength.)
+    t.ok(
+      `golden hour is strongly warm WITHOUT the realism lever (R/B ×${(m[0] / m[2]).toFixed(2)})`,
+      m[0] > m[2] * 2 && gold.neutral === false
+    );
+    // 2026-10-27 ("Golden hour in general is too bright"): low sun is weaker as
+    // well as warmer — the one level term the sky owns (GOLDEN_LEVEL).
+    t.ok('⭐ golden light is DIMMER than noon, not just warmer', luminance(m) < 0.85 && luminance(m) > 0.6);
+    t.ok('…and its red channel is no longer blown far past noon', m[0] < 1.35);
+    const off = createSkyHandle({ sun: computeSun(18 - 0.4), realism01: 0, goldenHour01: 0 });
+    t.ok('the golden lever at 0 turns it fully off', off.neutral === true);
+  }
+
+  // THE AFTERGLOW → BLUE HOUR (2026-10-27, "immediately after golden hour the
+  // colouration returns to normal long before it gets dark"). Sweep dusk from
+  // golden hour to full dark: while the sky still gives light, the outdoor light
+  // must never fall back to plain neutral white.
+  {
+    let worstNeutral = Infinity;
+    let worstAt = null;
+    for (let h = 18; h < 19.3; h += 0.02) {
+      const sun = computeSun(h);
+      if (sun.skyFactor01 < 0.25) break; // darkness past 0.75: night owns it from here
+      const m = createSkyHandle({ sun }).ambientMultiplierRgb;
+      const chroma = Math.max(...m) - Math.min(...m);
+      if (chroma < worstNeutral) {
+        worstNeutral = chroma;
+        worstAt = h;
+      }
+    }
+    t.ok(
+      `⭐ no white-light gap between sunset and dark (least chroma ${worstNeutral.toFixed(2)} at ${worstAt?.toFixed(2)})`,
+      worstNeutral > 0.25
+    );
+    const rose = createSkyHandle({ sun: computeSun(18 + 0.15) }).ambientMultiplierRgb;
+    const blue = createSkyHandle({ sun: computeSun(18 + 0.7) }).ambientMultiplierRgb;
+    t.ok('just after sunset the light is rose/warm', rose[0] > rose[1]);
+    t.ok('deeper into twilight it is the blue hour', blue[2] > blue[0] * 1.4);
+    t.ok(
+      'the afterglow rides the Golden lever',
+      createSkyHandle({ sun: computeSun(18.7), goldenHour01: 0 }).neutral === true
+    );
+    t.ok('and is gone at noon', createSkyHandle({ sun: NOON }).neutral === true);
+  }
+
+  // MOONLIGHT (2026-10-27) — an option, off by default, night-only, cool.
+  {
+    const night = computeSun(0);
+    t.ok(
+      'moonlight is off by default',
+      createSkyHandle({ sun: night }).moonAddRgb.every((v) => v === 0)
+    );
+    const moon = createSkyHandle({ sun: night, moonlight01: 1 });
+    t.ok('moonlight adds a cool light at night', moon.moonAddRgb[2] > moon.moonAddRgb[0] && moon.moonAddRgb[2] > 0.1);
+    t.ok('and cools the outdoor multiplier', moon.ambientMultiplierRgb[2] > moon.ambientMultiplierRgb[0]);
+    t.ok(
+      'but never at noon',
+      createSkyHandle({ sun: NOON, moonlight01: 1 }).moonAddRgb.every((v) => v === 0)
+    );
   }
 
   {
@@ -214,5 +288,34 @@ export function run(t) {
     }
     t.ok('the key direction is exactly OPPOSITE the shadow throw, at every azimuth', opposed);
     t.ok('…and stays a unit vector all the way round', unit);
+  }
+
+  // ======================================================================
+  // A POINT LIGHT'S AMBIENT TONES CARRY THE GOLDEN TINT (author, 2026-10-27:
+  // fire light "bleaching the colour of light towards white" at golden hour).
+  // ======================================================================
+  {
+    const m = [1.6, 0.8, 0.3];
+    const near = (a, b) => a.every((v, i) => close(v, b[i]));
+    t.ok(
+      'golden hour, open sky: the light carries the full sky multiplier',
+      near(lightGoldenTint({ multiplierRgb: m, golden01: 0.8, outdoors01: 1 }), m)
+    );
+    t.ok('indoors: nothing to apply', lightGoldenTint({ multiplierRgb: m, golden01: 0.8, outdoors01: 0 }) === null);
+    t.ok(
+      'not golden hour (noon, night): nothing to apply',
+      lightGoldenTint({ multiplierRgb: m, golden01: 0, outdoors01: 1 }) === null
+    );
+    t.ok(
+      'a doorway blends halfway',
+      near(lightGoldenTint({ multiplierRgb: m, golden01: 0.8, outdoors01: 0.5 }), [1.3, 0.9, 0.65])
+    );
+    t.ok(
+      'malformed input never yields NaN',
+      lightGoldenTint({ multiplierRgb: [NaN, 1, 1], golden01: 1 }) === null && lightGoldenTint() === null
+    );
+    const sky = createSkyHandle({ sun: { ...DUSK, golden01: 1 }, weather: { cloudCover01: 0 }, realism01: 0 });
+    const tint = lightGoldenTint({ multiplierRgb: sky.ambientMultiplierRgb, golden01: sky.golden01, outdoors01: 1 });
+    t.ok('the real golden grade yields a warm tint (red above blue)', tint !== null && tint[0] > tint[2] * 2);
   }
 }

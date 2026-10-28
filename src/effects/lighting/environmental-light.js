@@ -46,7 +46,8 @@
  * @module effects/lighting/environmental-light
  */
 
-import { buildSunVisibilityNode } from './sun-occlusion-render.js';
+import { buildSunVisibilityNode, buildWorldSpaceSunVisibilityNode } from './sun-occlusion-render.js';
+import { liftedLookupNode, layerScaleDecodeNode } from '../../scene/index.js';
 // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — reused, not
 // reinvented: the SAME footprint threshold `fluid-render.js`'s own mesh
 // gates its silhouette on (`smoothstep(EDGE0, EDGE1, maskTexNode.r)`), so a
@@ -212,6 +213,33 @@ export function computeGlobalLightFloor(globalLightConfig, ambientColors) {
 export function maxRgb(rgb, floor) {
   if (!floor) return [rgb[0], rgb[1], rgb[2]];
   return [Math.max(rgb[0], floor[0]), Math.max(rgb[1], floor[1]), Math.max(rgb[2], floor[2])];
+}
+
+/** The least a weather body is ever dimmed to — a streak in a pitch-black scene is still a streak. */
+export const SCENE_LIGHT_LEVEL_MIN = 0.06;
+
+/**
+ * HOW LIT THE OUTDOORS IS, as one 0..1 scalar for things that draw AFTER the
+ * lighting multiply (rain, wind ribbons, dust, fog). The scene itself is
+ * `colour × illum`; these additive/blended draws land on the result, so unless
+ * they scale themselves by the same ambient they glow at full brightness in a
+ * pitch-black scene (author, 2026-10-27: night darkness at full, rain and wind
+ * still bright). `ambientRgb` is `maxRgb(lastAmbientColors.background,
+ * lastGlobalLightFloor)` — the SAME outdoor ceiling the windows read — in the
+ * same space as illum, so this is the light the ground itself is getting.
+ *
+ * Rec.709 luminance, clamped. Absent or non-finite input is "fully lit" (1):
+ * an unmeasured scene must not silently delete its weather.
+ *
+ * @param {readonly number[]|null|undefined} ambientRgb
+ * @returns {number} SCENE_LIGHT_LEVEL_MIN..1
+ */
+export function sceneLightLevel(ambientRgb) {
+  if (!ambientRgb || ambientRgb.length < 3) return 1;
+  const [r, g, b] = ambientRgb;
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return 1;
+  const lum = r * 0.2126 + g * 0.7152 + b * 0.0722;
+  return Math.min(1, Math.max(SCENE_LIGHT_LEVEL_MIN, lum));
 }
 
 /**
@@ -424,6 +452,13 @@ export function buildEnvironmentalLightMaterials({
   // A 1x1 all-zero texture from the caller (textures are made in vt/ only —
   // `gpu/textures-in-vt-only`): "no water anywhere" until `setWaterMask`.
   waterMaskPlaceholder = null,
+  // THE FLOORS ABOVE (2026-10-28, author: "When underground I zoom out and I can
+  // see clouds across the whole map ... prevent the cloud tops and shadows from
+  // rendering where there is no gap above"). A 1x1 all-zero texture from the
+  // caller — "nothing above" — re-pointed by `setSkyCover` to the viewed floor's
+  // `coverAbove` grid. `_Outdoors` alone cannot answer this: an underground
+  // floor with no mask of its own reads as wholly outdoors. `null` = no term.
+  skyCoverPlaceholder = null,
 }) {
   const { uniform, texture, uv, vec2, vec3, vec4, float, mix, smoothstep, step, sRGBTransferEOTF, sRGBTransferOETF } =
     THREE.TSL;
@@ -455,10 +490,20 @@ export function buildEnvironmentalLightMaterials({
   // Asserted in `scene/__tests__/world-quad.test.mjs`, chained to the
   // already-proven `worldToNdc` rather than re-derived.
   const uSkyMultiplier = uniform(vec3(1, 1, 1));
+  /** The moon's additive light (`sky-access.js#moonAddRgb`), gamma-space ambient units. */
+  const uMoonAdd = uniform(vec3(0, 0, 0));
   /** The camera's world rect THIS frame: (minX, minY, maxX, maxY). */
   const uViewRect = uniform(vec4(0, 0, 1, 1));
   /** The world rect the outdoors texture covers: (minX, minY, maxX, maxY). */
   const uOutdoorsRect = uniform(vec4(0, 0, 1, 1));
+  /** The REAL scene rect, padding excluded: (minX, minY, maxX, maxY). Starts
+   * unbounded, so a caller that never calls `setSceneRect` gates nothing. */
+  const uSceneRect = uniform(vec4(-1e9, -1e9, 1e9, 1e9));
+  /** The same rect for the OUTDOORS gate, which it may only WIDEN: it starts empty, so a caller that
+   * never calls `setSceneRect` keeps the mask's own hard edge (the padding rule). */
+  const uOutdoorsExtent = uniform(vec4(0, 0, 0, 0));
+  /** (scene eye height px, sun throw x, y per px of height, unused) — for the lifted shadow lookup. */
+  const uLayerEye = uniform(vec4(1000, 0, 0, 0));
 
   const outdoorsTexNode = outdoorsTexture ? texture(outdoorsTexture) : null;
 
@@ -469,6 +514,12 @@ export function buildEnvironmentalLightMaterials({
   const waterMaskTexNode = waterShadowStrengthNode && waterMaskPlaceholder ? texture(waterMaskPlaceholder) : null;
   /** The world rect the water mask covers: (minX, minY, maxX, maxY). */
   const uWaterMaskRect = uniform(vec4(0, 0, 1, 1));
+
+  // The cover slot (see `skyCoverPlaceholder`): R = how covered by the floors
+  // above, 0 = open sky. Rebound by `setSkyCover`, never rebuilt.
+  const skyCoverTexNode = skyCoverPlaceholder ? texture(skyCoverPlaceholder) : null;
+  /** The world rect the cover texture covers: (minX, minY, maxX, maxY). */
+  const uSkyCoverRect = uniform(vec4(0, 0, 1, 1));
 
   /**
    * `1` outdoors, `0` indoors, smoothly between — evaluated at the world
@@ -481,7 +532,8 @@ export function buildEnvironmentalLightMaterials({
    * gate from byte-identical maths — a second inline copy is how the two would
    * drift and gate different halves of the map.
    */
-  const outdoorsAt = () => buildOutdoorsGate(THREE.TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode });
+  const outdoorsAt = () =>
+    buildOutdoorsGate(THREE.TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode, uExtentRect: uOutdoorsExtent });
 
   // ═══════════════════════════════════════════════════════════════════════
   // THE SUN'S OWN SHADOW (docs/planning/Sun-Shadows.md) — building, overhead
@@ -664,10 +716,26 @@ export function buildEnvironmentalLightMaterials({
     // uses `screenUV` for the identical sample — see its own call site).
     const depthFloorHere = depthFlagsTexNode ? depthFlagsTexNode.sample(uv()) : null;
     const floorSource = depthFloorHere ?? attrTexNode;
+    // THE LIFTED LOOKUP (2026-10-28, `scene/scene-eye.js#liftedLookupNode`): the top layer here may be
+    // one Parallax raised (a canopy, a roof) — its scale is the depth pass's G byte. The building and
+    // cloud shadows are looked up where that layer really is on the map, nudged toward the sun by its
+    // height, so they ride WITH it as the view pans instead of sliding under it. Every unlifted pixel
+    // reads scale 1 and looks up exactly where it always did.
+    const screenX = mix(uViewRect.x, uViewRect.z, uv().x);
+    const screenY = mix(uViewRect.y, uViewRect.w, uv().y);
+    const liftedXY = depthFloorHere
+      ? liftedLookupNode(THREE.TSL, {
+          xy: vec2(screenX, screenY),
+          eye: uViewRect.xy.add(uViewRect.zw).mul(0.5),
+          eyeHeight: uLayerEye.x,
+          s: layerScaleDecodeNode(THREE.TSL, depthFloorHere.g),
+          throwPerPx: uLayerEye.yz,
+        }).toVar('envLiftedXY')
+      : vec2(screenX, screenY);
     // DIAGNOSTIC ONLY (perf goal attempt 2): `maxSunSlots` limits how many
     // slots are compiled in. Default (Infinity) = every slot, the shipped build.
     const sunSlotsUsed = sunShadowSlots.slice(0, Math.max(0, diag.maxSunSlots ?? Infinity));
-    const sunVis =
+    const sunVisRaw =
       sunSlotsUsed.length === 0
         ? null
         : floorSource
@@ -675,8 +743,9 @@ export function buildEnvironmentalLightMaterials({
               attrFloorIndex01: floorSource.r,
               presence: depthFloorHere ? depthFloorHere.a : null,
               slots: sunSlotsUsed.map((slot) => ({
-                sunVis: buildSunVisibilityNode(THREE.TSL, {
-                  uViewRect,
+                sunVis: buildWorldSpaceSunVisibilityNode(THREE.TSL, {
+                  worldX: liftedXY.x,
+                  worldY: liftedXY.y,
                   uShadowRect: slot.uRect,
                   shadowTexNode: slot.texNode,
                 }),
@@ -699,9 +768,17 @@ export function buildEnvironmentalLightMaterials({
     // actually needs it, so having both active never pays for it twice.
     const fluidOn = fluidTintSlots.length > 0 && !diag.noFluid;
     const cloudsOn = !!(buildCloudField && buildCloudGroundVis && cloudUniforms) && !diag.noClouds;
-    const needsWorldXY = (fluidOn && sunVis) || cloudsOn;
-    const worldX = needsWorldXY ? mix(uViewRect.x, uViewRect.z, uv().x) : null;
-    const worldY = needsWorldXY ? mix(uViewRect.y, uViewRect.w, uv().y) : null;
+    const needsWorldXY = !!sunVisRaw || cloudsOn;
+    const worldX = needsWorldXY ? screenX : null;
+    const worldY = needsWorldXY ? screenY : null;
+    // No sun shadow in the scene padding (`buildInsideRectNode`'s rule): the
+    // baked field clamps its UV, so a building or tree at the map edge would
+    // otherwise throw its shadow on across the padding. The cloud shadow and
+    // sky need no gate of their own here — they ride `outdoors`, which is
+    // already 0 off the map.
+    const sunVis = sunVisRaw
+      ? mix(float(1), sunVisRaw, buildInsideRectNode(THREE.TSL, { worldX, worldY, rect: uSceneRect }))
+      : null;
 
     // ── THE CLOUD SHADOW — doc 03 §2's consumer #1, "the money slice": a
     // passing cloud darkens the outdoor ambient. Gated by the SAME outdoors
@@ -731,7 +808,8 @@ export function buildEnvironmentalLightMaterials({
         cloudStrengthHere = mix(cloudStrengthNode, waterShadowStrengthNode, waterPresence);
       }
       const cloudVisRaw = buildCloudGroundVis(THREE.TSL, {
-        worldXY: vec2(worldX, worldY),
+        // Where the layer showing here really is (its own place, toward the sun by its height).
+        worldXY: liftedXY,
         uniforms: cloudUniforms,
         buildField: buildCloudField,
         offset: cloudOffsetNode ?? vec2(0, 0),
@@ -747,7 +825,17 @@ export function buildEnvironmentalLightMaterials({
         blurFieldUnits: cloudBlurNode,
         varTag: 'ambient',
       });
-      cloudVis = mix(float(1), cloudVisRaw, outdoors).toVar('envCloudVis');
+      // Outdoors AND open to the sky through every floor above: the cloud is
+      // over the topmost roof, so an opaque floor overhead hides its shadow.
+      const coverAbove = skyCoverTexNode
+        ? buildOutdoorsMaskAtXY(THREE.TSL, {
+            uOutdoorsRect: uSkyCoverRect,
+            outdoorsTexNode: skyCoverTexNode,
+            worldXY: vec2(worldX, worldY),
+          })
+        : null;
+      const cloudGate = coverAbove ? outdoors.mul(float(1).sub(coverAbove)) : outdoors;
+      cloudVis = mix(float(1), cloudVisRaw, cloudGate).toVar('envCloudVis');
       compiledClouds = true;
     }
 
@@ -787,7 +875,13 @@ export function buildEnvironmentalLightMaterials({
       fluidTintAdd = ambient.mul(contribution).mul(float(FLUID_SHADOW_TINT_STRENGTH)).mul(float(1).sub(sunVis));
     }
     const ambientLitSun = sunVis ? ambient.mul(sunVis) : ambient;
-    const ambientLit = cloudVis ? ambientLitSun.mul(cloudVis) : ambientLitSun;
+    const ambientLitCloud = cloudVis ? ambientLitSun.mul(cloudVis) : ambientLitSun;
+    // THE MOON — an ADDED cool light, outdoors only, killed where cloud shades
+    // the ground: `cloudVis` is 1 in a gap and falls toward 0 under cloud, so
+    // moonlight appears only in the gaps and drifts with them. `uMoonAdd` is
+    // `[0,0,0]` unless the Moonlight option is on and it is night.
+    const moonGate = (outdoors ?? float(1)).mul(cloudVis ?? float(1));
+    const ambientLit = ambientLitCloud.add(uMoonAdd.mul(moonGate));
     return { node: vec4(fluidTintAdd ? ambientLit.add(fluidTintAdd) : ambientLit, float(1)), compiledClouds };
   };
   {
@@ -885,6 +979,11 @@ export function buildEnvironmentalLightMaterials({
     uSkyMultiplier.value.set(multiplierRgb[0], multiplierRgb[1], multiplierRgb[2]);
   }
 
+  /** Push the moon's additive light (`sky-access.js#moonAddRgb`). `[0,0,0]` = off. */
+  function setMoon(addRgb) {
+    uMoonAdd.value.set(addRgb[0], addRgb[1], addRgb[2]);
+  }
+
   /**
    * Push the UI-window-shadow tint colour (mythica-machina-press ui-window-
    * shadow.js `tintColor` param). A no-op call if `uiShadowVisNode` was never
@@ -915,9 +1014,44 @@ export function buildEnvironmentalLightMaterials({
     if (rect) uWaterMaskRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
   }
 
+  /**
+   * Point the cloud shadow's floors-above gate at the viewed floor's
+   * `coverAbove` texture (or `null` → the placeholder, "nothing above").
+   * Called on every per-floor rebake; a no-op when built without the term.
+   * @param {*} tex @param {{minX:number,minY:number,maxX:number,maxY:number}|null} rect
+   */
+  function setSkyCover(tex, rect) {
+    if (!skyCoverTexNode) return;
+    const next = tex ?? skyCoverPlaceholder;
+    if (skyCoverTexNode.value !== next) skyCoverTexNode.value = next;
+    if (rect) uSkyCoverRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+  }
+
   /** The world rect the outdoors texture covers — the world→mask half. */
   function setOutdoorsRect(rect) {
     uOutdoorsRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+  }
+
+  /** The real scene rect (`dimensions.sceneRect` as min/max) — no sun shadow past it. The viewer
+   * hands its effects extent here (the scene rect widened to the Table's brass while parallax lifts
+   * layers over the recess wall), so the sun and the outdoor light reach an overhanging canopy too. */
+  function setSceneRect(rect) {
+    uSceneRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+    uOutdoorsExtent.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+  }
+
+  /**
+   * The shared scene eye and the sun's throw, for the lifted shadow lookup (`liftedLookupNode`).
+   * @param {{eyeHeight:number, throwPerPx:{x:number,y:number}}} a - the eye's height (world px) and the
+   *   ground throw of a shadow per px of caster height (away from the sun).
+   */
+  function setLayerEye({ eyeHeight, throwPerPx }) {
+    uLayerEye.value.set(
+      eyeHeight > 0 ? eyeHeight : 1000,
+      Number.isFinite(throwPerPx?.x) ? throwPerPx.x : 0,
+      Number.isFinite(throwPerPx?.y) ? throwPerPx.y : 0,
+      0
+    );
   }
 
   /** The world rect ONE slot's baked field covers. Same shape, and set from
@@ -997,10 +1131,15 @@ export function buildEnvironmentalLightMaterials({
     colorationTexNode,
     setAmbient,
     setSky,
+    setMoon,
     setUiShadowTint,
     setViewRect,
     setWaterMask,
+    setSkyCover,
     setOutdoorsRect,
+    setSceneRect,
+    setLayerEye,
+    uSceneRect,
     setSunShadowRect,
     setSunShadowFloorIndex,
     setFluidShadowTintSlot,
@@ -1060,6 +1199,7 @@ export function buildEnvironmentalLightMaterials({
      * compute the same screen→world→mask mapping (see `buildOutdoorsGate`). */
     uViewRect,
     uOutdoorsRect,
+    uOutdoorsExtent,
     /** True when a mask was supplied and the sky terms are actually compiled
      * in — reported by the diagnostics so "the sky does nothing" is always
      * answerable (feedback_instruments_must_not_lie). */
@@ -1195,13 +1335,45 @@ export function blendSunVisibilityAcrossFloors(TSL, { attrFloorIndex01, slots, p
   return blended.add(float(1).sub(totalWeight));
 }
 
-function sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, worldY) {
-  const { vec2 } = TSL;
+/**
+ * `1` inside a world rect, `0` outside it — a hard edge, because the map art it
+ * stands in for ends hard too. `rect` is a vec4 node (minX, minY, maxX, maxY).
+ *
+ * THE PADDING RULE (2026-10-27, author: *"building shadows, tree shadows and
+ * cloud shadows are rendered outside the scene rectangle ... restrict rendering
+ * to only happen within the actual bounds of the scene and not the padded
+ * zone"*). Foundry's scene padding is not part of the world: it shows the scene
+ * background colour under the ambient light and nothing else. Every term that
+ * reads a scene-space field (sun visibility, cloud shadow, the outdoors mask)
+ * clamps its UV, so without this gate the field's edge texels smear outward
+ * across the whole padding.
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {{worldX: *, worldY: *, rect: *}} args
+ * @returns {*} a scalar 0/1 node.
+ */
+export function buildInsideRectNode(TSL, { worldX, worldY, rect }) {
+  const { step } = TSL;
+  return step(rect.x, worldX).mul(step(worldX, rect.z)).mul(step(rect.y, worldY)).mul(step(worldY, rect.w));
+}
+
+function sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, worldY, uExtentRect = null) {
+  const { vec2, max } = TSL;
   const outU = worldX.sub(uOutdoorsRect.x).div(uOutdoorsRect.z.sub(uOutdoorsRect.x));
   const outV = worldY.sub(uOutdoorsRect.y).div(uOutdoorsRect.w.sub(uOutdoorsRect.y));
-  // Clamped rather than wrapped: a pixel off the map's edge gets the nearest
-  // edge value, never a wrapped sample from the opposite side of the scene.
-  return outdoorsTexNode.sample(vec2(outU.clamp(0, 1), outV.clamp(0, 1))).r;
+  // Clamped rather than wrapped (never a sample from the opposite side of the
+  // scene) — and then ZEROED outside the mask's own rect, which is exactly
+  // `dimensions.sceneRect` (`mask-authority.js#reset` → `computeMaskGridSpec`).
+  // The clamp alone used to hand every padding pixel the nearest edge texel, so
+  // an outdoor map edge made the whole padding "outdoors": sky tint, cloud
+  // shadow, moonlight and the outdoor grade all ran there. See
+  // `buildInsideRectNode` for the rule.
+  const sampled = outdoorsTexNode.sample(vec2(outU.clamp(0, 1), outV.clamp(0, 1))).r;
+  const inside = buildInsideRectNode(TSL, { worldX, worldY, rect: uOutdoorsRect });
+  // THE EFFECTS EXTENT (2026-10-28): a parallax canopy lifted out over the Table's recess wall is
+  // still the map — there the clamped edge texel carries the map's own edge on out to the brass.
+  if (!uExtentRect) return sampled.mul(inside);
+  return sampled.mul(max(inside, buildInsideRectNode(TSL, { worldX, worldY, rect: uExtentRect })));
 }
 
 /**
@@ -1222,15 +1394,47 @@ function sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, wo
  * @param {*} args.uOutdoorsRect - vec4 uniform, the rect the mask covers.
  * @param {*} args.outdoorsTexNode - the `_Outdoors` texture node, or null.
  * @param {*} [args.uvNode] - optional screen UV (defaults to `uv()`), for refracted samples.
+ * @param {*} [args.uExtentRect] - optional vec4 uniform: a wider rect the gate also reaches (the
+ *   viewer's effects extent), carrying the mask's edge out over it.
  * @returns {*|null} a scalar 0..1 node, or null if no mask.
  */
-export function buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode, uvNode: screenUvNode = null }) {
+export function buildOutdoorsGate(
+  TSL,
+  { uViewRect, uOutdoorsRect, outdoorsTexNode, uvNode: screenUvNode = null, uExtentRect = null }
+) {
   if (!outdoorsTexNode) return null;
   const { uv, mix } = TSL;
   const screenUv = screenUvNode ?? uv();
   const worldX = mix(uViewRect.x, uViewRect.z, screenUv.x);
   const worldY = mix(uViewRect.y, uViewRect.w, screenUv.y);
-  return sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, worldY);
+  return sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, worldX, worldY, uExtentRect);
+}
+
+/**
+ * THE `_Outdoors` MASK AT AN ARBITRARY WORLD POINT, for a VERTEX stage — `1`
+ * outdoors, `0` indoors, from an explicit `worldXY` vec2 node rather than the
+ * fragment's `positionWorld`/screen UV. Built for vegetation sway, which needs
+ * the mask at the REST position AND at where the wind is about to throw the
+ * vertex (see `vt/vt-pan-viewer.js#buildVegetationSwayDisplacementNode`).
+ *
+ * UNLIKE {@link buildWorldSpaceOutdoorsGate} this does NOT zero the scene
+ * padding: it clamps to the mask's edge texel. The padding rule exists so sky
+ * light and grade do not run in the padded zone; a plant at the map edge being
+ * stopped dead from swaying outward would be a different (and wrong) effect.
+ *
+ * @param {*} TSL - THREE.TSL.
+ * @param {object} args
+ * @param {*} args.uOutdoorsRect - vec4 uniform, the rect the mask covers.
+ * @param {*} args.outdoorsTexNode - the `_Outdoors` texture node, or null.
+ * @param {*} args.worldXY - vec2 node, world px.
+ * @returns {*|null} a scalar 0..1 node, or null if no mask.
+ */
+export function buildOutdoorsMaskAtXY(TSL, { uOutdoorsRect, outdoorsTexNode, worldXY }) {
+  if (!outdoorsTexNode) return null;
+  const { vec2 } = TSL;
+  const outU = worldXY.x.sub(uOutdoorsRect.x).div(uOutdoorsRect.z.sub(uOutdoorsRect.x));
+  const outV = worldXY.y.sub(uOutdoorsRect.y).div(uOutdoorsRect.w.sub(uOutdoorsRect.y));
+  return outdoorsTexNode.sample(vec2(outU.clamp(0, 1), outV.clamp(0, 1))).r;
 }
 
 /**
@@ -1251,10 +1455,13 @@ export function buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNo
  * @param {object} args
  * @param {*} args.uOutdoorsRect - vec4 uniform, the rect the mask covers.
  * @param {*} args.outdoorsTexNode - the `_Outdoors` texture node, or null.
+ * @param {*} [args.worldXY] - where on the map to read (vec2 node); defaults to `positionWorld.xy`. A
+ *   mesh whose vertices are baked in world px passes `positionGeometry.xy`: Parallax moves such a mesh
+ *   by its transform (a lift toward the eye), and the mask belongs to its own place on the map.
  * @returns {*|null} a scalar 0..1 node, or null if no mask.
  */
-export function buildWorldSpaceOutdoorsGate(TSL, { uOutdoorsRect, outdoorsTexNode }) {
+export function buildWorldSpaceOutdoorsGate(TSL, { uOutdoorsRect, outdoorsTexNode, worldXY = null }) {
   if (!outdoorsTexNode) return null;
-  const { positionWorld } = TSL;
-  return sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, positionWorld.x, positionWorld.y);
+  const at = worldXY ?? TSL.positionWorld.xy;
+  return sampleOutdoorsAtWorldXY(TSL, uOutdoorsRect, outdoorsTexNode, at.x, at.y);
 }

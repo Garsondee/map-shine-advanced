@@ -117,6 +117,18 @@ export function maggotActivity(env, params = {}) {
 }
 
 /**
+ * How much of the DUST cloud is showing: the weather and nothing else. Dust is in the air whatever the
+ * hour; whether it can be SEEN is the light's business (the draw reads the window light), not the
+ * head-count's. A gale through an open door thins it (`windResponse`), and that is all the sky does here.
+ *
+ * @param {object|null} env @param {object} [params] - the weather responses.
+ * @returns {number} 0..1
+ */
+export function moteActivity(env, params = {}) {
+  return clamp01(weatherFactor(skyFeel(env), params));
+}
+
+/**
  * How active the FIREFLY population is, by the sun's elevation.
  *
  * @param {object|null} env

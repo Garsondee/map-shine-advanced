@@ -488,6 +488,25 @@ export function run(t) {
   {
     const rain = PRECIP_SPECIES.rain;
 
+    // The golden-hour colour reaches the frame (author, 2026-10-27), and its absence changes nothing.
+    {
+      const plain = resolveSpeciesFrame(rain, { precip01: 0.5 });
+      const warm = resolveSpeciesFrame(rain, { precip01: 0.5, skyTintRgb: [1.6, 0.8, 0.3] });
+      t.ok(
+        'no sky tint means a neutral [1,1,1] frame tint',
+        plain.skyTintRgb.every((v) => v === 1)
+      );
+      t.ok('a golden sky tint rides the frame', warm.skyTintRgb[0] === 1.6 && warm.skyTintRgb[2] === 0.3);
+      t.ok(
+        '…without touching the count or brightness scalars',
+        warm.liveCount === plain.liveCount && warm.rgbMul === plain.rgbMul
+      );
+      t.ok(
+        'a malformed tint falls back to neutral',
+        resolveSpeciesFrame(rain, { precip01: 0.5, skyTintRgb: [NaN, 1, 1] }).skyTintRgb.every((v) => v === 1)
+      );
+    }
+
     // LAW 5: a clear day costs nothing.
     const clear = resolveSpeciesFrame(rain, { precip01: 0 });
     t.ok('⭐ LAW 5: precip01=0 yields ZERO live bodies', clear.liveCount === 0);
@@ -553,6 +572,18 @@ export function run(t) {
       'dayFactor01 defaults to full day when absent',
       Math.abs(resolveSpeciesFrame(rain, { precip01: 1 }).alphaMul - day.alphaMul) < 1e-9
     );
+
+    // Scene darkness: weather draws after the lighting multiply, so colour scales by it.
+    const dark = resolveSpeciesFrame(rain, { precip01: 1, dayFactor01: 1, sceneLight01: 0.1 });
+    t.ok(
+      '⭐ a dark scene dims rgbMul by the scene light, and only rgbMul',
+      Math.abs(dark.rgbMul - 0.05) < 1e-9 &&
+        dark.alphaMul === day.alphaMul &&
+        dark.liveCount === day.liveCount &&
+        Math.abs(dark.rgbMulUnlit - 0.5) < 1e-9 &&
+        dark.sceneLight01 === 0.1
+    );
+    t.ok('an absent scene light is fully lit', day.sceneLight01 === 1 && day.rgbMul === day.rgbMulUnlit);
 
     // The flash is proportional, not a switch.
     const flashed = resolveSpeciesFrame(rain, { precip01: 1, dayFactor01: 1, flash01: 1 });

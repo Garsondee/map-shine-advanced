@@ -43,6 +43,8 @@
  * @module world/wind-enclosure
  */
 
+import { metresPerSecondForSpeed01, WIND_DIAL_MAX_METRES_PER_SECOND } from './wind-scale.js';
+
 /**
  * Flood-fill OPEN (non-solid) cells starting from every OPEN cell on the
  * grid's own outer border, 4-connected. A cell the fill reaches is "open air
@@ -318,16 +320,37 @@ export const DOOR_FALLOFF_REACH_CELLS = 120;
  * @returns {number} a multiplier on {@link DOOR_FALLOFF_REACH_CELLS}.
  */
 export function doorReachScaleForWindSpeed(speed01) {
-  const s = Number.isFinite(speed01) ? Math.min(1, Math.max(0, speed01)) : 0;
-  return DOOR_REACH_SCALE_CALM + (DOOR_REACH_SCALE_GALE - DOOR_REACH_SCALE_CALM) * s;
+  // ⚠️ 2026-10-27: keyed on REAL m/s, not the dial. The dial became linear to
+  // 70 m/s that day, so the old "full wind" (35 m/s) is now half the dial; the
+  // ramp reaches DOOR_REACH_SCALE_GALE at hurricane force as before, then keeps
+  // climbing to DOOR_REACH_SCALE_MAX at the top of the dial. Both ends were
+  // raised the same day — author: *"Make the effect stronger which pushes wind
+  // AROUND buildings and into open doorways."*
+  const mps = metresPerSecondForSpeed01(Number.isFinite(speed01) ? speed01 : 0);
+  const toGale = Math.min(1, mps / DOOR_REACH_GALE_MPS);
+  const beyond = Math.min(
+    1,
+    Math.max(0, (mps - DOOR_REACH_GALE_MPS) / (WIND_DIAL_MAX_METRES_PER_SECOND - DOOR_REACH_GALE_MPS))
+  );
+  return (
+    DOOR_REACH_SCALE_CALM +
+    (DOOR_REACH_SCALE_GALE - DOOR_REACH_SCALE_CALM) * Math.sqrt(toGale) +
+    (DOOR_REACH_SCALE_MAX - DOOR_REACH_SCALE_GALE) * beyond
+  );
 }
 
 /** "Very little" at dead calm — see {@link doorReachScaleForWindSpeed}. At the
  *  shipped 120-cell reach this is ~15 cells: air still creeps past an open
  *  door, it just does not travel. */
 export const DOOR_REACH_SCALE_CALM = 0.12;
-/** "Double the distance" at full wind — the author's own number, verbatim. */
-export const DOOR_REACH_SCALE_GALE = 2;
+/** At hurricane force. Was 2 ("double the distance", 2026-08-15); raised to 3 on
+ *  2026-10-27 with the stronger doorway push, and the ramp is now a square root
+ *  so a moderate breeze already reaches well in. */
+export const DOOR_REACH_SCALE_GALE = 3;
+/** At the top of the dial (70 m/s). */
+export const DOOR_REACH_SCALE_MAX = 4;
+/** The real speed at which the reach hits {@link DOOR_REACH_SCALE_GALE}. */
+export const DOOR_REACH_GALE_MPS = 33;
 
 /**
  * THE GRADED PENETRATION FALLOFF (2026-07-22, docs/planning/Wind-Rethink.md

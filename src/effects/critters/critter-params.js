@@ -41,7 +41,16 @@ export function freezeParams(map) {
  * @param {string} [a.countHelpExtra] - appended to the head-count's help.
  * @returns {Record<string, object>}
  */
-export function presenceParams({ countId, noun, unit, max, count, areaScaling, maskSensitivity = 0.15, countHelpExtra = '' }) {
+export function presenceParams({
+  countId,
+  noun,
+  unit,
+  max,
+  count,
+  areaScaling,
+  maskSensitivity = 0.15,
+  countHelpExtra = '',
+}) {
   return {
     [countId]: {
       type: 'int',

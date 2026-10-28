@@ -674,6 +674,7 @@ import {
 } from '../../world/index.js';
 import { findNearestParticles, summarizeNearestParticles } from '../../diag/wind-probe.js';
 import { createLogger } from '../../core/log.js';
+import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
 
 const log = createLogger('particle-runtime');
 
@@ -771,6 +772,8 @@ export function createParticleEngine({
   // Foundry's own documented default grid size (100px/square) if omitted —
   // never a silent guess, `foundry/scene-occlusion-sources.js`'s own fallback.
   pxPerMeter = 100,
+  /** `buf:scene.illum` — motes darken in a building's shadow like the ground. Absent ⇒ compiled out. */
+  illumTexture = null,
 }) {
   const TSL = THREE.TSL;
   const {
@@ -1421,7 +1424,15 @@ export function createParticleEngine({
     // WORLD position: mesh is untransformed, so the camera's view·proj places it.
     return vec3(c.x.add(corner.x.mul(sizePx)), c.y.add(corner.y.mul(sizePx)), float(zDepth));
   })();
-  material.colorNode = vec3(1.0, 0.96, 0.9); // warm dust white
+  // How lit the scene is (environmental-light.js#sceneLightLevel). Motes draw
+  // after the lighting multiply, so they dim by it themselves.
+  const uSceneLight = uniform(float(1));
+  const shade = buildWeatherShadeNode(TSL, {
+    illumTexNode: illumTexture ? TSL.texture(illumTexture) : null,
+    uSceneLight,
+  });
+  const dust = vec3(1.0, 0.96, 0.9).mul(uSceneLight); // warm dust white
+  material.colorNode = shade ? dust.mul(shade) : dust;
   material.opacityNode = Fn(() => {
     const d = uv().sub(0.5).length(); // 0 centre → ~0.707 corner
     const soft = d.mul(2.0).oneMinus().clamp(0, 1); // 1 centre → 0 edge
@@ -1473,10 +1484,11 @@ export function createParticleEngine({
      * Advance one frame. Synchronous compute (never computeAsync in-frame — that
      * awaits a readback and would stall the render loop).
      * @param {*} renderer
-     * @param {{dtSec:number, tMs:number, worldRect?:object}} frame
+     * @param {{dtSec:number, tMs:number, worldRect?:object, sceneLight01?:number}} frame
      */
-    step(renderer, { dtSec, tMs, worldRect: rect }) {
+    step(renderer, { dtSec, tMs, worldRect: rect, sceneLight01 }) {
       if (rect) this.setWorldRect(rect);
+      if (Number.isFinite(sceneLight01)) uSceneLight.value = Math.min(1, Math.max(0, sceneLight01));
       // clamp dt against the monster-delta lurch, same spirit as the frame clock
       uDtSec.value = Math.min(0.05, Math.max(0, dtSec || 0));
       uTimeMs.value = tMs || 0;

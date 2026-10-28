@@ -42,5 +42,28 @@ export function flattenDottedLeaves(obj, isLeaf) {
   return out;
 }
 
+/**
+ * The write-side mirror of `flattenDottedLeaves`: build the nested shape
+ * Foundry would have expanded a flat dotted map into. Needed wherever a flag
+ * value is written WHOLE (a `ForcedReplacement`), because Foundry's
+ * `expandObject` does not walk into an operator, so dotted keys inside one
+ * would otherwise be stored literally.
+ * @param {Record<string, unknown>} flat
+ * @returns {Record<string, unknown>}
+ */
+export function nestDottedKeys(flat) {
+  const out = {};
+  for (const [key, value] of Object.entries(flat ?? {})) {
+    const parts = key.split('.');
+    let node = out;
+    for (const part of parts.slice(0, -1)) {
+      if (!node[part] || typeof node[part] !== 'object') node[part] = {};
+      node = node[part];
+    }
+    node[parts[parts.length - 1]] = value;
+  }
+  return out;
+}
+
 /** A fade entry / cue target: the one field both always carry is `to`. */
 export const hasOwnTo = (v) => Object.prototype.hasOwnProperty.call(v, 'to');

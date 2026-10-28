@@ -241,6 +241,24 @@ export function deriveWallLooksLikeWindow({ move, light, sight } = {}) {
 }
 
 /**
+ * Does this wall divide one ROOM from another (`scene/room-map.js`)? Pure. The rooms are LIGHT's rooms, so a wall
+ * divides when it stops light or sight at all — windows included (`sight: PROXIMITY`) — and every door does, open or
+ * closed (a room does not merge with the hall because a door stands open).
+ *
+ * ⚠️ A wall that only stops MOVEMENT does not (2026-10-28, the Mad Scientist's Compound: four `move` walls with light
+ * and sight both NONE fence off furniture, and the first cut — "anything that stops anything" — cut a room in two
+ * along them, so window light stopped on an invisible line across the floor).
+ * @param {{light?: number, sight?: number, door?: number}} [wall]
+ * @returns {boolean}
+ */
+export function deriveWallRoomBarrier({ light, sight, door } = {}) {
+  if (Number.isFinite(door) && door !== WALL_DOOR_NONE) return true;
+  const lightVal = Number.isFinite(light) ? light : WALL_LIGHT_NORMAL;
+  const sightVal = Number.isFinite(sight) ? sight : WALL_LIGHT_NORMAL;
+  return !(lightVal === WALL_LIGHT_NONE && sightVal === WALL_LIGHT_NONE);
+}
+
+/**
  * Read every wall segment for the active scene, scoped to `levelId` the
  * SAME way `scene-wall-clip.js` already scopes candle light-clipping (an
  * empty `wall.levels` set means "every Level"). Never throws — a live
@@ -286,6 +304,8 @@ export function readSceneWallSegments(levelId = null) {
           deriveWallLooksLikeWindow({ move: wall.move, light: wall.light, sight: wall.sight }),
         // Stops light (see deriveWallBlocksLight) — `window-reach.js` uses it to find which windows a light can see.
         blocksLight: deriveWallBlocksLight({ light: wall.light, door: wall.door, ds: wall.ds }),
+        // Divides rooms (`scene/room-map.js`) — see deriveWallRoomBarrier.
+        roomBarrier: deriveWallRoomBarrier({ light: wall.light, sight: wall.sight, door: wall.door }),
       });
     }
     return out;

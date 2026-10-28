@@ -1,5 +1,5 @@
 /**
- * Critters (flies, maggots, fireflies) — pure-math suite. The GPU kernels and the
+ * Critters (flies, maggots, fireflies, dust) — pure-math suite. The GPU kernels and the
  * procedural bodies are verified live and in the shader lab (CONVENTIONS.md §4);
  * everything here is the arithmetic those depend on, proven in Node first.
  */
@@ -13,6 +13,7 @@ import { run as runRegistration } from './critter-registration.test.mjs';
 import { run as runGeometry } from './critter-geometry.test.mjs';
 import { run as runUniforms } from './critter-uniforms.test.mjs';
 import { run as runConsumption } from './critter-consumption.test.mjs';
+import { run as runDust } from './dust.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -51,6 +52,7 @@ await runRegistration(t);
 runGeometry(t);
 runUniforms(t);
 runConsumption(t);
+runDust(t);
 console.log(`\nsrc/effects/critters verification: ${passed} passed, ${failed} failed`);
 if (failed) {
   console.error('Failures:', fails);

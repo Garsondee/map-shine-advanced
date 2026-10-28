@@ -63,6 +63,7 @@ import {
 import { WINDOW_DEBUG_CHANNELS, WINDOW_DEBUG_BOOST } from './window.js';
 import { buildDebugChannelColor } from '../debug-channel-select.js';
 import { hexToRgb01 } from '../candle-flame-geometry.js';
+import { createWindowColorUniforms, pushWindowColor, applyWindowColor } from './window-grade.js';
 import {
   GLASS_SAMPLE_EPSILON,
   GLASS_CAUSTIC_DARK_RATIO,
@@ -70,6 +71,8 @@ import {
   GLASS_CURVATURE_GAIN,
 } from './window-glass.js';
 import { simplexFloat, rotate2d } from '../lighting/animations/tsl-noise-toolkit.js';
+import { WINDOW_FILL_RATE, WINDOW_OUTDOOR_MATCH_DEFAULT } from './window-weather.js';
+import { WINDOW_ROOM_TAPS } from './window-room-light.js';
 
 /**
  * Fraction of the authored file's resolution to upload for this shader's own
@@ -85,12 +88,12 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 // Was LOWERED 3 → 1 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither. Was RAISED 1 → 3 = WINDOW_PARAMS.strength's own max
 // (2026-09-09) before this round.
-export const WINDOW_DEFAULT_STRENGTH = 1.5; // 2026-10-19 author's Studio export (was 1)
+export const WINDOW_DEFAULT_STRENGTH = 1; // 2026-10-27 author's Studio export (was 1.5)
 // RAISED 0.69 → 1 (2026-09-21) — new live-tuned default, back to neutral;
 // see `WINDOW_PARAMS.contrast`'s own header (window.js). Was LOWERED 1 →
 // 0.69 (2026-09-08, recovered from a stash that missed both this file's own
 // commit and the 0.6.4 release; applied 2026-09-18) before this round.
-export const WINDOW_DEFAULT_CONTRAST = 1.72; // 2026-10-19 author's Studio export (was 1)
+export const WINDOW_DEFAULT_CONTRAST = 1; // 2026-10-27 author's Studio export (was 1.72)
 
 /**
  * THE OVERCAST MOOD — author, 2026-09-10: *"overcast days should blur the
@@ -121,8 +124,8 @@ export const WINDOW_OVERCAST_MIN_STRENGTH = 0.5;
 /** Hex source for the two daylight keyframes — mirrors `WINDOW_PARAMS.dawnDuskTint`/
  * `.nightTint`'s own `default`. Decoded once here rather than per frame; noon has
  * no colour of its own — it is the neutral (1,1,1) this effect falls back to. */
-export const WINDOW_DEFAULT_DAWN_DUSK_TINT_HEX = '#ff8a3d';
-export const WINDOW_DEFAULT_NIGHT_TINT_HEX = '#5c7cff';
+export const WINDOW_DEFAULT_DAWN_DUSK_TINT_HEX = '#ff6a14';
+export const WINDOW_DEFAULT_NIGHT_TINT_HEX = '#3a5cff';
 export const WINDOW_DEFAULT_DAWN_DUSK_TINT_RGB = hexToRgb01(WINDOW_DEFAULT_DAWN_DUSK_TINT_HEX);
 export const WINDOW_DEFAULT_NIGHT_TINT_RGB = hexToRgb01(WINDOW_DEFAULT_NIGHT_TINT_HEX);
 
@@ -135,17 +138,19 @@ export const WINDOW_DEFAULT_NIGHT_TINT_RGB = hexToRgb01(WINDOW_DEFAULT_NIGHT_TIN
  */
 export const WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR = 1;
 export const WINDOW_DEPTH_FLAG_IS_TILE_MIRROR = 16;
+/** Mirrors `DEPTH_FLAG_IS_TOKEN`: a token is never an occluder of window light. */
+export const WINDOW_DEPTH_FLAG_IS_TOKEN_MIRROR = 64;
 
 /** The glass defaults, mirroring `WINDOW_PARAMS`'s own `Glass` category. */
 // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither.
-export const WINDOW_DEFAULT_GLASS_WARP_PX = 3.5; // 2026-10-17 author's live-tuned defaults (was 6.5)
+export const WINDOW_DEFAULT_GLASS_WARP_PX = 10; // 2026-10-27 author's Studio export (WINDOW_PARAMS had 28, this mirror had drifted at 3.5)
 export const WINDOW_DEFAULT_GLASS_DISPERSION = 1;
-export const WINDOW_DEFAULT_GLASS_SCALE = 249; // 2026-10-17 author's live-tuned defaults (was 400)
+export const WINDOW_DEFAULT_GLASS_SCALE = 181; // 2026-10-27 author's Studio export (was 249)
 export const WINDOW_DEFAULT_GLASS_DETAIL = 1;
 export const WINDOW_DEFAULT_GLASS_STRIATION = 0;
 export const WINDOW_DEFAULT_GLASS_STRIATION_ANGLE = 0;
-export const WINDOW_DEFAULT_GLASS_CAUSTIC_STRENGTH = 2;
+export const WINDOW_DEFAULT_GLASS_CAUSTIC_STRENGTH = 0.25; // 2026-10-27 author's Studio export (was 2)
 export const WINDOW_DEFAULT_GLASS_CAUSTIC_SHARPNESS = 6;
 
 /**
@@ -299,6 +304,10 @@ export function windowTierPlan(tier) {
  *   existed. With it, the cookie is read through the drops' lens offset (added to the glass warp, or to the mask
  *   UV when there is no glass) and multiplied by the drops' gain. Whether there is rain RIGHT NOW is a runtime
  *   value inside that handle, never a rebuild.
+ * @param {object|null} [args.roomLight] - `window-room-light.js#createWindowRoomLight`'s handle (SUN & ROOMS). A
+ *   JS-TIME branch like `rain`: `null` constructs none of it. With it the light is split by how squarely its nearest
+ *   window faces the sun: that share is re-read along the sun's throw by extra single-tap reads (the beam), kept
+ *   inside its own room by the room map and faded near walls; the rest stays where it is painted.
  * @returns {object} the material plus its setters.
  */
 export function buildWindowSurfaceMaterial({
@@ -344,7 +353,12 @@ export function buildWindowSurfaceMaterial({
   // shader-side when the caller already has the one number this material
   // needs. `null`/omitted ⇒ `float(1)`, a provable no-op.
   cloudNoonBoostNode = null,
+  // THE WEATHER GAIN (2026-10-27, `window-weather.js`) — sun breaks under heavy
+  // cloud and rain-wave darkness, multiplied in AFTER the shoulder so a 0.1
+  // really is a tenth. `null` ⇒ the term is not built at all.
+  weatherGainNode = null,
   rain = null,
+  roomLight = null,
   strength = WINDOW_DEFAULT_STRENGTH,
   contrast = WINDOW_DEFAULT_CONTRAST,
   glass = true,
@@ -371,6 +385,7 @@ export function buildWindowSurfaceMaterial({
     If,
     floor,
     mod,
+    exp,
   } = TSL;
 
   const uStrength = uniform(float(strength));
@@ -456,6 +471,8 @@ export function buildWindowSurfaceMaterial({
    * plausible output masking a wrong model.
    */
   const uDaylightTint = uniform(vec3(1, 1, 1));
+  /** The CC section's inputs to the one grade primitive (`window-grade.js`) — identity until set. */
+  const windowColorDials = createWindowColorUniforms(TSL);
   /** The crop's extent in mask-UV space. THE ENTIRE mask lookup. */
   const uMaskUvBounds = uniform(vec4(0, 0, 1, 1));
   /** `computeTieSafeExpectedDepth`'s result for THIS quad's own background
@@ -500,6 +517,25 @@ export function buildWindowSurfaceMaterial({
    * travels across the sky and the window light inside dims and dies."
    */
   const uAmbientCeiling = uniform(float(WINDOW_DEFAULT_AMBIENT_CEILING));
+  /**
+   * THE OUTDOOR MATCH (2026-10-27) — the two numbers the composite now blends
+   * between. `uIndoorLight` is the ambient fill the illum buffer already holds
+   * indoors; `uTargetLight` is the light a fully painted texel lets in — the
+   * OUTDOOR light (sky colour, moon) leaning toward the window's own hue, times
+   * 'Brightness vs outdoors' (`window-weather.js#windowTargetLight`, resolved
+   * in JS by the subsystem). Both default to the old ceiling so an unwired
+   * caller still draws a mild window rather than nothing.
+   */
+  const uIndoorLight = uniform(
+    vec3(WINDOW_DEFAULT_AMBIENT_CEILING, WINDOW_DEFAULT_AMBIENT_CEILING, WINDOW_DEFAULT_AMBIENT_CEILING)
+  );
+  const uTargetLight = uniform(
+    vec3(
+      WINDOW_DEFAULT_AMBIENT_CEILING * WINDOW_OUTDOOR_MATCH_DEFAULT,
+      WINDOW_DEFAULT_AMBIENT_CEILING * WINDOW_OUTDOOR_MATCH_DEFAULT,
+      WINDOW_DEFAULT_AMBIENT_CEILING * WINDOW_OUTDOOR_MATCH_DEFAULT
+    )
+  );
 
   // ── THE MASK UV — the quad's own `uv()`, remapped by the crop ────────────
   // Same reasoning as specular-render.js's own note: `uv()` cannot exceed
@@ -637,6 +673,11 @@ export function buildWindowSurfaceMaterial({
     // mid-grey, which is exactly what their reading guides say "off" looks like.
     let debugGlassHeight = vec3(0.5, 0.5, 0.5);
     let debugGlassOffset = vec3(0.5, 0.5, 0.5);
+    // SUN & ROOMS (window-room-light.js). Built here, like the rain, so the gated build constructs its own copy
+    // inside the `Fn()`. The full decode below stays at the painted spot (the static share keeps its glass and
+    // prism); the moving beam's taps are added after it, warped by the same glass/rain offset (`warpUv`).
+    const room = roomLight ? roomLight.prepare(positionWorld.xy) : null;
+    let warpUv = null;
     // Built HERE, inside this function, on purpose: the gated build calls this again inside an `Fn()`, and the
     // rain nodes (with their own `If()`s and flow-texture taps) must be constructed in that same context.
     const rainNodes = rain ? rain.build({ maskGated: () => sampleCookieAt(maskUv, 'winRainGate').gated }) : null;
@@ -709,6 +750,7 @@ export function buildWindowSurfaceMaterial({
       const baseOffsetUv = baseOffsetPx.mul(uUvPerWorldPx).toVar('winGlassOffsetUv');
       const dispersionK = uGlassDispersion.mul(float(GLASS_DISPERSION_SPREAD)).toVar('winGlassDispK');
 
+      warpUv = baseOffsetUv;
       const tapR = sampleCookieAt(maskUv.add(baseOffsetUv.mul(float(1).sub(dispersionK))), 'winR');
       tapG = sampleCookieAt(maskUv.add(baseOffsetUv), 'winG');
       const tapB = sampleCookieAt(maskUv.add(baseOffsetUv.mul(float(1).add(dispersionK))), 'winB');
@@ -767,13 +809,33 @@ export function buildWindowSurfaceMaterial({
       // NO GLASS: one tap, monochrome presence — byte-for-byte the pre-glass
       // effect, and a visibly smaller compiled shader.
       // No glass, so no warp to add the drops' lens to: read the mask displaced by it directly.
-      tapG = sampleCookieAt(
-        rainNodes ? maskUv.add(rainNodes.offsetPx.mul(uUvPerWorldPx)).toVar('winRainMaskUv') : maskUv,
-        'win'
-      );
+      warpUv = rainNodes ? rainNodes.offsetPx.mul(uUvPerWorldPx).toVar('winRainOffsetUv') : null;
+      tapG = sampleCookieAt(warpUv ? maskUv.add(warpUv).toVar('winRainMaskUv') : maskUv, 'win');
       cookie = tapG.cookie.mul(tapG.presence).toVar('winCookie');
     }
+
+    // THE BEAM AND THE ROOM GATE — single-tap reads strung along the sun's throw, folded with the static share by
+    // `window-room-light.js#combine`. A tap that leaves the mask FILE reads nothing — clamp-to-edge would otherwise
+    // repeat the file's edge texel into a lit strip (the bug `toWorldBounds` documents).
+    let roomDebug = null;
+    if (room) {
+      const inFile = (u) =>
+        step(float(0), u.x)
+          .mul(step(u.x, float(1)))
+          .mul(step(float(0), u.y))
+          .mul(step(u.y, float(1)));
+      const beam = [];
+      for (let k = 0; k < WINDOW_ROOM_TAPS; k++) {
+        const uvK = maskUv.sub(room.offsetAt(k).mul(uUvPerWorldPx)).toVar(`winRoomUv${k}`);
+        const tap = sampleCookieAt(warpUv ? uvK.add(warpUv) : uvK, `winRoomTap${k}`);
+        beam.push(tap.cookie.mul(tap.presence).mul(inFile(uvK)));
+      }
+      const folded = roomLight.combine(room, beam, cookie, positionWorld.xy);
+      cookie = folded.cookie;
+      roomDebug = { rooms: room.debugRooms, wallDist: room.debugWallDist, sun: room.debugSun, gate: folded.debugGate };
+    }
     return {
+      roomDebug,
       tapG,
       cookie,
       causticGain,
@@ -855,7 +917,11 @@ export function buildWindowSurfaceMaterial({
       const restrictsLightBit = mod(floor(flagsByte.div(float(WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR))), float(2));
       const isTileBit = mod(floor(flagsByte.div(float(WINDOW_DEPTH_FLAG_IS_TILE_MIRROR))), float(2));
       const tileExempt = isTileBit.mul(float(1).sub(restrictsLightBit));
-      notOccluded = notOccluded.max(tileExempt);
+      // A token ranks above its floor but is something standing IN the light,
+      // not a roof over it: without this the token under a window patch stayed
+      // dark while the floor around it lit up.
+      const isTokenBit = mod(floor(flagsByte.div(float(WINDOW_DEPTH_FLAG_IS_TOKEN_MIRROR))), float(2));
+      notOccluded = notOccluded.max(tileExempt).max(isTokenBit);
     }
     notOccluded = notOccluded.toVar('winNotOccluded');
     visibility01 = notOccluded;
@@ -938,53 +1004,58 @@ export function buildWindowSurfaceMaterial({
 
   // ── THE COMPOSITE — this ADDS onto buf:scene.illum. Nothing here touches
   // composed scene colour (see this module's header). ─────────────────────
-  const rawLight = cookieTinted
-    .mul(uStrength)
-    .mul(coverage)
-    .mul(cloudFactor)
-    .mul(cloudOvercastDim)
-    .mul(noonBoost)
-    .toVar('winRawLight');
+  // ⚠️ NO `cloudFactor` HERE ANY MORE (2026-10-27) — a passing cloud shades
+  // the LIGHT LET IN (`target`, below), not how much of the window is painted.
+  const rawLight = cookieTinted.mul(uStrength).mul(coverage).mul(cloudOvercastDim).mul(noonBoost).toVar('winRawLight');
 
-  // ── THE HIGHLIGHT SHOULDER — the transcription of
-  // `window-cookie.js#shoulderedContribution`. Shapes on the PEAK channel and
-  // rescales all three by the SAME ratio, so hue/saturation survive
-  // compression — see that function's own header for why this exists at all
-  // (found live: a large cookie over bright architectural art washed out to
-  // a flat, textureless white disc) and why it shapes the peak rather than
-  // each channel independently (per-channel compression desaturates a
-  // saturated cookie exactly where it is brightest).
+  // ── THE FILL — painted light → how much of the OUTDOORS this texel lets in,
+  // 0..1. The transcription of `window-weather.js#windowFill01`. Shapes on the
+  // PEAK channel and rescales all three by the SAME ratio, so a coloured
+  // `_Window` keeps its hue (the same reason the old highlight shoulder shaped
+  // the peak — per-channel compression desaturates a saturated cookie exactly
+  // where it is brightest).
+  //
+  // ⚠️ THIS REPLACED AN ADDITIVE SHOULDER, AND WHY (author, 2026-10-27, the
+  // Mansion greenhouse: too bright at noon, black at night, blown out at
+  // golden hour — *"it should end up roughly the same brightness as the
+  // outdoors around it"*). The shoulder ADDED up to a whole outdoor ambient's
+  // worth of light on top of an interior this renderer already fills at the
+  // outdoor ambient level — so a white `_Window` lit its room to ~1.7× the
+  // ground outside; its ceiling ignored the moon, so the same room went black
+  // at night while moonlight lit the garden. A window now PULLS the interior
+  // toward the light outside (see the composite below), so a fully painted
+  // texel sits at the outdoor level, never above it by more than the
+  // 'Brightness vs outdoors' match.
   const rawPeak = max(max(rawLight.r, rawLight.g), rawLight.b).toVar('winRawPeak');
   const rawPeakSafe = max(rawPeak, float(1e-5));
-  // `softShoulder(x, k) = x / (1 + x·k)` asymptotes to `1/k` as `x → ∞` — so
-  // deriving `k` from `uAmbientCeiling` (`k = 1/ceiling`) makes the SAME
-  // curve shape from before (`window-cookie.js#softShoulder`, unchanged)
-  // asymptote at the live outside-ambient ceiling instead of a fixed
-  // constant. See `uAmbientCeiling`'s own doc for what feeds it.
-  const shoulderK = float(1).div(max(uAmbientCeiling, float(1e-4)));
-  const shapedPeak = rawPeakSafe.div(float(1).add(rawPeakSafe.mul(shoulderK)));
-  const shoulderScale = shapedPeak.div(rawPeakSafe);
-  const shoulderedLight = rawLight.mul(shoulderScale).toVar('winShouldered');
+  const fillPeak = float(1).sub(exp(rawPeakSafe.mul(float(-WINDOW_FILL_RATE))));
+  const shoulderedLight = rawLight.mul(fillPeak.div(rawPeakSafe)).toVar('winFill');
 
-  // ── THE DAYLIGHT TINT — LAST, AFTER THE SHOULDER, ON PURPOSE ─────────────
-  // See `uDaylightTint`'s own declaration for the full reasoning; the short
-  // version: the shoulder's whole job is to correctly expose the RAW light
-  // this window actually receives — the glass's warp, its prism split, its
-  // caustic — and the astrolabe tint is not part of that light at all, it is
-  // a colour grade laid over the finished result (dusk staining a whole room
-  // orange, not one particular photon). Multiplying it in BEFORE the shoulder
-  // would let it change what the shoulder sees as "the peak": an orange tint
-  // dims the blue channel, which lowers the measured peak, which makes the
-  // shoulder compress LESS — so how hard a bright cookie gets compressed
-  // would depend on the time of day, an entanglement between two effects
-  // that have no business influencing each other's exposure math. Multiplying
-  // it in AFTER means the shoulder always sees and shapes the same raw light
-  // regardless of the hour, and the tint only ever recolours the result.
-  //
-  // A plain multiply, not a mix: the JS side already folded the astrolabe's
-  // dayFactor01/twilight01 into this ONE colour, so noon lands on (1,1,1)
-  // (no-op) by construction, not by an extra "amount" knob here.
-  const cookieLight = shoulderedLight.mul(uDaylightTint).toVar('winFinal');
+  // ── THE DAYLIGHT TINT AND THE WEATHER — ON THE LIGHT LET IN, NOT THE FILL ─
+  // The fill must see the same painted light at every hour (an orange tint
+  // dims blue, which would lower the measured peak and change how fast the
+  // fill saturates — two effects entangled through the exposure maths; see
+  // `uDaylightTint`'s own declaration). So the hue and the weather both grade
+  // the TARGET instead: the outside world deciding what comes through. The
+  // weather was moved after the old shoulder for the same reason — before it, a
+  // white mask's raw light sat so far past the ceiling that dimming it barely
+  // showed ("90% cloud and still bright").
+  const weatherGain = weatherGainNode ? weatherGainNode.toVar('winWeatherGain') : float(1);
+  // THE LIGHT LET IN — the outdoor light (hue, moon, the 'Brightness vs
+  // outdoors' match: `uTargetLight`, resolved in JS — so the daylight tint is
+  // already folded in and `uDaylightTint` is now the debug channel's alone),
+  // shaded by the cloud overhead and by the weather.
+  const target = uTargetLight.mul(cloudFactor).mul(weatherGain).toVar('winTarget');
+  // THE CC (the card's Colour section) grades the light COMING IN — through the
+  // project's ONE grade primitive (`window-grade.js`), identity at its defaults
+  // — and only then is the indoor light it replaces taken away:
+  //   illum += fill · (target − indoor)  ⇒  illum → mix(indoor, target, fill).
+  // Signed on purpose: `buf:scene.illum` is half-float, so a window whose
+  // outside is darker than the room (a storm wave, a cloud, a dim dusk) darkens
+  // the room toward it, the way the garden beside it darkens.
+  const cookieLight = applyWindowColor(TSL, shoulderedLight.mul(target), windowColorDials)
+    .sub(shoulderedLight.mul(uIndoorLight))
+    .toVar('winFinal');
 
   /** @param {*} material */
   function configureShared(material) {
@@ -1047,6 +1118,11 @@ export function buildWindowSurfaceMaterial({
     rainFlow: debugGlass.rainNodes ? debugGlass.rainNodes.debugFlow : vec3(0, 0, 0),
     rainFlowAux: debugGlass.rainNodes ? debugGlass.rainNodes.debugAux : vec3(0, 0, 0),
     rainDrops: debugGlass.rainNodes ? debugGlass.rainNodes.debugDrops : vec3(0.5, 0.5, 0.5),
+    // SUN & ROOMS' four views. Without the room term: black, black, black, and white (every tap counts).
+    rooms: debugGlass.roomDebug ? debugGlass.roomDebug.rooms : vec3(0, 0, 0),
+    roomWallDist: debugGlass.roomDebug ? debugGlass.roomDebug.wallDist : vec3(0, 0, 0),
+    roomSun: debugGlass.roomDebug ? debugGlass.roomDebug.sun : vec3(0, 0, 0),
+    roomGate: debugGlass.roomDebug ? debugGlass.roomDebug.gate : vec3(1, 1, 1),
   };
   // ⚠️ ARITHMETIC, NOT `select()`. This shared the specular selector's exact
   // shape and therefore its exact defect — every channel's maths inside its own
@@ -1115,6 +1191,20 @@ export function buildWindowSurfaceMaterial({
     setAmbientCeiling(v) {
       uAmbientCeiling.value = Number.isFinite(v) && v > 0 ? v : WINDOW_DEFAULT_AMBIENT_CEILING;
     },
+    /** THE OUTDOOR MATCH's two ends — see `uIndoorLight`/`uTargetLight`. A
+     * malformed triple leaves the uniform as it was rather than feeding the GPU
+     * a NaN. @param {readonly number[]} rgb */
+    setIndoorLight(rgb) {
+      if (Array.isArray(rgb) && rgb.length === 3 && rgb.every(Number.isFinite)) {
+        uIndoorLight.value.set(Math.max(0, rgb[0]), Math.max(0, rgb[1]), Math.max(0, rgb[2]));
+      }
+    },
+    /** @param {readonly number[]} rgb */
+    setTargetLight(rgb) {
+      if (Array.isArray(rgb) && rgb.length === 3 && rgb.every(Number.isFinite)) {
+        uTargetLight.value.set(Math.max(0, rgb[0]), Math.max(0, rgb[1]), Math.max(0, rgb[2]));
+      }
+    },
     setStrength(v2) {
       uStrength.value = Math.max(0, v2);
     },
@@ -1125,6 +1215,11 @@ export function buildWindowSurfaceMaterial({
      * own doc. `[1,1,1]`/anything malformed falls back to neutral, never NaN
      * (`feedback_raw_seed_into_noise_coordinate`'s same "never feed the GPU an
      * unvalidated number" lesson, one layer up). @param {readonly number[]} rgb */
+    /** The CC section (`window-grade.js`). Every field optional; anything
+     * malformed falls back to the identity. @param {object} dials */
+    setColor(dials = {}) {
+      pushWindowColor(windowColorDials, dials);
+    },
     setDaylightTint(rgb) {
       const [r, g, b] = Array.isArray(rgb) && rgb.length === 3 ? rgb : [1, 1, 1];
       uDaylightTint.value.set(Number.isFinite(r) ? r : 1, Number.isFinite(g) ? g : 1, Number.isFinite(b) ? b : 1);
@@ -1177,6 +1272,9 @@ export function buildWindowSurfaceMaterial({
     /** The rain handle this material was built with (or null), so the subsystem pushes weather to the one that is live. */
     rain,
     rainCompiled: !!rain,
+    /** The SUN & ROOMS handle this material was built with (or null). */
+    roomLight,
+    roomCompiled: !!roomLight,
     // Whether the production material actually took the gated build — false
     // whenever `gateGlass` was off OR there was no depth texture to gate on,
     // matching `cookieTinted`'s own condition exactly rather than echoing
@@ -1211,5 +1309,6 @@ export function computeWindowFloorGateVisibility({ storedDepth, expectedDepth, f
   const restrictsLightBit = Math.floor(flagsByte / WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR) % 2;
   const isTileBit = Math.floor(flagsByte / WINDOW_DEPTH_FLAG_IS_TILE_MIRROR) % 2;
   const tileExempt = isTileBit && !restrictsLightBit ? 1 : 0;
-  return Math.max(rankGate, tileExempt);
+  const isTokenBit = Math.floor(flagsByte / WINDOW_DEPTH_FLAG_IS_TOKEN_MIRROR) % 2;
+  return Math.max(rankGate, tileExempt, isTokenBit);
 }

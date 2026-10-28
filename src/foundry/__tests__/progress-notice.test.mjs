@@ -14,6 +14,8 @@ import {
   formatPrepareMessage,
   escapeNoticeText,
   createProgressNotice,
+  PLAYER_SCENE_MESSAGE,
+  PLAYER_FLOOR_MESSAGE,
 } from '../progress-notice.js';
 
 /** A fake notification centre and a manual clock. */
@@ -83,6 +85,18 @@ export function run(t) {
     formatPrepareMessage({ name: 'Cellar' }, b) === 'Preparing Cellar — step 2 of 5: compressing the art (3/6)'
   );
   ok('a custom verb is used', formatPrepareMessage({ verb: 'Opening', name: 'Keep' }, a).startsWith('Opening Keep'));
+
+  // ── a player is never told which scene or floor is loading ────────────────────
+  const playerScene = formatPrepareMessage({ verb: 'Gamemaster is preparing', name: null }, b);
+  ok(
+    'no name → the generic scene message, no verb, no step detail',
+    playerScene === PLAYER_SCENE_MESSAGE && !playerScene.includes('step') && !playerScene.includes('Gamemaster')
+  );
+  ok('the generic scene message says it may take a while', /little while/.test(PLAYER_SCENE_MESSAGE));
+  ok(
+    'a floor change can pass its own generic line',
+    formatPrepareMessage({ name: undefined, generic: PLAYER_FLOOR_MESSAGE }, b) === PLAYER_FLOOR_MESSAGE
+  );
 
   // ── the notification: nothing until the work is not instant ───────────────────
   ok('the show delay matches ui/floor-transition.js (250 ms)', NOTICE_SHOW_AFTER_MS === 250);

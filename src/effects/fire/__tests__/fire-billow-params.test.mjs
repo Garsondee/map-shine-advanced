@@ -58,8 +58,14 @@ export function run(t) {
       near(base.life.rekindleRampSec, FIRE_LIFE.rekindleRampSec)
   );
   t.ok(
-    'the default tint is white (no change to the painted palette) and rekindle is on',
-    base.tint.every((c) => c === 1) && base.rekindle === true
+    // flameTint's own default moved from white to the author's '#ffd2a8' (fire.js, 2026-10-27);
+    // white itself is still pinned, just below, as `hex01`'s own identity case.
+    'the default tint is the author’s warm #ffd2a8 (no change leaves the painted palette as-is) and rekindle is on',
+    near(base.tint[0], 1) && near(base.tint[1], 0xd2 / 255) && near(base.tint[2], 0xa8 / 255) && base.rekindle === true
+  );
+  t.ok(
+    'a white flameTint leaves the painted palette exactly as it is (the identity case)',
+    billowRuntimeFromParams({ ...defaults, flameTint: '#ffffff' }).tint.every((c) => c === 1)
   );
   t.ok('the default camera is the 3/4 view with full parallax', near(base.parallax, 1) && near(base.tilt, 0.3));
   t.ok(

@@ -330,6 +330,16 @@ export const SUN_SHADOW_EDGE_BAND_PX = 384;
 // 0.95 × 0.7). A constant, not the `strength01` param, so it applies to every
 // scene including ones whose saved slider value would have masked a new default.
 export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.665, 0.665, 0.665, 0.665]);
+// GOLDEN HOUR EXAGGERATION (2026-10-27, author: "building shadows should be very
+// strong and very long at the golden hour"). Both scale with `golden01` (the
+// ONE golden-hour bell, `world/sun.js`), so they vanish by midday and the
+// author's 30%-weaker daytime shadow above is untouched.
+//   STRENGTH_GAIN  0.665 × 1.45 ≈ 0.96 at the peak — nearly black cores.
+//   LENGTH_GAIN    ×2 on the length scale AND on the dawn/dusk cap, so the cap
+//                  (which is what actually bites at low sun) cannot undo it.
+const GOLDEN_SHADOW_STRENGTH_GAIN = 0.45;
+const GOLDEN_SHADOW_LENGTH_GAIN = 1;
+const GOLDEN_SHADOW_STRENGTH_CEIL = 0.97;
 /** Shape of the distance falloff — higher hugs the caster more tightly.
  * 1.6→1 2026-08-02 (author, live — the tuned "preferred default" pass). */
 export const SUN_SHADOW_FALLOFF_EXP = 1;
@@ -926,8 +936,9 @@ function createFloorSlot({
   function publishField() {
     overheadFade.setRect(currentRect());
     overheadFade.setFades(publishedFades);
-    renderSunShadowPass(sunShadowRt, overheadFadeQuad);
-    fadesDirty = false;
+    // Not drawn (its pipeline still compiling — see `bakeSunShadowField`)? Stay
+    // dirty, so `maybeBake` publishes again next frame.
+    fadesDirty = renderSunShadowPass(sunShadowRt, overheadFadeQuad) === false;
   }
   /** THIS SLOT'S OWN rect uniform, for the debug view ONLY — see this
    * function's own `getEnvLight` doc for why the CONSUMER push goes through
@@ -1254,6 +1265,7 @@ function createFloorSlot({
     const state = getSunShadowRenderState();
     const atmosphere = getShadowHandle().atmosphere;
     const params = state.params ?? {};
+    const golden01 = Number.isFinite(atmosphere.golden01) ? atmosphere.golden01 : 0;
     // A DISABLED effect, or a field with nothing in it, bakes WHITE — an
     // explicit, provable "no shadow anywhere" rather than a stale field left
     // multiplying the ambient forever. (The pass cannot simply be skipped:
@@ -1296,8 +1308,8 @@ function createFloorSlot({
       // the ONE effective tangent `resolveLayerSmear` computes per layer, so
       // the shorter span also means smaller steps (finer, and cheaper). Same
       // contract the previous model's `resolveSunMarch` used.
-      lengthScale: params.lengthScale ?? 1,
-      maxLengthMul: params.dawnDuskLength ?? 0,
+      lengthScale: (params.lengthScale ?? 1) * (1 + GOLDEN_SHADOW_LENGTH_GAIN * golden01),
+      maxLengthMul: (params.dawnDuskLength ?? 0) * (1 + GOLDEN_SHADOW_LENGTH_GAIN * golden01),
     });
     sunShadowBake.setSun(resolved);
     // THE DEBUG ISOLATION, applied here rather than in the derivation
@@ -1306,7 +1318,12 @@ function createFloorSlot({
     // layer's STRENGTH is exactly what Shader Lab's `layerIsolate` does, so
     // "sky-reach only" means the identical thing in both tools.
     const isolate = sunShadowDebugLayers(params.debugView ?? 'off');
-    sunShadowBake.setLayers({ strengths: SUN_SHADOW_LAYER_STRENGTH.map((s, i) => s * (isolate[i] ?? 1)) });
+    sunShadowBake.setLayers({
+      strengths: SUN_SHADOW_LAYER_STRENGTH.map(
+        (s, i) =>
+          Math.min(GOLDEN_SHADOW_STRENGTH_CEIL, s * (1 + GOLDEN_SHADOW_STRENGTH_GAIN * golden01)) * (isolate[i] ?? 1)
+      ),
+    });
     // THE SKY-REACH GRADIENT — the BAND layers only. Walls and overhead are
     // thin casters with no meaningful interior for a receiver to stand deep
     // inside (`layer-smear.js#isotropicDepthTerm`'s own header), so they have
@@ -1341,7 +1358,21 @@ function createFloorSlot({
 
     // The literal save/bind/render/restore triplet lives in `vt/` (§3) — this
     // module only decides WHEN it needs to run.
-    renderSunShadowPass(sunShadowBakeRt, sunShadowQuad);
+    //
+    // ⚠️ A BAKE THAT DID NOT DRAW IS NOT A BAKE (2026-10-27). Since the pipeline
+    // governor, this pass's pipeline may compile on a worker thread, and three
+    // simply skips drawing until it is ready. Recording that skipped frame as
+    // "baked" left the field blank until the sun next moved half a degree —
+    // with the clock paused, forever: no building, overhead or sky-reach shadow
+    // at all. So nothing below is recorded, and `bakedSun` is cleared, which
+    // makes `sunNeedsRebake` answer yes on the next (throttled) frame.
+    // `renderSunShadowPass` returns `false` only when it KNOWS nothing drew; a
+    // caller that returns nothing (tests, older wiring) counts as drawn.
+    if (renderSunShadowPass(sunShadowBakeRt, sunShadowQuad) === false) {
+      bakedSun = null;
+      lastSunShadowBake = { reason, pending: 'bake pipeline still compiling — retrying' };
+      return;
+    }
     fieldBaked = true;
     publishField();
 

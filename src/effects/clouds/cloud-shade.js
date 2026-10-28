@@ -681,6 +681,26 @@ export function cloudTopsGate({ viewWidthWorldPx, deckAltitudePx, zoomSensitivit
 }
 
 /**
+ * THE TOPS' MAGNIFICATION FROM THE SHARED EYE (2026-10-28, author: "allow cloud tops to be rendered hanging
+ * above the table in the perspective"). `cloudTopsGate` still decides WHEN the tops show (its wake/fade —
+ * author-tuned in view widths, a visibility rule, not a camera). WHERE they hang is now the one perspective
+ * every depth effect shares (`scene/scene-eye.js`): a deck `deckAltitudePx` up, seen by the scene eye, is
+ * magnified by `H / (H − altitude)` — the same law the Table's rim and Parallax's floors use, so the deck
+ * sits visibly ABOVE the table top and overhangs the rim as the view pans. Capped at the gate's own
+ * {@link CLOUD_TOPS_MAX_PARALLAX} ceiling (a deck at the eye would sample one point of the field).
+ *
+ * @param {number} deckAltitudePx
+ * @param {number} eyeHeightPx - the scene eye's height.
+ * @returns {number} M >= 1 (1 = no eye or no deck).
+ */
+export function cloudTopsEyeMagnification(deckAltitudePx, eyeHeightPx) {
+  const alt = Number.isFinite(deckAltitudePx) ? Math.max(0, deckAltitudePx) : 0;
+  if (!(eyeHeightPx > 0) || alt <= 0) return 1;
+  const parallax = Math.min(CLOUD_TOPS_MAX_PARALLAX, alt / eyeHeightPx);
+  return 1 / (1 - parallax);
+}
+
+/**
  * The one TSL remap every tops consumer applies before sampling the field:
  * "magnified about the view centre by `M`" (doc 02 §4.1). Never applied to
  * the shadow path — a cloud shadow is a fact about the ground and must not

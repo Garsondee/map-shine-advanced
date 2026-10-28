@@ -54,7 +54,8 @@ export const BLOOM_PARAMS = Object.freeze({
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 1.79).
     // 2026-10-16 — second dump: lowered hard (was 1.52), so far more of the
     // image sits above the glow cutoff.
-    default: 0.33,
+    // 2026-10-27 — third dump (was 0.33).
+    default: 0.51,
     category: 'Look',
     label: 'Threshold',
     help: 'How bright a pixel must be before it starts to glow. The scene is HDR (light and coloration push values above 1), so ~1.0 means "only real highlights bloom"; lower it to make more of the image glow.',
@@ -79,7 +80,8 @@ export const BLOOM_PARAMS = Object.freeze({
     // release; applied 2026-09-18.
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.14).
     // 2026-10-16 — second dump: the master dial runs full (was 0.29).
-    default: 1,
+    // 2026-10-27 — third dump (was 1).
+    default: 0.96,
     category: 'Look',
     label: 'Strength',
     help: 'Overall glow intensity — scales both the tight core and the wide atmosphere together. The master dial.',
@@ -114,7 +116,8 @@ export const BLOOM_PARAMS = Object.freeze({
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 2.45).
     // 2026-10-16 — second dump: the wide haze steps well back (was 0.75) —
     // the tight core carries the glow now.
-    default: 0.24,
+    // 2026-10-27 — third dump (was 0.24).
+    default: 0.43,
     category: 'Look',
     label: 'Atmosphere strength',
     help: 'Intensity of the WIDE, soft glow — the sense of air catching the light, haze around a scene. This is the "atmospherics" layer, separate from the tight core.',

@@ -77,7 +77,7 @@
  */
 
 import { getActiveSceneFloors } from '../foundry/index.js';
-import { resolveElevationFloorIndex } from '../scene/index.js';
+import { resolveElevationFloorIndex, layerScaleEncodeNode, encodeLayerScale01 } from '../scene/index.js';
 // `vt/` importing FROM `effects/` is the established one-way layering
 // direction (`vt/scene-attr.js` already does this; see
 // `effects/lighting/point-light-illumination.js`'s own header for why the
@@ -389,6 +389,26 @@ export const DEPTH_FLAG_RESTRICTS_WEATHER = 2;
 export const DEPTH_FLAG_IS_LEVEL_BACKGROUND = 4;
 export const DEPTH_FLAG_IS_LEVEL_FOREGROUND = 8;
 export const DEPTH_FLAG_IS_TILE = 16;
+/**
+ * A canopy that is a TREE rather than a bush — only meaningful alongside
+ * {@link DEPTH_FLAG_IS_VEGETATION}. Bit 5 was once reserved for `occlusionFaded`, which nothing
+ * ever wrote: the live occlusion gate (#480) discards a fading item from this pass instead.
+ */
+export const DEPTH_FLAG_IS_TREE = 32;
+/**
+ * A vegetation canopy's own pixels (2026-10-28). Foliage lets some light through: a point
+ * light below it is dimmed, not blocked (`effects/lighting/canopy-light.js`). Every other
+ * consumer keeps treating the canopy as solid, because none of them reads this bit.
+ */
+export const DEPTH_FLAG_IS_VEGETATION = 128;
+/**
+ * A token's own pixels. Tokens rank above their floor's background, so a bare
+ * rank comparison reads a token as something drawn OVER the floor and blocks
+ * window light under it — the token stayed dark while the rug around it lit
+ * up. Light consumers that ADD light to what is on the floor (window light)
+ * read this bit to treat a token as lit, never as a roof.
+ */
+export const DEPTH_FLAG_IS_TOKEN = 64;
 
 /**
  * Pure, per-item flag byte — never re-derives anything `foundry/scene-
@@ -414,8 +434,8 @@ export const DEPTH_FLAG_IS_TILE = 16;
  * it. See {@link DEPTH_FLAG_RESTRICTS_LIGHT}'s own doc for the guard.
  *
  * @param {{kind?: string, restrictsLight?: boolean, restrictsWeather?: boolean}} [item]
- * @returns {number} 0-31 (bits 0-4; bit 5, `occlusionFaded`, is not this
- *   function's to set — see this module's own flag-bit header).
+ * @returns {number} bits 0-4 and bit 6 (the token bit); bit 5, `occlusionFaded`,
+ *   is not this function's to set — see this module's own flag-bit header.
  */
 export function computeSceneDepthFlags(item) {
   if (!item) return 0;
@@ -425,7 +445,19 @@ export function computeSceneDepthFlags(item) {
   if (item.kind === 'levelBackground') bits |= DEPTH_FLAG_IS_LEVEL_BACKGROUND;
   if (item.kind === 'levelForeground') bits |= DEPTH_FLAG_IS_LEVEL_FOREGROUND;
   if (item.kind === 'tile') bits |= DEPTH_FLAG_IS_TILE;
+  if (item.kind === 'token') bits |= DEPTH_FLAG_IS_TOKEN;
   return bits;
+}
+
+/**
+ * The flag byte a vegetation canopy's depth proxy writes: {@link DEPTH_FLAG_IS_VEGETATION},
+ * plus {@link DEPTH_FLAG_IS_TREE} for a tree. An unknown kind still reads as foliage (a bush).
+ *
+ * @param {string} [kindId] - `VEGETATION_KINDS[].id` ('tree' | 'bush').
+ * @returns {number}
+ */
+export function computeVegetationDepthFlags(kindId) {
+  return DEPTH_FLAG_IS_VEGETATION | (kindId === 'tree' ? DEPTH_FLAG_IS_TREE : 0);
 }
 
 /**
@@ -496,7 +528,8 @@ export function resolveSceneDepthFloorIndex({ item, sceneDoc, viewedFloorIndex, 
  * @param {number} [args.alphaThreshold=0.75] - the item's own authored
  *   threshold (`collectLevelTextures`'s default, per `scene-layers.js`).
  * @param {number} args.floorIndex - 0-255, {@link resolveSceneDepthFloorIndex}'s result.
- * @param {number} args.flags - 0-31, {@link computeSceneDepthFlags}'s result.
+ * @param {number} args.flags - 0-255, {@link computeSceneDepthFlags}'s (or
+ *   {@link computeVegetationDepthFlags}'s) result.
  * @param {*} [args.positionNode] - a vertex-stage TSL node, applied to
  *   `material.positionNode` when present. EVERY existing caller (ordinary
  *   Level/tile/token proxies) omits this — their real mesh is static, so the
@@ -586,7 +619,14 @@ export function buildSceneDepthWriterMaterial({
   fluidMaskUvScale = [1, 1],
   fluidMaskEpsilon = FLUID_PRESENCE_EDGE0,
 }) {
-  const { Fn, float, uniform, vec4, vec2, uv, texture } = THREE.TSL;
+  const { Fn, float, uniform, vec4, vec2, uv, texture, modelScale } = THREE.TSL;
+  // G — THE LAYER'S PARALLAX SCALE (2026-10-28, `scene/scene-eye.js#encodeLayerScale01`): this proxy's
+  // own mesh scale, which Parallax sets to its colour mesh's (`parallax-subsystem.js#placeProxy`). An
+  // object-scope uniform, so a pooled material shared by many proxies still writes each one's own.
+  // Screen passes read it to look their shadows up where a lifted layer really is.
+  // A TSL without object nodes (a test's mock) writes "scale 1", the unlifted answer.
+  const layerScale01 = () =>
+    modelScale ? layerScaleEncodeNode(THREE.TSL, modelScale.x) : float(encodeLayerScale01(1));
   const material = new THREE.NodeMaterial();
   material.side = THREE.DoubleSide;
   material.transparent = false;
@@ -663,7 +703,7 @@ export function buildSceneDepthWriterMaterial({
   if (alwaysOpaque || (!tex && !fluidMaskTex)) {
     material.fragmentNode = Fn(() => {
       discardIfFading();
-      return vec4(uFloorIndex, float(0), uFlags, float(1));
+      return vec4(uFloorIndex, layerScale01(), uFlags, float(1));
     })();
     if (uLiveOcclusionAmount) material.uLiveOcclusionAmount = uLiveOcclusionAmount;
     return material;
@@ -716,13 +756,9 @@ export function buildSceneDepthWriterMaterial({
     }
     discardCond.discard();
     discardIfFading();
-    // G (outdoors) is a KNOWN GAP, stated honestly, not faked: wiring it
-    // needs the same envLight/uOutdoorsRect plumbing scene-attr.js's real
-    // writers take, and no Stage 1 consumer reads it yet (design doc §6's
-    // own `d.outdoors` is for a later effect migration). 0 — "indoors" — is
-    // the SAME safe default `packFloorAttr` already uses for a floor with
-    // no authored outdoors mask, never a fabricated "somewhere outside".
-    return vec4(uFloorIndex, float(0), uFlags, float(1));
+    // G was a reserved outdoors slot no consumer ever read (always 0); since 2026-10-28 it carries
+    // the layer's parallax scale instead — see `layerScale01` above.
+    return vec4(uFloorIndex, layerScale01(), uFlags, float(1));
   })();
   if (uLiveOcclusionAmount) material.uLiveOcclusionAmount = uLiveOcclusionAmount;
   return material;

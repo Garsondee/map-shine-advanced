@@ -50,9 +50,13 @@ function fakeAllocator() {
 function fakeRenderPass() {
   let calls = 0;
   return {
+    /** What the pass reports: `undefined` (an older caller — counts as drawn), or
+     * `false` to play a pipeline that three skipped because it is still compiling. */
+    drew: undefined,
     run(target, quad) {
       calls++;
       if (!target || !quad) throw new Error(`renderSunShadowPass call #${calls} got a missing target/quad`);
+      return this.drew;
     },
     get calls() {
       return calls;
@@ -178,6 +182,29 @@ export function run(t) {
     const rendersAfterCatchUp = pass.calls;
     subsystem.maybeBake(0, 1250);
     ok('unchanged after the deferred bake correctly skips re-baking', pass.calls === rendersAfterCatchUp);
+  }
+
+  // ══ A BAKE THAT DID NOT DRAW IS RETRIED (2026-10-27) — the pipeline governor
+  // can compile the bake on a worker thread, and three skips the draw until it
+  // is ready. Recording that skipped frame as a bake left the field blank until
+  // the sun moved: building, overhead and sky-reach shadows all gone, live. ══
+  {
+    const { subsystem, pass } = buildHarness();
+    pass.drew = false;
+    subsystem.maybeBake(0, 1000);
+    const afterSkipped = pass.calls;
+    ok(
+      'a skipped bake is reported as pending, not as a bake',
+      /still compiling/.test(String(subsystem.getStatus().floors[0]?.lastBake?.pending ?? ''))
+    );
+    subsystem.maybeBake(0, 1050);
+    ok('...and is not retried inside the throttle window', pass.calls === afterSkipped);
+    pass.drew = true;
+    subsystem.maybeBake(0, 1200);
+    ok('...but IS retried, with nothing else changed, once the window passes', pass.calls > afterSkipped);
+    const afterReal = pass.calls;
+    subsystem.maybeBake(0, 1400);
+    ok('once it really drew, a quiet poll does not bake again', pass.calls === afterReal);
   }
 
   // ══ `nowMs` IS OPTIONAL — every caller that predates the throttle must see

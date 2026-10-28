@@ -109,10 +109,21 @@
  * @module effects/particles/precip-runtime
  */
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
-import { createWindHandle, windFlowVectorNode } from '../../world/index.js';
+import {
+  createWindHandle,
+  windFlowVectorNode,
+  computeGustEnvelope,
+  windFieldPxPerSecPerUnit,
+  windStrength01Node,
+  WIND_DEFAULT_PIXELS_PER_METRE,
+  createWindAdvectionUniforms,
+  writeWindAdvectionUniforms,
+  windAdvectionDtSecNode,
+} from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
 import { buildSquallField } from '../precipitation/squall-field.js';
+import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
 import {
   LUMA,
   GLINT_DEFAULT_STRENGTH,
@@ -185,6 +196,16 @@ const CHAOS_PER_SPEED = 0.0103;
  * apparent pace and size. See {@link uViewScale}.
  */
 const REFERENCE_VIEW_SPAN_PX = 2000;
+
+/**
+ * THE SHARED EYE (2026-10-28, scene/scene-eye.js). Rain's own camera was `cameraHeight × span / 2000`; at a
+ * 16:9 view and the Table's default 45° that is 1.657 scene-eye heights at the shipped 2250 dial — so the
+ * dial value at which rain's camera IS the eye is 2250 / 1.657 = 1358. With an eye, the camera becomes
+ * `eye × cameraHeight / 1358`: the identical look at the default (rain stays zoom-invariant, because the eye
+ * already scales with the view), now on the eye's own centre and following its Perspective. Read the dial as
+ * how tall the falling column is drawn against the shared eye.
+ */
+const RAIN_EYE_REFERENCE_CAMERA = 1358;
 
 /**
  * How far downwind the convergence point may run, in camera heights.
@@ -373,6 +394,8 @@ export function createPrecipEngine({
   const uSizeScale = uniform(float(1.1));
   const uAlphaMul = uniform(float(1));
   const uRgbMul = uniform(float(1));
+  /** The golden-hour colour of the light (`sky-access.js#lightGoldenTint`), (1,1,1) when none. */
+  const uSkyTint = uniform(vec3(1, 1, 1));
   const uFlutterMul = uniform(float(1));
 
   /**
@@ -572,6 +595,13 @@ export function createPrecipEngine({
    */
   const uWindAirSpeed = uniform(float(2250));
   /**
+   * THE SCENE'S px/m (2026-10-27) — from the wind handle's ambient, so a body's
+   * sideways speed is the wind's REAL speed on this map (see `windVec`).
+   * `uWindAirSpeed` is now read as a gain on that, 2250 = ×1 (its old default,
+   * which was within 3% of the real speed at the old dial's top anyway).
+   */
+  const uPixelsPerMetre = uniform(float(WIND_DEFAULT_PIXELS_PER_METRE));
+  /**
    * ⭐ THE SQUALL FIELD's inputs (P4, §3.4 job 2). `gustiness01` is the wind
    * door's own axis; `squallDepth` at 0 makes the field a constant 1, i.e.
    * EXACTLY the un-banded population this engine had before P4 — the identity,
@@ -580,6 +610,13 @@ export function createPrecipEngine({
   const uGustiness01 = uniform(float(0));
   const uSquallDepth = uniform(float(1));
   const uSquallScale = uniform(float(3.9));
+  /**
+   * The wind's INTEGRATED travel (`world/wind-field.js#createWindAdvectionUniforms`),
+   * copied from the handle in `step` like the speed above. The gust push, the
+   * squall bands and the flake spin all read it rather than `speed × t`, which
+   * during a wind fade flung the rain sideways and spun snow like a blender.
+   */
+  const uAdvection = createWindAdvectionUniforms(TSL);
 
   /**
    * ⭐ ZOOM INVARIANCE — the view's span relative to {@link REFERENCE_VIEW_SPAN}.
@@ -622,6 +659,17 @@ export function createPrecipEngine({
    * the sky gate does) would read a completely unrelated pixel.
    */
   const illumTex = illumTexture ? TSL.texture(illumTexture) : null;
+  /**
+   * THE SHADE — a building's (or cloud's) shadow darkens the streak over it like
+   * the ground (`lighting/weather-shade.js`). Its OWN texture node, sampled at
+   * the fragment's `screenUV`, not `illumTex` above (that one is read in the
+   * vertex stage through the view-rect mapping — two uvs, two nodes).
+   */
+  const uSceneLight = uniform(float(1));
+  const shade = buildWeatherShadeNode(TSL, {
+    illumTexNode: illumTexture ? TSL.texture(illumTexture) : null,
+    uSceneLight,
+  });
 
   /**
    * ⭐ mmp-row — THE GRADIENT-LINE GLINT (precip-glint.js has the why and the
@@ -922,11 +970,36 @@ export function createPrecipEngine({
     // 2210 px/s, rain 1170. The tilt is then DERIVED (snow ~88°, i.e. nearly
     // horizontal — which is what a blizzard actually looks like) rather than
     // dialled, so it can never disagree with the body's real travel.
-    const windVec = windFlowVectorNode(TSL, uWindDirDeg)
+    //
+    // ⭐ 2026-10-27 — THE WIND'S OWN SPEED AND ITS OWN GUSTS. Author: *"the rain
+    // moves at a COMPLETELY different pace entirely"* from the gust waves on the
+    // wind overlay. Three reasons, all fixed here:
+    //   1. the push was `speed01 × 2250 px/s`, a number unrelated to the real
+    //      wind or the scene's grid — now `speed01 × 70 m/s × px/m`, the speed
+    //      the overlay's gust fronts travel at (`uWindAirSpeed` is a gain on it);
+    //   2. it was ONE vector for the whole map — now each body is pushed by the
+    //      field's gust envelope AT ITS OWN POSITION, so rain surges inside the
+    //      very red bands the overlay draws and slackens in the lulls between;
+    //   3. it was multiplied by `uViewScale`, so zooming changed how fast rain
+    //      crossed the GROUND. Sideways drift is the air moving over the map,
+    //      so it is world-real now; fall speed, size and jitter keep their
+    //      zoom-invariant pace (see `uViewScale`).
+    let windVec = windFlowVectorNode(TSL, uWindDirDeg)
       .mul(uWindSpeed01)
-      .mul(uWindAirSpeed)
-      .mul(uViewScale)
+      .mul(windFieldPxPerSecPerUnit(uPixelsPerMetre))
+      .mul(uWindAirSpeed.div(float(2250)))
       .mul(float(WIND_CARRY));
+    windVec = windVec.mul(
+      computeGustEnvelope(TSL, {
+        centerXY: pos,
+        time: uTimeMs,
+        directionDeg: uWindDirDeg,
+        gustiness01: uGustiness01,
+        speed01: uWindSpeed01,
+        pixelsPerMetre: uPixelsPerMetre,
+        advection: uAdvection,
+      })
+    );
     // 2. The chaos — V2's dual-frequency lateral sway (`:1450-1505`), phase
     //    offset per body so neighbours never move in lockstep (the ember
     //    lesson: a pure function of position and time makes a swarm drift as
@@ -971,7 +1044,7 @@ export function createPrecipEngine({
       // A streak's lateral wander is wind turbulence: in calm air rain falls
       // straight (author: "at 0 wind they wobble from side to side"). Build-time
       // branch; only streaks pay it.
-      .mul(isStreak ? mix(float(0.04), float(1), uWindSpeed01.clamp(float(0), float(1))) : float(1));
+      .mul(isStreak ? mix(float(0.04), float(1), windStrength01Node(TSL, uWindSpeed01)) : float(1));
 
     // 3. Flutter — snow only. The paper-fall sway (V2 `:1556-1663`), and the
     //    whole character of a flake: without it snow falls like slow rain,
@@ -1265,8 +1338,10 @@ export function createPrecipEngine({
       directionDeg: uWindDirDeg,
       speed01: uWindSpeed01,
       gustiness01: uGustiness01,
+      pixelsPerMetre: uPixelsPerMetre,
       bandDepth: uSquallDepth,
       scale: uSquallScale,
+      advection: uAdvection,
     });
 
     const visible = alive.mul(birthEase).mul(sceneClip).mul(squall);
@@ -1630,16 +1705,25 @@ export function createPrecipEngine({
       // A flake tumbles rather than pointing anywhere. Spin is derived from
       // the seed (per-body rate and direction) and scaled by wind — V2's
       // calm ×0.4 → storm ×3.
+      //
+      // ⚠️ THE WIND'S SHARE IS INTEGRATED (2026-10-27). `t × rate × mix(calm,
+      // storm, strength)` spun at `t · dStrength/dt` extra during a wind fade —
+      // hundreds of turns a second. `mix(c, s, k)·t` is `c·t + (s − c)·k·t`, and
+      // the second half becomes `(s − c)·∫k dt`, the advection's `strengthSec`.
       const sd = seed.element(i);
-      const rate = mix(float(SPIN.radSMin), float(SPIN.radSMax), hash11(sd.mul(float(8.1))))
-        .mul(
-          hash11(sd.mul(float(9.3)))
-            .step(float(0.5))
-            .mul(float(2))
-            .sub(float(1))
-        )
-        .mul(mix(float(SPIN.windScaleCalm), float(SPIN.windScaleStorm), uWindSpeed01));
-      const ang = uTimeMs.mul(float(0.001)).mul(rate).add(sd);
+      const baseRate = mix(float(SPIN.radSMin), float(SPIN.radSMax), hash11(sd.mul(float(8.1)))).mul(
+        hash11(sd.mul(float(9.3)))
+          .step(float(0.5))
+          .mul(float(2))
+          .sub(float(1))
+      );
+      const strengthSecNow = uAdvection.strengthSec.add(
+        windStrength01Node(TSL, uWindSpeed01).mul(windAdvectionDtSecNode(TSL, uTimeMs, uAdvection))
+      );
+      const spinTurnSec = uTimeMs
+        .mul(float(0.001 * SPIN.windScaleCalm))
+        .add(strengthSecNow.mul(float(SPIN.windScaleStorm - SPIN.windScaleCalm)));
+      const ang = spinTurnSec.mul(baseRate).add(sd);
       const ca = cos(ang);
       const sa = sin(ang);
       const rx = corner.x.mul(ca).sub(corner.y.mul(sa));
@@ -1704,7 +1788,9 @@ export function createPrecipEngine({
      * nothing for spore's glow (Effects.md Law 4).
      */
     if (EMISSIVE > 0) return rgb.mul(bright).mul(uRgbMul).mul(float(EMISSIVE));
-    const base = rgb.mul(bright).mul(uRgbMul);
+    // Shaded, the glint below is not: a torch lighting a streak in a building's
+    // shadow is exactly the light the shadow does not take away.
+    const base = (shade ? rgb.mul(bright).mul(uRgbMul).mul(shade) : rgb.mul(bright).mul(uRgbMul)).mul(uSkyTint);
     if (!vGlint) return base;
     // ⭐ mmp-row — the lit streak's gradient line, in the light's own colour.
     // `vGlint.xyz` is (0,0,0) by day / unlit / switched off, so this adds zeros.
@@ -1907,6 +1993,9 @@ export function createPrecipEngine({
         // The squall field's travelling half IS the wind door's gust envelope,
         // so it needs the same gustiness the vegetation bends to.
         if (Number.isFinite(gu)) uGustiness01.value = gu;
+        const ppm = wind.ambient.pixelsPerMetre?.value;
+        if (Number.isFinite(ppm) && ppm > 0) uPixelsPerMetre.value = ppm;
+        writeWindAdvectionUniforms(uAdvection, wind.ambient.advection);
       }
       uDtSec.value = Math.max(0, Math.min(0.1, dtSec || 0));
       uTimeMs.value = timeMs || 0;
@@ -1998,6 +2087,17 @@ export function createPrecipEngine({
       uGlintNight.value = glintNightFade(Number.isFinite(dayFactor01) ? dayFactor01 : 1);
     },
 
+    /**
+     * The frame's scene eye: the convergence centre and camera of every falling body. Call AFTER
+     * `setWorldRect` (which still sets the rect-relative pace and sizes). No eye ⇒ the rect's own camera.
+     * @param {{x:number,y:number,height:number}|null} eye
+     */
+    setEye(eye) {
+      if (!eye || !(eye.height > 0) || !Number.isFinite(eye.x) || !Number.isFinite(eye.y)) return;
+      uCamCentre.value.set(eye.x, eye.y);
+      uCamHeight.value = Math.max(1, (eye.height * camHeightBase) / RAIN_EYE_REFERENCE_CAMERA);
+    },
+
     setWorldRect(rect) {
       if (!rect) return;
       uRectMin.value.set(rect.minX, rect.minY);
@@ -2031,6 +2131,9 @@ export function createPrecipEngine({
       if (Number.isFinite(frame.lengthMul)) uLengthMul.value = frame.lengthMul;
       if (Number.isFinite(frame.alphaMul)) uAlphaMul.value = frame.alphaMul;
       if (Number.isFinite(frame.rgbMul)) uRgbMul.value = frame.rgbMul;
+      if (Array.isArray(frame.skyTintRgb) && frame.skyTintRgb.length === 3) uSkyTint.value.set(...frame.skyTintRgb);
+      else uSkyTint.value.set(1, 1, 1);
+      if (Number.isFinite(frame.sceneLight01)) uSceneLight.value = frame.sceneLight01;
       if (Number.isFinite(frame.flutterMul)) uFlutterMul.value = frame.flutterMul;
     },
 

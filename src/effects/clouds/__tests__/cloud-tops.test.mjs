@@ -25,9 +25,11 @@ import { CLOUD_TOPS, CLOUD_TOPS_PARAMS } from '../cloud-tops.js';
 import {
   buildCloudTopsNode,
   cloudTopsGate,
+  cloudTopsEyeMagnification,
   buildCloudTopsParallaxWorldXY,
   CLOUD_TOPS_MAX_PARALLAX,
 } from '../cloud-shade.js';
+import { sceneEyeHeight, eyeScale } from '../../../scene/index.js';
 import { createCloudUniforms, buildCloudFieldNode } from '../../../world/cloud-field.js';
 
 export function run(t) {
@@ -45,6 +47,27 @@ export function run(t) {
   ok('off at performance', resolveEffectEnabled(CLOUD_TOPS, { profile: 'performance' }) === false);
   ok('on at standard (the actual default profile)', resolveEffectEnabled(CLOUD_TOPS, { profile: 'standard' }) === true);
   ok('on at quality', resolveEffectEnabled(CLOUD_TOPS, { profile: 'quality' }) === true);
+
+  // ---- 1b. where the deck hangs: the SHARED scene eye (2026-10-28) ---------
+  {
+    const eye = sceneEyeHeight(6000, 45);
+    const m = cloudTopsEyeMagnification(1400, eye);
+    ok(
+      '⭐ the deck is magnified by the same law as the Table and the floors',
+      Math.abs(m - eyeScale(1400, eye, 1)) < 1e-9
+    );
+    ok('a deck hangs well above a table top (it is magnified more)', m > eyeScale(60, eye, 1));
+    ok('zooming out flattens it', cloudTopsEyeMagnification(1400, sceneEyeHeight(12000, 45)) < m);
+    ok(
+      'capped at the gate’s own ceiling',
+      cloudTopsEyeMagnification(1e9, eye) <= 1 / (1 - CLOUD_TOPS_MAX_PARALLAX) + 1e-9
+    );
+    ok(
+      'no eye or no deck: no magnification',
+      cloudTopsEyeMagnification(1400, 0) === 1 && cloudTopsEyeMagnification(0, eye) === 1
+    );
+    ok('garbage altitude is no deck', cloudTopsEyeMagnification(NaN, eye) === 1);
+  }
 
   // ---- 2. cloudTopsGate — pure CPU math, no TSL ----------------------------
   {

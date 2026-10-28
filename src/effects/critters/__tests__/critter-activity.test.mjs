@@ -5,6 +5,7 @@
  * a test author typed in and believed.
  */
 import { buildEnvSnapshot } from '../../../world/environment.js';
+import { speed01FromLegacyBeaufortDial } from '../../../world/wind-scale.js';
 import {
   flyActivity,
   maggotActivity,
@@ -17,8 +18,12 @@ import { FIREFLIES_PARAMS } from '../fireflies.js';
 import { skyFeel, weatherFactor } from '../critter-weather.js';
 
 const FIREFLIES_DEFAULTS = Object.fromEntries(Object.entries(FIREFLIES_PARAMS).map(([k, d]) => [k, d.default]));
+// Wind inputs here are written as the OLD dial (Beaufort force ÷ 12, the scale these thresholds were
+// tuned on); the dial went linear to 70 m/s on 2026-10-27, so they are converted to the same real speed.
+const legacyWind = (w = {}) =>
+  Number.isFinite(w.speed01) ? { ...w, speed01: speed01FromLegacyBeaufortDial(w.speed01) } : w;
 const at = (todHour, weather = {}, wind = {}) =>
-  buildEnvSnapshot({ time: { frame: 1, tMs: 1000, dtSec: 0.016 }, todHour, weather, wind });
+  buildEnvSnapshot({ time: { frame: 1, tMs: 1000, dtSec: 0.016 }, todHour, weather, wind: legacyWind(wind) });
 
 export function run(t) {
   // ---- V2's weather rule is one setting of the new weather model ------------------------------------
@@ -100,8 +105,11 @@ export function run(t) {
   );
   t.ok('deep night leaves only the residual', Math.abs(fireflyActivity(at(23), { nightResidual: 0.2 }) - 0.2) < 1e-9);
   t.ok(
-    'by default the colony is gone at midnight (no stragglers, none at dawn)',
-    fireflyActivity(at(23.99), FIREFLIES_DEFAULTS) === 0 && fireflyActivity(at(0), FIREFLIES_DEFAULTS) === 0
+    // nightResidual's own default moved from 0 to 0.1 in Ingram's 2026-10-27 settings export
+    // (765cf1ba) — a few stragglers glow faintly all night now, by design.
+    'by default the colony keeps its own night residual at midnight (the stragglers, not zero)',
+    Math.abs(fireflyActivity(at(23.99), FIREFLIES_DEFAULTS) - FIREFLIES_DEFAULTS.nightResidual) < 1e-9 &&
+      Math.abs(fireflyActivity(at(0), FIREFLIES_DEFAULTS) - FIREFLIES_DEFAULTS.nightResidual) < 1e-9
   );
   t.ok('nightResidual 0 means none after the fade', fireflyActivity(at(23), { nightResidual: 0 }) === 0);
   t.ok('the sky window is real: at 18:30 they are out', fireflyActivity(at(18.5)) > 0.9);

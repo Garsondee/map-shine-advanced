@@ -11,8 +11,8 @@
  */
 import { ZONE_FIELD_CELLS_MAX } from './critter-zone.js';
 
-/** The three bodies the engine can build. */
-export const CRITTER_KINDS = Object.freeze(['fly', 'maggot', 'firefly']);
+/** The bodies the engine can build. A dust `mote` is not a creature, but it is the same machine: a painted zone, agents that steer, a procedural body. */
+export const CRITTER_KINDS = Object.freeze(['fly', 'maggot', 'firefly', 'mote']);
 
 /**
  * Slots reserved in the particle arena per kind, MAP-WIDE (one floor's worth —
@@ -23,7 +23,7 @@ export const CRITTER_KINDS = Object.freeze(['fly', 'maggot', 'firefly']);
  * kind that asked for more than its capacity is thinned proportionally by
  * `allocateZonePopulation`, never truncated mid-zone.
  */
-export const CRITTER_CAPACITY = Object.freeze({ fly: 1024, maggot: 2048, firefly: 1536 });
+export const CRITTER_CAPACITY = Object.freeze({ fly: 1024, maggot: 2048, firefly: 1536, mote: 8192 });
 
 /**
  * The most cells the shared zone buffer can hold. `MASK_GRID_MAX_DIM` is 512 and a derived grid is at
@@ -142,15 +142,29 @@ const FIREFLY_TIER_PLANS = Object.freeze([
 ]);
 
 /**
+ * Dust: `glint` is the tumbling flake's flash, `depth` the depth of field plus the faint glow by the scene's
+ * own light (the two illumination reads), `sparkle` the star and halo on the brightest motes.
+ */
+const MOTE_TIER_PLANS = Object.freeze([
+  Object.freeze({ countScale: 0.5, glint: false, depth: false, sparkle: false }),
+  Object.freeze({ countScale: 0.75, glint: true, depth: false, sparkle: false }),
+  Object.freeze({ countScale: 1, glint: true, depth: true, sparkle: false }),
+  Object.freeze({ countScale: 1, glint: true, depth: true, sparkle: true }),
+  Object.freeze({ countScale: 1.5, glint: true, depth: true, sparkle: true }),
+]);
+
+const TIER_PLANS = Object.freeze({ fly: FLY_TIER_PLANS, firefly: FIREFLY_TIER_PLANS, mote: MOTE_TIER_PLANS });
+
+/**
  * The plan for a rung. Total: an out-of-range or non-finite tier clamps into the
  * ladder rather than throwing into a frame (`resolveEffectTier`'s own posture).
  *
- * @param {'fly'|'firefly'} family - maggots follow the fly ladder (same swarm, same cost class).
+ * @param {'fly'|'firefly'|'mote'} family - maggots follow the fly ladder (same swarm, same cost class).
  * @param {number} tier
  * @returns {Readonly<object>}
  */
 export function critterTierPlan(family, tier) {
-  const plans = family === 'firefly' ? FIREFLY_TIER_PLANS : FLY_TIER_PLANS;
+  const plans = TIER_PLANS[family] ?? FLY_TIER_PLANS;
   const n = Number.isFinite(tier) ? Math.max(0, Math.min(plans.length - 1, Math.floor(tier))) : CRITTER_DEFAULT_TIER;
   return plans[n];
 }

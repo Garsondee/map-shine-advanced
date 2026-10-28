@@ -14,6 +14,7 @@ import { validateEffectManifest } from '../../effect-manifest.js';
 import { validateParamsSchema, validateParamValue } from '../../../core/params-schema.js';
 import { CATEGORY_ORDER } from '../../../diag/effect-controls.js';
 import { precipTierPlan } from '../precip-species.js';
+import { createPrecipitationSubsystem, warmWeatherFor } from '../precip-subsystem.js';
 
 export function run(t) {
   const { ok } = t;
@@ -61,10 +62,11 @@ export function run(t) {
     // DEFAULT — every other param's `default` below is copied from what
     // `precip-subsystem.js`'s sub-engines already hardcode, so a fresh
     // session needs no "push defaults on boot" step; this is the one the
-    // author asked to change ("lower their opacity by a lot").
+    // author asked to change ("lower their opacity by a lot"), tuned down
+    // from the engine's own 0.75 across more than one live pass.
     ok(
-      'splashAlphaScale`s default was lowered from the engine`s original 1.0',
-      PRECIPITATION_PARAMS.splashAlphaScale.default === 0.75
+      'splashAlphaScale`s default was lowered from the engine`s own 0.75',
+      PRECIPITATION_PARAMS.splashAlphaScale.default === 0.29
     );
   }
   ok('the manifest points at that same schema object', PRECIPITATION.params === PRECIPITATION_PARAMS);
@@ -100,4 +102,47 @@ export function run(t) {
   );
   ok('tier 0`s scale matches the manifest`s own "40%" claim', precipTierPlan(0).tierScale === 0.4);
   ok('tier 2 (standard, the ceiling) matches the manifest`s own "100%" claim', precipTierPlan(2).tierScale === 1.0);
+
+  // ── THE LOAD-TIME WARM-UP's SEAMS (2026-10-28) ───────────────────────────
+  // A forced storm is a COPY laid over the real sky: it must cross every response threshold (veil 0.5, fog 0.7,
+  // torrent 0.75) and must never write into the snapshot, whose weather is frozen.
+  {
+    const sky = Object.freeze({ cloudCover01: 0.4, temperature01: 0.6, precip01: 0, precipKind: 'rain' });
+    const stormy = warmWeatherFor(sky, 'snow');
+    ok('a warm storm is full strength (every threshold crossed)', stormy.precip01 === 1);
+    ok('...of the asked kind, unmixed', stormy.precipKind === 'snow' && stormy.precipMixWeight === 0);
+    ok(
+      '...over the real sky (cloud and temperature kept)',
+      stormy.cloudCover01 === 0.4 && stormy.temperature01 === 0.6
+    );
+    ok('...and the frozen snapshot is untouched', sky.precip01 === 0 && sky.precipKind === 'rain');
+    ok('an absent sky still yields a storm', warmWeatherFor(undefined, 'rain').precip01 === 1);
+  }
+  {
+    let state = { enabled: true, weather: { precip01: 0 } };
+    const sub = createPrecipitationSubsystem({ THREE: {}, getPrecipRenderState: () => state });
+    const kinds = sub.warmUpKinds();
+    ok('every kind a GM can reach is warmed, rain first', kinds[0] === 'rain' && kinds.includes('snow'));
+    ok(
+      'only built species are warmed (sleet and embers are not rows of their own)',
+      !kinds.includes('sleet') && !kinds.includes('embers')
+    );
+    state = { enabled: false, weather: {} };
+    ok(
+      'a disabled effect warms nothing (a low profile pays nothing for weather it will not draw)',
+      sub.warmUpKinds().length === 0
+    );
+    state = null;
+    ok('no render state yet (cold load, before the first env snapshot) warms nothing', sub.warmUpKinds().length === 0);
+    // A warm frame with nothing to warm against must be a clean no-op, and `endWarm` callable regardless.
+    let threw = false;
+    try {
+      sub.sync(null, 1 / 60, 0, null, null, null, { kind: 'rain' });
+      sub.endWarm();
+      sub.endWarm();
+    } catch {
+      threw = true;
+    }
+    ok('a warm frame with no render state, and endWarm twice, are harmless', !threw && sub.scenes.length === 0);
+  }
 }

@@ -35,6 +35,7 @@ import { DEPTH_OF_FIELD } from '../depth-of-field.js';
 import { DOOR_GRAPHICS } from '../door-graphics.js';
 import { FIRE } from '../fire/fire.js';
 import { FIREFLIES } from '../critters/fireflies.js';
+import { DUST } from '../critters/dust.js';
 import { FLUID } from '../fluid/fluid.js';
 import { GRADE } from '../grade/grade.js';
 import { IRIDESCENCE } from '../iridescence/iridescence.js';
@@ -70,6 +71,7 @@ const MANIFESTS = [
   // The critters own two zones apiece (light.<effect>Sync / light.draw<Effect>) from day one, so check 2
   // below REQUIRES them. Both declare `firstRunWork: true` (a compute kernel and a material, built
   // lazily on the first sync that has paint) with `coverage: 'none'` and the reason why.
+  DUST,
   FIREFLIES,
   FLUID,
   GRADE,

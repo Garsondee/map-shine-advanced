@@ -157,9 +157,12 @@
 
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
 import { createWindHandle } from '../../world/index.js';
+import { getSafeProfile } from '../../core/safe-mode.js';
+import { markCompileDeferrable } from '../../core/compile-policy.js';
 import { buildApertureGoboTerm } from './aperture-gobo-render.js';
 import { buildWindowReachTerm } from './window-reach.js';
 import { repairLightPolygonFolds } from './light-polygon-repair.js';
+import { buildCanopyLightTerm } from './canopy-light.js';
 
 /** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
  * rather than a wind-inert light — see candle-flame-render.js's own identical
@@ -577,6 +580,28 @@ export function inverseSquareFalloff(TSL, dist, steepness = INVERSE_SQUARE_STEEP
   const d2 = dist.mul(dist);
   const windowTerm = clamp(float(1).sub(d2.mul(d2)), float(0), float(1)); // 1 - dist⁴, → 0 at the edge
   return windowTerm.mul(windowTerm).div(d2.mul(float(steepness)).add(float(1)));
+}
+
+/**
+ * SOFT EDGE ENVELOPE (2026-10-27) — a 1 → 0 fade over the outer {@link SOFT_EDGE_WIDTH}
+ * of a light's radius, applied to the light's WHOLE illumination output.
+ *
+ * ⚠️ WHY: illumination is `mix(backgroundFloor, litColor, falloff)`, so as `falloff`
+ * reaches 0 at the rim the output reaches `backgroundFloor` — the light's own ambient
+ * floor — NOT black. Wherever the true local ambient is darker than that floor
+ * (outdoors at night, beyond a doorway), the whole wall-clipped polygon shows as a pale
+ * fan with a hard edge. Fading the output to black (= "adds nothing" under the MAX
+ * blend) over the outer band turns that hard rim into a soft, smoothstep-eased one.
+ * Same trick `window-reach.js` already plays for light that crossed a window.
+ * @param {*} TSL @param {*} dist - normalized radial distance, 0 centre, 1 rim.
+ * @returns {*} float node in [0,1].
+ */
+export const SOFT_EDGE_WIDTH = 0.45;
+export function softEdgeEnvelope(TSL, dist) {
+  const { float, clamp } = TSL;
+  const x = clamp(float(1).sub(dist).div(float(SOFT_EDGE_WIDTH)), float(0), float(1));
+  const s = x.mul(x).mul(float(3).sub(x.mul(float(2)))); // smoothstep(0,1,x)
+  return s.mul(s); // squared: an eased, exponential-feeling tail rather than a linear ramp
 }
 
 /**
@@ -1317,6 +1342,31 @@ export function buildPointLightSharedTerms({
   // local-unit-radius space, to exactly this.
   const dist = length(localUnitXY);
 
+  // Sampled here (once), not inside buildDepthHeightGateNode itself, so a
+  // caller needing depthFlagsHere for something ELSE too (illumination's own
+  // sun-shadow floor attribution) can reuse this exact sample instead of
+  // resampling `buf:scene.depth` a second time — the SAME `screenUV`-not-bare
+  // rule `attrHere` follows elsewhere (this material's mesh carries no `uv`
+  // attribute at all).
+  const depthHere = depthTexNode ? depthTexNode.sample(screenUV) : null;
+  const depthFlagsHere = depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null;
+
+  // CANOPY LIGHT (2026-10-28, `canopy-light.js`) — a tree or bush above the
+  // light passes part of it, reached over the canopy's own height. The falloff
+  // below reads the lifted distance on those pixels; everywhere else
+  // `liftedDist` is exactly `dist`.
+  const canopy =
+    depthHere && depthFlagsHere
+      ? buildCanopyLightTerm(THREE.TSL, {
+          depthHere,
+          flagsHere: depthFlagsHere,
+          expectedDepth,
+          localUnitXY,
+          dist,
+        })
+      : null;
+  const falloffDist = canopy ? canopy.liftedDist : dist;
+
   // FALLOFF, audit §7 — the AUTHORED attenuation slider's own radial corona,
   // epsilon-guarded: Foundry branches `if (attenuation != 0.0)` to skip a
   // degenerate smoothstep(1,1,dist) when attenuation is authored as exactly
@@ -1337,18 +1387,23 @@ export function buildPointLightSharedTerms({
   // constant, not the slider).
   let falloff;
   if (falloffModel === 'inverseSquare') {
-    falloff = inverseSquareFalloff(THREE.TSL, dist);
+    falloff = inverseSquareFalloff(THREE.TSL, falloffDist);
   } else if (falloffModel === 'candle') {
-    falloff = candleFalloff(THREE.TSL, dist);
+    falloff = candleFalloff(THREE.TSL, falloffDist);
   } else if (falloffModel === 'inverseSquareWide') {
-    falloff = inverseSquareFalloff(THREE.TSL, dist, FIRE_INVERSE_SQUARE_STEEPNESS);
+    falloff = inverseSquareFalloff(THREE.TSL, falloffDist, FIRE_INVERSE_SQUARE_STEEPNESS);
   } else if (falloffModel === 'beam' && beamDirection && beamShape) {
     // FLASHLIGHT BEAM (mythica-machina-press#579/#77 Stage 2a) — see
-    // buildBeamFalloffNode's own header for the full shape account.
-    falloff = buildBeamFalloffNode(THREE.TSL, { localUnitXY, beamDirection, ...beamShape });
+    // buildBeamFalloffNode's own header for the full shape account. The beam
+    // reads a position, not a distance: on a canopy the same direction,
+    // pushed out to the lifted distance.
+    const beamXY = canopy
+      ? THREE.TSL.select(canopy.under.greaterThan(float(0.5)), localUnitXY.mul(canopy.liftScale), localUnitXY)
+      : localUnitXY;
+    falloff = buildBeamFalloffNode(THREE.TSL, { localUnitXY: beamXY, beamDirection, ...beamShape });
   } else {
     const attenForFalloff = attenuationEased.max(float(0.0001));
-    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), dist);
+    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), falloffDist);
   }
 
   // PROJECTED FLASHLIGHT COOKIE — part of this light's falloff, not a
@@ -1360,18 +1415,16 @@ export function buildPointLightSharedTerms({
     falloff = falloff.mul(cookie);
   }
 
-  // Sampled here (once), not inside buildDepthHeightGateNode itself, so a
-  // caller needing depthFlagsHere for something ELSE too (illumination's own
-  // sun-shadow floor attribution) can reuse this exact sample instead of
-  // resampling `buf:scene.depth` a second time — the SAME `screenUV`-not-bare
-  // rule `attrHere` follows elsewhere (this material's mesh carries no `uv`
-  // attribute at all).
-  const depthHere = depthTexNode ? depthTexNode.sample(screenUV) : null;
-  const depthFlagsHere = depthFlagsTexNode ? depthFlagsTexNode.sample(screenUV) : null;
   if (depthHere) {
-    falloff = falloff.mul(
-      buildDepthHeightGateNode(THREE.TSL, { depthHere, flagsHere: depthFlagsHere, uLightExpectedDepth: expectedDepth })
-    );
+    let gate = buildDepthHeightGateNode(THREE.TSL, {
+      depthHere,
+      flagsHere: depthFlagsHere,
+      uLightExpectedDepth: expectedDepth,
+    });
+    // A canopy above the light: the hard gate says 0, the foliage passes
+    // `transmit`. Off a canopy `transmit` is 0 and the gate stands.
+    if (canopy) gate = gate.max(canopy.transmit);
+    falloff = falloff.mul(gate);
   }
 
   // Graph-BUILD-TIME gate (`apertureCount` is a JS integer, part of the
@@ -1630,6 +1683,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   // would still pay for the compiled branch).
   let finalColor = defaultSeed;
   let skipExposure = false;
+  let presence01 = null;
   if (animation?.buildIlluminationSeed) {
     const { speedRaw: uSpeedRaw, reverseSign: uReverseSign, seed: uSeed, intensityRaw: uIntensityRaw } = anim;
     const time = buildAnimationTimeNode(THREE.TSL, { uSpeedRaw, uReverseSign, uSeed, uGlobalTimeMs });
@@ -1641,13 +1695,24 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     // than calling `sampleWind` itself, so there is exactly one call site
     // per light, never a per-animation re-derivation of the same field.
     let wind;
+    let windHistory;
     let uWindResponse;
-    if (windInputs) {
+    if (windInputs && getSafeProfile().lightWind) {
       uWindResponse = windInputs.response;
-      wind = windHandle.node(THREE.TSL, {
+      wind = windHandle.strengthNode(THREE.TSL, {
         centerXY: windInputs.center,
         time: uGlobalTimeMs,
+        baked: 'now', // READ the per-frame baked field — no noise in the light's shader (epic mmp-fpu)
       });
+      // THE CANDLE'S MEMORY (2026-10-27, `effects/candle-wind-state.js`) — the
+      // field's gusts at the same point at any past moment, so a candle light can
+      // stay out after a snuff and regrow with its flame.
+      windHistory = {
+        at: windHandle.gustMagnitudeAt(THREE.TSL, { centerXY: windInputs.center }),
+        // The wind's recorded past (epic mmp-fpu): null on a handle that records none.
+        history: windHandle.gustHistory?.(THREE.TSL, { centerXY: windInputs.center }),
+        timeMs: uGlobalTimeMs,
+      };
     }
     const seeded = animation.buildIlluminationSeed({
       THREE,
@@ -1674,10 +1739,13 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
       computeSwitchColorBand,
       quality: animationQuality,
       wind,
+      windHistory,
       windResponse: uWindResponse,
     });
     finalColor = seeded.finalColor;
     skipExposure = seeded.skipExposure === true;
+    // An animation (candle) whose flame can be OUT: 0 = this light adds nothing at all.
+    presence01 = seeded.presence01 ?? null;
   }
 
   // EXPOSURE, audit §8/§18 (`AdaptiveIlluminationShader.EXPOSURE`) — a
@@ -1882,7 +1950,11 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   const litColor = mix(backgroundFloor, finalColorExposed, combinedFalloffGoboed);
   // WINDOW REACH (`window-reach.js`): scales the whole output, down to black = "this light adds nothing here" under
   // the MAX blend, so the true ambient shows through. 1.0 everywhere the light has not crossed a window.
-  const outputColor = windowReachNode ? litColor.mul(windowReachNode) : litColor;
+  // SOFT EDGE + SNUFFED FLAME (2026-10-27): fade to black over the rim, and to black entirely when the flame is out,
+  // so neither leaves the light's ambient floor painted across its polygon (see `softEdgeEnvelope`).
+  let shaped = litColor.mul(softEdgeEnvelope(THREE.TSL, dist));
+  if (presence01) shaped = shaped.mul(presence01);
+  const outputColor = windowReachNode ? shaped.mul(windowReachNode) : shaped;
 
   return {
     finalNode: outputColor,
@@ -2289,6 +2361,8 @@ export function buildPointLightIlluminationMaterial({
     });
 
   const material = new THREE.NodeMaterial();
+
+  markCompileDeferrable(material, 'point light (illumination)');
   material.transparent = false;
   material.depthTest = false;
   material.depthWrite = false;

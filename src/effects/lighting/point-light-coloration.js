@@ -116,6 +116,8 @@
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
 import { buildPointLightSharedTerms } from './point-light-illumination.js';
 import { createWindHandle } from '../../world/index.js';
+import { getSafeProfile } from '../../core/safe-mode.js';
+import { markCompileDeferrable } from '../../core/compile-policy.js';
 
 /** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
  * rather than a wind-inert light — see candle-flame-render.js's own identical
@@ -265,13 +267,24 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     // SHARED WIND (Wind.md Tier 0) — see point-light-illumination.js's own
     // identical block for the full "why"; OPT-IN on the same two params.
     let wind;
+    let windHistory;
     let uWindResponse;
-    if (windInputs) {
+    if (windInputs && getSafeProfile().lightWind) {
       uWindResponse = windInputs.response;
-      wind = windHandle.node(THREE.TSL, {
+      wind = windHandle.strengthNode(THREE.TSL, {
         centerXY: windInputs.center,
         time: uGlobalTimeMs,
+        baked: 'now', // READ the per-frame baked field — no noise in the light's shader (epic mmp-fpu)
       });
+      // THE CANDLE'S MEMORY (2026-10-27, `effects/candle-wind-state.js`) — the
+      // field's gusts at the same point at any past moment, so a candle light can
+      // stay out after a snuff and regrow with its flame.
+      windHistory = {
+        at: windHandle.gustMagnitudeAt(THREE.TSL, { centerXY: windInputs.center }),
+        // The wind's recorded past (epic mmp-fpu): null on a handle that records none.
+        history: windHandle.gustHistory?.(THREE.TSL, { centerXY: windInputs.center }),
+        timeMs: uGlobalTimeMs,
+      };
     }
     const seeded = animation.buildColorationSeed({
       THREE,
@@ -289,6 +302,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
       uRatio,
       quality: animationQuality,
       wind,
+      windHistory,
       windResponse: uWindResponse,
     });
     seedColor = seeded.finalColor;
@@ -499,6 +513,8 @@ export function buildPointLightColorationMaterial({
   });
 
   const material = new THREE.NodeMaterial();
+
+  markCompileDeferrable(material, 'point light (coloration)');
   material.transparent = false;
   material.depthTest = false;
   material.depthWrite = false;

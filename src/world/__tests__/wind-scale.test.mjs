@@ -11,6 +11,8 @@
 import {
   BEAUFORT_SCALE,
   BEAUFORT_MAX,
+  BEAUFORT_COEFFICIENT,
+  speed01FromLegacyBeaufortDial,
   beaufortForSpeed01,
   speed01ForBeaufort,
   metresPerSecondForSpeed01,
@@ -51,23 +53,33 @@ export function run(t) {
     ok('the top of the dial is force 12, not 13', approx(beaufortForSpeed01(1), 12));
   }
 
-  // ---- the seven checkpoints the epic is specified against -------------------
-  // These are the dial positions #497 §5 writes its acceptance criteria for, so
-  // a change that silently moved the scale under them would break the spec
-  // rather than just a number.
+  // ---- ⭐ THE LINEAR DIAL (2026-10-27, the author's choice) -------------------
+  // Dial % is a % of a Category 5 hurricane's 70 m/s. These are the checkpoints
+  // she was shown when she chose it.
   {
     const at = (dial) => describeWindSpeed01(dial / 100);
     ok('dial 0 is Calm', at(0).force === 0 && at(0).name === 'Calm');
-    ok('dial 15 is a Light breeze (~2 m/s)', at(15).force === 2 && approx(at(15).metresPerSecond, 2.019, 0.01));
-    ok('dial 35 is a Moderate breeze (~7.2 m/s)', at(35).force === 4 && approx(at(35).metresPerSecond, 7.196, 0.01));
-    ok('dial 50 is a Strong breeze (~12.3 m/s)', at(50).force === 6 && approx(at(50).metresPerSecond, 12.287, 0.01));
-    ok('dial 75 is a Strong gale (~22.6 m/s)', at(75).force === 9 && approx(at(75).metresPerSecond, 22.572, 0.01));
-    ok('dial 100 is a Hurricane (~34.8 m/s)', at(100).force === 12 && approx(at(100).metresPerSecond, 34.752, 0.01));
-    // ⭐ The land criterion is the checkable half — "is the wind right at 35?"
-    // becomes "is dust lifting and are small branches moving?" rather than a
-    // matter of taste.
-    ok('dial 35 carries its real land criterion', at(35).land.includes('dust'));
-    ok('dial 100 carries its real land criterion', at(100).land === 'Devastation');
+    ok('dial 10 is a 7 m/s Moderate breeze', at(10).force === 4 && approx(at(10).metresPerSecond, 7));
+    ok('dial 25 is a 17.5 m/s Gale', at(25).force === 8 && approx(at(25).metresPerSecond, 17.5));
+    ok('⭐ dial 50 is a 35 m/s Category 1 hurricane', at(50).force === 12 && at(50).category === 1);
+    ok('dial 100 is 70 m/s, Category 5', approx(at(100).metresPerSecond, 70) && at(100).category === 5);
+    ok('a hurricane is named by category', at(100).name === 'Hurricane, Category 5');
+    // ⭐ The land criterion is the checkable half — "is the wind right at 10?"
+    // becomes "is dust lifting and are small branches moving?".
+    ok('dial 10 carries its real land criterion', at(10).land.includes('dust'));
+    ok('linear: twice the dial is twice the speed', approx(at(60).metresPerSecond, 2 * at(30).metresPerSecond));
+  }
+
+  // ---- ⭐ THE MIGRATION KEEPS A SAVED SCENE'S REAL SPEED ----------------------
+  {
+    const oldMps = (d) => BEAUFORT_COEFFICIENT * Math.pow(d * BEAUFORT_MAX, 1.5);
+    let same = true;
+    for (const d of [0, 0.15, 0.35, 0.5, 0.75, 1]) {
+      if (!approx(metresPerSecondForSpeed01(speed01FromLegacyBeaufortDial(d)), oldMps(d), 1e-6)) same = false;
+    }
+    ok('⭐ a legacy dial converts to the linear dial with the same m/s', same);
+    ok('the old 50% (12.3 m/s) reads ~0.176', approx(speed01FromLegacyBeaufortDial(0.5), 12.287 / 70, 1e-3));
+    ok('the old 100% (34.8 m/s) reads ~0.5', approx(speed01FromLegacyBeaufortDial(1), 0.4965, 1e-3));
   }
 
   // ---- the scale is ordered and reversible ----------------------------------

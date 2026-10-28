@@ -66,7 +66,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // light subtracting from whatever else lights that pixel.
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 4).
     // 2026-10-16 — second dump: a small trim (was 2), the same scale.
-    default: 1.91,
+    // 2026-10-28 — author: 30% less opacity on cloud shadows (was 1.91).
+    default: 1.34,
     category: 'Look',
     label: 'Shadow strength',
     help: 'How dark a passing cloud can make the ground light. 0 = no shadow at all; 1 = the natural depth derived from the sun/sky split (shallow at dawn, absent at night); past 1 exaggerates it darker than that natural ceiling allows. Window light has its own separate Window cloud contrast, below.',
@@ -93,7 +94,9 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     max: 1,
     step: 0.01,
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 0.08).
-    default: 0.12,
+    // 2026-10-28 — author: "much softer" cloud shadows, on the ground and on
+    // _Window alike (both read this one blurred silhouette). Was 0.12.
+    default: 0.4,
     category: 'Look',
     label: 'Shadow blur',
     help: "How soft the shadow's own edge is, even under a clear sky with light cloud. 0 = the shadow traces the cloud's own silhouette exactly; higher values widen the transition into a soft penumbra.",
@@ -141,7 +144,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // 2026-10-08 — author: halve wind's effect on cloud movement so the clouds
     // feel bigger and further away (was 0.78). Scales the calm floor too, as
     // the multiplier sits after it.
-    default: 0.39,
+    // 2026-10-28 — author: move 50% slower with wind speed (was 0.39).
+    default: 0.195,
     category: 'Motion',
     label: 'Cloud speed',
     help: "Multiplies how fast the deck drifts with wind. 1 = the ambient wind's own speed, unscaled (which reaches ~35 m/s equivalent at full wind — genuinely hurricane force, tuned for ground-level effects, not a slow-moving cloud deck). 0 holds the deck still regardless of wind.",
@@ -200,7 +204,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // a good window one.
     // 2026-09-16, round 4 — author, live: "cloud shadows are also very
     // faint on windows." Raised to the dial's own ceiling.
-    default: 4,
+    // 2026-10-28 — author: 30% less opacity on the window shadow too (was 4).
+    default: 2.8,
     category: 'Light',
     label: 'Window cloud contrast',
     help: "How much a passing cloud's own shadow darkens window light, separate from Shadow strength above (which governs the ground only). 1 = the natural depth from the sun/sky split; higher pushes the passing shadow shape deeper so it reads clearly against the window's own glow; 0 removes it entirely.",
@@ -213,7 +218,10 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // 2026-09-16, round 4 — author's own tuned value, same "faint on
     // windows" dump as windowCloudContrast — less blur so the window's own
     // cloud/overcast response reads sharper (default was 0.22).
-    default: 0.1,
+    // 2026-10-27: 0.1 -> 0.03. Overcast now plays as drifting sun breaks at
+    // full strength (window-weather.js), and the author asked that it not
+    // soften the window's look: "We're going for dramatic, never dull."
+    default: 0.03,
     category: 'Light',
     label: 'Window blur (overcast)',
     help: "How much extra softening heavy overcast adds to a window's own light cookie edge, independent of any cloud directly overhead — a global sky-mood response, not a moving shadow. 0 = window edges never soften with overcast.",
@@ -225,7 +233,9 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     step: 0.01,
     // 2026-09-16, round 4 — author's own tuned value, same dump as
     // windowCloudContrast (default was 0.6).
-    default: 0.64,
+    // 2026-10-27: 0.64 -> 0. Author: not "lower the contrast to the point of
+    // making it look less exciting" — the sun breaks carry the overcast now.
+    default: 0,
     category: 'Light',
     label: 'Window flatten (overcast)',
     help: "How much heavy overcast flattens a window cookie's own internal contrast toward neutral — the other half of a diffuse, gloomy interior look. 0 = window contrast never responds to overcast.",
@@ -240,7 +250,13 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // as the default — overcast can extinguish window light almost entirely.
     // 2026-09-16, round 4 — same "faint on windows" dump, pushed to the
     // dial's own floor: overcast can now extinguish window light entirely.
-    default: 0,
+    // 2026-10-27: 0 -> 1. This dim acted BEFORE the window's highlight
+    // shoulder, where a white mask's light sits far past the ceiling — so even
+    // a 90% cut barely showed (the author's "clouds at 90% the _Windows are
+    // still very bright"). Overcast darkness now comes from the Window card's
+    // Overcast fill, applied after the shoulder around full-strength sun
+    // breaks; this dial stays for anyone who wants a global dim on top.
+    default: 1,
     category: 'Light',
     label: 'Window dim floor (overcast)',
     help: "The darkest heavy overcast can push a window's own light strength to. 1 = overcast never dims window light at all; 0 = a fully overcast sky can extinguish it entirely.",

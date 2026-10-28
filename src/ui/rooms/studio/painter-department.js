@@ -180,6 +180,11 @@ export const PAINT_REACH = Object.freeze({
     reach: 'renders',
     why: 'The colony reads the painted grid directly — paint a meadow and fireflies rise from it at dusk.',
   },
+  // `dust` — the fourth critter-engine zone (effects/critters/dust.js), the same `getMaskGrid` seam.
+  dust: {
+    reach: 'renders',
+    why: 'The dust reads the painted grid directly — paint a room and its air fills with motes that glow where the window light falls.',
+  },
   // `ash` — Ash Disturbance's authored floor (`effects/precipitation/mantle-runtime.js`), read the
   // same way `fire` is: `getDerived('ash', floor)` baked straight to the texture the mantle samples.
   // No tile of its own (the same scope call as `drip`/`shadow`/`outdoors`, above): precipitation's

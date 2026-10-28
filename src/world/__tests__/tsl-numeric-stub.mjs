@@ -63,9 +63,17 @@ class N {
   get w() {
     return new N([this.c[3]]);
   }
+  /** The first two components, as TSL's `.xy` swizzle (added 2026-10-27 for the baked wind field read). */
+  get xy() {
+    return new N([this.c[0], this.c[1]]);
+  }
   /** The single number, for a 1-component node. */
   get v() {
     return this.c[0];
+  }
+  /** `texture(...).level(l)` — the stub's textures have no mips, so a level changes nothing. */
+  level() {
+    return this;
   }
   add(o) {
     return zip(this, o, (a, b) => a + b);
@@ -132,8 +140,24 @@ const mix = (a, b, t) =>
 // note on why `.mix()` as a method is deliberately absent. Added 2026-09-04
 // for the Beaufort speed curve in `computeWindTurbulence`'s Taylor advection.
 const pow = (a, b) => zip(a, b, Math.pow);
+// `mod` follows the sign of the divisor, like GLSL's — and unlike JS's `%`. Added 2026-10-27 for the gust
+// history's ring-slot arithmetic. `floor` as a function (the method form already exists on a node).
+const mod = (a, b) => zip(a, b, (x, y) => x - y * Math.floor(x / y));
+const floor = (a) => new N(n(a).c.map(Math.floor));
 const cos = (a) => new N(n(a).c.map(Math.cos));
 const sin = (a) => new N(n(a).c.map(Math.sin));
+// Added 2026-10-27 so the gust envelope (`computeGustEnvelope`) can be EVALUATED
+// here, for the wind-fade regression in `wind-advection.test.mjs`. GLSL's
+// definition: the edges are per-component, the result is clamped then eased.
+const smoothstep = (e0, e1, x) =>
+  zip(
+    zip(x, e0, (v, a) => v - a),
+    zip(e1, e0, (b, a) => b - a),
+    (d, w) => {
+      const s = Math.min(1, Math.max(0, w === 0 ? (d < 0 ? 0 : 1) : d / w));
+      return s * s * (3 - 2 * s);
+    }
+  );
 
 /**
  * A smooth, deterministic stand-in for MaterialX's gradient noise: bilinear-
@@ -183,6 +207,9 @@ export const TSL_STUB = Object.freeze({
   min,
   clamp,
   mix,
+  smoothstep,
+  mod,
+  floor,
   cos,
   sin,
   mx_noise_float,

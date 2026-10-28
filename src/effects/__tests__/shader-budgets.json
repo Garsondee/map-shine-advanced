@@ -1,0 +1,304 @@
+{
+  "_readme": [
+    "Shader budgets (2026-10-27, epic mmp-fpu). Read src/effects/__tests__/shader-budget.test.mjs for why this file exists.",
+    "scenario/opts: how tools/shader-lab/cost-probe.js builds the REAL production material (never a lab copy).",
+    "budget: what `npm test` enforces, counted from the TSL graph with no GPU: noise = Perlin/MaterialX call sites (each is inlined by the driver compiler - the term that exploded), unique = distinct graph nodes, textures = distinct textures bound.",
+    "  budget:null means the census is BLIND to this material (its body is inside Fn(), which only exists once a renderer builds it). Only mustBeDeferrable and the lab bench protect it.",
+    "mustBeDeferrable: every material in the scenario carries markCompileDeferrable (core/compile-policy.js), so no pipeline of it can compile on the GPU process's main thread.",
+    "measured.census: what the budget was set from. measured.gpu: what the REAL compiler said, cold (salted so the driver's disk cache cannot help). Refresh with `await (await import('/tools/shader-lab/cost-probe.js')).bench()` in the Shader Lab pane and copy `proposed` here.",
+    "A budget may be raised only by someone who has read the measured.gpu line beside it: 58k characters of candle was 19.7 s on the GPU process's main thread, and Chrome kills that thread at ~15 s."
+  ],
+  "measuredOn": {
+    "date": "2026-10-27",
+    "machine": "author's dev workstation, WebGPU over D3D12, in the Claude desktop app's browser pane",
+    "method": "cost-probe.js bench(): renderer.compileAsync, cold (salted), a fresh scene per scenario"
+  },
+  "limits": {
+    "maxTexturesPerStage": 16,
+    "budgetSlack": 1.5
+  },
+  "scenarios": {
+    "candle-flame": {
+      "scenario": "candle-flame",
+      "opts": {
+        "field": true,
+        "history": true
+      },
+      "mustBeDeferrable": true,
+      "budget": {
+        "noise": 14,
+        "unique": 3100,
+        "textures": 3
+      },
+      "measured": {
+        "gpu": {
+          "pipelines": 1,
+          "chars": 33942,
+          "maxPipelineChars": 33942,
+          "maxPipelineMs": 1095,
+          "coldMs": 1143
+        },
+        "census": {
+          "noise": 12,
+          "unique": 2650,
+          "textures": 2
+        }
+      }
+    },
+    "candle-light-illumination": {
+      "scenario": "candle-light-illumination",
+      "opts": {
+        "field": true,
+        "history": true
+      },
+      "mustBeDeferrable": true,
+      "budget": {
+        "noise": 10,
+        "unique": 2500,
+        "textures": 3
+      },
+      "measured": {
+        "gpu": {
+          "pipelines": 1,
+          "chars": 24972,
+          "maxPipelineChars": 24972,
+          "maxPipelineMs": 119,
+          "coldMs": 138
+        },
+        "census": {
+          "noise": 8,
+          "unique": 2120,
+          "textures": 2
+        }
+      }
+    },
+    "candle-light-coloration": {
+      "scenario": "candle-light-coloration",
+      "opts": {
+        "field": true,
+        "history": true
+      },
+      "mustBeDeferrable": true,
+      "budget": {
+        "noise": 11,
+        "unique": 2450,
+        "textures": 4
+      },
+      "measured": {
+        "gpu": {
+          "pipelines": 1,
+          "chars": 30021,
+          "maxPipelineChars": 30021,
+          "maxPipelineMs": 188,
+          "coldMs": 204
+        },
+        "census": {
+          "noise": 9,
+          "unique": 2079,
+          "textures": 3
+        }
+      }
+    },
+    "storm-fog": {
+      "scenario": "storm-fog",
+      "opts": {},
+      "mustBeDeferrable": true,
+      "budget": null,
+      "measured": {
+        "gpu": {
+          "pipelines": 1,
+          "chars": 10582,
+          "maxPipelineChars": 10582,
+          "maxPipelineMs": 359,
+          "coldMs": 367
+        }
+      }
+    },
+    "curtain-rain": {
+      "scenario": "curtain-rain",
+      "opts": {},
+      "mustBeDeferrable": true,
+      "budget": null,
+      "measured": {
+        "gpu": {
+          "pipelines": 1,
+          "chars": 10382,
+          "maxPipelineChars": 10382,
+          "maxPipelineMs": 202,
+          "coldMs": 207
+        }
+      }
+    },
+    "torrent": {
+      "scenario": "torrent",
+      "opts": {},
+      "mustBeDeferrable": true,
+      "budget": null,
+      "measured": {
+        "gpu": {
+          "pipelines": 1,
+          "chars": 23731,
+          "maxPipelineChars": 23731,
+          "maxPipelineMs": 1768,
+          "coldMs": 1781
+        }
+      }
+    },
+    "window": {
+      "scenario": "window",
+      "opts": {},
+      "mustBeDeferrable": false,
+      "budget": {
+        "noise": 12,
+        "unique": 1400,
+        "textures": 3
+      },
+      "measured": {
+        "gpu": {
+          "pipelines": 2,
+          "chars": 41632,
+          "maxPipelineChars": 21849,
+          "maxPipelineMs": 767,
+          "coldMs": 1495
+        },
+        "census": {
+          "noise": 10,
+          "unique": 1154,
+          "textures": 2
+        }
+      }
+    },
+    "window-full": {
+      "_note": "2026-10-28: the window as production builds it at the glass rung — glass + rain on the glass + SUN & ROOMS. The rain alone (window-rain, unbudgeted) already measured 190,898 / 374,739 fs chars, 2.3 s / 4.9 s cold. SUN & ROOMS (8 beam taps, 4 gap + 8 line-of-sight clearance reads, two room-map textures — re-measured after the Compound stepped-edge fix) brings the pair to the numbers below: about +45k / +60k chars over rain alone. Both pipelines are far above the governor's 45k async line, so they never compile on the GPU process's main thread; the larger is the debug material, compiled only when a debug channel is picked.",
+      "scenario": "window-full",
+      "opts": {},
+      "mustBeDeferrable": false,
+      "budget": {
+        "noise": 12,
+        "unique": 2800,
+        "textures": 5
+      },
+      "measured": {
+        "gpu": {
+          "pipelines": 2,
+          "chars": 672932,
+          "maxPipelineChars": 438503,
+          "maxPipelineMs": 6170,
+          "coldMs": 9622
+        },
+        "census": {
+          "noise": 10,
+          "unique": 2444,
+          "textures": 5
+        }
+      }
+    },
+    "water-tier-0": {
+      "scenario": "water-tier-0",
+      "opts": {},
+      "mustBeDeferrable": true,
+      "budget": null,
+      "measured": {
+        "gpu": {
+          "pipelines": 3,
+          "chars": 29973,
+          "maxPipelineChars": 25260,
+          "maxPipelineMs": 983,
+          "coldMs": 1086
+        }
+      }
+    },
+    "water-tier-1": {
+      "scenario": "water-tier-1",
+      "opts": {},
+      "mustBeDeferrable": true,
+      "budget": null,
+      "measured": {
+        "gpu": {
+          "pipelines": 3,
+          "chars": 31807,
+          "maxPipelineChars": 27074,
+          "maxPipelineMs": 1005,
+          "coldMs": 1056
+        }
+      }
+    },
+    "water-tier-2": {
+      "scenario": "water-tier-2",
+      "opts": {},
+      "mustBeDeferrable": true,
+      "budget": null,
+      "measured": {
+        "gpu": {
+          "pipelines": 3,
+          "chars": 51807,
+          "maxPipelineChars": 47094,
+          "maxPipelineMs": 3638,
+          "coldMs": 3707
+        }
+      }
+    },
+    "water-tier-3": {
+      "scenario": "water-tier-3",
+      "opts": {},
+      "mustBeDeferrable": true,
+      "budget": null,
+      "measured": {
+        "gpu": {
+          "pipelines": 3,
+          "chars": 57561,
+          "maxPipelineChars": 52848,
+          "maxPipelineMs": 3504,
+          "coldMs": 3583
+        }
+      }
+    },
+    "water-tier-4": {
+      "scenario": "water-tier-4",
+      "opts": {},
+      "mustBeDeferrable": true,
+      "budget": null,
+      "measured": {
+        "gpu": {
+          "pipelines": 3,
+          "chars": 143279,
+          "maxPipelineChars": 138566,
+          "maxPipelineMs": 13110,
+          "coldMs": 13244
+        }
+      }
+    },
+    "water-tier-5": {
+      "scenario": "water-tier-5",
+      "opts": {},
+      "mustBeDeferrable": true,
+      "budget": null,
+      "measured": {
+        "gpu": {
+          "pipelines": 4,
+          "chars": 149145,
+          "maxPipelineChars": 138629,
+          "maxPipelineMs": 12195,
+          "coldMs": 12411
+        }
+      }
+    }
+  },
+  "before": {
+    "_note": "The same scenarios as they were BEFORE the wind field was baked and the gust history recorded (analytic wind sampled in every consumer), compiled synchronously on the GPU process main thread. Chrome kills that thread at ~15 s.",
+    "candle-flame": {
+      "chars": 58014,
+      "syncMs": 19700,
+      "noise": 58
+    },
+    "candle-light-illumination": {
+      "syncMs": 16600,
+      "noise": 54
+    },
+    "candle-light-coloration": {
+      "syncMs": 17200,
+      "noise": 55
+    },
+    "sumOfTheThreeSyncMs": 53500
+  }
+}

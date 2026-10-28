@@ -34,6 +34,7 @@
 import { SORT_LAYERS, makeLayerKey } from '../scene/index.js';
 import { normalizeTint } from './scene-layers.js';
 import { tokenFootprint, GRID_TYPES } from './scene-geometry.js';
+import { isTokenHiddenOffBoard } from './off-board-privacy.js';
 
 /** Foundry's own fallback art when a token has no texture (`Token.DEFAULT_ICON`). */
 export const DEFAULT_TOKEN_ICON = 'icons/svg/mystery-man.svg';
@@ -219,6 +220,9 @@ export function dragPreviewItemId(originalId) {
  *   every pointer move; `originalId` is the id of the token being dragged. Each
  *   becomes a GHOST item beside the real tokens, and the token it was cloned from
  *   is dimmed (see DRAG_*_ALPHA).
+ * @param {{sceneRect: object, privateTable: boolean}} [options.offBoard] - the Table's
+ *   privacy (foundry/off-board-privacy.js): with `privateTable`, a token whose centre
+ *   is outside `sceneRect` is drawn only for a GM or its owner.
  * @returns {{items: Array<object>, skipped: Array<{name: string, reason: string}>}}
  */
 export function collectTokens(
@@ -232,6 +236,7 @@ export function collectTokens(
     getRouteFn,
     isGM = true,
     dragPreviews = [],
+    offBoard = null,
   } = {}
 ) {
   // No knownLevelIds => strict matching, no fallback. See resolveTokenLevel: with
@@ -269,6 +274,20 @@ export function collectTokens(
 
     if (token?.hidden && !isGM) {
       drop('hidden, and this client is not a GM');
+      continue;
+    }
+
+    if (
+      offBoard?.privateTable &&
+      isTokenHiddenOffBoard(token, {
+        sceneRect: offBoard.sceneRect,
+        gridSize: size,
+        gridType: type,
+        privateTable: true,
+        isGM,
+      })
+    ) {
+      drop('off the board on a private Table, and this client neither is a GM nor owns it');
       continue;
     }
 

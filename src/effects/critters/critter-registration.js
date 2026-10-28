@@ -32,13 +32,15 @@
 import { SMELLY_FLIES, SMELLY_FLIES_PARAMS } from './smelly-flies.js';
 import { MAGGOTS, MAGGOTS_PARAMS } from './maggots.js';
 import { FIREFLIES, FIREFLIES_PARAMS } from './fireflies.js';
+import { DUST, DUST_PARAMS } from './dust.js';
 import { projectCascadeRenderState, buildCascadeReadout } from '../effect-readout.js';
 
-/** The three effects, as data. `maskKind` is the id in `scene/mask-catalog.js` — one separate mask each. */
+/** The four effects, as data. `maskKind` is the id in `scene/mask-catalog.js` — one separate mask each. */
 const EFFECTS = Object.freeze([
   Object.freeze({ key: 'smellyFlies', manifest: SMELLY_FLIES, params: SMELLY_FLIES_PARAMS, maskKind: 'flies' }),
   Object.freeze({ key: 'maggots', manifest: MAGGOTS, params: MAGGOTS_PARAMS, maskKind: 'maggots' }),
   Object.freeze({ key: 'fireflies', manifest: FIREFLIES, params: FIREFLIES_PARAMS, maskKind: 'fireflies' }),
+  Object.freeze({ key: 'dust', manifest: DUST, params: DUST_PARAMS, maskKind: 'dust' }),
 ]);
 
 /**
@@ -57,7 +59,7 @@ const EFFECTS = Object.freeze([
  * @param {() => {floorIndex?: number, elevation?: number}|null} args.getFloorContext - the viewed floor.
  * @param {() => number} args.getMaskVersion - the mask authority's change counter.
  * @param {() => number} args.getGridPx - the scene's px per grid square.
- * @returns {Record<'smellyFlies'|'maggots'|'fireflies', {reapply: () => void, set: (partial?: object) => object,
+ * @returns {Record<'smellyFlies'|'maggots'|'fireflies'|'dust', {reapply: () => void, set: (partial?: object) => object,
  *   getReadout: () => object, getRenderState: () => object, hasPaint: () => boolean}>}
  */
 export function createCritterRegistration({

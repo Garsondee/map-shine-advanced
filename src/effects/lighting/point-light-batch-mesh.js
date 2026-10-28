@@ -74,6 +74,7 @@ import { createBucket, describeBucketVertexBuffers } from './point-light-batch.j
 import { buildIlluminationShadingCore, triangulateLightFan } from './point-light-illumination.js';
 import { buildColorationShadingCore } from './point-light-coloration.js';
 import { buildMergedPointLightShadingCore } from './point-light-merged.js';
+import { markCompileDeferrable } from '../../core/compile-policy.js';
 
 /** Per-buffer float count — the SAME names `describeBucketVertexBuffers` emits.
  * `aAnim`/`aWind` keep their own itemSize (4 each) even when a `channel:
@@ -429,6 +430,8 @@ function buildBatchedMaterial({ THREE, channel, shared, flags, layout }) {
     : null;
 
   const material = new THREE.NodeMaterial();
+
+  markCompileDeferrable(material, 'point light bucket');
   material.transparent = false;
   material.depthTest = false;
   material.depthWrite = false;

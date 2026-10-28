@@ -21,7 +21,7 @@
  * @module foundry/fade-persistence
  */
 
-import { flattenDottedLeaves, hasOwnTo } from './flag-keys.js';
+import { flattenDottedLeaves, hasOwnTo, nestDottedKeys } from './flag-keys.js';
 
 const FADE_NAMESPACE = 'map-shine-advanced';
 const SCENE_FADE_FLAG = 'fadeState';
@@ -47,7 +47,36 @@ export function readFadeState() {
 }
 
 /**
- * Write the active scene's fade state. GM-only.
+ * Wrap the whole map so Foundry REPLACES the stored flag instead of merging
+ * into it.
+ *
+ * ⚠️ A plain `setFlag` with an object MERGES (Foundry's `update` runs
+ * `mergeObject`), so a key missing from `state` was never removed from
+ * storage: every fade ever started on a scene stayed in its flag forever.
+ * Live incident (2026-10-27, Mad Scientist's Compound): a "Rain 0 → 100%
+ * over 1m" entry from a test hours earlier was still stored. After a reload,
+ * changing Wind wrote the flag, `watchFadeState`'s echo read the WHOLE flag
+ * back, the old entry came back to life and slammed rain to 100%; the sky
+ * re-resolve that the same flag write triggers then eased it back down over
+ * ~2 minutes, deaf to Fade Time = Now. `fadeWindSpeedTo`'s own
+ * `delete rest['wind.speed01']` had never reached storage either.
+ *
+ * Nested first, because `expandObject` does not look inside an operator, and
+ * the stored shape should stay the one `readFadeState` already repairs.
+ * Outside Foundry (Node tests) there is no operator: the plain map is
+ * returned, the old merge behaviour.
+ * @param {Record<string, object>} state
+ * @returns {object}
+ */
+export function fadeStateFlagValue(state) {
+  const nested = nestDottedKeys(state ?? {});
+  const Replace = globalThis.foundry?.data?.operators?.ForcedReplacement;
+  return typeof Replace?.create === 'function' ? Replace.create(nested) : nested;
+}
+
+/**
+ * Write the active scene's fade state. GM-only. Replaces the stored map
+ * whole — see `fadeStateFlagValue`.
  * @param {Record<string, object>} state
  * @returns {Promise<{ok: boolean, reason: string|null}>}
  */
@@ -55,7 +84,7 @@ export async function writeFadeState(state) {
   try {
     const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
     if (!scene) return { ok: false, reason: 'no active scene to write to' };
-    await scene.setFlag(FADE_NAMESPACE, SCENE_FADE_FLAG, state ?? {});
+    await scene.setFlag(FADE_NAMESPACE, SCENE_FADE_FLAG, fadeStateFlagValue(state));
     return { ok: true, reason: null };
   } catch (err) {
     return { ok: false, reason: `writing fade state failed (GM only?): ${err?.message ?? err}` };

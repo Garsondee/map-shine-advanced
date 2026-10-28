@@ -59,13 +59,13 @@ export function billowRampStops() {
 /** Defaults for every look uniform. The lab overrides any of them; the engine maps the author's dials onto them. */
 export const BILLOW_LOOK = Object.freeze({
   /** Density level of the silhouette (each billow adds ~1 inside its edge, so 0.5 = the union of the discs). */
-  outline: 0.52,
+  outline: 0.81,
   /** Density above the outline at which the tone reaches the cream core. */
   span: 8.2,
   /** How much of the tone follows heat rather than density (0 = pure density). */
   toneHeat: 0.63,
   /** Tone gamma: < 1 lifts the whole flame toward the cream end. */
-  tonePow: 0.58,
+  tonePow: 0.7,
   /** Levels on the tone (0..1): stretches it so the middle really reaches the cream stop. */
   toneLo: 0.03,
   toneHi: 0.8,
@@ -81,21 +81,21 @@ export const BILLOW_LOOK = Object.freeze({
   edgeSoft: 0.3,
   /** Painterly roughness of the edge: px of noise warp, and the noise's spatial frequency (1/px); two octaves. */
   warpPx: 2.6,
-  warpFreq: 0.04,
-  warpSpeed: 0.45,
+  warpFreq: 0.02,
+  warpSpeed: 0.5,
   warpPx2: 1.1,
   warpFreq2: 0.15,
   /** Painterly mottling of the tone (noise added to the temperature). */
-  mottle: 0.19,
+  mottle: 0.5,
   mottleFreq: 0.07,
   /** The cel-shaded crescents: how steeply the density surface tilts the normal, and how far a lit/shaded flank moves the tone. */
-  relief: 1.3,
+  relief: 4.2,
   crescent: 0.06,
   /** Faint halo around the flame (HDR, additive: feeds the bloom). */
   glow: 0.35,
-  glowRadiusPx: 17,
+  glowRadiusPx: 6,
   /** Emission multiplier on the flame colours (1 = the painted colours exactly). */
-  emission: 1.25,
+  emission: 2.5,
   /** HDR added at the flame's hottest cream core (after the bloom counter), so the heart of the fire exceeds the bloom threshold and blooms. */
   coreBloom: 0.4,
   /** The coal bed: its glow strength, the cracked cells' size (1/px) and crack width. */

@@ -45,9 +45,35 @@
  * @module world/wind-scale
  */
 
-/** Beaufort's own defining coefficient: `v = 0.836 · B^1.5` m/s. Exported so
- *  `world/wind-field.js`'s Taylor advection converts the dial to a real px/sec
- *  through THIS relation rather than carrying a second copy of it. */
+// ─────────────────────────────────────────────────────────────────────────────
+// ⭐ 2026-10-27 — THE DIAL IS NOW LINEAR IN METRES PER SECOND, TOPPING OUT AT 70
+// ─────────────────────────────────────────────────────────────────────────────
+// The author, looking at the wind overlay: *"At 50% it looks visually extremely
+// mild compared to what I imagine 50% of the top wind speed recorded on earth
+// would look like."* Under the Beaufort curve above, 50% was force 6 — 12 m/s, a
+// strong breeze — because `B^1.5` spends the whole bottom half of the dial on
+// breezes. She chose the linear reading (asked, answered): dial % is a % of a
+// Category 5 hurricane's sustained wind, 70 m/s. 10% = 7 m/s breeze, 25% =
+// 17.5 m/s gale, 50% = 35 m/s hurricane, 100% = 70 m/s.
+//
+// What this buys beyond the reading: `speed01` is now a LINEAR measure of real
+// speed, so any field vector carried in dial units (`sampleWind`'s output is
+// `flow × speed01 × gust`) converts to m/s by ONE multiply —
+// `× WIND_DIAL_MAX_METRES_PER_SECOND` — and to world px/s by one more
+// (`× pixelsPerMetre`). That is what lets every consumer (rain, snow,
+// vegetation, gust fronts, trails) move at the SAME real speed as the field the
+// overlay draws, instead of each carrying its own px/s calibration.
+//
+// The Beaufort table and its formula stay: they still answer "what force is
+// this?" for the probe, now from the real m/s rather than from the dial.
+// Saved scenes are converted by {@link speed01FromLegacyBeaufortDial} so a
+// scene keeps the real speed it had.
+
+/** The real speed at the top of the dial — a Category 5 hurricane's threshold
+ *  (Saffir-Simpson, 1-minute sustained, ≥ 70 m/s). */
+export const WIND_DIAL_MAX_METRES_PER_SECOND = 70;
+
+/** Beaufort's own defining coefficient: `v = 0.836 · B^1.5` m/s. */
 export const BEAUFORT_COEFFICIENT = 0.836;
 /** The top of the scale. Force 12 is the last one; there is no 13. */
 export const BEAUFORT_MAX = 12;
@@ -133,40 +159,132 @@ function clamp01(v) {
 }
 
 /**
- * The dial's own 0..1 as a CONTINUOUS Beaufort force. Not rounded — the
- * in-between values are real (dial 35 is force 4.2, a moderate breeze leaning
- * toward fresh), and rounding here would quantise the whole wind model to
- * thirteen steps.
- * @param {number} speed01 @returns {number} 0..12
- */
-export function beaufortForSpeed01(speed01) {
-  return clamp01(speed01) * BEAUFORT_MAX;
-}
-
-/** The inverse. @param {number} beaufort @returns {number} 0..1 */
-export function speed01ForBeaufort(beaufort) {
-  const b = Number(beaufort);
-  if (!Number.isFinite(b)) return 0;
-  return Math.min(1, Math.max(0, b / BEAUFORT_MAX));
-}
-
-/**
- * ⭐ THE DIAL IN REAL UNITS — `v = 0.836 · B^1.5` m/s.
- * Exactly 0 at a dead calm, by construction: `0^1.5 = 0`. That matters beyond
- * tidiness — Stage 1's whole point is that dial 0 is genuinely nothing, and a
- * speed scale with a floor in it would quietly reintroduce the very thing
+ * ⭐ THE DIAL IN REAL UNITS — linear, `v = 70 · speed01` m/s (see the block at
+ * the top of this file). Exactly 0 at a dead calm, by construction — a speed
+ * scale with a floor in it would quietly reintroduce the very thing
  * `WIND_INDOOR_RESIDUAL` was deleted for.
  * @param {number} speed01 @returns {number} metres per second
  */
 export function metresPerSecondForSpeed01(speed01) {
-  return BEAUFORT_COEFFICIENT * Math.pow(beaufortForSpeed01(speed01), 1.5);
+  return clamp01(speed01) * WIND_DIAL_MAX_METRES_PER_SECOND;
 }
 
 /** The inverse. @param {number} metresPerSecond @returns {number} 0..1 */
 export function speed01ForMetresPerSecond(metresPerSecond) {
   const v = Number(metresPerSecond);
   if (!Number.isFinite(v) || v <= 0) return 0;
-  return speed01ForBeaufort(Math.pow(v / BEAUFORT_COEFFICIENT, 2 / 3));
+  return Math.min(1, v / WIND_DIAL_MAX_METRES_PER_SECOND);
+}
+
+/** The continuous Beaufort force of a real speed, by Beaufort's own relation
+ *  inverted (`B = (v / 0.836)^(2/3)`), capped at 12 — the scale has no 13.
+ *  @param {number} metresPerSecond @returns {number} 0..12 */
+export function beaufortForMetresPerSecond(metresPerSecond) {
+  const v = Number(metresPerSecond);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  const b = Math.pow(v / BEAUFORT_COEFFICIENT, 2 / 3);
+  // Snap float dust: a legacy dial of 1 round-trips to 11.9999999 and must still read force 12.
+  return b >= BEAUFORT_MAX - 1e-6 ? BEAUFORT_MAX : b;
+}
+
+/**
+ * The dial's own 0..1 as a CONTINUOUS Beaufort force. Not rounded — the
+ * in-between values are real, and rounding would quantise the reading to
+ * thirteen steps. Reaches 12 at ~50% (35 m/s); the top half of the dial is all
+ * force 12, which is why {@link describeWindSpeed01} also reports a hurricane
+ * category.
+ * @param {number} speed01 @returns {number} 0..12
+ */
+export function beaufortForSpeed01(speed01) {
+  return beaufortForMetresPerSecond(metresPerSecondForSpeed01(speed01));
+}
+
+/** The inverse (force → dial). @param {number} beaufort @returns {number} 0..1 */
+export function speed01ForBeaufort(beaufort) {
+  const b = Number(beaufort);
+  if (!Number.isFinite(b) || b <= 0) return 0;
+  return speed01ForMetresPerSecond(BEAUFORT_COEFFICIENT * Math.pow(Math.min(BEAUFORT_MAX, b), 1.5));
+}
+
+/**
+ * ⭐ THE MIGRATION — a dial value saved under the OLD Beaufort curve (`B = 12 ×
+ * dial`, `v = 0.836 · B^1.5`), converted to the linear dial that gives the SAME
+ * real speed. A scene saved at the old 50% (12.3 m/s) reads 0.176 afterwards: it
+ * keeps blowing exactly as hard as it did, it is only the dial's labelling that
+ * moved. @param {number} legacySpeed01 @returns {number} 0..1
+ */
+export function speed01FromLegacyBeaufortDial(legacySpeed01) {
+  return speed01ForMetresPerSecond(metresPerSecondForLegacyBeaufortDial(legacySpeed01));
+}
+
+/**
+ * ⭐ THE WIND'S STRENGTH AS A 0..1 — Beaufort force ÷ 12, from the real speed.
+ *
+ * Many effects scale a LOOK (how far grass leans, how dense a squall reads, how
+ * slanted the rain sheets are) on a 0..1 "how windy is it". Those were all
+ * tuned against the old dial, whose 0..1 WAS force ÷ 12. This returns exactly
+ * that quantity from the new linear dial, so every such look stays tuned to the
+ * same real speed: 12.3 m/s still reads 0.5, hurricane force still reads 1.
+ * Anything that MOVES with the wind should use the real speed instead
+ * (`world/wind-field.js#windFieldPxPerSecPerUnit`) — that is what keeps rising
+ * past hurricane force.
+ * @param {number} speed01 @returns {number} 0..1
+ */
+export function windStrength01ForSpeed01(speed01) {
+  return beaufortForSpeed01(speed01) / BEAUFORT_MAX;
+}
+
+/**
+ * ⭐ THE SPACE A WIND FADE TRAVELS IN — `speed01^(2/3)`, Beaufort's own shape
+ * without its cap at 12, so it runs the whole dial and inverts exactly.
+ *
+ * Author, fading 0 → 100% over a minute: *"wind thrashes vegetation to insane
+ * amounts very quickly"*. Every LOOK reads {@link windStrength01ForSpeed01},
+ * which is steep at the bottom: a fade linear in m/s put the vegetation at ~35%
+ * of its look six seconds into a one-minute fade, and at full hurricane look by
+ * 28 s. Strength is `∝ speed^(2/3)` below hurricane force, so fading THIS
+ * raises the look in a straight line — hurricane at ~60% of the Fade Time (the
+ * dial's remaining range is beyond-hurricane, where only the speed still grows).
+ * @param {number} speed01 @returns {number} 0..1
+ */
+export function windPerceived01ForSpeed01(speed01) {
+  return Math.pow(clamp01(speed01), 2 / 3);
+}
+
+/** The inverse of {@link windPerceived01ForSpeed01}. @param {number} perceived01 @returns {number} 0..1 */
+export function speed01ForWindPerceived01(perceived01) {
+  return Math.pow(clamp01(perceived01), 1.5);
+}
+
+/**
+ * The real speed an OLD-curve dial value meant — for an effect whose own Studio
+ * parameter was authored as a 0..1 on the old Beaufort dial (cloud drift's
+ * floor) and must keep meaning the same real speed.
+ * @param {number} legacySpeed01 @returns {number} metres per second
+ */
+export function metresPerSecondForLegacyBeaufortDial(legacySpeed01) {
+  return BEAUFORT_COEFFICIENT * Math.pow(clamp01(legacySpeed01) * BEAUFORT_MAX, 1.5);
+}
+
+/**
+ * Saffir-Simpson hurricane categories (1-minute sustained, m/s lower edges) —
+ * what the top half of the new dial means, since Beaufort stops at 12.
+ */
+export const SAFFIR_SIMPSON_SCALE = Object.freeze([
+  Object.freeze({ category: 1, minMetresPerSecond: 33, land: 'Some damage: roofs, gutters, large branches snap' }),
+  Object.freeze({ category: 2, minMetresPerSecond: 43, land: 'Extensive damage: shallow-rooted trees uprooted' }),
+  Object.freeze({ category: 3, minMetresPerSecond: 50, land: 'Devastating: many trees snapped or uprooted' }),
+  Object.freeze({ category: 4, minMetresPerSecond: 58, land: 'Catastrophic: most trees snapped, roofs lost' }),
+  Object.freeze({ category: 5, minMetresPerSecond: 70, land: 'Catastrophic: framed houses destroyed' }),
+]);
+
+/** The hurricane category a speed reaches, or 0 below Category 1.
+ *  @param {number} metresPerSecond @returns {number} 0..5 */
+export function hurricaneCategoryForMetresPerSecond(metresPerSecond) {
+  const v = Number.isFinite(Number(metresPerSecond)) ? Number(metresPerSecond) : 0;
+  let category = 0;
+  for (const row of SAFFIR_SIMPSON_SCALE) if (v >= row.minMetresPerSecond) category = row.category;
+  return category;
 }
 
 /**
@@ -192,8 +310,11 @@ export function beaufortRowForMetresPerSecond(metresPerSecond) {
  * into a checkable claim: at force 4 dust and loose paper should be lifting
  * and small branches moving, or the model is wrong.
  *
+ * Above force 12 the name carries the hurricane category and `land` that
+ * category's damage criterion, since Beaufort itself stops describing there.
+ *
  * @param {number} speed01
- * @returns {{speed01: number, beaufort: number, force: number,
+ * @returns {{speed01: number, beaufort: number, force: number, category: number,
  *   metresPerSecond: number, name: string, land: string}}
  */
 export function describeWindSpeed01(speed01) {
@@ -201,12 +322,15 @@ export function describeWindSpeed01(speed01) {
   const beaufort = beaufortForSpeed01(s);
   const metresPerSecond = metresPerSecondForSpeed01(s);
   const row = beaufortRowForMetresPerSecond(metresPerSecond);
+  const category = hurricaneCategoryForMetresPerSecond(metresPerSecond);
+  const hurricane = category > 0 ? SAFFIR_SIMPSON_SCALE[category - 1] : null;
   return {
     speed01: s,
     beaufort,
     force: row.force,
+    category,
     metresPerSecond,
-    name: row.name,
-    land: row.land,
+    name: hurricane ? `Hurricane, Category ${category}` : row.name,
+    land: hurricane ? hurricane.land : row.land,
   };
 }

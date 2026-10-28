@@ -143,7 +143,7 @@ export async function run(t) {
     await Promise.resolve();
     await Promise.resolve();
 
-    envRef.value = rainyEnv({ precip01: 0.8, tMs: 5000, dtSec: 0.5, wind: { directionDeg: 90, speed01: 0.5 } });
+    envRef.value = rainyEnv({ precip01: 0.8, tMs: 5000, dtSec: 0.5, wind: { directionDeg: 90, speed01: 0.176 } }); // 12.3 m/s — the old dial’s 0.5 (2026-10-27)
     sub.sync(0);
     let s = sub.getStatus().rain;
     ok('rain: rain at 0.8 reaches the subsystem as 0.8', Math.abs(s.rain01 - 0.8) < 1e-9 && s.presence === 1);

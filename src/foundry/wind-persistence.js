@@ -49,10 +49,33 @@
  * @module foundry/wind-persistence
  */
 
+import { speed01FromLegacyBeaufortDial } from '../world/index.js';
+
 /** The module namespace this scene flag lives under. */
 const WIND_NAMESPACE = 'map-shine-advanced';
-/** The scene flag's key — `{directionDeg, speed01}`, the whole pair. */
+/** The scene flag's key — `{directionDeg, speed01, scale}`. */
 const SCENE_WIND_FLAG = 'wind';
+/**
+ * Which dial a stored `speed01` was saved on (2026-10-27). The dial moved from
+ * the Beaufort curve to linear-to-70-m/s (`world/wind-scale.js`); a flag with
+ * no `scale` was saved on the old curve and is converted on read so the scene
+ * keeps the real speed it had. Every write stamps the current scale.
+ */
+export const WIND_DIAL_SCALE = 'linear70';
+
+/**
+ * A stored flag value, read onto the current dial. Pure (Node-tested).
+ * @param {*} raw - whatever the flag holds.
+ * @returns {{directionDeg: number, speed01: number, scale: string}|null}
+ */
+export function normalizeStoredWind(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const speed = Number(raw.speed01);
+  const wind = { ...raw };
+  if (raw.scale !== WIND_DIAL_SCALE && Number.isFinite(speed)) wind.speed01 = speed01FromLegacyBeaufortDial(speed);
+  wind.scale = WIND_DIAL_SCALE;
+  return wind;
+}
 
 /**
  * Read the active scene's own wind ambient.
@@ -66,7 +89,7 @@ export function readSceneWind() {
   try {
     const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
     if (!scene) return { wind: null, reason: 'no active scene' };
-    return { wind: scene.getFlag(WIND_NAMESPACE, SCENE_WIND_FLAG) ?? null, reason: null };
+    return { wind: normalizeStoredWind(scene.getFlag(WIND_NAMESPACE, SCENE_WIND_FLAG)), reason: null };
   } catch (err) {
     return { wind: null, reason: `reading the scene wind failed: ${err?.message ?? err}` };
   }
@@ -85,7 +108,7 @@ export async function writeSceneWind(wind) {
   try {
     const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
     if (!scene) return { ok: false, reason: 'no active scene to write to' };
-    await scene.setFlag(WIND_NAMESPACE, SCENE_WIND_FLAG, wind);
+    await scene.setFlag(WIND_NAMESPACE, SCENE_WIND_FLAG, { ...wind, scale: WIND_DIAL_SCALE });
     return { ok: true, reason: null };
   } catch (err) {
     return { ok: false, reason: `writing the scene wind failed (GM only?): ${err?.message ?? err}` };

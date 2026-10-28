@@ -87,6 +87,18 @@ export { discoverAuthoredMasks } from './mask-discovery.js';
 // Token documents -> drawables.
 export { collectTokens, diagnoseTokens, TOKEN_DOCUMENTS, tokenFootprint } from './scene-tokens.js';
 
+// THE TABLE'S PRIVACY — tokens on the velvet (the scene's padding) belong to the GM, or to
+// their owner. See off-board-privacy.js for the rule and the two doors it closes.
+export {
+  isOffBoardPoint,
+  hideOffBoardToken,
+  isTokenHiddenOffBoard,
+  installOffBoardPrivacy,
+  refreshOffBoardPrivacy,
+} from './off-board-privacy.js';
+// Foundry's own black outline round the map: hidden while the Table's brass frames it instead.
+export { isSceneOutline, setSceneOutlineVisible } from './scene-outline.js';
+
 // The drag GHOST — Foundry moves a clone of a dragged token, not the token; these
 // hand that clone to collectTokens and say when one appears or goes away.
 export { readTokenDragPreviews, watchTokenDragPreviews } from './token-drag-previews.js';
@@ -134,7 +146,12 @@ export {
 // THE BLANK-CANVAS WATCHDOG — detects a canvasTearDown that nothing follows
 // (Scene#unview(), the active scene being deleted), which canvasInit/
 // canvasReady alone can never see.
-export { registerCanvasTearDownWatchdog, isOrphanedTeardown, decideTeardownKind } from './canvas-lifecycle.js';
+export {
+  registerCanvasTearDownWatchdog,
+  isOrphanedTeardown,
+  decideTeardownKind,
+  redrawActiveScene,
+} from './canvas-lifecycle.js';
 
 // PREPARE, THEN LET FOUNDRY DRAW (loading audit, 2026-10-25) — the one wrap of Scene#view, and Foundry's own progress
 // notification for what it is doing.
@@ -148,6 +165,8 @@ export {
   SCENE_PREPARE_STEPS,
   notifyUser,
   NOTICE_SHOW_AFTER_MS,
+  PLAYER_SCENE_MESSAGE,
+  PLAYER_FLOOR_MESSAGE,
 } from './progress-notice.js';
 
 // PREPARE THE WHOLE TABLE, THEN SWITCH (loading audit, phase 4) — the GM's wait, its socket transport, and the gate on
@@ -204,6 +223,7 @@ export {
   // darkness publish's own call, and vice versa.
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
+  isGlobalLightSystemOwned,
   readSceneGlobalLightRaw,
   GLOBAL_LIGHT_DAYLIGHT_MAX,
 } from './scene-environment.js';
@@ -336,6 +356,7 @@ export {
   deriveWallSolid,
   deriveWallAperture,
   deriveWallLooksLikeWindow,
+  deriveWallRoomBarrier,
   watchSceneWallStructure,
   watchDoorOpenings,
 } from './scene-walls.js';
@@ -609,3 +630,10 @@ export { createPlayerAimChannel } from './player-aim-channel.js';
 // (critter-subsystem.js); `world/token-activity.js` is where a position
 // snapshot becomes MOTION.
 export { collectActiveTokenPoints } from './token-activity.js';
+// MSA's transitions read Foundry's own: its catalogue, a scene's own setting, its effect filters.
+export {
+  listFoundryTransitions,
+  readSceneTransition,
+  captureFoundryLayer,
+  playFoundryTransition,
+} from './transition-bridge.js';

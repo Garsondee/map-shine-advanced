@@ -8,7 +8,12 @@
  * BEFORE the real view, fail open on any error, never swallow what Foundry would
  * itself refuse, and let the last request win.
  */
-import { classifyViewRequest, createViewGate, installSceneSwitchGate } from '../scene-switch-gate.js';
+import {
+  classifyViewRequest,
+  createViewGate,
+  hideRootForColdDraw,
+  installSceneSwitchGate,
+} from '../scene-switch-gate.js';
 
 const idle = (over = {}) => ({
   currentSceneId: 's1',
@@ -229,6 +234,82 @@ export async function run(t) {
     await Promise.all([first, joined, second]);
     ok('only the NEWEST request is viewed; the superseded one resolves without drawing', viewedWith.join() === 'L2');
     ok('stats count the supersede', gate.getStatus().superseded === 1);
+  }
+
+  // ── A COLD PREPARE RUNS WITH FOUNDRY'S ROOT HIDDEN (2026-10-27) ──────────────
+  // A cold load used to leave `canvas.root` visible through the whole prepare, so PIXI
+  // rendered a never-drawn PrimaryCanvasGroup and threw on its unset `_backgroundColor`.
+  {
+    ok(
+      'a cold request hides a visible root',
+      (() => {
+        const c = { root: { visible: true } };
+        return hideRootForColdDraw({ kind: 'cold' }, c) === true && c.root.visible === false;
+      })()
+    );
+    ok(
+      'a scene switch leaves the root alone — the old scene must stay on screen',
+      (() => {
+        const c = { root: { visible: true } };
+        return hideRootForColdDraw({ kind: 'scene' }, c) === false && c.root.visible === true;
+      })()
+    );
+    ok(
+      'a level switch leaves the root alone',
+      (() => {
+        const c = { root: { visible: true } };
+        return hideRootForColdDraw({ kind: 'level' }, c) === false && c.root.visible === true;
+      })()
+    );
+    ok(
+      'no canvas, or no root yet => nothing to do, no throw',
+      (() => {
+        return (
+          hideRootForColdDraw({ kind: 'cold' }, undefined) === false &&
+          hideRootForColdDraw({ kind: 'cold' }, {}) === false
+        );
+      })()
+    );
+
+    const order = [];
+    const c = controlled();
+    const gate = createViewGate({
+      prepare: (request, control) => {
+        order.push('prepare');
+        return c.prepare(request, control);
+      },
+      isEnabled: () => true,
+      readState: () => idle({ hasCurrentScene: false, currentSceneId: null, currentLevelId: null }),
+      beforePrepare: (request) => order.push(`before:${request.kind}`),
+    });
+    const p = gate.run({ id: 's1' }, {}, async () => order.push('view'));
+    await tick();
+    ok('beforePrepare runs with the classified request, BEFORE prepare starts', order.join() === 'before:cold,prepare');
+    c.finish(0);
+    await p;
+    ok('…and the view still follows', order.join() === 'before:cold,prepare,view');
+
+    let viewed = 0;
+    const throwing = createViewGate({
+      prepare: async () => ({ ok: true }),
+      isEnabled: () => true,
+      readState: () => idle(),
+      beforePrepare: () => {
+        throw new Error('before-prepare broke');
+      },
+    });
+    await throwing.run({ id: 's2' }, {}, async () => viewed++);
+    ok('a throwing beforePrepare never stops the switch', viewed === 1);
+
+    let passed = 0;
+    const off = createViewGate({
+      prepare: async () => ({ ok: true }),
+      isEnabled: () => true,
+      readState: () => idle(),
+      beforePrepare: () => passed++,
+    });
+    await off.run({ id: 's1' }, {}, async () => 'changeless');
+    ok('a pass-through (changeless) request never reaches beforePrepare', passed === 0);
   }
 
   // ── installSceneSwitchGate: wraps once, never double, fails soft ──────────────

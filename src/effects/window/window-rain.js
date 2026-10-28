@@ -150,7 +150,10 @@ export const RAIN_TUNE = Object.freeze({
   lodHi: 0.8,
 });
 
-/** Look defaults, mirroring `WINDOW_PARAMS.rain*` (window.js quotes these). */
+/** Look defaults, mirroring `WINDOW_PARAMS.rain*` (window.js quotes these).
+ *  ⚠️ 2026-10-27: the author's new Studio defaults live in `WINDOW_PARAMS` (the cascade always supplies them);
+ *  this object is deliberately LEFT at the previous set because the drop-physics tests below use it as their
+ *  baseline (sheeting 1, windward bias 1, mask floor 100). It is only a fallback for a caller with no params. */
 export const WINDOW_RAIN_DEFAULTS = Object.freeze({
   // 2026-10-19 author's Studio export (was 1 / 1.2 / 1 / 1 / 0.8 / 0.35 / 0.7 / 1 / 0.6 / 0.35 / 0.6 / 0.6 / 40)
   response: 2,

@@ -22,6 +22,8 @@ import { run as runDepthAuthority } from './depth-authority.test.mjs';
 import { run as runWeatherRestrict } from './weather-restrict.test.mjs';
 import { run as runGridEdt } from './grid-edt.test.mjs';
 import { run as runGridRgba } from './grid-rgba.test.mjs';
+import { run as runRoomMap } from './room-map.test.mjs';
+import { run as runSceneEye } from './scene-eye.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -72,6 +74,8 @@ const suites = [
   ['weather-restrict', runWeatherRestrict],
   ['grid-edt', runGridEdt],
   ['grid-rgba', runGridRgba],
+  ['room-map', runRoomMap],
+  ['scene-eye', runSceneEye],
 ];
 
 for (const [name, fn] of suites) {

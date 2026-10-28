@@ -104,6 +104,8 @@ import {
   isCameraPathPlayingCapped,
 } from './foundry/index.js';
 import { buildLiveSceneExport, sceneExportFilename } from './foundry/index.js';
+// THE TABLE'S PRIVACY (foundry/off-board-privacy.js): tokens on the velvet are the GM's, or their owner's.
+import { installOffBoardPrivacy, refreshOffBoardPrivacy, setSceneOutlineVisible } from './foundry/index.js';
 // THE TOKEN-VISION DIAGNOSTIC — see its own module header, and the
 // `token-vision` report registration below.
 import { readTokenVisionDiagnostic } from './foundry/index.js';
@@ -277,6 +279,11 @@ import {
   WEATHER_AXES,
   auditAxisConsumers,
   CLOUD_COVER_VISUAL_MAX,
+  // The dial's real reading for Wind's card status (2026-10-27).
+  describeWindSpeed01,
+  // The space a wind FADE travels in (see `fadeWindSpeedTo`).
+  windPerceived01ForSpeed01,
+  speed01ForWindPerceived01,
 } from './world/index.js';
 import {
   runVtLiveDecodeTest,
@@ -296,6 +303,8 @@ import {
   prewarmVtPanViewerAdjacentFloors,
   isVtPanViewerFloorPrepared,
   afterNextVtPanViewerFrame,
+  captureVtPanViewerFrame,
+  getVtPanViewerParallaxStep,
   setVtPanViewerGpuProbe,
   setVtPanViewerGpuZoneTimer,
   getVtPanViewerGpuZoneStatus,
@@ -334,6 +343,7 @@ import {
   getVtPanViewerTimeDialState,
   getVtPanViewerTodHour,
   setVtPanViewerSkyRealism,
+  setVtPanViewerSkyLook,
   setVtPanViewerGradeEnvStrength,
   setVtPanViewerSunLatitude,
   setVtPanViewerCloudCover,
@@ -467,6 +477,10 @@ import {
   FIREFLIES_PRESETS,
   FIREFLIES_FOH,
   firefliesPreset,
+  DUST_PARAMS,
+  DUST_PRESETS,
+  DUST_FOH,
+  dustPreset,
   createCritterRegistration,
   extractFiresWithLabels,
   fireMaskSignature,
@@ -544,6 +558,20 @@ import {
   IRIDESCENCE_PARAMS,
   IRIDESCENCE_PRESETS,
   iridescencePreset,
+  // WIND TRAILS (2026-10-27) — sleek white strokes riding the shared wind field
+  // at its real speed (effects/wind-trails.js).
+  WIND_TRAILS,
+  WIND_TRAILS_PARAMS,
+  // TEMPERATURE EFFECTS (2026-10-27) — the Temperature fader's icy / warm
+  // grade, frost frame and heat ripple (effects/temperature/).
+  TEMPERATURE_EFFECTS,
+  TEMPERATURE_EFFECTS_PARAMS,
+  // TABLE (2026-10-27) — the scene recessed in a brass-rimmed velvet games table (effects/table/).
+  TABLE,
+  TABLE_PARAMS,
+  // PARALLAX (2026-10-28) — real depth between the floors (effects/parallax/).
+  PARALLAX,
+  PARALLAX_PARAMS,
   buildCascadeReadout,
   projectCascadeRenderState,
 } from './effects/index.js';
@@ -579,6 +607,7 @@ import {
   setExploredFogBase,
   getExploredFogBase,
   registerCanvasTearDownWatchdog,
+  redrawActiveScene,
   installSceneSwitchGate,
   installSceneActivationGate,
   createPrepareCoordinator,
@@ -594,6 +623,10 @@ import {
   sendPrepareRequest,
   sendPrepareReady,
   sendPrepareHere,
+  listFoundryTransitions,
+  readSceneTransition,
+  captureFoundryLayer,
+  playFoundryTransition,
   sendPrepareCancel,
   listenForPrepareMessages,
   SCENE_PREPARE_STEPS,
@@ -603,6 +636,8 @@ import {
   describeStep,
   formatPrepareMessage,
   FLOOR_PREPARE_STEPS,
+  PLAYER_SCENE_MESSAGE,
+  PLAYER_FLOOR_MESSAGE,
   registerSettings,
   readSetting,
   writeSetting,
@@ -687,6 +722,10 @@ import {
   createPlayerAimChannel,
 } from './foundry/index.js';
 import { engageFoundryFallback, getDescribeRenderModeStats, onFoundryFallback } from './diag/render-fallback.js';
+// THE CRASH LADDER (epic mmp-fpu, 2026-10-27): a load that ended because the GPU died is never repeated
+// unchanged. Policy: core/safe-mode.js. Memory: diag/crash-guard.js. Wiring: `crashGuard` in install().
+import { createCrashGuard } from './diag/crash-guard.js';
+import { setSafeLevel, SAFE_LEVEL } from './core/safe-mode.js';
 import { registerMarkerSource, getAllMarkerPoints } from './diag/marker-overlay.js';
 import {
   beginSceneLoad,
@@ -715,6 +754,10 @@ import {
   onPerfProgressText,
   formatPerfProgressText,
   beginFloorTransition,
+  planTransition,
+  createTransitionDirector,
+  composeFrame,
+  DRAMATIC_TRANSITIONS,
   updateFloorTransitionProgress,
   endFloorTransition,
   installStudio,
@@ -725,6 +768,7 @@ import {
   installPlayer,
   LOAD_PHASES,
   blockerSignature,
+  nextNoProgressCount,
   installCompressionStatusBadge,
 } from './ui/index.js';
 import {
@@ -1398,6 +1442,84 @@ function install() {
   installFlightRecorder(MapShine);
   installSoak(MapShine); // exposes MapShine.soak(n) — the stage-gate soak harness
   installDebugPanel(MapShine);
+
+  // THE CRASH LADDER (epic mmp-fpu, 2026-10-27) — second thing installed, so a load that dies is on the
+  // black box AND on the ladder. A load that ended because the GPU died is never repeated unchanged:
+  // `core/safe-mode.js` decides the rung, `diag/crash-guard.js` remembers it across page loads, and
+  // `startRealSceneViewer` below asks for it before a single shader is built.
+  const crashGuard = createCrashGuard();
+  const readSafeModeSetting = () => {
+    try {
+      return readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.safeMode) ?? 'auto';
+    } catch (err) {
+      // Settings not registered yet (a very early call) or a broken store: the safe reading is "automatic".
+      log.warn('could not read the safeMode setting — assuming automatic:', err);
+      return 'auto';
+    }
+  };
+  const safeBuildId = () => {
+    try {
+      return String(globalThis.game?.modules?.get?.(MODULE_ID)?.version ?? VERSION);
+    } catch (err) {
+      log.warn('could not read the module version — the crash ladder cannot tell builds apart:', err);
+      return '';
+    }
+  };
+  /** Tell the player, once per load, why this load is not at full quality. */
+  const announceSafeMode = (ladder) => {
+    if (!ladder.message) return;
+    log.warn(`safe mode: ${ladder.message}`);
+    try {
+      globalThis.ui?.notifications?.warn?.(
+        `Map Shine Advanced: ${ladder.message} (Settings → Map Shine → Safe mode, or MapShine.safeMode.reset(), to try full quality again.)`
+      );
+    } catch (err) {
+      log.warn('could not show the safe-mode notification:', err);
+    }
+  };
+  /** Restarts this page session may spend after a lost device — at most one per rung of the ladder. */
+  let lossRetriesLeft = SAFE_LEVEL.FOUNDRY;
+  /** Long enough for Chrome to restart its GPU process and for Foundry's own recovery to redraw first. */
+  const RETRY_AFTER_LOSS_MS = 8_000;
+  /**
+   * AFTER A LOST DEVICE, START AGAIN — ONE RUNG LOWER, WITHOUT A RELOAD. The viewer is gone and Foundry is
+   * drawing the scene. Foundry's own context-loss recovery usually redraws the canvas, which starts MSA
+   * through the normal path (the ladder reads `lost` and climbs). If after the wait the record still says
+   * `lost`, nothing restarted us: ask Foundry for the redraw ourselves. Bounded twice over — by the retry
+   * budget here and by the ladder's last rung, where MSA stays out of the way.
+   */
+  const scheduleRetryAfterLoss = () => {
+    if (lossRetriesLeft <= 0) return;
+    lossRetriesLeft -= 1;
+    setTimeout(async () => {
+      if (crashGuard.status().record.state !== 'lost') return; // Foundry already restarted us
+      log.warn(
+        'the GPU device was lost and nothing restarted Map Shine — redrawing the scene to start it one rung lower'
+      );
+      const res = await redrawActiveScene();
+      if (!res.ok) log.warn(`could not redraw the scene for the retry: ${res.reason}`);
+    }, RETRY_AFTER_LOSS_MS);
+  };
+  /** The handle the viewer gets: the guard's compile notes and loss record, plus the restart. */
+  const viewerCrashGuard = {
+    noteCompileStart: (id, label, chars) => crashGuard.noteCompileStart(id, label, chars),
+    noteCompileEnd: (id) => crashGuard.noteCompileEnd(id),
+    recordLoss: (info) => {
+      crashGuard.recordLoss(info);
+      scheduleRetryAfterLoss();
+    },
+  };
+  // The console door: what the ladder knows, and the way back to full quality.
+  MapShine.safeMode = {
+    /** @returns {{record: object, decision: object|null, inFlight: object[]}} */
+    status: () => crashGuard.status(),
+    /** Forget every recorded crash; the next reload runs at full quality. */
+    reset: () => {
+      crashGuard.reset();
+      log.info('safe mode reset — the next reload runs at full quality.');
+      return { ok: true };
+    },
+  };
   // THE STUDIO (U1, docs/holy/UI-Testament.md §5, §9) — the new LANTERN
   // Studio shell, side-by-side with the panel above during rollout. Takes
   // `MapShine.debug` explicitly (never a global read — see shell.js's own
@@ -1556,28 +1678,28 @@ function install() {
       // disagree about which kind a given effect opens.
       listPaintableEffects: () => listPaintableEffects(),
       armBrush: (effectId) => paintAffordance(effectId)?.onAdd?.(),
-      // PINNED EFFECTS PERSISTENCE (2026-09-14) — the Effects grid's pin
-      // state used to reset every reload (effects-department.js's own
-      // `pinned` Set had nowhere to live between sessions). A malformed or
-      // pre-this-feature stored value degrades to "nothing pinned" rather
-      // than throwing — the read happens once per Studio open, not worth
-      // wedging the whole panel over a corrupt string.
-      getPinnedEffects: () => {
+      // THE EFFECTS LIBRARY'S MEMORY (2026-10-28) — which effect is open and
+      // the last few opened, so reopening the Studio (or reloading) lands the
+      // GM back where they were. Stored in the setting that used to hold the
+      // grid's pinned cards (pins went with the grid). A malformed value, or
+      // an old pins array, degrades to "library, no recents" rather than
+      // throwing — not worth wedging the panel over a corrupt string.
+      getEffectsMemory: () => {
         try {
-          const raw = JSON.parse(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.studioPinnedEffects) || '[]');
-          return Array.isArray(raw) ? raw.filter((id) => typeof id === 'string') : [];
+          const raw = JSON.parse(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.studioPinnedEffects) || '{}');
+          if (!raw || Array.isArray(raw) || typeof raw !== 'object') return { open: null, recent: [] };
+          return {
+            open: typeof raw.open === 'string' ? raw.open : null,
+            recent: Array.isArray(raw.recent) ? raw.recent.filter((id) => typeof id === 'string') : [],
+          };
         } catch {
-          return [];
+          return { open: null, recent: [] };
         }
       },
-      setPinnedEffects: (ids) => {
+      setEffectsMemory: (memory) => {
         Promise.resolve(
-          writeSetting(
-            MODULE_ID,
-            GLOBAL_SETTING_KEYS.studioPinnedEffects,
-            JSON.stringify(Array.isArray(ids) ? ids : [])
-          )
-        ).catch((err) => log.error('studio pinned-effects write failed:', err));
+          writeSetting(MODULE_ID, GLOBAL_SETTING_KEYS.studioPinnedEffects, JSON.stringify(memory ?? {}))
+        ).catch((err) => log.error('studio effects-memory write failed:', err));
       },
       // THE SYSTEM DEPARTMENT (U5) — getSystemPanelCtx is declared much
       // further down install() (it closes over PROFILE_CHOICE_LIST/
@@ -1832,6 +1954,10 @@ function install() {
         getForecast: () => getVtPanViewerTimeDialState()?.weatherForecastNext ?? null,
         getSkyRealism: () => skyScope.sky?.realism01 ?? 0,
         onSkyRealismCommit: (v) => void editSky({ realism01: v }),
+        getGoldenHour: () => skyScope.sky?.goldenHour01 ?? 1,
+        onGoldenHourCommit: (v) => void editSky({ goldenHour01: v }),
+        getMoonlight: () => skyScope.sky?.moonlight01 ?? 0,
+        onMoonlightCommit: (v) => void editSky({ moonlight01: v }),
         getGradeEnvStrength: () => skyScope.sky?.gradeEnvStrength ?? 0,
         onGradeEnvStrengthCommit: (v) => void editSky({ gradeEnvStrength: v }),
         // SUN LATITUDE (mythica-machina-press#170) — same shape as the two
@@ -1925,6 +2051,35 @@ function install() {
       // is driven by `MapShine.__remote.refreshPlayerLightBoard()`, called
       // from `resolveAndApplyPlayerLightPermissions` on scene load and on
       // the scene-flag watcher, never by this board polling on its own).
+      // THE TRANSITIONS BOARD (2026-10-26) — the default every cut plays, and a one-off armed for the
+      // next scene change (ui/rooms/remote/transition-board.js). Both are world settings, so every
+      // client plays the same thing.
+      transitionBoard: {
+        getDefaults: () => readTransitionDefaults(),
+        onSetPreset: (id) => {
+          writeSetting(MODULE_ID, GLOBAL_SETTING_KEYS.transitionPreset, id)
+            .then(() => MapShine.__remote?.refreshTransitionBoard?.())
+            .catch((err) => log.warn('transition preset not saved:', err));
+        },
+        onSetPace: (id) => {
+          writeSetting(MODULE_ID, GLOBAL_SETTING_KEYS.transitionPace, id)
+            .then(() => MapShine.__remote?.refreshTransitionBoard?.())
+            .catch((err) => log.warn('transition pace not saved:', err));
+        },
+        listOverrideChoices: () => [
+          ...Object.entries(DRAMATIC_TRANSITIONS).map(([id, d]) => ({ id, label: d.label, group: 'msa' })),
+          ...listFoundryTransitions().map((t) => ({ id: t.id, label: t.label, group: 'foundry' })),
+        ],
+        getOverride: () => readArmedTransition(),
+        onArm: ({ type, durationMs }) => {
+          writeArmedTransition({ id: newPrepareToken(), type, durationMs }).catch((err) =>
+            log.warn('the transition could not be armed:', err)
+          );
+        },
+        onDisarm: () => {
+          writeArmedTransition(null).catch((err) => log.warn('the transition could not be disarmed:', err));
+        },
+      },
       playerLight: {
         getPermissions: () => readScenePlayerLightPermissions().permissions,
         onModeToggle: (modeKey, allowed) => {
@@ -2419,6 +2574,16 @@ function install() {
   // identical reason: `enabledFromProfile: 'extreme'` means "not resolved
   // yet" is honestly `false`.
   let iridescenceReadout = { enabled: false, params: null };
+  // WIND TRAILS — `enabledFromProfile: 'low'`, so "not resolved yet" seeds ON;
+  // the viewer still draws nothing until there is wind above the threshold.
+  let windTrailsReadout = { enabled: true, params: null };
+  // TEMPERATURE EFFECTS — `enabledFromProfile: 'low'`, so it seeds ON; a
+  // temperate scene shows nothing either way.
+  let temperatureEffectsReadout = { enabled: true, params: null };
+  // TABLE: `enabledFromProfile: 'extreme'` (an opt-in look), so it seeds OFF like Iridescence.
+  let tableReadout = { enabled: false, params: null };
+  // PARALLAX: `enabledFromProfile: 'extreme'` (an opt-in look), so it seeds OFF like the Table.
+  let parallaxReadout = { enabled: false, params: null };
   /** Depth-of-field READOUT — same seed posture as bloom's own, above, and
    * for the identical reason: the manifest already says `enabledFromProfile:
    * 'low'`, so a `false` seed would misrepresent the window between
@@ -2816,6 +2981,66 @@ function install() {
     iridescenceReadout = buildCascadeReadout(resolved);
   });
 
+  // WIND TRAILS (2026-10-27) — not anchor- or mask-driven: the trails go
+  // wherever the wind field says the air is fast, so `apply` only refreshes the
+  // readout the viewer reads each frame (getWindTrailsRenderState below).
+  effectRegistry.register(WIND_TRAILS, (resolved) => {
+    windTrailsReadout = buildCascadeReadout(resolved);
+  });
+
+  // TEMPERATURE EFFECTS (2026-10-27) — driven by the weather's own eased
+  // `temperature01`, read by the viewer each frame; `apply` only refreshes the
+  // readout (getTemperatureEffectsRenderState below).
+  effectRegistry.register(TEMPERATURE_EFFECTS, (resolved) => {
+    temperatureEffectsReadout = buildCascadeReadout(resolved);
+  });
+
+  /** Last outline miss reported, so a Foundry that draws no outline is told once, not on every draw. */
+  let sceneOutlineMissLogged = false;
+  /**
+   * FOUNDRY'S BLACK OUTLINE ROUND THE MAP (`foundry/scene-outline.js`): hidden while the Table is on — the
+   * brass frames the map instead, and the line cut a seam through every canopy Parallax lifts over the
+   * edge (the author, 2026-10-28). Foundry redraws it on every canvas draw, so this runs on
+   * `canvasReady` as well as whenever the Table is turned on or off.
+   */
+  function syncFoundrySceneOutline() {
+    try {
+      const tableOn = !!tableReadout?.enabled;
+      const r = setSceneOutlineVisible(globalThis.canvas, !tableOn);
+      if (!r.ok && tableOn && globalThis.canvas?.interface && !sceneOutlineMissLogged) {
+        sceneOutlineMissLogged = true;
+        log.warn(`Table: Foundry's scene outline was not hidden — ${r.reason}`);
+      }
+    } catch (err) {
+      log.error('Table: syncing Foundry’s scene outline failed:', err);
+    }
+  }
+
+  // TABLE (2026-10-27) — drawn by the viewer's world pass from `getTableRenderState`, so `apply`
+  // refreshes the readout and then asks tokens to re-run their privacy: turning the Table on,
+  // off, public or private changes which tokens a player may see, and MSA's own draw list and
+  // Foundry's token objects both need to hear it.
+  effectRegistry.register(TABLE, (resolved) => {
+    tableReadout = buildCascadeReadout(resolved);
+    syncFoundrySceneOutline();
+    try {
+      refreshOffBoardPrivacy();
+      refreshVtPanViewerItems('table').catch((err) => log.error('table draw-list refresh failed:', err));
+    } catch (err) {
+      log.error('table privacy refresh failed:', err);
+    }
+  });
+  installOffBoardPrivacy({
+    isPrivateTable: () =>
+      tableReadout.enabled && (tableReadout.params?.privateOffBoard ?? TABLE_PARAMS.privateOffBoard.default) === true,
+  });
+
+  // PARALLAX (2026-10-28) — applied by the viewer's per-frame mesh transforms from `getParallaxRenderState`,
+  // so `apply` only refreshes the readout: nothing is rebuilt, nothing is recompiled.
+  effectRegistry.register(PARALLAX, (resolved) => {
+    parallaxReadout = buildCascadeReadout(resolved);
+  });
+
   /** Transient, in-memory precipitation LOOK-dial tuning
    * (MapShine.setPrecipitation) — mirrors fireLiveOverride/
    * vegetationLiveOverride exactly, now that PRECIPITATION_PARAMS (2026-09-04)
@@ -2919,6 +3144,55 @@ function install() {
     const { params: sceneParams } = readSceneEffectParams('iridescence');
     layers.paramLayers = [sceneParams, iridescenceLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('iridescence', layers);
+  }
+
+  /** Transient, in-memory Wind Trails tuning (MapShine.setWindTrails / the
+   * card). Mirrors `iridescenceLiveOverride` exactly. */
+  const windTrailsLiveOverride = {};
+
+  /** Re-resolve Wind Trails' cascade — mirrors `reapplyIridescence` exactly,
+   * and is in the reapply-ALL table below for the same reason. */
+  function reapplyWindTrails() {
+    const layers = deriveEffectLayers('windTrails', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('windTrails');
+    layers.paramLayers = [sceneParams, windTrailsLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('windTrails', layers);
+  }
+
+  /** Transient, in-memory Temperature Effects tuning (MapShine.setTemperatureEffects
+   * / the card). Mirrors `windTrailsLiveOverride` exactly. */
+  const temperatureEffectsLiveOverride = {};
+
+  /** Re-resolve Temperature Effects' cascade — mirrors `reapplyWindTrails`
+   * exactly, and is in the reapply-ALL table below for the same reason. */
+  function reapplyTemperatureEffects() {
+    const layers = deriveEffectLayers('temperatureEffects', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('temperatureEffects');
+    layers.paramLayers = [sceneParams, temperatureEffectsLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('temperatureEffects', layers);
+  }
+
+  /** Transient, in-memory Table tuning (MapShine.setTable / the card). Mirrors
+   * `temperatureEffectsLiveOverride` exactly. */
+  const tableLiveOverride = {};
+
+  /** Re-resolve the Table's cascade — mirrors `reapplyTemperatureEffects` exactly. */
+  function reapplyTable() {
+    const layers = deriveEffectLayers('table', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('table');
+    layers.paramLayers = [sceneParams, tableLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('table', layers);
+  }
+
+  /** Transient, in-memory Parallax tuning (MapShine.setParallax / the card). Mirrors `tableLiveOverride`. */
+  const parallaxLiveOverride = {};
+
+  /** Re-resolve Parallax's cascade — mirrors `reapplyTable` exactly. */
+  function reapplyParallax() {
+    const layers = deriveEffectLayers('parallax', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('parallax');
+    layers.paramLayers = [sceneParams, parallaxLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('parallax', layers);
   }
 
   /** Transient, in-memory depth-of-field param tuning (MapShine.setDof / the
@@ -3111,6 +3385,7 @@ function install() {
     ['smelly flies', () => critters.smellyFlies.reapply()],
     ['maggots', () => critters.maggots.reapply()],
     ['fireflies', () => critters.fireflies.reapply()],
+    ['dust', () => critters.dust.reapply()],
     ['vegetation', () => reapplyVegetation()],
     ['door graphics', () => reapplyDoors()],
     ['water', () => water.reapply()],
@@ -3122,6 +3397,10 @@ function install() {
     ['lens', () => reapplyLens()],
     ['prism', () => reapplyPrism()],
     ['iridescence', () => reapplyIridescence()],
+    ['wind trails', () => reapplyWindTrails()],
+    ['temperature effects', () => reapplyTemperatureEffects()],
+    ['table', () => reapplyTable()],
+    ['parallax', () => reapplyParallax()],
     ['depth of field', () => reapplyDof()],
     ['clouds', () => reapplyClouds()],
     ['cloud tops', () => reapplyCloudTops()],
@@ -3415,6 +3694,113 @@ function install() {
   /** THE FLOOR-CHANGE TIMELINE (loading audit, Phase 0): fed by the gate, Foundry's canvas hooks, the
    * commit and the viewer's next frame. A debug report, so it rides into the flight bundle. */
   const floorTimeline = createFloorTimeline({ log });
+
+  // ---------------------------------------------------------------------------
+  // THE ONE TRANSITION (author, 2026-10-26) — every load, scene change and floor change cuts the
+  // same way. `planTransition` decides each cut (armed override > the scene's own Foundry setting >
+  // the GM's default at that moment's pace); the director covers BEFORE the view changes and
+  // reveals once the new view is fully rendered — which the loading code decides, not this.
+  // ---------------------------------------------------------------------------
+  const transitionHost = () => document.getElementById('board')?.parentElement ?? document.body;
+  const sceneTransitions = createTransitionDirector({
+    resolveHost: transitionHost,
+    captureFrame: captureTransitionFrame,
+    playFoundry: playFoundryTransition,
+    log,
+  });
+  /** How long after using an armed override the GM clears it — long enough for every player to have
+   * started the same scene change and read it. */
+  const TRANSITION_DISARM_DELAY_MS = 15000;
+  /** The armed override this client claimed for a scene change already under way. */
+  let claimedTransition = null;
+  /** Override ids this client has already played: each one plays once. */
+  const playedTransitionIds = new Set();
+
+  /** One still of everything on screen: MSA's frame with Foundry's layer on top. */
+  async function captureTransitionFrame() {
+    const msa = await captureVtPanViewerFrame();
+    const host = transitionHost();
+    return composeFrame([msa, captureFoundryLayer()], {
+      width: host.clientWidth || window.innerWidth,
+      height: host.clientHeight || window.innerHeight,
+    });
+  }
+
+  function readTransitionDefaults() {
+    try {
+      return {
+        preset: String(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.transitionPreset) ?? 'cinematic'),
+        pace: String(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.transitionPace) ?? 'measured'),
+      };
+    } catch (err) {
+      log.warn('could not read the transition settings — using a measured fade:', err);
+      return { preset: 'cinematic', pace: 'measured' };
+    }
+  }
+
+  function readArmedTransition() {
+    try {
+      const raw = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.transitionOverride);
+      if (!raw) return null;
+      const o = JSON.parse(raw);
+      return o && typeof o.type === 'string' && typeof o.id === 'string' ? o : null;
+    } catch (err) {
+      log.warn('the armed transition could not be read — ignoring it:', err);
+      return null;
+    }
+  }
+
+  async function writeArmedTransition(o) {
+    await writeSetting(MODULE_ID, GLOBAL_SETTING_KEYS.transitionOverride, o ? JSON.stringify(o) : '');
+    MapShine.__remote?.refreshTransitionBoard?.();
+  }
+
+  function transitionReducedMotion() {
+    let fromSetting = false;
+    try {
+      fromSetting = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.reducedMotion) === true;
+    } catch (err) {
+      log.warn('could not read the reduced-motion setting for a transition:', err);
+    }
+    const fromOs = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return fromSetting || fromOs;
+  }
+
+  /**
+   * A scene change began on this client. If it heads for the ACTIVE scene (a table-wide change,
+   * never a private view or a teleport elsewhere) and the GM armed a transition, claim it for that
+   * scene. Each armed id plays once per client; a GM clears it shortly after, once everyone has
+   * had the chance to read it.
+   * @param {object|null} sceneDoc
+   */
+  function claimArmedTransition(sceneDoc) {
+    if (!sceneDoc?.active) return;
+    const armed = readArmedTransition();
+    if (!armed || playedTransitionIds.has(armed.id)) return;
+    playedTransitionIds.add(armed.id);
+    claimedTransition = { sceneId: sceneDoc.id ?? null, override: armed };
+    if (currentUserIsGM()) {
+      setTimeout(() => {
+        if (readArmedTransition()?.id !== armed.id) return; // re-armed meanwhile: leave the new one
+        writeArmedTransition(null).catch((err) => log.warn('could not clear the used transition:', err));
+      }, TRANSITION_DISARM_DELAY_MS);
+    }
+  }
+
+  /** @param {'load'|'scene'|'floor'} moment @param {object|null} sceneDoc */
+  function transitionPlanFor(moment, sceneDoc) {
+    const defaults = readTransitionDefaults();
+    const claimed = claimedTransition?.sceneId === (sceneDoc?.id ?? null) ? claimedTransition.override : null;
+    return planTransition({
+      moment,
+      preset: defaults.preset,
+      pace: defaults.pace,
+      reducedMotion: transitionReducedMotion(),
+      sceneTransition: readSceneTransition(sceneDoc),
+      override: moment === 'floor' ? null : claimed,
+      foundryTypes: listFoundryTransitions().map((t) => t.id),
+    });
+  }
   let sceneActivationGate = null;
 
   /** The GM's world setting. Unreadable => the gate is OFF (fail toward Foundry). */
@@ -3425,6 +3811,31 @@ function install() {
       log.warn('could not read the prepareBeforeSwitch setting — the switch gate stays off:', err);
       return false;
     }
+  }
+
+  /**
+   * THE GLIDE IS THE FLOOR TRANSITION while Parallax is on (the author, 2026-10-28: "when I change floors it
+   * just cuts immediately to black … There is no glide"). A fade through black hid the whole glide —
+   * it ran behind the veil and had finished before the reveal. So the floor change becomes a dissolve
+   * lasting the glide: the old floor's still fades while it moves the way that floor does (`step`), and
+   * the new floor glides into place live beneath it, revealed on its first frame. Reduced motion, a glide
+   * of 0 or Parallax off (no `step`) keep the GM's own preset.
+   * @param {object|null} plan - the preset's floor plan. @param {number|null} step - the old floor's scale.
+   */
+  function parallaxFloorPlan(plan, step) {
+    if (!plan) return plan;
+    const glideSec = Number(getParallaxRenderState()?.params?.glideSec);
+    if (!step || transitionReducedMotion() || !(glideSec > 0)) {
+      return plan.kind === 'dissolve' && step ? { ...plan, depthScale: step } : plan;
+    }
+    return {
+      ...plan,
+      kind: 'dissolve',
+      foundryType: null,
+      outMs: 0,
+      inMs: Math.round(glideSec * 1000),
+      depthScale: step,
+    };
   }
 
   /**
@@ -3441,7 +3852,10 @@ function install() {
     if (!target) return { ok: false, reason: `no floor for level ${request.levelId}` };
 
     let cancelled = false;
-    const subject = { name: target.name ?? `floor ${target.index}` };
+    // Floor names are the GM's to see; a player is only told floors are changing.
+    const subject = globalThis.game?.user?.isGM
+      ? { name: target.name ?? `floor ${target.index}` }
+      : { name: null, generic: PLAYER_FLOOR_MESSAGE };
     const bar = switchNotice.begin(formatPrepareMessage(subject, describeStep(FLOOR_PREPARE_STEPS, null)));
     // The overlay is now ONLY the Cancel control (a notification has no buttons).
     beginFloorTransition({
@@ -3465,6 +3879,15 @@ function install() {
     }
     if (cancelled) return { ok: false, cancelled: true, reason: 'cancelled by the user' };
     if (control.isCancelled()) return { ok: false, reason: 'superseded by a newer request' };
+    // Prepared: dim the old floor BEFORE Foundry redraws; switchToPreparedFloor reveals the new one.
+    if (prepared?.ok === true) {
+      const plan = transitionPlanFor('floor', request.scene);
+      // PARALLAX: a dissolve melts the old view away, so let it move the way the old floor would — receding
+      // when you climb, rising toward you when you descend. Null (and nothing changes) with Parallax off.
+      const from = activeFloorContext?.floorIndex;
+      const step = Number.isFinite(from) ? getVtPanViewerParallaxStep(from, target.index) : null;
+      await sceneTransitions.cover(parallaxFloorPlan(plan, step));
+    }
     return { ok: prepared?.ok === true, reason: prepared?.reason };
   }
 
@@ -3562,6 +3985,7 @@ function install() {
     // explains a cold load better. Only the step that must precede Foundry's draw (the PIXI
     // proxies, which have to win the race with Foundry's own loader) runs.
     const cold = request.kind === 'cold';
+    if (!cold) claimArmedTransition(sceneDoc);
     // The cold path runs no masks step here (see above), so start discovery now: it then runs
     // during Foundry's own draw instead of after it.
     if (cold) kickMaskDiscovery(sceneDoc);
@@ -3581,7 +4005,7 @@ function install() {
     // No buttons. Nobody is waiting on a click here: the switch goes ahead by itself when the
     // warm-up finishes, or when the wait set by the GM runs out (the timer above).
     beginFloorTransition({
-      headline: `Preparing ${subject.name}`,
+      headline: subject.name === null ? PLAYER_SCENE_MESSAGE : `Preparing ${subject.name}`,
       actions: [],
     });
     try {
@@ -3602,6 +4026,8 @@ function install() {
       endFloorTransition();
       bar.end();
     }
+    // Dim the old scene BEFORE Foundry redraws (the first draw of a session has nothing to dim).
+    if (!cold && !control.isCancelled()) await sceneTransitions.cover(transitionPlanFor('scene', sceneDoc));
     return { ok: true };
   }
 
@@ -3694,6 +4120,7 @@ function install() {
       const scene = findScene(sceneId);
       // Not applicable here: gate off, MSA off, unknown scene, or already there.
       if (!scene || !isSwitchGateEnabled() || !isMsaEnabledSetting() || currentSceneId() === sceneId) return;
+      // `sceneNameForUser` is null for a player, so this reads as the generic "loading" line.
       const subject = { verb: `${userDisplayName(from)} is preparing`, name: sceneNameForUser(scene) };
       bar = switchNotice.begin(formatPrepareMessage(subject, describeStep(SCENE_PREPARE_STEPS, null)));
       await prewarmSceneForSwitch(scene, levelId, {
@@ -3858,6 +4285,7 @@ function install() {
     });
     endFloorTransition(); // always — success, failure, or cancel all end here the same way
     if (!prepared.ok) {
+      sceneTransitions.abort('the floor prepare did not complete');
       // Superseded by a newer floor-switch request (a rapid second call),
       // or cancelled via the overlay's own button — the newer request (or
       // the author's own choice to stay put) owns this outcome, so this
@@ -3905,6 +4333,10 @@ function install() {
     };
     const result = await setVtPanViewerFloor(targetFloorIndex, { atFlip: commitContext });
     if (!flipped) commitContext();
+    // The new floor is committed: reveal it on the first frame that shows it. A floor change that
+    // never went through the gate (the painter's stepper, the gate switched off) was not covered,
+    // so this is a no-op for it.
+    if (!afterNextVtPanViewerFrame(() => void sceneTransitions.reveal())) void sceneTransitions.reveal();
     log.info(`real-scene VT viewer synced to floor ${targetFloorIndex}.`, result);
     syncInterfaceSeam('floor switch');
 
@@ -4795,6 +5227,147 @@ function install() {
     return { ...prismLiveOverride };
   };
 
+  // MapShine.setWindTrails — the console tuner AND the card's write path
+  // (mirrors MapShine.setIridescence exactly):
+  //   MapShine.setWindTrails({ density: 1.5, swirl: 1 })
+  MapShine.setWindTrails = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('windTrails', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyWindTrails())
+        .catch((err) => log.error('wind trails enable write/reapply failed:', err));
+    }
+    let changed = false;
+    const scenePatch = {};
+    for (const k of Object.keys(WIND_TRAILS_PARAMS)) {
+      if (k in p) {
+        windTrailsLiveOverride[k] = p[k];
+        if (WIND_TRAILS_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('windTrails', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`wind trails scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('wind trails scene param write failed:', err)
+      );
+      try {
+        reapplyWindTrails();
+      } catch (err) {
+        log.error('wind trails reapply (setWindTrails) failed:', err);
+      }
+    }
+    return { ...windTrailsLiveOverride };
+  };
+
+  // MapShine.setTemperatureEffects — the console tuner AND the card's write
+  // path (mirrors MapShine.setWindTrails exactly):
+  //   MapShine.setTemperatureEffects({ frostReach: 0.4, coldStrength: 1.5 })
+  MapShine.setTemperatureEffects = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(
+        writeSetting(MODULE_ID, effectEnableKey('temperatureEffects', 'player'), p.enabled ? 'on' : 'off')
+      )
+        .then(() => reapplyTemperatureEffects())
+        .catch((err) => log.error('temperature effects enable write/reapply failed:', err));
+    }
+    let changed = false;
+    const scenePatch = {};
+    for (const k of Object.keys(TEMPERATURE_EFFECTS_PARAMS)) {
+      if (k in p) {
+        temperatureEffectsLiveOverride[k] = p[k];
+        if (TEMPERATURE_EFFECTS_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('temperatureEffects', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`temperature effects scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('temperature effects scene param write failed:', err)
+      );
+      try {
+        reapplyTemperatureEffects();
+      } catch (err) {
+        log.error('temperature effects reapply (setTemperatureEffects) failed:', err);
+      }
+    }
+    return { ...temperatureEffectsLiveOverride };
+  };
+
+  // MapShine.setTable — the console tuner AND the card's write path (mirrors
+  // MapShine.setTemperatureEffects exactly):
+  //   MapShine.setTable({ enabled: true, depthPct: 4, rimPct: 2 })
+  MapShine.setTable = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('table', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyTable())
+        .catch((err) => log.error('table enable write/reapply failed:', err));
+    }
+    let changed = false;
+    const scenePatch = {};
+    for (const k of Object.keys(TABLE_PARAMS)) {
+      if (k in p) {
+        tableLiveOverride[k] = p[k];
+        if (TABLE_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('table', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`table scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('table scene param write failed:', err)
+      );
+      try {
+        reapplyTable();
+      } catch (err) {
+        log.error('table reapply (setTable) failed:', err);
+      }
+    }
+    return { ...tableLiveOverride };
+  };
+
+  // MapShine.setParallax — the console tuner AND the card's write path (mirrors MapShine.setTable exactly):
+  //   MapShine.setParallax({ enabled: true, floorHeightPct: 2, glideSec: 1.2 })
+  MapShine.setParallax = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('parallax', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyParallax())
+        .catch((err) => log.error('parallax enable write/reapply failed:', err));
+    }
+    let changed = false;
+    const scenePatch = {};
+    for (const k of Object.keys(PARALLAX_PARAMS)) {
+      if (k in p) {
+        parallaxLiveOverride[k] = p[k];
+        if (PARALLAX_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('parallax', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`parallax scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('parallax scene param write failed:', err)
+      );
+      try {
+        reapplyParallax();
+      } catch (err) {
+        log.error('parallax reapply (setParallax) failed:', err);
+      }
+    }
+    return { ...parallaxLiveOverride };
+  };
+
   // MapShine.setIridescence — the console tuner AND the FOH/ROH card's write
   // path (mirrors MapShine.setPrism exactly, one effect later). Accepts a
   // single knob or several:
@@ -5124,6 +5697,14 @@ function install() {
   // IRIDESCENCE's render-state seam (mythica-machina-press#136) — same shape
   // as prism's own, above, one effect later.
   const getIridescenceRenderState = () => projectCascadeRenderState(iridescenceReadout);
+  // WIND TRAILS' render-state seam — same shape as iridescence's own, above.
+  const getWindTrailsRenderState = () => projectCascadeRenderState(windTrailsReadout);
+  // TEMPERATURE EFFECTS' render-state seam — same shape again.
+  const getTemperatureEffectsRenderState = () => projectCascadeRenderState(temperatureEffectsReadout);
+  // TABLE'S render-state seam — same shape again.
+  const getTableRenderState = () => projectCascadeRenderState(tableReadout);
+  // PARALLAX'S render-state seam — same shape again.
+  const getParallaxRenderState = () => projectCascadeRenderState(parallaxReadout);
   // DEPTH OF FIELD's render-state seam — same shape as bloom's own, above.
   // perfTier ADDED 2026-08-30, same fix; DELEGATES the same way.
   // U6 READ TRACKING (mythica-machina-press#194) — wrapped HERE, the real
@@ -5975,6 +6556,21 @@ function install() {
   // wind snapshot read a sealed room as open sky
   // (feedback_required_masks_fail_loud).
   const getOutdoorsMaskGrid = (floorIndex) => maskAuthority.getDerived('outdoors', floorIndex)?.grid ?? null;
+  // THE SAME `_Outdoors`, AT CASTER RESOLUTION — for the sky/cloud gate TEXTURE
+  // only (2026-10-28, author: the strip beside a building's wall took neither its
+  // shadow nor cloud shadow). The shared grid above is a 512-wide POINT sample
+  // (~14 world px per texel on Mad Scientist's Compound), so its indoor/outdoor
+  // edge can sit a whole texel outside the real wall. The authority already
+  // rasterizes the same sources at caster resolution for the sun bake; the GPU
+  // gate reads that. `getDerived('outdoors')` runs FIRST so a missing required
+  // mask still throws exactly as before; CPU consumers keep the cheap 512 grid.
+  const getOutdoorsMaskGridFine = (floorIndex) => {
+    const coarse = maskAuthority.getDerived('outdoors', floorIndex)?.grid ?? null;
+    if (!coarse) return null;
+    const fine = maskAuthority.getDerived('casterHeight', floorIndex, { acknowledgeMissingRequired: true })?.channels
+      ?.outdoors;
+    return fine?.spec && fine?.data ? fine : coarse;
+  };
 
   // FIRE'S MASK, AS A GPU TEXTURE SEAM (2026-08-08) — the same coarse `_Fire`
   // grid `getMaskDrivenFires` already extracts point sources from, handed to
@@ -6256,7 +6852,7 @@ function install() {
   // SMELLY FLIES + FIREFLIES — the cascade layers, live overrides, console setters and render-state
   // seams for BOTH, from one factory (effects/critters/critter-registration.js). The four closures it
   // is handed are the only things it needs to know about this scene:
-  //   • the painted zone, as a MaskGrid — `_Flies`/`_Fireflies` (`rasterize: true`, so the authority
+  //   • the painted zone, as a MaskGrid — `_Flies`/`_Fireflies`/`_Dust` (`rasterize: true`, so the authority
   //     composites painted strokes with any file) — swallowed to null like `getFireMaskGrid`/
   //     `getDripMaskGrid` (an absent mask is the ORDINARY case, never an error);
   //   • which floor is viewed, and its ground elevation (the depth gate's input);
@@ -6367,6 +6963,7 @@ function install() {
     smellyFlies: critters.smellyFlies.reapply,
     maggots: critters.maggots.reapply,
     fireflies: critters.fireflies.reapply,
+    dust: critters.dust.reapply,
   };
   function forceEffectEnabled(id, enabled) {
     if (enabled == null) {
@@ -10539,9 +11136,8 @@ function install() {
   // gate names water specifically) — same real functions/data as the panel
   // above, through registerEffectCard (never a second registry; see ui/
   // rooms/studio/shell.js's own header for why the Studio never imports
-  // effects/ or effectRegistry directly). `filterCategory` is this
-  // session's own proposal for the category strip — no per-effect taxonomy
-  // exists in src/ yet; see Petition P10.
+  // effects/ or effectRegistry directly). Its library group lives in
+  // ui/rooms/studio/effect-catalog.js, with every other effect's.
   registerEffectCardSafe('water', () => {
     const readLive = () => water.getReadout();
     const maskStatus = (() => {
@@ -10556,7 +11152,6 @@ function install() {
       icon: 'water',
       title: 'Water',
       accVar: '--c-atmos',
-      filterCategory: 'surface',
       tier: {
         tier: readLive().perfTier,
         maxTier: readLive().maxPerfTier,
@@ -10633,7 +11228,7 @@ function install() {
    *    today (only bare `perfTier`, and only for some of them); a real,
    *    scoped follow-up, not a blocker for shipping real param editing now.
    * @param {string} id
-   * @param {{icon?: string, title: string, accVar?: string, filterCategory?: string,
+   * @param {{icon?: string, title: string, accVar?: string,
    *   schema: object, fohKeys: string[],
    *   getReadout: () => {enabled: boolean, params: object, perfTier?: number},
    *   setValue: (patch: object) => void, onPaint?: () => void, paintVerb?: string,
@@ -10674,7 +11269,6 @@ function install() {
         icon: opts.icon,
         title: opts.title,
         accVar: opts.accVar,
-        filterCategory: opts.filterCategory,
         schema: opts.schema,
         fohKeys: opts.fohKeys,
         getValue: (key) => readLive().params?.[key] ?? opts.schema[key]?.default,
@@ -10746,7 +11340,6 @@ function install() {
     icon: 'candle',
     title: 'Candle flames',
     accVar: '--c-lighting',
-    filterCategory: 'lighting',
     schema: CANDLE_FLAME_PARAMS,
     fohKeys: ['color', 'sizePx', 'lightRadiusPx'],
     getReadout: () => candleReadout,
@@ -10769,7 +11362,6 @@ function install() {
     icon: 'bolt',
     title: 'Lightning',
     accVar: '--c-lighting',
-    filterCategory: 'lighting',
     schema: LIGHTNING_PARAMS,
     fohKeys: ['outerColor', 'brightness', 'maxDelayMs', 'burstMaxStrikes', 'outsideFlashGain', 'originFlashEnabled'],
     getReadout: () => lightningReadout,
@@ -10788,7 +11380,6 @@ function install() {
     icon: 'fire',
     title: 'Fire',
     accVar: '--c-particles',
-    filterCategory: 'particles',
     schema: FIRE_PARAMS,
     fohKeys: ['flameSize', 'flameHeight', 'smokeDensity', 'emberCount', 'spitRate', 'maskSensitivity'],
     getReadout: () => fireReadout,
@@ -10824,7 +11415,6 @@ function install() {
     icon: 'bug',
     title: 'Smelly flies',
     accVar: '--c-particles',
-    filterCategory: 'particles',
     schema: SMELLY_FLIES_PARAMS,
     fohKeys: SMELLY_FLIES_FOH,
     presets: { table: SMELLY_FLIES_PRESETS, pick: smellyFliesPreset },
@@ -10839,7 +11429,6 @@ function install() {
     icon: 'bug',
     title: 'Maggots',
     accVar: '--c-particles',
-    filterCategory: 'particles',
     schema: MAGGOTS_PARAMS,
     fohKeys: MAGGOTS_FOH,
     presets: { table: MAGGOTS_PRESETS, pick: maggotsPreset },
@@ -10853,7 +11442,6 @@ function install() {
     icon: 'dust',
     title: 'Fireflies',
     accVar: '--c-particles',
-    filterCategory: 'particles',
     schema: FIREFLIES_PARAMS,
     fohKeys: FIREFLIES_FOH,
     presets: { table: FIREFLIES_PRESETS, pick: firefliesPreset },
@@ -10861,6 +11449,20 @@ function install() {
     setValue: (patch) => MapShine.setFireflies(patch),
     status: (readout) =>
       !readout.enabled ? 'off' : critters.fireflies.hasPaint() ? 'glowing at dusk' : 'nothing painted yet',
+  });
+
+  // DUST — motes over a painted `_Dust` zone, lit only where the `_Window` light falls on them.
+  registerSimpleEffectCard('dust', {
+    icon: 'dust',
+    title: 'Dust',
+    accVar: '--c-particles',
+    schema: DUST_PARAMS,
+    fohKeys: DUST_FOH,
+    presets: { table: DUST_PRESETS, pick: dustPreset },
+    getReadout: () => critters.dust.getReadout(),
+    setValue: (patch) => MapShine.setDust(patch),
+    status: (readout) =>
+      !readout.enabled ? 'off' : critters.dust.hasPaint() ? 'drifting in the window light' : 'nothing painted yet',
   });
 
   registerSimpleEffectCard('precipitation', {
@@ -10872,7 +11474,6 @@ function install() {
     // the weather manager's own astrolabe controls; this card is the LOOK —
     // splash opacity/size/rate, the falling body, the distant veil, ground
     // accumulation, roof drips (PRECIPITATION_PARAMS, 2026-09-04).
-    filterCategory: 'particles',
     schema: PRECIPITATION_PARAMS,
     fohKeys: ['splashAlphaScale', 'splashSizeScale', 'sizeScale', 'streakScale', 'chaosScale', 'curtainStrength'],
     getReadout: () => precipReadout,
@@ -10886,7 +11487,6 @@ function install() {
   registerSimpleEffectCard('vegetation', {
     title: 'Vegetation',
     accVar: '--c-surface',
-    filterCategory: 'surface',
     schema: VEGETATION_PARAMS,
     fohKeys: ['intensity', 'windResponse', 'swayAmount', 'flutterAmount', 'shadowStrength'],
     getReadout: () => vegetationReadout,
@@ -10897,7 +11497,6 @@ function install() {
     icon: 'bloom',
     title: 'Bloom',
     accVar: '--c-post',
-    filterCategory: 'post',
     schema: BLOOM_PARAMS,
     fohKeys: ['strength', 'threshold', 'coreStrength', 'atmoStrength', 'atmoTint', 'atmoSpread'],
     getReadout: () => bloomReadout,
@@ -10915,7 +11514,6 @@ function install() {
     icon: 'aperture',
     title: 'Lens',
     accVar: '--c-post',
-    filterCategory: 'post',
     schema: LENS_PARAMS,
     // FOH is the "which cinematic techniques are active right now" strip —
     // three ON/OFF toggles a GM plausibly reaches for mid-session (autofocus
@@ -10948,7 +11546,6 @@ function install() {
     icon: 'gem',
     title: 'Prism',
     accVar: '--c-surface',
-    filterCategory: 'surface',
     schema: PRISM_PARAMS,
     // FOH mirrors specular's own split: the look-defining strength dials a
     // GM plausibly reaches for mid-session, never the facet-geometry/glint
@@ -10973,7 +11570,6 @@ function install() {
     icon: 'palette',
     title: 'Iridescence',
     accVar: '--c-surface',
-    filterCategory: 'surface',
     schema: IRIDESCENCE_PARAMS,
     // FOH mirrors prism's own split: the look-defining strength dials a GM
     // plausibly reaches for mid-session, never the phase-field fine-tuning
@@ -10989,7 +11585,6 @@ function install() {
     icon: 'eye',
     title: 'Depth of Field',
     accVar: '--c-post',
-    filterCategory: 'post',
     schema: DOF_PARAMS,
     fohKeys: ['strength', 'blurPerFloor', 'maxBlur'],
     getReadout: () => dofReadout,
@@ -11005,7 +11600,6 @@ function install() {
     icon: 'layers',
     title: 'UI window shadows',
     accVar: '--c-post',
-    filterCategory: 'post',
     schema: UI_SHADOW_PARAMS,
     fohKeys: ['strength01', 'azimuthDeg', 'elevationDeg', 'offsetScale', 'tintColor'],
     getReadout: () => uiShadowReadout,
@@ -11017,7 +11611,6 @@ function install() {
     icon: 'sun',
     title: 'Sun shadows',
     accVar: '--c-lighting',
-    filterCategory: 'lighting',
     schema: SUN_SHADOW_PARAMS,
     fohKeys: ['strength01', 'dawnDuskLength', 'lengthScale', 'buildingHeightPx'],
     getReadout: () => sunShadowReadout,
@@ -11028,7 +11621,6 @@ function install() {
     icon: 'palette',
     title: 'Colour Grade',
     accVar: '--c-post',
-    filterCategory: 'post',
     schema: GRADE_LOOK_PARAMS,
     fohKeys: ['exposure', 'contrast', 'saturation', 'temperature', 'vibrance', 'toneMapping', 'lutName'],
     getReadout: () => gradeLookReadout,
@@ -11040,7 +11632,6 @@ function install() {
     icon: 'camera',
     title: 'Stylize',
     accVar: '--c-post',
-    filterCategory: 'post',
     schema: STYLIZE_PARAMS,
     fohKeys: ['style', 'amount'],
     getReadout: () => stylizeReadout,
@@ -11060,7 +11651,6 @@ function install() {
     icon: 'moon',
     title: 'Region Darkness Override',
     accVar: '--c-post',
-    filterCategory: 'post',
     schema: REGION_DARKNESS_OVERRIDE_PARAMS,
     fohKeys: ['value'],
     getReadout: () => {
@@ -11084,11 +11674,10 @@ function install() {
   registerSimpleEffectCard('fluid', {
     icon: 'water',
     title: 'Fluid',
-    // Matches water's own accVar choice (not 'surface', its filterCategory's
-    // own default) — a deliberate visual-identity call, same as water's,
+    // Matches water's own accVar choice (not its library group's own
+    // colour) — a deliberate visual-identity call, same as water's,
     // not an oversight; see that card's own accVar a few dozen lines up.
     accVar: '--c-atmos',
-    filterCategory: 'surface',
     schema: FLUID_PARAMS,
     fohKeys: ['tint', 'glow', 'flowSpeed', 'iridescence'],
     getReadout: () => fluid.getReadout(),
@@ -11099,7 +11688,6 @@ function install() {
     icon: 'gem',
     title: 'Metal & shine',
     accVar: '--c-surface',
-    filterCategory: 'surface',
     schema: SPECULAR_PARAMS,
     fohKeys: ['strength', 'incidentSteepness', 'shimmerGain', 'parallaxStrength', 'islandSpread'],
     getReadout: () => specular.getReadout(),
@@ -11118,7 +11706,6 @@ function install() {
     icon: 'frame',
     title: 'Window light',
     accVar: '--c-lighting',
-    filterCategory: 'lighting',
     schema: WINDOW_PARAMS,
     fohKeys: ['strength', 'contrast'],
     getReadout: () => windowLight.getReadout(),
@@ -11130,7 +11717,6 @@ function install() {
   registerSimpleEffectCard('apertureGobo', {
     title: 'Window light pattern',
     accVar: '--c-lighting',
-    filterCategory: 'lighting',
     schema: APERTURE_GOBO_PARAMS,
     fohKeys: ['strength', 'cols', 'rows', 'softness'],
     getReadout: () => apertureGobo.getReadout(),
@@ -11592,6 +12178,8 @@ function install() {
   MapShine.setSmellyFlies = critters.smellyFlies.set;
   MapShine.setMaggots = critters.maggots.set;
   MapShine.setFireflies = critters.fireflies.set;
+  //   MapShine.setDust({ countPerZone: 400, sparkle: 0.8 })
+  MapShine.setDust = critters.dust.set;
   /** `MapShine.setApertureGoboDebug(true)` — the OLD console twin, kept working
    * (maps to the `'pattern'` channel) alongside the picker below. */
   MapShine.setApertureGoboDebug = (on) => apertureGobo.setDebug(on);
@@ -12398,16 +12986,31 @@ function install() {
   // Clouds/Rain/Temperature. Persistence happens once, on arrival, in
   // `pumpWeatherFades`'s own completion loop below (`fadeWindSpeedTo`'s own
   // gesture).
+  //
+  // `perceived01` (2026-10-27) is the SAME wind in the space a fade travels in —
+  // `speed01^(2/3)`, see `world/wind-scale.js#windPerceived01ForSpeed01`. A fade
+  // linear in the dial put the whole visible change in its first few seconds
+  // (every look reads Beaufort strength, which is steep at the bottom): the
+  // author's *"wind thrashes vegetation to insane amounts very quickly"*.
+  // `speed01` stays resolvable so a fade persisted before this still lands.
   fadeSourceRegistry.registerSource('wind', {
-    keys: () => ['speed01'],
+    keys: () => ['speed01', 'perceived01'],
     typeOf: () => 'float',
-    readLive: (field) => (field === 'speed01' ? windSpeed01 : undefined),
+    readLive: (field) =>
+      field === 'speed01' ? windSpeed01 : field === 'perceived01' ? windPerceived01ForSpeed01(windSpeed01) : undefined,
     write: (field, value) => {
-      if (field !== 'speed01') return;
-      windSpeed01 = Math.max(0, Math.min(1, value));
+      if (field === 'speed01') windSpeed01 = Math.max(0, Math.min(1, value));
+      else if (field === 'perceived01') windSpeed01 = speed01ForWindPerceived01(value);
+      else return;
       applyAmbientWind();
     },
   });
+  /** The dial value of a wind fade IN FLIGHT, either shape, else null. */
+  function liveWindFadeSpeed01() {
+    const perceived = liveFadeValue('wind.perceived01');
+    if (perceived !== null) return speed01ForWindPerceived01(perceived);
+    return liveFadeValue('wind.speed01');
+  }
 
   /** Record<'weather.cloudCover01'|'weather.precip01', FadeEntry> — scene-
    * scoped, reloaded from the scene flag on every canvasReady (below). */
@@ -12679,18 +13282,24 @@ function install() {
   function fadeWindSpeedTo(value, overMs) {
     const nowMs = wallClockMs();
     const gestureId = `wind:${nowMs}`;
+    // A fade persisted under the old `wind.speed01` key would keep writing the
+    // same wind beside this one — two writers, one value. This gesture replaces it.
+    const rest = { ...fadeState };
+    delete rest['wind.speed01'];
+    // Faded in the perceptual space (see the 'wind' source's own doc); the
+    // completion below still persists the DIAL value the GM chose.
     fadeState = mergeFadeState(
-      fadeState,
+      rest,
       {
         id: gestureId,
         label: 'Wind',
         targets: {
-          'wind.speed01': {
-            to: value,
+          'wind.perceived01': {
+            to: windPerceived01ForSpeed01(value),
             type: 'float',
             overMs,
             curve: 'ease',
-            from: fadeSourceRegistry.readLive('wind.speed01'),
+            from: fadeSourceRegistry.readLive('wind.perceived01'),
           },
         },
       },
@@ -13194,17 +13803,90 @@ function install() {
     icon: 'wind',
     title: 'Wind',
     accVar: '--c-atmos',
-    filterCategory: 'atmos',
     schema: {},
     fohKeys: [],
     getValue: () => undefined,
     onChange: () => {},
-    status: () =>
-      windSpeed01 > 0
-        ? `${compassOf(windDirectionDeg)} · ${Math.round(windSpeed01 * 100)}%`
-        : 'calm — raise Wind on the astrolabe',
+    // The real reading (2026-10-27 — the dial is linear to 70 m/s): dial %,
+    // m/s and what that speed is called, so 50% visibly says "hurricane".
+    status: () => {
+      if (!(windSpeed01 > 0)) return 'calm — raise Wind on the astrolabe';
+      const d = describeWindSpeed01(windSpeed01);
+      return `${compassOf(windDirectionDeg)} · ${Math.round(windSpeed01 * 100)}% · ${Math.round(d.metresPerSecond)} m/s ${d.name}`;
+    },
     extra: () => MapShine.debug.buildEffectAttachments('wind'),
   }));
+
+  // WIND TRAILS' card (2026-10-27) — beside Wind's own, in Atmosphere.
+  registerSimpleEffectCard('windTrails', {
+    icon: 'wind',
+    title: 'Wind Trails',
+    accVar: '--c-atmos',
+    schema: WIND_TRAILS_PARAMS,
+    fohKeys: ['density', 'widthPx', 'lengthSec', 'swirl', 'opacity'],
+    getReadout: () => windTrailsReadout,
+    setValue: (patch) => MapShine.setWindTrails(patch),
+    status: (readout) =>
+      readout.enabled
+        ? windSpeed01 > 0
+          ? `on · trails above ${readout.params?.minSpeedMps ?? WIND_TRAILS_PARAMS.minSpeedMps.default} m/s`
+          : 'on · waiting for wind'
+        : 'off',
+  });
+
+  // TEMPERATURE EFFECTS' card (2026-10-27) — its own card, in Atmosphere
+  // beside the weather it follows. The status line names the bands, so the
+  // fader's 25% / 10% / 75% marks read straight off the card.
+  registerSimpleEffectCard('temperatureEffects', {
+    icon: 'thermometer',
+    title: 'Temperature Effects',
+    accVar: '--c-atmos',
+    schema: TEMPERATURE_EFFECTS_PARAMS,
+    fohKeys: ['coldStrength', 'warmStrength', 'frostReach', 'frostRefractPx', 'heatStrengthPx'],
+    getReadout: () => temperatureEffectsReadout,
+    setValue: (patch) => MapShine.setTemperatureEffects(patch),
+    status: (readout) => {
+      if (!readout.enabled) return 'off';
+      const v = (k) => readout.params?.[k] ?? TEMPERATURE_EFFECTS_PARAMS[k].default;
+      const pct = (x) => `${Math.round(x * 100)}%`;
+      return `on · icy below ${pct(v('coldBelow'))} · frost below ${pct(v('frostBelow'))} · warm above ${pct(v('warmAbove'))}`;
+    },
+  });
+
+  // TABLE'S card (2026-10-27) — the scene recessed in a brass-rimmed velvet table. An opt-in look
+  // (`enabledFromProfile: 'extreme'`): the GM turns it on here. The status line says who can see
+  // what, since "private table" is the one setting that changes the game, not just the picture.
+  registerSimpleEffectCard('table', {
+    icon: 'frame',
+    title: 'Table',
+    accVar: '--c-atmos',
+    schema: TABLE_PARAMS,
+    fohKeys: ['depthPct', 'rimPct', 'feltColor', 'rimColor', 'lampStrength'],
+    getReadout: () => tableReadout,
+    setValue: (patch) => MapShine.setTable(patch),
+    status: (readout) => {
+      if (!readout.enabled) return 'off';
+      const priv = readout.params?.privateOffBoard ?? TABLE_PARAMS.privateOffBoard.default;
+      return priv ? 'on · private: players see only their own tokens on the velvet' : 'on · public velvet';
+    },
+  });
+
+  // PARALLAX'S card (2026-10-28) — real depth between the floors. An opt-in look (`enabledFromProfile:
+  // 'extreme'`): the GM turns it on here. It works alone; with the Table on, the recess deepens to hold the building.
+  registerSimpleEffectCard('parallax', {
+    icon: 'layers',
+    title: 'Parallax',
+    accVar: '--c-system',
+    schema: PARALLAX_PARAMS,
+    fohKeys: ['strength', 'floorHeightPct', 'glideSec'],
+    getReadout: () => parallaxReadout,
+    setValue: (patch) => MapShine.setParallax(patch),
+    status: (readout) => {
+      if (!readout.enabled) return 'off';
+      const follows = readout.params?.tableFollows ?? PARALLAX_PARAMS.tableFollows.default;
+      return follows && tableReadout.enabled ? 'on · the table recess deepens with the building' : 'on';
+    },
+  });
 
   // ── CLOUDS (docs/planning/Clouds.md, mythica-machina-press#40/#41/#305) ──
   // Cover/type/altitude/scale are WEATHER axes (Weather-Manager LAW 3), owned
@@ -13236,7 +13918,6 @@ function install() {
     icon: 'cloud',
     title: 'Clouds',
     accVar: '--c-atmos',
-    filterCategory: 'atmos',
     schema: CLOUD_LOOK_PARAMS,
     fohKeys: ['shadowStrength', 'windowCloudContrast', 'speedMul', 'windowOvercastMinStrength', 'noonExposureBoost'],
     getReadout: () => cloudsReadout,
@@ -13275,7 +13956,6 @@ function install() {
     icon: 'cloud',
     title: 'Cloud Tops',
     accVar: '--c-atmos',
-    filterCategory: 'atmos',
     schema: CLOUD_TOPS_PARAMS,
     fohKeys: ['opacity'],
     getReadout: () => cloudTopsReadout,
@@ -13469,6 +14149,7 @@ function install() {
       setVtPanViewerPrecipKind(sky.precipKindAuthored);
     }
     setVtPanViewerSkyRealism(sky.realism01);
+    setVtPanViewerSkyLook({ goldenHour01: sky.goldenHour01, moonlight01: sky.moonlight01 });
     // THE ENVIRONMENTAL GRADE (docs/planning/Grade.md) — its strength drives the
     // automatic ToD/weather look + cloud desaturation. (The ARTISTIC grade is a
     // separate effect now, resolved through its own cascade, not from here.)
@@ -13800,7 +14481,7 @@ function install() {
             if (fadingTemp !== null) liveAxes.temperature01 = fadingTemp;
             // Wind, same shape as Temperature just above — fadeWindSpeedTo's
             // own fade lives under the 'wind' namespace, not 'weather'.
-            const fadingWind = liveFadeValue('wind.speed01');
+            const fadingWind = liveWindFadeSpeed01();
             if (fadingWind !== null) liveAxes.windSpeed01 = fadingWind;
             MapShine.__remote?.updateLiveWeatherAxisValues?.(liveAxes);
           }
@@ -14489,6 +15170,24 @@ function install() {
       return { ok: false, error: 'disabled by setting' };
     }
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
+    // THE CRASH LADDER (epic mmp-fpu) — decided before anything else is built. A load that ended because
+    // the GPU died is never repeated unchanged: this one runs a rung lower, says so, and records itself
+    // as `booting` (with a heartbeat) so that if THIS load dies too, the next one climbs again.
+    const ladder = crashGuard.start({
+      mode: readSafeModeSetting(),
+      build: safeBuildId(),
+      scene: sceneDoc?.id ?? null,
+    });
+    setSafeLevel(ladder.level);
+    announceSafeMode(ladder);
+    if (!ladder.profile.startMsa) {
+      // The last rung: three loads in a row ended in a lost device. MSA stays out of the way, Foundry
+      // draws the scene, and the player is told exactly how to try again. Same shape as the two exits
+      // above — no canvas exists yet, so there is nothing to tear down.
+      engageFoundryFallback({ reason: ladder.message });
+      endSceneLoad({ error: 'safe mode: Foundry rendering' });
+      return { ok: false, error: 'safe mode: Foundry rendering' };
+    }
     beginSceneLoadPhase(LOAD_PHASES.SCENE); // no-op unless a curtain is up
     const floorsResult = getActiveSceneFloors(sceneDoc);
     if (!floorsResult.ok) {
@@ -14514,6 +15213,13 @@ function install() {
     setMsaMayOwnArt(true);
     const dimensions = computeSceneDimensions(sceneDoc);
     const isGM = typeof game !== 'undefined' ? !!game.user?.isGM : true;
+    // THE TABLE'S PRIVACY, read live on every collection (a draw-list rebuild follows each Table
+    // change): with the Table on and private, a token on the velvet is drawn only for a GM or its owner.
+    const offBoardRule = () => ({
+      sceneRect: dimensions.sceneRect,
+      privateTable:
+        tableReadout.enabled && (tableReadout.params?.privateOffBoard ?? TABLE_PARAMS.privateOffBoard.default) === true,
+    });
     // Track the floor being opened so the candle marker overlay shows only its
     // candles (covers both initial load and a full scene change — both route here).
     updateActiveFloorContext(floors, initialFloorIndex);
@@ -14554,6 +15260,7 @@ function install() {
           viewedLevelId,
           isGM,
           dragPreviews: readTokenDragPreviews(),
+          offBoard: offBoardRule(),
         }).items,
       ];
     };
@@ -14571,6 +15278,7 @@ function install() {
       knownLevelIds: allLevelIds,
       viewedLevelId: floors[initialFloorIndex]?.id,
       isGM,
+      offBoard: offBoardRule(),
     });
     // The report must describe what will actually DRAW, tokens included — a report
     // that quietly omits a whole class of drawable is worse than none.
@@ -14901,6 +15609,10 @@ function install() {
           const seam = restoreFoundryArt();
           log.info(`device lost — restored Foundry's own art (seam un-suppressed: ${seam}).`);
         },
+        // THE CRASH LADDER'S MEMORY (epic mmp-fpu): the viewer records a device loss through it (so the
+        // next load runs a rung lower) and notes every shader compile before it starts (so a GPU that dies
+        // mid-compile leaves a name behind). The policy lives in core/safe-mode.js; this is only the handle.
+        crashGuard: viewerCrashGuard,
         // VIDEO-CAPTURE FRAME CAP (2026-08-10, author-requested): the author
         // records promotional videos at 30fps externally, and rendering faster
         // than that while the camera-path tool is playing only steals GPU
@@ -14973,6 +15685,7 @@ function install() {
         getSmellyFliesRenderState: critters.smellyFlies.getRenderState,
         getMaggotsRenderState: critters.maggots.getRenderState,
         getFirefliesRenderState: critters.fireflies.getRenderState,
+        getDustRenderState: critters.dust.getRenderState,
         // DOOR GRAPHICS (effects/door-graphics-render.js): each frame the viewer
         // reconciles + animates the door leaves, reading the cascade-resolved
         // enable + motion params and the active-floor door snapshots from here.
@@ -15058,6 +15771,7 @@ function install() {
         // torture fixture's default (`() => null`) bakes a fully-outdoors
         // placeholder, which is a no-op while the sky ships neutral.
         getOutdoorsMaskGrid,
+        getOutdoorsMaskGridFine,
         // FIRE'S mask-clip texture seam — same real-scene-only reasoning; an
         // unwired/torture-fixture default of `() => null` leaves every fire
         // unclipped (the fail-open default `bakeFireMaskTexture` already has).
@@ -15176,6 +15890,10 @@ function install() {
         // placement discovery (tile-only, no floor-level door).
         getIridescenceMaskItems,
         getIridescenceRenderState,
+        getWindTrailsRenderState,
+        getTemperatureEffectsRenderState,
+        getTableRenderState,
+        getParallaxRenderState,
         // APERTURE GOBO's one seam (docs/planning/Aperture-Gobo.md) — no mask
         // URL/rect pair, unlike SHINE/window just above: its only input is
         // wall geometry `effects/lighting/point-light-pool.js` reads itself.
@@ -15321,6 +16039,16 @@ function install() {
   );
 
   MapShine.debug.registerReport('interface-seam', 'Interface seam (art vs chrome)', () => getCanvasCompositingReport());
+
+  MapShine.debug.registerReport('transitions', 'Transitions (what the last cut played, and why)', () => ({
+    report: 'transitions',
+    generatedAt: new Date().toISOString(),
+    defaults: readTransitionDefaults(),
+    armed: readArmedTransition(),
+    claimed: claimedTransition,
+    director: sceneTransitions.getStatus(),
+    nextFloorChange: transitionPlanFor('floor', null),
+  }));
 
   MapShine.debug.registerReport('floor-timeline', 'Floor/scene change timeline (where the time went)', () => ({
     report: 'floor-timeline',
@@ -16652,6 +17380,7 @@ function install() {
         // without this reset it answers "same scene — a floor switch" and the
         // whole rebuild runs invisibly.
         resetLoadingSceneMemory();
+        sceneTransitions.abort('the canvas went blank');
       },
       logInfo: (msg) => log.info(msg),
       onTearDown: (kind) => floorTimeline.mark(TIMELINE_EVENTS.TEAR_DOWN, { kind }),
@@ -16688,7 +17417,13 @@ function install() {
         if (!viewerSurvivesThisDraw && !getLoadingScreenState().showing) resetLoadingSceneMemory();
         // A draw that will start a viewer: begin its mask discovery now, alongside Foundry's draw.
         if (!viewerSurvivesThisDraw) kickMaskDiscovery(sceneDoc);
-        const verdict = beginSceneLoad({ sceneId: sceneDoc?.id ?? null, sceneName: sceneDoc?.name });
+        // An ungated scene change (the gate off) still claims an armed transition here.
+        if (!viewerSurvivesThisDraw && lastRealSceneId !== null) claimArmedTransition(sceneDoc);
+        // The curtain names the scene for the GM only; a player sees just that it is loading.
+        const verdict = beginSceneLoad({
+          sceneId: sceneDoc?.id ?? null,
+          sceneName: globalThis.game?.user?.isGM ? sceneDoc?.name : '',
+        });
         if (!verdict.shown) log.info(`loading screen suppressed — ${verdict.reason}`);
       } catch (err) {
         // A broken curtain must never block a scene load.
@@ -16731,6 +17466,8 @@ function install() {
     // write its diagnostics. `startVtPanViewer` itself is serialised, so the newer
     // load disposes this one's viewer cleanly.
     let sceneLoadGeneration = 0;
+    /** Has this session revealed a scene yet? The first reveal is the 'load' moment, later ones 'scene'. */
+    let sessionHasRevealedAScene = false;
     // THE LAST LOAD'S "WHAT ATE THE TIME" DIAGNOSTICS (mythica-machina-press#400
     // follow-up, 2026-09-01) — shader/pipeline rebuild timing plus a before/
     // after snapshot of the art-streaming caches, gathered automatically
@@ -17006,6 +17743,8 @@ function install() {
         } catch (err) {
           log.error('painted-mask hydrate (canvasReady) failed — painting skipped, scene bring-up continues:', err);
         }
+        // Foundry has just redrawn its interface group, outline and all: hide it again under the Table.
+        syncFoundrySceneOutline();
         // THE SKY, RE-RESOLVED FOR THIS SCENE — `canvas.scene` did not exist at
         // `init` (where the setting itself gets registered), so this is the
         // first point a per-scene override can actually be read. Also the right
@@ -17037,7 +17776,13 @@ function install() {
         // with, not whatever the last scene happened to leave in memory.
         try {
           const { state, reason } = readFadeState();
-          fadeState = filterResolvableFadeState(state);
+          // A fade that had already arrived before this client loaded has
+          // nothing left to ease, and the scene's stored sky/wind already hold
+          // its result. Replaying its `to` once would overrule them — the
+          // 2026-10-27 "rain jumped to 100% after a reload" bug (see
+          // fade-persistence.js#fadeStateFlagValue). Only the LOAD prunes:
+          // a watcher echo must keep another GM's instant (`overMs:0`) fade.
+          fadeState = pruneExpired(filterResolvableFadeState(state), wallClockMs());
           if (reason) log.info(`fade state (canvasReady): ${reason}`); // "no active scene" etc. — benign, not an error
           pendingSkyFadeCompletions.clear();
           baselineWeatherSnapshot = {
@@ -17341,7 +18086,12 @@ function install() {
             const stop = shouldStopWaitingForReady();
             if (stop.stop) return { ready: false, reason: stop.reason, waitingFor: settle?.waitingFor ?? [] };
             const signature = blockerSignature(settle?.blockers);
-            unchangedPolls = signature === lastSignature ? unchangedPolls + 1 : 0;
+            // A hidden tab cannot clear a blocker that waits on a frame, so blockers frozen
+            // while hidden are not "no progress" (the #582 rule, for the poll count).
+            unchangedPolls = nextNoProgressCount(unchangedPolls, {
+              sameSignature: signature === lastSignature,
+              tabHidden: typeof document !== 'undefined' && document.hidden === true,
+            });
             lastSignature = signature;
             if (unchangedPolls >= READINESS_NO_PROGRESS_POLLS && pastOrdinaryRevealDeadline()) {
               return {
@@ -17379,6 +18129,7 @@ function install() {
         }
         if (result.ok === false) {
           log.warn(`real-scene VT viewer did not start:`, result.error);
+          sceneTransitions.abort('the viewer did not start');
           lastLoadDiagnostics = null; // a failed load must not show a stale earlier load's numbers
           // A load that fails must not leave the clamp engaged — the viewer
           // would stay at reduced internal resolution for the rest of the
@@ -17544,7 +18295,23 @@ function install() {
         // Arming the detector here means MSA notices a regression itself, on
         // every load, rather than waiting for someone to report a stutter.
         noteVtPanViewerRevealed();
-        const summary = endSceneLoad({ forced: !readyOutcome.ready });
+        // THE CRASH LADDER: a reveal is not yet a survivor. If nothing dies for the next few seconds
+        // (the second burst of compiles — masks arriving after warm-up — is exactly when it did),
+        // this rung is remembered as one that works on this machine.
+        crashGuard.armStable();
+        // THE REVEAL IS THE TRANSITION (2026-10-26): the curtain fades to the veil and the scene rises,
+        // or dissolves straight in, or cuts. Started, not awaited: `endCurtain` runs synchronously at
+        // the transition's start, so `summary` is set before the next line reads it.
+        const revealPlan = transitionPlanFor(sessionHasRevealedAScene ? 'scene' : 'load', canvasRef?.scene ?? null);
+        sessionHasRevealedAScene = true;
+        let summary = null;
+        sceneTransitions
+          .revealFromCurtain(revealPlan, (fadeMs) => {
+            summary = endSceneLoad({ forced: !readyOutcome.ready, fadeMs });
+            return fadeMs > 0 ? new Promise((r) => setTimeout(r, fadeMs)) : undefined;
+          })
+          .catch((err) => log.warn('the scene reveal transition failed:', err));
+        if (claimedTransition?.sceneId === (canvasRef?.scene?.id ?? null)) claimedTransition = null;
         let loadGpuQueue = null;
         try {
           loadGpuQueue = loadGpuQueueProbe.stop();
@@ -17629,6 +18396,10 @@ function install() {
             warmUpSimError: warmUpDiag?.shaders?.warmUpSimError ?? null,
             shaderCompileMs: warmUpDiag?.shaders?.precompileMs ?? null,
           },
+          // EVERY PIPELINE THIS LOAD CREATED (vt/pipeline-governor.js, epic mmp-fpu): how many compiled on a
+          // worker thread versus on the GPU process's main thread, and the slowest few with their WGSL size.
+          // This is the measurement the GPU-device-lost investigation lacked: which shader is the long pole.
+          shaderCompiles: warmUpDiag?.shaders?.governor ?? null,
           // TEXTURE COMPRESSION HEALTH (mythica-machina-press#585) — a
           // POINT-IN-TIME read at load end, deliberately NOT a delta, so the
           // window problem in #583 cannot apply to it. When the BC worker is
@@ -17655,6 +18426,24 @@ function install() {
           cacheSnapshot: { start: loadCacheSnapshotStart, end: loadCacheSnapshotEnd },
           gpuQueue: loadGpuQueue,
         };
+
+        // ONE LINE a person can paste: the pipelines this load compiled and the slowest of them. A load that lost
+        // its GPU device leaves its own breadcrumbs (diag/crash-guard.js); a load that SURVIVED but compiled a
+        // 10 s shader on the GPU's main thread is the near-miss worth reading before it becomes the next crash.
+        {
+          const gov = lastLoadDiagnostics.shaderCompiles;
+          if (gov?.installed) {
+            const top = (gov.slowest ?? [])
+              .slice(0, 4)
+              .map((r) => `${r.label} ${r.ms}ms/${r.chars}ch/${r.mode}`)
+              .join(', ');
+            log.info(
+              `shader compiles: ${gov.created} pipelines (${gov.async} off-thread, ${gov.sync} on the GPU main thread, ` +
+                `${gov.failed} failed)${top ? `; slowest: ${top}` : ''}`,
+              gov
+            );
+          }
+        }
 
         // SHOUT IF THE FREEZE CAME BACK (mythica-machina-press#614). Checked a
         // few seconds after reveal, because the compiles being hunted happen on
@@ -17801,6 +18590,19 @@ function install() {
         applyUiPreferences();
       } catch (err) {
         log.error('MSA settings registration failed:', err);
+      }
+
+      // THE CRASH LADDER'S RUNG, decided at `init` — before any shader exists. A read-only peek: the
+      // load itself (`startRealSceneViewer`) makes the same decision for real and records it. Doing it
+      // here means everything built before the first scene starts (prewarmed materials, the effect
+      // cascade's profile read) already sees the right rung.
+      try {
+        const peeked = crashGuard.peek({ mode: readSafeModeSetting(), build: safeBuildId() });
+        setSafeLevel(peeked.level);
+        if (peeked.level > SAFE_LEVEL.FULL)
+          log.warn(`safe mode level ${peeked.level} (${peeked.profile.name}) in force from init — ${peeked.reason}`);
+      } catch (err) {
+        log.error('could not decide the safe-mode rung at init — running at full quality:', err);
       }
 
       // THE SKY SETTING (2026-07-23) — registered here, in the SAME `init`

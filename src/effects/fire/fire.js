@@ -49,7 +49,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 0.8,
+    default: 0.25, // 2026-10-27 author's live-tuned defaults (was 0.8)
     category: 'Presence',
     label: 'Fire intensity',
     help: 'How hard everything burns. Above 1 the flame stands taller and burns hotter; below 1 it banks down toward its coals.',
@@ -72,7 +72,7 @@ export const FIRE_PARAMS = Object.freeze({
     // ⚠️ 0.05, NOT 0.2 (2026-08-16, author live on Tower Bridge — the real multi-blob `_Fire.webp`, ~20 painted regions).
     // At 0.2 only 3 of the ~20 valid areas produced flames; the rest are faint/small strokes. See fire-mask.js's own
     // MIN_PEAK_TEXELS/PAINT_THRESHOLD headers — real authored fire is routinely this small.
-    default: 0.05, // 2026-10-20 new defaults (was 0.04)
+    default: 0.15, // 2026-10-27 author's live-tuned defaults (was 0.05)
     category: 'Presence',
     label: 'Mask sensitivity',
     help: 'How much of the painted fire mask counts as real paint before a fire registers there. LOWER catches fainter or smaller painted strokes — turn this DOWN if fire you painted is not appearing. HIGHER requires bolder, more solid paint before a fire lights at all.',
@@ -86,7 +86,7 @@ export const FIRE_PARAMS = Object.freeze({
   flameTint: {
     type: 'color',
     space: 'srgb',
-    default: '#ffffff',
+    default: '#ffd2a8', // 2026-10-27 author's live-tuned defaults (was '#ffffff')
     category: 'Look',
     label: 'Flame tint',
     help: 'Multiplies the flame’s colours. White leaves the painted-campfire palette exactly as it is; a colour pulls the whole flame toward it. (For a whole new fire colour — green alchemy, blue foxfire — use Hue shift instead.)',
@@ -116,7 +116,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: -180,
     max: 180,
     step: 1,
-    default: -3, // 2026-10-17 author's live-tuned defaults (was -6)
+    default: 2, // 2026-10-27 author's live-tuned defaults (was -3)
     category: 'Look',
     label: 'Hue shift',
     help: 'Rotates the flame, embers and smoke around the colour wheel together — the way to get a green alchemical fire or a blue foxfire without hand-picking every stop. Adds to whatever the chosen Fuel already contributes (magical fuel carries its own built-in 180° shift). ±180° already covers the whole wheel in either direction; there is no further edge to push past.',
@@ -146,7 +146,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 4,
     step: 0.05,
-    default: 0.25,
+    default: 1.7, // 2026-10-27 author's live-tuned defaults (was 0.25)
     category: 'Look',
     label: 'Flame glow',
     help: 'The faint orange halo around the flame (it also feeds the bloom). The fire’s real light on the room is the Light category.',
@@ -178,7 +178,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.2,
     max: 4,
     step: 0.05,
-    default: 1.5,
+    default: 1, // 2026-10-27 author's live-tuned defaults (was 1.5)
     category: 'Flame',
     label: 'Flame size ×',
     help: 'How wide the flame is, as a multiple of what the painted fire’s own width implies. 1 matches the painted campfires’ flame-to-logs proportion.',
@@ -521,7 +521,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.25,
     max: 3,
     step: 0.05,
-    default: 2.3, // 2026-10-20 new defaults (was 3)
+    default: 1.85, // 2026-10-27 author's live-tuned defaults (was 2.3)
     category: 'Light',
     label: 'Light reach',
     // ⚠️ NOT WIDENED IN THE 2026-09-04 ROH RANGE PASS, DELIBERATELY — this one has a REAL, EXPLAINED cost curve
@@ -531,7 +531,7 @@ export const FIRE_PARAMS = Object.freeze({
   lightColor: {
     type: 'color',
     space: 'srgb',
-    default: '#ffa047', // 2026-10-17 author's live-tuned defaults (was #fe7e06)
+    default: '#ff5900', // 2026-10-27 author's live-tuned defaults (was '#ffa047')
     category: 'Light',
     label: 'Light colour',
     help: "The colour this fire throws into the room, separate from the flame's own tint.",
@@ -548,7 +548,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.05,
     max: 0.9,
     step: 0.01,
-    default: 0.35, // the old fixed `ratio`
+    default: 0.05, // 2026-10-27 author's live-tuned defaults (was 0.35)
     category: 'Light',
     label: 'Light core size',
     help: "Radius of the fire light's brighter inner core, as a fraction of its outer reach. Higher keeps the glow at full strength further out before it starts to fade.",
@@ -558,7 +558,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.05,
     max: 1,
     step: 0.01,
-    default: 0.6, // the old fixed `attenuation01`
+    default: 1, // 2026-10-27 author's live-tuned defaults (was 0.6)
     category: 'Light',
     label: 'Light edge softness',
     help: 'How gradually the light fades out past its core. Lower is a harder-edged pool of light; higher spreads a softer, more gradual fade across the rest of the radius.',
@@ -683,7 +683,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 6,
     step: 0.1,
-    default: 0.4,
+    default: 1, // 2026-10-27 author's live-tuned defaults (was 0.4)
     category: 'Look',
     label: 'Core bloom (HDR)',
     help: 'How far the hottest cream heart of the flame goes above white, so it triggers the scene bloom. 0 = painted colours only.',
@@ -773,7 +773,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.1,
     max: 2,
     step: 0.05,
-    default: 0.45,
+    default: 1.15, // 2026-10-27 author's live-tuned defaults (was 0.45)
     category: 'Flame',
     label: 'Tongue length',
     help: 'How far the licking tongues reach out of the flame body (x the body radius).',
@@ -863,7 +863,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 0.5,
     step: 0.01,
-    default: 0.19,
+    default: 0.5, // 2026-10-27 author's live-tuned defaults (was 0.19)
     category: 'Look',
     label: 'Tone mottling',
     help: "Painterly noise in the flame's tone.",
@@ -873,7 +873,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 8,
     step: 0.1,
-    default: 1.3,
+    default: 4.2, // 2026-10-27 author's live-tuned defaults (was 1.3)
     category: 'Look',
     label: 'Crescent relief',
     help: 'How steeply the flame surface tilts the lit/shaded crescents.',
@@ -883,7 +883,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.2,
     max: 2.5,
     step: 0.05,
-    default: 1.25,
+    default: 2.5, // 2026-10-27 author's live-tuned defaults (was 1.25)
     category: 'Look',
     label: 'Flame brightness',
     help: '1 = the painted colours exactly.',
@@ -893,7 +893,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.4,
     max: 1.6,
     step: 0.02,
-    default: 0.58,
+    default: 0.7, // 2026-10-27 author's live-tuned defaults (was 0.58)
     category: 'Look',
     label: 'Tone gamma',
     help: 'Below 1 lifts the flame toward the cream end, above 1 toward deep orange.',
@@ -903,7 +903,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.25,
     max: 0.9,
     step: 0.01,
-    default: 0.52,
+    default: 0.81, // 2026-10-27 author's live-tuned defaults (was 0.52)
     category: 'Look',
     label: 'Silhouette threshold',
     help: "Where the flame's edge is cut: higher = thinner, lower = fatter.",
@@ -913,7 +913,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 60,
     step: 1,
-    default: 17,
+    default: 6, // 2026-10-27 author's live-tuned defaults (was 17)
     category: 'Look',
     label: 'Glow radius (px)',
     help: 'Reach of the faint halo round the flame.',
@@ -943,7 +943,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 0.45,
+    default: 0.5, // 2026-10-27 author's live-tuned defaults (was 0.45)
     category: 'Look',
     label: 'Edge wobble speed',
     help: 'How fast the painterly edge roughness moves.',
@@ -953,7 +953,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.01,
     max: 0.2,
     step: 0.005,
-    default: 0.04,
+    default: 0.02, // 2026-10-27 author's live-tuned defaults (was 0.04)
     category: 'Look',
     label: 'Edge wobble scale',
     help: 'Spatial frequency of the edge roughness: low = big waves, high = fine ripple.',

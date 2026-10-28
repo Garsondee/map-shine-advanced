@@ -12,7 +12,7 @@
  * Same root reason `vegetation-spring-gpu.js` gives for its own choice, even
  * though the DETAIL differs (see "ONE TRIO PER INSTANCE" below for how):
  * this codebase's live wind vector is reachable only through
- * `windHandle.node()`/`.kernel()` (both TSL/GPU-only) — `.cpuAt()` returns
+ * `windHandle.strengthNode()`/`.kernel()` (both TSL/GPU-only) — `.cpuAt()` returns
  * only a scalar `{exposure, openness, solid, inGrid}`, never a usable force
  * vector (confirmed by direct investigation, issue #1's own 2026-09-20
  * design comment) — so the modal oscillator's per-frame integration has to
@@ -197,8 +197,8 @@ export function buildRopeChainSpringIntegrateMaterial({
   const uProbeB = uniform(vec2(probeBWorld.x, probeBWorld.y));
   const uPerpDir = uniform(vec2(perpDir.x, perpDir.y));
 
-  const sampleA = windHandle.node(THREE.TSL, { centerXY: uProbeA, time });
-  const sampleB = windHandle.node(THREE.TSL, { centerXY: uProbeB, time });
+  const sampleA = windHandle.strengthNode(THREE.TSL, { centerXY: uProbeA, time, baked: 'now' });
+  const sampleB = windHandle.strengthNode(THREE.TSL, { centerXY: uProbeB, time, baked: 'now' });
 
   const windPerpA = dot(sampleA, uPerpDir);
   const windPerpB = dot(sampleB, uPerpDir);

@@ -65,7 +65,7 @@ export const SMELLY_FLIES_PARAMS = freezeParams({
     min: 4,
     max: 120,
     step: 1,
-    default: 4,
+    default: 6,
     category: 'Look',
     label: 'Fly size',
     help: 'Body length in pixels. V2’s Flying Scale was 18.',
@@ -129,7 +129,7 @@ export const SMELLY_FLIES_PARAMS = freezeParams({
     min: 0,
     max: 1,
     step: 0.05,
-    default: 0.45,
+    default: 0.15,
     category: 'Look',
     label: 'Shadow',
     help: 'How dark the fly’s shadow on the ground is. It slides away from the body as the fly climbs and merges back when it lands — the cue that tells the eye the fly is airborne.',
@@ -139,7 +139,7 @@ export const SMELLY_FLIES_PARAMS = freezeParams({
     min: 0.2,
     max: 4,
     step: 0.05,
-    default: 1,
+    default: 0.35,
     category: 'Look',
     label: 'Shadow softness ×',
     help: 'How blurred the shadow is, as a multiple of what the sky’s own cloud cover and sun height give it. Under 1 is a hard noon shadow; over 1 is the smudge under an overcast sky.',
@@ -253,7 +253,7 @@ export const SMELLY_FLIES_PARAMS = freezeParams({
     min: 0,
     max: 0.6,
     step: 0.005,
-    default: 0.1,
+    default: 0.495,
     category: 'Motion',
     label: 'Land chance (per second)',
     help: 'The chance each second that a flying fly decides to land, if it is over its zone. 0 keeps the whole swarm in the air forever.',
@@ -263,7 +263,7 @@ export const SMELLY_FLIES_PARAMS = freezeParams({
     min: 0.2,
     max: 4,
     step: 0.05,
-    default: 0.8,
+    default: 1,
     category: 'Motion',
     label: 'Landing time (s)',
     help: 'How long the descent takes: the fly slows, drops its legs, flares its wings and folds them on touchdown.',
@@ -357,7 +357,7 @@ export const SMELLY_FLIES_PARAMS = freezeParams({
     min: 5,
     max: 400,
     step: 5,
-    default: 80,
+    default: 230,
     category: 'Depth',
     label: 'Fly height',
     help: 'How high above the ground a flying fly hovers. Height makes it look bigger (it is nearer the camera), throws its shadow further away, and is what the landing and take-off animations travel between.',
@@ -443,7 +443,7 @@ export const SMELLY_FLIES_PARAMS = freezeParams({
   // ⭐ TOKENS — the "startle" idea this file used to only DEFER (see this module's own history):
   // "flies scattering when a token walks through the swarm... a disturbance source — a small
   // list of token positions". `critter-token.js`/`critter-subsystem.js` supply it now.
-  ...tokenParams({ noun: 'flies', defaults: { response: 0.8, radiusPx: 140 } }),
+  ...tokenParams({ noun: 'flies', defaults: { response: 1, radiusPx: 480 } }),
 });
 
 /**

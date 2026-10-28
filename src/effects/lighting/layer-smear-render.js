@@ -231,7 +231,6 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // anywhere in this file (memory: feedback_y_flip_recurring_risk).
     const world = vec2(uRect.x, uRect.y).add(uv().mul(rectSize));
     const toSun = vec2(uSun.x, uSun.y);
-    const maxThrow = uSun.z;
 
     const strength = uLook.x;
     const softnessMul = uLook.y;
@@ -295,26 +294,37 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     const layerDiffusionPx = layerHeight.map((h) => h.mul(float(DIFFUSION_PER_HEIGHT_PX)).mul(softnessMul));
 
     for (let j = 0; j <= STEPS; j++) {
-      // `stationDistancePx(j, STEPS, maxThrow)` — stations bunch toward the
-      // caster. `u` and `spacing` are plain JS numbers times a node, because
-      // `j`/`STEPS` are compile-time constants; the twin computes the identical
-      // values from the identical formula.
+      // ⚠️ EVERY LAYER WALKS ITS OWN THROW, NOT THE TALLEST LAYER'S (2026-10-28,
+      // author: at the dawn/dusk extremes "building shadows leave a gap between
+      // the outer edge of the building and where the shadow starts — these should
+      // be the darkest regions"). The stations used to be laid along `maxThrow`
+      // (the LONGEST layer's throw, up to HARD_CAP_PX at a grazing sun), and the
+      // anti-aliasing floor on each station's blur scales with ITS spacing — so
+      // a short layer (the walls) was given a handful of stations a long way
+      // apart, each blurred 2.5 spacings wide, and the caster's own edge was
+      // diluted by that blur: measured on a 1-D model, the wall's shadow read
+      // 0.75 against the wall instead of 0.99 with a 8192 px max throw over a
+      // 300 px wall throw. Laying each layer's `STEPS + 1` stations across its
+      // OWN throw gives every layer the full resolution at no extra cost (one
+      // fetch per layer per station was already being paid), and THE LAW still
+      // holds — it only needs each layer's own falloff to decrease along its own
+      // walk (`layer-smear.js#layerSmearVisibility` is the CPU twin).
       const u = j / STEPS;
-      const d = maxThrow.mul(float(u * u));
-      const stationUv = sampleUvAt(world.add(toSun.mul(d)));
-      // `stationSpacingPx(j, STEPS, maxThrow)` — the anti-aliasing FLOOR. No
-      // sample may be narrower than the gap to its neighbour, or a thin caster
-      // slips between two stations and THE LAW breaks discretely even though it
-      // holds continuously (the twin's header spells this out).
-      const spacing = maxThrow.mul(float((2 * u) / STEPS));
-      const stationBlurPx = max(
-        basePx.add(d.mul(float(PENUMBRA_PER_PX)).mul(uBlur.x)).mul(softnessMul),
-        max(spacing.mul(float(STATION_BLUR_OVERLAP)), texelWorldPx)
-      );
-
       for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
         const L = layerThrow[i];
         const r = depthRadii[i];
+        // `stationDistancePx(j, STEPS, L)` and `stationSpacingPx(j, STEPS, L)` —
+        // this layer's own station and its own anti-aliasing floor (the twin's
+        // header spells out why no sample may be narrower than its neighbour
+        // gap). A layer that casts nothing (`L <= 0`) has d = 0 and no blur
+        // floor; its contribution is zeroed below.
+        const d = L.mul(float(u * u));
+        const stationUv = sampleUvAt(world.add(toSun.mul(d)));
+        const spacing = L.mul(float((2 * u) / STEPS));
+        const stationBlurPx = max(
+          basePx.add(d.mul(float(PENUMBRA_PER_PX)).mul(uBlur.x)).mul(softnessMul),
+          max(spacing.mul(float(STATION_BLUR_OVERLAP)), texelWorldPx)
+        );
         // ⚠️ ONE FETCH PER LAYER NOW, NOT ONE SHARED FETCH (2026-08-05, the
         // shadow cascade). The four layers still live in four channels of the
         // same texel, but they no longer want the same MIP: a band three
@@ -377,7 +387,10 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
         // is exactly 0 — so both cases fall out of the arithmetic with no
         // branch.
         const t = d.div(max(L, float(1e-3))).clamp(0, 1);
-        const fall = pow(float(1).sub(t), falloffExp);
+        // `L <= 0` casts nothing: its walk is degenerate (d = 0, t = 0, so the
+        // falloff would read 1), so it is zeroed explicitly rather than by the
+        // old accident of `d` overshooting a zero throw.
+        const fall = pow(float(1).sub(t), falloffExp).mul(select(L.greaterThan(float(1e-3)), float(1), float(0)));
         occ[i].assign(max(occ[i], coverage.mul(fall)));
       }
     }

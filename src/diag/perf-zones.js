@@ -305,6 +305,17 @@ export const ZONES = Object.freeze(
       false,
       'firefliesSubsystem.sync'
     ),
+    z(
+      'light.dustSync',
+      'Dust sync (zone, population, wind cells, mote step)',
+      'sims',
+      null,
+      'dust',
+      'both',
+      'conditional',
+      false,
+      'dustSubsystem.sync'
+    ),
 
     // ---- masks.occlusion -----------------------------------------------------
     z(
@@ -1007,6 +1018,17 @@ export const ZONES = Object.freeze(
       'conditional',
       false,
       'firefliesSubsystem.scene'
+    ),
+    z(
+      'light.drawDust',
+      'Dust draw (additive motes lit by the window light)',
+      'lighting',
+      'light.accumulate',
+      'dust',
+      'gpu',
+      'conditional',
+      false,
+      'dustSubsystem.scene'
     ),
     z(
       'light.drawWindOverlay',
@@ -1798,6 +1820,10 @@ export const EFFECT_ZONING = Object.freeze({
   fireflies: Object.freeze({
     coverage: 'full',
     why: "light.firefliesSync (the zone-field rebuild, population, the twilight-window activity and the colony's compute dispatch) and light.drawFireflies (the beetle and additive-glow draws, one scene) together cover its entire cost; it casts no light into the shared point-light pool. An effect with nothing painted early-outs before building anything, so both read ~0 on a scene with nothing painted for it.",
+  }),
+  dust: Object.freeze({
+    coverage: 'full',
+    why: 'light.dustSync (the zone-field rebuild, population, the wind-cell refresh and the mote compute dispatch) and light.drawDust (the additive mote draw, one scene) together cover its entire cost; it casts no light. An effect with nothing painted early-outs before building anything, so both read ~0 on a scene with nothing painted for it.',
   }),
   // Added 2026-09-16 (perf-instrumentation-audit, mythica-machina-press#553) —
   // candleFlame owned zones (light.candleSync, light.drawCandleFlame) with no

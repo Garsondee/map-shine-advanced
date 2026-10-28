@@ -51,6 +51,9 @@
  * @module effects/precipitation/curtain-render
  */
 import { buildSquallField } from './squall-field.js';
+import { createWindAdvectionUniforms, writeWindAdvectionUniforms } from '../../world/index.js';
+import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
+import { markCompileDeferrable } from '../../core/compile-policy.js';
 
 /**
  * ⭐ Per-species veil colour — §3.4's *"tinted per species (rain grey-blue,
@@ -116,6 +119,8 @@ export function createPrecipCurtain({
   zDepth = 0,
   renderOrder = 0,
   openSkyTexture = null,
+  /** `buf:scene.illum` — the veil darkens in a building's shadow like the ground. Absent ⇒ compiled out. */
+  illumTexture = null,
 }) {
   const TSL = THREE.TSL;
   const { Fn, float, vec2, vec3, vec4, uniform, mix, positionGeometry } = TSL;
@@ -124,6 +129,8 @@ export function createPrecipCurtain({
   const uWindDirDeg = uniform(float(0));
   const uWindSpeed01 = uniform(float(0));
   const uGustiness01 = uniform(float(0.5));
+  /** The wind's integrated travel — the SAME one the bodies' and splashes' squall reads, copied in `step`. */
+  const uAdvection = createWindAdvectionUniforms(TSL);
   /** The species' own `respond.veil(precip01)` — ZERO below its threshold, so
    * drizzle does not grey the air and a downpour does (§2.3). */
   const uVeil01 = uniform(float(0));
@@ -135,6 +142,8 @@ export function createPrecipCurtain({
    * lit like noon at midnight is the single most obvious way an atmospheric
    * layer stops belonging to the scene. */
   const uRgbMul = uniform(float(1));
+  /** The golden-hour colour of the light (`sky-access.js#lightGoldenTint`), (1,1,1) when none. */
+  const uSkyTint = uniform(vec3(1, 1, 1));
   const uAlphaMul = uniform(float(1));
 
   const uSkyReachRect = uniform(vec4(0, 0, 1, 1));
@@ -152,6 +161,8 @@ export function createPrecipCurtain({
 
   const material = new THREE.NodeMaterial();
 
+  markCompileDeferrable(material, 'rain curtain');
+
   /** The world position of this fragment. The quad is axis-aligned and spans
    * the scene rect, so `positionGeometry.xy` IS world space — no mapping, and
    * therefore no Y-flip to get wrong. */
@@ -165,9 +176,17 @@ export function createPrecipCurtain({
     gustiness01: uGustiness01,
     bandDepth: uBandDepth,
     scale: uBandScale,
+    advection: uAdvection,
   });
 
-  material.colorNode = Fn(() => uTint.mul(uRgbMul))();
+  const uSceneLight = uniform(float(1));
+  const shade = buildWeatherShadeNode(TSL, {
+    illumTexNode: illumTexture ? TSL.texture(illumTexture) : null,
+    uSceneLight,
+  });
+  material.colorNode = Fn(() =>
+    shade ? uTint.mul(uRgbMul).mul(uSkyTint).mul(shade) : uTint.mul(uRgbMul).mul(uSkyTint)
+  )();
 
   material.opacityNode = Fn(() => {
     // ⭐ LAW 3, at the curtain. An indoor pixel must stay CLEAR — a veil drawn
@@ -237,6 +256,7 @@ export function createPrecipCurtain({
         if (Number.isFinite(sp)) uWindSpeed01.value = sp;
         if (Number.isFinite(dg)) uWindDirDeg.value = dg;
         if (Number.isFinite(gu)) uGustiness01.value = gu;
+        writeWindAdvectionUniforms(uAdvection, wind.ambient.advection);
       }
     },
 
@@ -249,7 +269,10 @@ export function createPrecipCurtain({
       veil01 = Number.isFinite(frame?.veil01) ? Math.max(0, Math.min(1, frame.veil01)) : 0;
       uVeil01.value = veil01;
       if (Number.isFinite(frame?.rgbMul)) uRgbMul.value = frame.rgbMul;
+      if (Array.isArray(frame?.skyTintRgb) && frame.skyTintRgb.length === 3) uSkyTint.value.set(...frame.skyTintRgb);
+      else uSkyTint.value.set(1, 1, 1);
       if (Number.isFinite(frame?.alphaMul)) uAlphaMul.value = frame.alphaMul;
+      if (Number.isFinite(frame?.sceneLight01)) uSceneLight.value = frame.sceneLight01;
     },
 
     setSkyReachTexture(texture, rect) {

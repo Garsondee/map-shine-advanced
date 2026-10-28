@@ -231,6 +231,7 @@ export function buildLensCompositeMaterial({
   resolutionWidth,
   resolutionHeight,
   tier = LENS_DEFAULT_TIER,
+  uvGuard = null,
 }) {
   const plan = lensTierPlan(tier);
   const {
@@ -343,7 +344,10 @@ export function buildLensCompositeMaterial({
   // simple barrel/pincushion warp, exactly transcribed.
   const distortCenter = vec2(LENS_DISTORTION_CENTER[0], LENS_DISTORTION_CENTER[1]);
   const p = uv().sub(distortCenter);
-  const distortedUv = distortCenter.add(p.mul(float(1).add(uDistortion.mul(dot(p, p))))).toVar();
+  const rawDistortedUv = distortCenter.add(p.mul(float(1).add(uDistortion.mul(dot(p, p)))));
+  // `uvGuard(plainUv, warpedUv)`: the Table's way to keep the warp off its straight rim
+  // (`effects/table/table-subsystem.js#lensGuard`). Omitted ⇒ the plain warp, unchanged.
+  const distortedUv = (uvGuard ? uvGuard(uv(), rawDistortedUv) : rawDistortedUv).toVar();
 
   /** `sampleSceneWithCA` — red/blue split along the radial direction from
    * distortion centre, blue and red offset OPPOSITE ways, green stays the

@@ -6,6 +6,7 @@
  */
 import {
   doorReachScaleForWindSpeed,
+  DOOR_REACH_SCALE_MAX,
   DOOR_REACH_SCALE_CALM,
   DOOR_REACH_SCALE_GALE,
   floodFillOpenFromBoundary,
@@ -660,7 +661,14 @@ export function run(t) {
   // actual penetrate double the distance and then that distance should fade
   // towards very little as wind speed heads towards zero."
   {
-    ok('full wind doubles the reach — the number the author asked for', doorReachScaleForWindSpeed(1) === 2);
+    // 2026-10-27: keyed on real m/s (dial linear to 70 m/s); hurricane force
+    // (33 m/s, dial ~0.47) reaches the raised GALE scale, the dial's top the MAX.
+    ok(
+      'hurricane force reaches the gale scale',
+      Math.abs(doorReachScaleForWindSpeed(33 / 70) - DOOR_REACH_SCALE_GALE) < 1e-9
+    );
+    ok('the top of the dial reaches furthest', doorReachScaleForWindSpeed(1) === DOOR_REACH_SCALE_MAX);
+    ok('the push is stronger than the old doubling', DOOR_REACH_SCALE_GALE > 2);
     ok('dead calm reaches "very little"', doorReachScaleForWindSpeed(0) === DOOR_REACH_SCALE_CALM);
     ok('and "very little" is NOT nothing — a hard 0 would make the doorway a visible cliff', DOOR_REACH_SCALE_CALM > 0);
     ok(
@@ -670,12 +678,13 @@ export function run(t) {
       )
     );
     ok(
-      'half wind lands between the endpoints',
-      doorReachScaleForWindSpeed(0.5) > DOOR_REACH_SCALE_CALM && doorReachScaleForWindSpeed(0.5) < DOOR_REACH_SCALE_GALE
+      'a gale (dial 0.25, 17.5 m/s) lands between the endpoints',
+      doorReachScaleForWindSpeed(0.25) > DOOR_REACH_SCALE_CALM &&
+        doorReachScaleForWindSpeed(0.25) < DOOR_REACH_SCALE_GALE
     );
     // Out-of-range and junk clamp rather than producing a negative or NaN
     // reach, which downstream would silently become "no penetration anywhere".
-    ok('over-range clamps to the gale end', doorReachScaleForWindSpeed(9) === DOOR_REACH_SCALE_GALE);
+    ok('over-range clamps to the top end', doorReachScaleForWindSpeed(9) === DOOR_REACH_SCALE_MAX);
     ok('negative clamps to the calm end', doorReachScaleForWindSpeed(-3) === DOOR_REACH_SCALE_CALM);
     ok('a non-finite speed reads as calm, never NaN', doorReachScaleForWindSpeed(undefined) === DOOR_REACH_SCALE_CALM);
   }

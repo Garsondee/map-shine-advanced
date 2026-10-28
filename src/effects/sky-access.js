@@ -134,6 +134,101 @@ export const CLOUD_FILL_GAIN = 0.6;
 export const TINT_STRENGTH = 0.35;
 
 /**
+ * THE GOLDEN TINT A POINT LIGHT'S OWN AMBIENT TONES CARRY (2026-10-27, author: fire
+ * light "bleaching the colour of light towards white" at golden hour).
+ *
+ * The ground's fill is multiplied by the sky's colour (`ambientMultiplierRgb`) but a
+ * point light's illumination is built from UNTINTED ambient tones and MAX-blended
+ * over that fill — so inside a fire's glow the neutral light beat the golden fill on
+ * green and blue and the golden hour washed to white. Tinting the light's tones by the
+ * same multiplier, where the light stands outdoors, keeps it in the same colour world.
+ * Only during the golden grade, so night and noon are untouched.
+ *
+ * @param {{multiplierRgb?: readonly number[], golden01?: number, outdoors01?: number}} a
+ * @returns {number[]|null} per-channel multiplier, or null when there is nothing to apply.
+ */
+export function lightGoldenTint({ multiplierRgb, golden01 = 0, outdoors01 = 1 } = {}) {
+  const g = Number.isFinite(golden01) ? golden01 : 0;
+  const o = Number.isFinite(outdoors01) ? Math.min(1, Math.max(0, outdoors01)) : 0;
+  if (!(g > 0) || !(o > 0)) return null;
+  if (!Array.isArray(multiplierRgb) || multiplierRgb.length !== 3 || !multiplierRgb.every(Number.isFinite)) return null;
+  return multiplierRgb.map((m) => 1 + (m - 1) * o);
+}
+
+/**
+ * THE GOLDEN-HOUR GRADE (2026-10-27, author: "the lighting at dusk and dawn
+ * golden hour is not very golden at all. Make it strong and exagerated").
+ *
+ * Why the existing key/fill model could not do this on its own: it ships at
+ * `realism01 = 0` (a no-op), and even at 1 it rotates the hue by only
+ * `TINT_STRENGTH` (0.35) — with the BLUE sky-dome fill (weighted 0.38 at the
+ * horizon) pulling the blend straight back toward neutral. Golden hour is the
+ * one time of day that wants the opposite: the key is the whole story.
+ *
+ * So this is a SECOND, independent multiplier, keyed off the sun's own
+ * `golden01` bell (`world/sun.js` — the same bell the long shadows read), NOT
+ * gated by `realism01`. It is exactly `[1,1,1]` whenever `golden01 = 0`
+ * (midday, night), so the noon parity check this module's header guards is
+ * untouched. Like everything here it is luminance-normalised: it moves HUE,
+ * and `darkness01` still owns how bright it is.
+ */
+export const GOLDEN_RGB = Object.freeze([1.0, 0.46, 0.14]);
+/** The deepest the golden grade rotates the outdoor light at the bell's peak. */
+export const GOLDEN_MAX_AMOUNT = 0.8;
+/**
+ * The whole golden grade, scaled (2026-10-28, author: *"golden hour lighting is just a bit too strong, could you make
+ * it about 20% less strong as an effect"*). A scale on the EFFECT rather than a lower default, so it reaches scenes
+ * already saved with a tuned Golden lever. Everything normalised by {@link GOLDEN_MAX_AMOUNT} — the low-sun dimming
+ * (`GOLDEN_LEVEL`) and the `golden01` other effects read — follows it down by the same 20%.
+ */
+export const GOLDEN_EFFECT_SCALE = 0.8;
+/** Cloud mutes golden light (a sunset behind overcast is dull) — but not to
+ * nothing: broken cloud is exactly when it lights up. 1 = cloud fully mutes. */
+export const GOLDEN_CLOUD_MUTE = 0.55;
+/**
+ * THE GOLDEN LIGHT IS DIMMER THAN NOON (2026-10-27, author: *"Golden hour in
+ * general is too bright"*). A luminance-normalised orange runs its red channel
+ * at ~1.65× noon to hold luminance, which on pale stone reads as a blown-out
+ * yellow-white, not a low sun. Real low sun is weaker as well as warmer, so at
+ * the bell's peak the outdoor light sits at this fraction of its noon level.
+ * The one deliberate exception to "the sky owns colour, darkness owns level":
+ * darkness keys off the SKY dome, which is still at full strength at +2°.
+ */
+export const GOLDEN_LEVEL = 0.72;
+
+/**
+ * THE AFTERGLOW → BLUE HOUR (2026-10-27, author: *"immediately after golden
+ * hour the colouration returns to normal long before it gets dark which looks
+ * very strange"*). Keyed off `world/sun.js#afterglow01`/`blueHour01`, it takes
+ * over as the golden bell lets go: a rose glow as the sun goes, deepening into
+ * the blue hour, held until the sky is genuinely dark — no white-light gap
+ * between sunset and night. Rides the same Golden lever (both are "how
+ * dramatic is the sun going down") and is muted by cloud the same way.
+ */
+export const AFTERGLOW_RGB = Object.freeze([1.0, 0.5, 0.5]);
+export const BLUE_HOUR_RGB = Object.freeze([0.42, 0.54, 1.0]);
+export const AFTERGLOW_MAX_AMOUNT = 0.75;
+
+/**
+ * THE MOON (2026-10-27, author: "at night I want the option to make the scene
+ * cool colours as if it were moonlight illuminating the scene through gaps in
+ * the clouds"). An OPTION — `moonlight01 = 0` ships it off.
+ *
+ * Two parts, and they are deliberately different mechanisms:
+ *   - a cool, luminance-normalised multiplier (the whole outdoor night goes
+ *     blue-silver instead of Foundry's flat violet), and
+ *   - an ADDITIVE cool light (`moonAddRgb`), which `environmental-light.js`
+ *     multiplies by the cloud field's own clear-sky visibility. A light that is
+ *     added, and then killed under cloud, is what makes shafts of moonlight
+ *     appear only in the gaps — a multiplier alone can only darken the gaps' neighbours.
+ */
+export const MOON_RGB = Object.freeze([0.5, 0.68, 1.0]);
+/** The additive moon level at full strength, gamma-space ambient units. */
+export const MOON_ADD_LEVEL = 0.2;
+/** How far the night multiplier rotates toward the moon's blue at full strength. */
+export const MOON_TINT_AMOUNT = 0.65;
+
+/**
  * Build the sky handle. Pure: same inputs → same frozen value.
  *
  * @param {object} [spec]
@@ -146,7 +241,14 @@ export const TINT_STRENGTH = 0.35;
  *   the full atmospheric model. See the header.
  * @returns {Readonly<object>} the handle.
  */
-export function createSkyHandle({ version = 0, sun = null, weather = null, realism01 = 0 } = {}) {
+export function createSkyHandle({
+  version = 0,
+  sun = null,
+  weather = null,
+  realism01 = 0,
+  goldenHour01 = 1,
+  moonlight01 = 0,
+} = {}) {
   const elevationDeg = Number.isFinite(sun?.elevationDeg) ? sun.elevationDeg : 90;
   const azimuthDeg = Number.isFinite(sun?.azimuthDeg) ? sun.azimuthDeg : 180;
   const dayFactor01 = clamp01(sun?.dayFactor01 ?? 1);
@@ -154,6 +256,11 @@ export function createSkyHandle({ version = 0, sun = null, weather = null, reali
   const twilight01 = clamp01(sun?.twilight01 ?? 0);
   const cloud01 = clamp01(weather?.cloudCover01 ?? 0);
   const realism = clamp01(realism01);
+  const golden = clamp01(sun?.golden01 ?? 0);
+  const afterglow = clamp01(sun?.afterglow01 ?? 0);
+  const blueHour = clamp01(sun?.blueHour01 ?? 0);
+  const goldenLever = clamp01(goldenHour01);
+  const moonLever = clamp01(moonlight01);
 
   // --- KEY: the sun disc ---------------------------------------------------
   // Warm at the horizon, neutral overhead — this is where "subtle recoloration
@@ -226,14 +333,51 @@ export function createSkyHandle({ version = 0, sun = null, weather = null, reali
   const tintAmount = TINT_STRENGTH * skyFactor01;
   const tinted = mixRgb([1, 1, 1], chromaOnly, tintAmount);
 
-  const ambientMultiplierRgb = mixRgb([1, 1, 1], tinted, realism);
+  const realismMultiplier = mixRgb([1, 1, 1], tinted, realism);
+
+  // --- THE GOLDEN GRADE: independent of `realism01` (see GOLDEN_RGB) ---------
+  const goldenAmount =
+    GOLDEN_MAX_AMOUNT * GOLDEN_EFFECT_SCALE * golden * goldenLever * (1 - GOLDEN_CLOUD_MUTE * cloud01);
+  const goldenMultiplier = mixRgb([1, 1, 1], unitLuminance(GOLDEN_RGB), goldenAmount);
+
+  // --- THE AFTERGLOW → BLUE HOUR (see AFTERGLOW_RGB) -------------------------
+  const afterglowAmount = AFTERGLOW_MAX_AMOUNT * afterglow * goldenLever * (1 - GOLDEN_CLOUD_MUTE * cloud01);
+  const afterglowHue = mixRgb(unitLuminance(AFTERGLOW_RGB), unitLuminance(BLUE_HOUR_RGB), blueHour);
+  const afterglowMultiplier = mixRgb([1, 1, 1], afterglowHue, afterglowAmount);
+
+  // --- THE MOON: only once the sky dome has gone dark ------------------------
+  // `skyFactor01` is the sky's own light, 0 at the end of astronomical
+  // twilight. (1 − it) is "how night it is", already eased by the sun model.
+  const moonAmount = moonLever * (1 - skyFactor01);
+  const moonMultiplier = mixRgb([1, 1, 1], unitLuminance(MOON_RGB), MOON_TINT_AMOUNT * moonAmount);
+  const moonAddRgb = scaleRgb(MOON_RGB, MOON_ADD_LEVEL * moonAmount);
+
+  // The three multipliers are each unit-luminance; their PRODUCT is not (the
+  // channels multiply unevenly), so it is renormalised — the sky still owns
+  // colour only, and `darkness01` still owns level.
+  const product = [
+    realismMultiplier[0] * goldenMultiplier[0] * moonMultiplier[0] * afterglowMultiplier[0],
+    realismMultiplier[1] * goldenMultiplier[1] * moonMultiplier[1] * afterglowMultiplier[1],
+    realismMultiplier[2] * goldenMultiplier[2] * moonMultiplier[2] * afterglowMultiplier[2],
+  ];
+  const productLuma = luminance(product);
+  // …then the ONE level term the sky owns: the low sun's own weakness.
+  const goldenLevel = 1 - (1 - GOLDEN_LEVEL) * (goldenAmount / GOLDEN_MAX_AMOUNT);
+  // Skipped when no extra grade is live, so the realism-0 handle stays
+  // EXACTLY [1,1,1] (a luminance of 1.0000000000000002 would otherwise nudge it).
+  const ambientMultiplierRgb =
+    goldenAmount === 0 && moonAmount === 0 && afterglowAmount === 0
+      ? realismMultiplier
+      : productLuma > 1e-6
+        ? scaleRgb(product, goldenLevel / productLuma)
+        : [1, 1, 1];
 
   return Object.freeze({
     version,
     /** The lever's own value, so a diagnostic can report parity vs. model. */
     realism01: realism,
     /** True when this handle is a mathematical no-op (parity mode). */
-    neutral: realism === 0,
+    neutral: realism === 0 && goldenAmount === 0 && moonAmount === 0 && afterglowAmount === 0,
 
     /** The sun disc: where it is, what colour, how strong. */
     key: Object.freeze({
@@ -283,6 +427,19 @@ export function createSkyHandle({ version = 0, sun = null, weather = null, reali
     ambientMultiplierRgb: Object.freeze(ambientMultiplierRgb),
 
     /**
+     * THE MOON's additive light (see MOON_RGB) — `[0,0,0]` unless the option is
+     * on AND it is night. NOT cloud-attenuated here: the cloud field lives in
+     * the shader, which multiplies this by the clear-sky visibility so the
+     * light appears only through gaps. `strength` is its scalar for diagnostics.
+     */
+    moonAddRgb: Object.freeze(moonAddRgb),
+    moon: Object.freeze({ colorRgb: MOON_RGB, strength: moonAmount }),
+    /** How golden the grade is right now, 0..1 (lever × bell × cloud). */
+    golden01: goldenAmount / GOLDEN_MAX_AMOUNT || 0,
+    /** How far into the afterglow/blue-hour grade the light is right now, 0..1. */
+    afterglow01: afterglowAmount / AFTERGLOW_MAX_AMOUNT || 0,
+
+    /**
      * The shadow character for this same sky — NOT recomputed here, delegated
      * to the module that already owns it and already has a consumer
      * (`effects/shadow-access.js`, vegetation). Two derivations of one sky is
@@ -320,6 +477,12 @@ export function saturation(rgb) {
 function mixRgb(a, b, t) {
   const s = clamp01(t);
   return [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s];
+}
+
+/** A hue scaled to unit Rec.709 luminance — colour with no level. */
+function unitLuminance(rgb) {
+  const l = luminance(rgb);
+  return l > 1e-6 ? scaleRgb(rgb, 1 / l) : [1, 1, 1];
 }
 
 /** @param {readonly number[]} rgb @param {number} k @returns {number[]} */

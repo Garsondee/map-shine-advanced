@@ -87,6 +87,22 @@ export function run(t) {
     ok('night still casts SOMETHING (moon/skyglow floor, never a hard cut to zero)', night.strength01 > 0);
   }
 
+  // --- GOLDEN HOUR: shadows must be at full strength with the sun low (2026-10-27) --
+  {
+    const noon = cast(NOON, CLEAR);
+    const goldenSun = { elevationDeg: 3, azimuthDeg: 270, dayFactor01: 0.45, golden01: 0.9 };
+    const golden = cast(goldenSun, CLEAR);
+    ok(
+      'a golden-hour shadow keeps full strength (was ~half, via the ambient dayFactor)',
+      golden.strength01 > noon.strength01 * 0.95
+    );
+    ok(
+      'a sun on the horizon (0°) is still faint',
+      cast({ elevationDeg: 0, azimuthDeg: 270, dayFactor01: 0.3 }, CLEAR).strength01 < noon.strength01 * 0.3
+    );
+    ok('the atmosphere reports the golden bell for the bake', shadowAtmosphere(goldenSun, CLEAR).golden01 === 0.9);
+  }
+
   // --- THE STATED ORDERING: night-under-cloud is the extreme --------------
   {
     const dayClear = cast(NOON, CLEAR);

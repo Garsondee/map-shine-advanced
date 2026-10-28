@@ -521,17 +521,17 @@ export function layerSmearVisibility({
   const occ = new Array(SHADOW_LAYER_COUNT).fill(0);
 
   for (let j = 0; j <= n; j++) {
-    const d = stationDistancePx(j, n, maxThrow);
-    const sx = x + resolved.dirX * d;
-    const sy = y + resolved.dirY * d;
-    // ONE sample serves every layer WITHOUT a depth radius. They live in
-    // different channels of the same texel, so splitting them costs no extra
-    // bandwidth — and evaluating each at its OWN normalised distance is what
-    // lets a single shared walk carry four different throw lengths.
-    const at = sampleLayers(sx, sy);
     for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
+      // EACH LAYER WALKS ITS OWN THROW (2026-10-28) — the TSL twin's header has
+      // the measured reason (a shared walk laid along the longest layer's throw
+      // gave a short wall layer a few distant, over-blurred stations, so the
+      // shadow read weak right against its caster at a grazing sun).
       const L = throws[i];
-      if (!(L > 0) || d > L) continue;
+      if (!(L > 0)) continue;
+      const d = stationDistancePx(j, n, L);
+      const sx = x + resolved.dirX * d;
+      const sy = y + resolved.dirY * d;
+      const at = sampleLayers(sx, sy);
       // THE SKY-REACH GRADIENT — see isotropicDepthTerm's own header. NOT a
       // term added alongside the march (a `max` against an already-saturated
       // ceiling is a no-op — measured, not assumed: the first version of this

@@ -47,6 +47,9 @@
  * @module effects/candle-flame-render
  */
 
+import { buildCandleWindState, scaleCandleHistory } from './candle-wind-state.js';
+import { getSafeProfile } from '../core/safe-mode.js';
+import { markCompileDeferrable } from '../core/compile-policy.js';
 import { createWindHandle } from '../world/index.js';
 import { buildDepthHeightGateNode } from './lighting/point-light-illumination.js';
 import { computeCandleFlameArrays, FLAME_SHAPE, srgbHexToLinear } from './candle-flame-geometry.js';
@@ -332,10 +335,12 @@ const FLAME_WIND_MAX = 0.34;
  * approaches these thresholds, and its atmospheric flicker comes from
  * `candleLife`'s own noise regardless.
  */
-const WIND_GUTTER_MAG_THRESHOLD = 0.14;
-const WIND_GUTTER_MAG_RANGE = 0.09;
-const WIND_SNUFF_MAG_LOW = 0.27;
-const WIND_SNUFF_MAG_HIGH = 0.4;
+// ⭐ 2026-10-27 — THESE FOUR NUMBERS MOVED, AND SNUFF IS NO LONGER STATELESS.
+// The gutter/snuff thresholds and the new memory (out for a while, then a slow
+// regrowth a later gust can catch) live in `effects/candle-wind-state.js`, which
+// the flame AND its cast light (`candle-flicker.js`) both build from the same
+// field at the same wick. The snuff speeds above are unchanged; the gutter now
+// starts gentler and runs longer. Read that module's header.
 
 /** FLAME ANIMATION (2026-07-20, tiered — author: "more chaotic… bend, curl,
  * flicker, gutter, elongate/shorten, evolve; near candles must NOT react the
@@ -560,13 +565,36 @@ export function buildCandleFlameMaterial({
   // sample feeds both, so they can never disagree about "how windy is it
   // right now" the way flame/light used to disagree before Wind.md Tier 0.
   let gust = null;
-  let windMag = float(0);
-  if (quality >= 1 && uGlobalTimeMs) {
-    gust = windHandle.node(THREE.TSL, {
+  // THE WIND STATE (2026-10-27, `effects/candle-wind-state.js`) — gutter, the
+  // struggling flicker, and `alive01`: out for a while after a snuffing gust,
+  // then a slow regrowth. Constant across a candle, so it is built in the
+  // VERTEX stage (`toVarying`) — its look-back samples the field ~17 times, which
+  // per fragment would be ruinous and per vertex is four times per candle.
+  let windState = null;
+  if (quality >= 1 && uGlobalTimeMs && getSafeProfile().lightWind) {
+    gust = windHandle.strengthNode(THREE.TSL, {
       centerXY,
       time: uGlobalTimeMs,
+      // READ the wind field baked this frame instead of compiling its noise into the flame (epic mmp-fpu).
+      baked: 'now',
     });
-    windMag = length(gust).mul(uWindResponse);
+    const state = buildCandleWindState(THREE.TSL, {
+      magNow: length(gust).mul(uWindResponse),
+      magAt: (
+        (sampleAt) => (t) =>
+          sampleAt(t).mul(uWindResponse)
+      )(windHandle.gustMagnitudeAt(THREE.TSL, { centerXY })),
+      // THE RECORDED PAST (epic mmp-fpu): when the handle records one, the memory is 14 texture fetches
+      // instead of 14 evaluations of the gust envelope; `magAt` above is the fallback for a handle that does not.
+      history: scaleCandleHistory(windHandle.gustHistory?.(THREE.TSL, { centerXY }), uWindResponse),
+      timeMs: uGlobalTimeMs,
+      seed,
+    });
+    windState = {
+      alive01: state.alive01.toVarying('vCandleAlive'),
+      gutter01: state.gutter01.toVarying('vCandleGutter'),
+      struggle: state.struggle.toVarying('vCandleStruggle'),
+    };
   }
 
   // LIFE — a per-candle [0,1] envelope. Tier ≥1: chaotic multi-octave with COLD
@@ -587,12 +615,7 @@ export function buildCandleFlameMaterial({
       float(1)
     );
     const noiseCold = smoothstep(float(0.5), float(0.88), nz(FLAME_GUTTER_RATE, float(31)));
-    const windCold = clamp(
-      windMag.sub(float(WIND_GUTTER_MAG_THRESHOLD)).div(float(WIND_GUTTER_MAG_RANGE)),
-      float(0),
-      float(1)
-    );
-    const cold = max(noiseCold, windCold);
+    const cold = windState ? max(noiseCold, windState.gutter01) : noiseCold;
     life = clamp(base.mul(float(1).sub(cold.mul(float(FLAME_GUTTER_DEPTH)))), float(0), float(1));
   } else {
     life = clamp(float(0.5).add(nz(FLAME_LIFE_MID, float(0)).mul(float(0.22))), float(0), float(1));
@@ -608,7 +631,12 @@ export function buildCandleFlameMaterial({
           float(0.3)
         )
       : float(1);
-  const baseR = float(FLAME_BASE_RADIUS).mul(sizeScale);
+  // A snuffed flame is gone and a regrowing one starts as a tiny bead: width
+  // and length both follow `alive01` (2026-10-27).
+  const aliveShape = windState ? windState.alive01 : float(1);
+  const baseR = float(FLAME_BASE_RADIUS)
+    .mul(sizeScale)
+    .mul(mix(float(0.25), float(1), aliveShape));
 
   // THE FLAME AS A 3D OBJECT, seen from straight above. It has a TRUE length (the
   // life envelope pulses it) and a tilt away from vertical; what the top-down camera
@@ -622,7 +650,9 @@ export function buildCandleFlameMaterial({
   //   still air, as a real one does) with a gently breathing tilt.
   //   WIND — adds a horizontal push (the lean, in projected units) on top of the
   //   rest pose: the flame tilts further and swings downwind.
-  const trueLen = float(FLAME_REST_LEN_BASE).add(life.mul(float(FLAME_REST_LEN_LIFE)));
+  const trueLen = float(FLAME_REST_LEN_BASE)
+    .add(life.mul(float(FLAME_REST_LEN_LIFE)))
+    .mul(mix(float(0.3), float(1), aliveShape));
   let azimuth = seed.mul(float(2 * Math.PI));
   let restTilt = float(FLAME_REST_TILT);
   if (quality >= 1) {
@@ -824,9 +854,12 @@ export function buildCandleFlameMaterial({
   // inert, no extra always-zero node, matching its own "no wind, no gutter,
   // cheapest" promise (tsl/no-uniform-gates' own spirit: a tier that pays
   // for wind math it never uses is not actually cheaper).
-  if (gust) {
-    const snuff = smoothstep(float(WIND_SNUFF_MAG_LOW), float(WIND_SNUFF_MAG_HIGH), windMag);
-    vis = vis.mul(float(1).sub(snuff));
+  //
+  // ⭐ 2026-10-27: NOT STATELESS ANY MORE — `alive01` holds the flame out after
+  // a snuffing gust and lets it creep back (`candle-wind-state.js`), and the
+  // struggle dips it raggedly while it fights the draught.
+  if (windState) {
+    vis = vis.mul(windState.alive01).mul(windState.struggle);
   }
 
   // ============================================================================
@@ -878,6 +911,8 @@ export function buildCandleFlameMaterial({
     .mul(clamp(vis.mul(float(2)), float(0), float(1)));
 
   const material = new THREE.NodeMaterial();
+
+  markCompileDeferrable(material, 'candle flame');
   material.transparent = true;
   material.depthTest = false;
   material.depthWrite = false;

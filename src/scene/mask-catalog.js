@@ -38,7 +38,8 @@
  *
  * V2 suffixes deliberately NOT declared yet (Stage 6 rethink rule,
  * keyhole-stage6-effects-approach: audit + rethink per effect, never a
- * mechanical port): _Roughness/_Normal/_Dust.
+ * mechanical port): _Roughness/_Normal. (`_Dust` came off this list on
+ * 2026-10-27 for the Dust effect, `effects/critters/dust.js`.)
  * The wall still reserves their literals — the day an effect needs one, its
  * declaration lands HERE (one line) or the build fails, which is the funnel
  * working as designed. `_Fluid` came off that list on 2026-07-26, `_Prism`
@@ -249,6 +250,23 @@ export const MASK_KINDS = Object.freeze([
       'at dusk (and dawn, if enabled) and drift over it, glowing, then settle again as the sky darkens or ' +
       'the rain comes. Each separate painted blob is its own colony. The paint never shows — only the ' +
       'fireflies do, and only while the sun is in their twilight window. Absent = no fireflies anywhere.',
+  },
+  {
+    id: 'dust',
+    suffixes: ['_Dust'],
+    channels: 'gray',
+    packChannel: null,
+    absentValue: 0,
+    // The same CPU-consumer case as `fireflies` just above: the critter zone-field builder reads it, and the
+    // mote agents drift inside the field it makes. V2's `_Dust` (DustEffectV2) was the same idea, so a
+    // V2-authored map folder is read unchanged.
+    rasterize: true,
+    meaning:
+      'white = air with dust in it: a library, a barn, a dusty attic, a ruined hall. The motes fill this ' +
+      'region at every height up to the effect’s own air depth, drifting on the wind field, and SHOW only where ' +
+      'the `_Window` light falls on them (faintly by the room’s own light, if the effect says so). Paint the ' +
+      'whole room, not just the sunbeam: the beam moves with the sun and the dust should be there to meet it. ' +
+      'The paint never shows. Absent = no dust anywhere.',
   },
   {
     id: 'ash',

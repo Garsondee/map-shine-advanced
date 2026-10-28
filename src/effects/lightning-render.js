@@ -61,6 +61,7 @@
 import { createWindHandle } from '../world/index.js';
 import { simplexFloat } from './lighting/animations/tsl-noise-toolkit.js';
 import { buildDepthHeightGateNode } from './lighting/point-light-illumination.js';
+import { markCompileDeferrable } from '../core/compile-policy.js';
 
 /** Bake-less fallback handle — organic gust/flutter noise only, no baked
  * openness/wall-avoidance field. Mirrors candle-flame-render.js's own
@@ -288,6 +289,8 @@ export function buildLightningMaterial({
   const vExpectedDepth = strandExpectedDepth.toVarying('vLightningExpectedDepth');
 
   const material = new THREE.NodeMaterial();
+
+  markCompileDeferrable(material, 'lightning');
   material.transparent = true;
   material.depthWrite = false;
   material.depthTest = false;
@@ -331,7 +334,7 @@ export function buildLightningMaterial({
     // return stroke connects and stronger toward the tip (V2's own
     // `windT = max(0, uStrikeAge01)` × `uvOffset` timing), off by default
     // (`uWindDriftStrength` defaults to 0, V2's own default).
-    const gust = windHandle.node(THREE.TSL, { centerXY: cur.xy, time: uGlobalTimeMs });
+    const gust = windHandle.strengthNode(THREE.TSL, { centerXY: cur.xy, time: uGlobalTimeMs, baked: 'now' });
     const windT = max(float(0), t).mul(uvOffset);
     world = world.add(gust.mul(uWindDriftStrength).mul(windT).mul(float(40)));
 

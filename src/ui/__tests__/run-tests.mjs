@@ -13,6 +13,7 @@ import { run as runAstrolabe } from './astrolabe-geometry.test.mjs';
 import { run as runLoadProgress } from './load-progress.test.mjs';
 import { run as runPerfProgressOverlay } from './perf-progress-overlay.test.mjs';
 import { run as runFloorTransition } from './floor-transition.test.mjs';
+import { run as runSceneTransition } from './scene-transition.test.mjs';
 import { run as runTokens } from './tokens.test.mjs';
 import { run as runAstrolabeDial } from './astrolabe-dial.test.mjs';
 import { run as runPainterDepartment } from './painter-department.test.mjs';
@@ -20,6 +21,7 @@ import { run as runStudioStyle } from './studio-style.test.mjs';
 import { run as runRoomStyle } from './room-style.test.mjs';
 import { run as runExtensionSections } from './extension-sections.test.mjs';
 import { run as runPaintMode } from './paint-mode.test.mjs';
+import { run as runEffectCatalog } from './effect-catalog.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -59,6 +61,7 @@ const suites = [
   ['load-progress', runLoadProgress],
   ['perf-progress-overlay', runPerfProgressOverlay],
   ['floor-transition', runFloorTransition],
+  ['scene-transition', runSceneTransition],
   ['tokens', runTokens],
   ['astrolabe-dial', runAstrolabeDial],
   ['painter-department', runPainterDepartment],
@@ -70,6 +73,7 @@ const suites = [
   // no-DOM path, so ordering it after that suite costs nothing and removes
   // the only way a leak could ever be mistaken for a passing assertion.
   ['paint-mode', runPaintMode],
+  ['effect-catalog', runEffectCatalog],
 ];
 
 for (const [name, fn] of suites) {

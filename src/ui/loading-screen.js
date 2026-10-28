@@ -103,6 +103,40 @@ const MAX_BLOCKERS_SHOWN = 4;
  */
 const now = perfNowMs;
 
+const LEARNED_PHASE_KEY = 'msa.loadPhaseMs';
+
+/** Per-phase durations the last completed load measured on this machine, or null. */
+function readLearnedPhaseMs() {
+  try {
+    const parsed = JSON.parse(globalThis.localStorage?.getItem(LEARNED_PHASE_KEY) ?? 'null');
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null; // storage can be blocked or empty — the defaults then apply
+  }
+}
+
+/**
+ * Remember how long each phase took, so the next load's bar is weighted by real cost here.
+ * Blended with the previous reading so one odd load does not swing the bar.
+ * @param {Array<{phase:string, durMs:number|null}>} phases
+ */
+function saveLearnedPhaseMs(phases) {
+  try {
+    const prev = readLearnedPhaseMs() ?? {};
+    const next = { ...prev };
+    for (const p of phases ?? []) {
+      if (!Number.isFinite(p?.durMs) || p.durMs <= 0) continue;
+      const measured = Math.max(200, p.durMs);
+      next[p.phase] = Number.isFinite(prev[p.phase])
+        ? Math.round((prev[p.phase] + measured) / 2)
+        : Math.round(measured);
+    }
+    globalThis.localStorage?.setItem(LEARNED_PHASE_KEY, JSON.stringify(next));
+  } catch (_) {
+    // A convenience only — never let it touch a load.
+  }
+}
+
 /** The scene whose load was last STARTED — the floor-switch guard's memory. */
 let lastStartedSceneId = null;
 /** Set by the "Show me anyway" button. Cleared when a new load begins. */
@@ -322,19 +356,23 @@ function paint(nowMs) {
   const d = describeLoad(state, nowMs);
   els.title.textContent = d.title;
   els.scene.textContent = state.sceneName ?? '';
-  els.detail.textContent = d.detail ?? '';
+  // "Step 4 of 6" so a long step reads as one stage of a known sequence, not a hang.
+  const stepLabel = d.stepIndex ? `Step ${d.stepIndex} of ${d.stepCount}` : '';
+  els.detail.textContent = [stepLabel, d.detail].filter(Boolean).join(' · ');
   els.note.textContent = d.stallNote ?? '';
   els.blockers.style.whiteSpace = 'pre-line';
   els.blockers.textContent = formatBlockerLines(d.blockers);
   els.elapsed.textContent = `${(d.elapsedMs / 1000).toFixed(1)}s`;
   // Appears only once the load is genuinely slow — see SHOW_SKIP_AFTER_MS.
   if (!d.complete && !d.error && d.elapsedMs >= SHOW_SKIP_AFTER_MS) els.skip.style.display = 'block';
-  // Hidden, not zeroed, when there is nothing honest to show.
-  if (d.fraction === null) {
+  // The bar is the WHOLE load (an estimate — weights are earlier loads' measured phase
+  // times; see overallProgress). It only goes hidden when there is no load to describe.
+  if (d.overall === null) {
     els.barOuter.style.visibility = 'hidden';
   } else {
     els.barOuter.style.visibility = 'visible';
-    els.barInner.style.width = `${(d.fraction * 100).toFixed(1)}%`;
+    els.barInner.style.width = `${(d.overall * 100).toFixed(1)}%`;
+    els.barOuter.title = 'Estimated progress of the whole load';
   }
 }
 
@@ -406,7 +444,12 @@ export function beginSceneLoad({ sceneId, sceneName }) {
   // would make the SCENE phase appear to start a fraction of a millisecond after
   // the load it opens, which is a small lie but a lie with a receipt in the export.
   const startNow = now();
-  state = createLoadState({ sceneId, sceneName: sceneName ?? '', nowMs: startNow });
+  state = createLoadState({
+    sceneId,
+    sceneName: sceneName ?? '',
+    nowMs: startNow,
+    phaseExpectedMs: readLearnedPhaseMs(),
+  });
   beginPhase(state, LOAD_PHASES.SCENE, { nowMs: startNow });
   els = buildOverlay();
   watchVisibility();
@@ -507,7 +550,7 @@ export function reportSceneLoadBlockers(blockers, detail = null, structuredBlock
  * @param {{error?:string|null, silent?:boolean}} [args]
  * @returns {object|null} the summary, or null if nothing was loading.
  */
-export function endSceneLoad({ error = null, silent = false, forced = false } = {}) {
+export function endSceneLoad({ error = null, silent = false, forced = false, fadeMs = 0 } = {}) {
   unwatchVisibility();
   if (rafHandle !== null) {
     cancelAnimationFrame(rafHandle);
@@ -552,10 +595,24 @@ export function endSceneLoad({ error = null, silent = false, forced = false } = 
       error: state.error,
     };
     if (!silent) lastSummary = summary;
+    if (!silent && !error && !forced) saveLearnedPhaseMs(summary.phases);
   }
   state = null;
   try {
-    document.getElementById(OVERLAY_ID)?.remove();
+    const el = document.getElementById(OVERLAY_ID);
+    if (el && fadeMs > 0) {
+      // PART OF THE TRANSITION (ui/scene-transition.js, 2026-10-26): the curtain fades into
+      // whatever is under it (the transition's veil, or the scene itself). Renamed at once, so a
+      // new load starting during the fade builds its own curtain and this one cannot remove it.
+      el.id = `${OVERLAY_ID}-leaving`;
+      el.style.pointerEvents = 'none';
+      el.style.transition = `opacity ${fadeMs}ms cubic-bezier(0.45, 0, 0.55, 1)`;
+      void el.offsetWidth;
+      el.style.opacity = '0';
+      setTimeout(() => el.remove(), fadeMs + 50);
+    } else {
+      el?.remove();
+    }
   } catch (_) {
     // The curtain must never be what breaks a load.
   }

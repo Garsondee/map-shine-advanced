@@ -54,12 +54,17 @@ const clamp01 = (v) => (Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1);
  * @param {number} args.viewedFloorIndex - `view.floorIndex`, the floor
  *   currently being viewed.
  * @param {boolean} [args.present=true] - `buf:scene.depth`'s A channel > 0.5.
- * @returns {number} an integer >= 0.
+ * @param {boolean} [args.fractional=false] - the viewed floor may be a glide position between two floors
+ *   (Parallax's floor change): then it is NOT rounded, and a floor just below the camera reads as a fraction
+ *   of a floor down — which is what lets the blur arrive continuously instead of snapping on the flip. The
+ *   shader has always worked in floats; only this reference rounded.
+ * @returns {number} an integer >= 0 (a float >= 0 when `fractional`).
  */
-export function computeDofFloorsBelow({ floorIndexHere, viewedFloorIndex, present = true }) {
+export function computeDofFloorsBelow({ floorIndexHere, viewedFloorIndex, present = true, fractional = false }) {
   if (present === false) return 0;
   const here = Number.isFinite(floorIndexHere) ? Math.round(floorIndexHere) : 0;
-  const viewed = Number.isFinite(viewedFloorIndex) ? Math.round(viewedFloorIndex) : 0;
+  const rawViewed = Number.isFinite(viewedFloorIndex) ? viewedFloorIndex : 0;
+  const viewed = fractional ? rawViewed : Math.round(rawViewed);
   return Math.max(0, viewed - here);
 }
 
@@ -148,8 +153,13 @@ export function computeDofMipSample({ floorsBelow, strength, blurPerFloor, maxBl
  * @param {number} args.floorsBelow
  * @param {number} args.lod - {@link computeDofMipSample}'s `lod`, the same
  *   value driving which mip(s) get sampled.
- * @returns {number} 0 or 1.
+ * ONE EXCEPTION TO "0 OR 1": a floor change glides the viewed floor between two floors (Parallax), so
+ * `floorsBelow` can be a fraction. Alpha is then `min(1, floorsBelow)` — the lower floor's blur fades in
+ * over the glide instead of switching on at the first epsilon. At rest `floorsBelow` is a whole number
+ * ≥ 1, so alpha is exactly 1 and every guarantee above is unchanged.
+ *
+ * @returns {number} 0 or 1 at rest; between 0 and 1 only mid-glide.
  */
 export function computeDofAlpha({ floorsBelow, lod }) {
-  return floorsBelow > 0 && lod > 0 ? 1 : 0;
+  return floorsBelow > 0 && lod > 0 ? Math.min(1, floorsBelow) : 0;
 }

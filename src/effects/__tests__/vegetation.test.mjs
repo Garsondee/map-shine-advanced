@@ -70,16 +70,25 @@ export function run(t) {
   // per-kind physical facts. The broader rule still holds for everything
   // else — this assertion now checks "every OTHER param", not "every param".
   const KNOWN_PER_KIND_PARAMS = new Set(['treeHeightFt', 'bushHeightFt']);
+  // ⚠️ THIRD NAMED EXCEPTION (2026-10-28): how much light a canopy blocks is
+  // the same kind of physical fact as its height — foliage density. The
+  // author asked for the two kinds apart: *"bushes only occlude 50% and trees
+  // occlude 75% of the light"* (`lighting/canopy-light.js`). Live-settable,
+  // unlike the heights, so kept in its own set.
+  const KNOWN_PER_KIND_LIGHT_PARAMS = new Set(['treeLightBlock', 'bushLightBlock']);
   ok(
-    'both kinds share ONE param set, except the two NAMED per-kind height params',
+    'both kinds share ONE param set, except the NAMED per-kind height and light-block params',
     Object.keys(VEGETATION_PARAMS).every(
-      (k) => KNOWN_PER_KIND_PARAMS.has(k) || (!k.startsWith('tree') && !k.startsWith('bush'))
+      (k) =>
+        KNOWN_PER_KIND_PARAMS.has(k) ||
+        KNOWN_PER_KIND_LIGHT_PARAMS.has(k) ||
+        (!k.startsWith('tree') && !k.startsWith('bush'))
     )
   );
   ok(
-    'the per-kind exception is EXACTLY these two keys, never silently grown',
+    'the per-kind exception is EXACTLY these four keys, never silently grown',
     Object.keys(VEGETATION_PARAMS).filter((k) => k.startsWith('tree') || k.startsWith('bush')).length ===
-      KNOWN_PER_KIND_PARAMS.size
+      KNOWN_PER_KIND_PARAMS.size + KNOWN_PER_KIND_LIGHT_PARAMS.size
   );
   ok(
     "tree/bush height default to the author's own worked example — tall enough to clear a single story, " +
@@ -228,7 +237,7 @@ export function run(t) {
       // full account: #499 shrank the wind field's own magnitude ~3x, and
       // #505 removed the seam/sampling tears that had been silently capping
       // how far several of these dials could usefully go).
-      resolved.params.windResponse === 1 && resolved.params.swayAmount === 12 && resolved.params.intensity === 1.0
+      resolved.params.windResponse === 0.5 && resolved.params.swayAmount === 12 && resolved.params.intensity === 1.0
     );
     throws(
       'a duplicate vegetation registration throws',

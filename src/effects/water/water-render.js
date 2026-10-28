@@ -319,6 +319,7 @@ import { WATER_DEBUG_CHANNELS } from './water.js';
 // copy is how two effects end up disagreeing about what a hex string means.
 import { hexToRgb01 } from '../candle-flame-geometry.js';
 import { hsb2rgb } from '../lighting/animations/tsl-noise-toolkit.js';
+import { markCompileDeferrable } from '../../core/compile-policy.js';
 
 /**
  * Tier 0's flat body colour. A muted blue-green with a deliberate green bias:
@@ -2756,6 +2757,7 @@ export function buildWaterSurfaceMaterial({
     refractResolveOut = vec4(refractOffsetWorld, fringeSuppress, refractAlpha);
     refractResolveAlpha = refractAlpha;
     refractMaterial = new THREE.NodeMaterial();
+    markCompileDeferrable(refractMaterial, 'water refract'); // see absorbMaterial
     refractMaterial.colorNode = vec4(refractColor, refractResolved ? resolveOutputNode.w : refractAlpha);
     if (refractResolved) refractTexNodeForResolve = refractResolved;
     configureShared(refractMaterial);
@@ -2885,6 +2887,8 @@ export function buildWaterSurfaceMaterial({
   const foamLift = float(1).add(totalFoam.mul(shoreDry).mul(uShoreFoamDryLift));
 
   const absorbMaterial = new THREE.NodeMaterial();
+  // The water passes are redrawn every frame, so it may compile on a worker thread (core/compile-policy.js). At tiers 4-5 one of these is 130-160k chars of WGSL and took 10-12 s to compile cold on the dev machine — long enough, compiled on the GPU process's main thread, to trip Chrome's 15 s watchdog on a slower GPU.
+  markCompileDeferrable(absorbMaterial, 'water absorb');
   // CAUSTICS BRIGHTEN THE BED, MULTIPLICATIVELY — the correct mesh for them:
   // a caustic does not add new light to the scene, it REDISTRIBUTES the light
   // already reaching the bed, which is exactly what multiplying the bed's own
@@ -2934,6 +2938,7 @@ export function buildWaterSurfaceMaterial({
   // `src + dst`, premultiplied — the light the volume sends back. Zero outside
   // the water by construction (bedTransmit is 1 there), so it needs no gate.
   const inscatterMaterial = new THREE.NodeMaterial();
+  markCompileDeferrable(inscatterMaterial, 'water inscatter'); // see absorbMaterial
   // ⚠️ A/B TEST (round 7) — SHARED SHAPE, SHARED SURFACE. Reuses
   // `causticExcess` (already fully composed above: gain-scaled, shadow-
   // suppressed) as a specular modulation source — see
@@ -3027,6 +3032,7 @@ export function buildWaterSurfaceMaterial({
   const resolveTexNodes = { output: null, absorb: null, refract: refractTexNodeForResolve };
   if (sharedResolve) {
     resolveMaterial = new THREE.NodeMaterial();
+    markCompileDeferrable(resolveMaterial, 'water resolve'); // see absorbMaterial
     // ⚠️ THE LAYOUT IS DICTATED BY TWO THINGS three DOES (both verified on the
     // bench, both in vendor/three):
     //  • `colorNode` (attachment 0, `output`) is clamped `max(0)` on the way

@@ -18,7 +18,13 @@
  * filtering (active scene + this module's own `wind` flag key only), and
  * that a wind write never touches this same scene's own `sky` flag.
  */
-import { readSceneWind, writeSceneWind, watchSceneWind } from '../wind-persistence.js';
+import {
+  readSceneWind,
+  writeSceneWind,
+  watchSceneWind,
+  normalizeStoredWind,
+  WIND_DIAL_SCALE,
+} from '../wind-persistence.js';
 
 /**
  * A tiny scene double: `getFlag`/`setFlag` over an in-memory store keyed
@@ -98,6 +104,21 @@ async function withGlobals({ canvasStub, hooksStub } = {}, fn) {
 }
 
 export async function run(t) {
+  // ── ⭐ THE DIAL MIGRATION (2026-10-27): a flag saved on the old Beaufort
+  // curve keeps its REAL speed on the new linear-to-70 dial ──
+  {
+    const legacy = normalizeStoredWind({ directionDeg: 90, speed01: 0.5 });
+    t.ok(
+      'a legacy flag (no scale) is converted: old 50% (12.3 m/s) → ~0.176',
+      Math.abs(legacy.speed01 - 12.287 / 70) < 1e-3
+    );
+    t.ok('…and comes back stamped with the current scale', legacy.scale === WIND_DIAL_SCALE);
+    t.ok('direction is untouched', legacy.directionDeg === 90);
+    const current = normalizeStoredWind({ directionDeg: 10, speed01: 0.5, scale: WIND_DIAL_SCALE });
+    t.ok('a current-scale flag is read as-is', current.speed01 === 0.5);
+    t.ok('nothing stored stays null', normalizeStoredWind(null) === null && normalizeStoredWind(undefined) === null);
+  }
+
   const { ok } = t;
 
   // ---- no active scene: reports failure, never throws --------------------

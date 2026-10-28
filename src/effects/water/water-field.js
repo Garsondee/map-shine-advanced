@@ -889,7 +889,7 @@ export function buildWaterSurfaceField({
   causticsVisible = null,
   // THE WIND'S STRENGTH, PRE-SAMPLED (2026-10-25, Water-Performance-Audit W-08)
   // — `{ texture, uRect }`: a small world-space texture whose R is
-  // `length(windHandle.node(...))`, re-rendered once per frame by the viewer
+  // `length(windHandle.strengthNode(...))`, re-rendered once per frame by the viewer
   // over `uRect` (vec4 minX, minY, maxX, maxY). Water only ever needs that
   // LENGTH, and the wind field's finest structure (its smallest turbulence
   // eddy) is ~260 world px, so one bilinear tap of a ~20-30 px grid stands in
@@ -1216,7 +1216,7 @@ export function buildWaterSurfaceField({
   //
   // ⚠️ WHY THIS DOES NOT ADD ITS OWN DOMAIN DRIFT — the SAME trap this
   // file's own header names for flow direction applies here just as hard.
-  // `windHandle.node()` returns a vector that varies PER PIXEL (openness
+  // `windHandle.strengthNode()` returns a vector that varies PER PIXEL (openness
   // gating, wall deflection near shelter, organic turbulence) — exactly the
   // "smoothly varying across space" shape that turns into a fan of hard
   // rays the moment it is multiplied by unbounded time (`drift`'s own
@@ -1258,7 +1258,7 @@ export function buildWaterSurfaceField({
       );
       windStrength = TSL.texture(windStrengthField.texture, windUv).r;
     } else {
-      const windVec = windHandle.node(TSL, { centerXY: worldXY, time: timeMsNode });
+      const windVec = windHandle.strengthNode(TSL, { centerXY: worldXY, time: timeMsNode });
       windStrength = length(windVec);
     }
     // Shelter-aware for free: `windStrength` is already near zero in a

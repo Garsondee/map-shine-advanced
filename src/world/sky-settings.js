@@ -125,6 +125,13 @@ export const DEFAULT_SKY = Object.freeze({
   /** 0 = exact Foundry parity (the sky light is a no-op), 1 = full model.
    * See effects/sky-access.js for why the default cannot be anything else. */
   realism01: 0,
+  /** GOLDEN-HOUR light, 0..1 — how strongly dawn/dusk tints the outdoor light
+   * orange (and, in the sun shadows, how long/dark they run). Independent of
+   * `realism01`; 1 = the exaggerated look, 0 = off. effects/sky-access.js. */
+  goldenHour01: 1,
+  /** MOONLIGHT, 0..1 — an option: at night, cool silver-blue light that shows
+   * only through gaps in the clouds. 0 (default) = Foundry's own night. */
+  moonlight01: 0,
   /** THE ENVIRONMENTAL GRADE strength, 0..1 (the automatic ToD/weather look +
    * cloud desaturation). 0 = neutral. docs/planning/Grade.md.
    *
@@ -186,6 +193,8 @@ export function normalizeSky(raw) {
       ? r.precipKindAuthored
       : DEFAULT_SKY.precipKindAuthored,
     realism01: clampRange(r.realism01, 0, 1, DEFAULT_SKY.realism01),
+    goldenHour01: clampRange(r.goldenHour01, 0, 1, DEFAULT_SKY.goldenHour01),
+    moonlight01: clampRange(r.moonlight01, 0, 1, DEFAULT_SKY.moonlight01),
     gradeEnvStrength: clampRange(r.gradeEnvStrength, 0, 1, DEFAULT_SKY.gradeEnvStrength),
     latitudeDeg: clampRange(r.latitudeDeg, -90, 90, DEFAULT_SKY.latitudeDeg),
   });

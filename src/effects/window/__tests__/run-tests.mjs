@@ -13,6 +13,8 @@
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runWindowCookie } from './window-cookie.test.mjs';
+import { run as runWindowWeather } from './window-weather.test.mjs';
+import { run as runWindowGrade } from './window-grade.test.mjs';
 import { run as runWindowGlass } from './window-glass.test.mjs';
 import { run as runWindow } from './window.test.mjs';
 import { run as runWindowRender } from './window-render.test.mjs';
@@ -22,6 +24,7 @@ import { run as runWindowSeams } from './window-seams.test.mjs';
 import { run as runWindowRainField } from './window-rain-field.test.mjs';
 import { run as runWindowRain } from './window-rain.test.mjs';
 import { run as runWindowRainSubsystem } from './window-rain-subsystem.test.mjs';
+import { run as runWindowRoomLight } from './window-room-light.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -52,6 +55,8 @@ const t = {
 
 const suites = [
   ['window-cookie', runWindowCookie],
+  ['window-weather', runWindowWeather],
+  ['window-grade', runWindowGrade],
   ['window-glass', runWindowGlass],
   ['window', runWindow],
   ['window-render', runWindowRender],
@@ -61,6 +66,7 @@ const suites = [
   ['window-rain-field', runWindowRainField],
   ['window-rain', runWindowRain],
   ['window-rain-subsystem', runWindowRainSubsystem],
+  ['window-room-light', runWindowRoomLight],
 ];
 // AWAITED, not called-and-dropped — the subsystem suite lets a mask load
 // settle before asserting on visibility, same reasoning as specular's own

@@ -76,6 +76,7 @@ import {
   WINDOW_DEFAULT_TIER,
 } from './window-render.js';
 import { computeSeedOffset } from './window-glass.js';
+import { windowDaylightTint, windowTargetLight } from './window-weather.js';
 import { WINDOW_DEFAULT_AMBIENT_CEILING } from './window-cookie.js';
 import { buildTileMotionPositionNode, buildTileMotionMaskUvNode } from '../tile-motion-nodes.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
@@ -89,10 +90,6 @@ const log = createLogger('WindowTileSurface');
  * standalone copy of comparable small helpers).
  * @param {readonly number[]} a @param {readonly number[]} b @param {number} t
  * @returns {number[]} */
-function lerpRgb(a, b, t) {
-  const s = Math.min(1, Math.max(0, t));
-  return [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s];
-}
 
 /** How many entries for items NOT on the drawn floor stay loaded (hidden) before
  * the oldest are disposed — loading audit P-05. */
@@ -159,12 +156,14 @@ function worldSpanOf(corners) {
  * @param {*} [args.cloudOvercastMinStrengthNode] - see `window-render.js`'s
  *   header. Passed straight through.
  * @param {*} [args.cloudNoonBoostNode] - see `window-render.js`'s header.
+ * @param {*} [args.weatherGainNode] - see `window-weather.js` (sun breaks + rain-wave darkness).
  *   Passed straight through.
  * @param {() => object} [args.getWindowRenderState] - the SAME effect-wide
  *   look/enable seam the floor subsystem reads; Window has one param set for
  *   the whole effect, not one per surface.
  * @param {() => object|null} [args.getEnvSun]
  * @param {() => (readonly number[]|null)} [args.getAmbientCeilingRgb]
+ * @param {() => (readonly number[]|null)} [args.getOutdoorLightRgb] - see the floor subsystem's own doc.
  * @param {*} [args.profiler]
  * @returns {{scene: *, sync: (floorIndex: number) => void, hasContent: () => boolean, isLoadingMask: () => boolean, getStatus: () => object, dispose: () => void}}
  */
@@ -189,9 +188,11 @@ export function createWindowTileSurfaceSubsystem({
   cloudOvercastContrastSoftenNode = null,
   cloudOvercastMinStrengthNode = null,
   cloudNoonBoostNode = null,
+  weatherGainNode = null,
   getWindowRenderState,
   getEnvSun,
   getAmbientCeilingRgb,
+  getOutdoorLightRgb,
   profiler = null,
 }) {
   // ⚠️ `seams/viewer-wired` history — see window-surface-subsystem.js's own
@@ -200,6 +201,7 @@ export function createWindowTileSurfaceSubsystem({
   getWindowRenderState ??= () => ({ enabled: true, params: {}, debugChannel: 0 });
   getEnvSun ??= () => null;
   getAmbientCeilingRgb ??= () => null;
+  getOutdoorLightRgb ??= () => null;
   resolveExpectedDepth ??= () => 0;
   getItemTileMotion ??= () => null;
 
@@ -246,6 +248,7 @@ export function createWindowTileSurfaceSubsystem({
       cloudOvercastContrastSoftenNode,
       cloudOvercastMinStrengthNode,
       cloudNoonBoostNode,
+      weatherGainNode,
       positionNode,
       maskUvNode,
       // Same production wiring the floor subsystem uses — see that file's
@@ -520,10 +523,18 @@ export function createWindowTileSurfaceSubsystem({
     const dayFactor01 = Number.isFinite(sun?.dayFactor01) ? sun.dayFactor01 : 1;
     const twilight01 = Number.isFinite(sun?.twilight01) ? sun.twilight01 : 0;
     const rawAmbientRgb = getAmbientCeilingRgb();
-    const ambientCeiling =
-      Array.isArray(rawAmbientRgb) && rawAmbientRgb.length === 3 && rawAmbientRgb.every(Number.isFinite)
-        ? Math.max(rawAmbientRgb[0], rawAmbientRgb[1], rawAmbientRgb[2], 0)
-        : WINDOW_DEFAULT_AMBIENT_CEILING;
+    const ambientValid =
+      Array.isArray(rawAmbientRgb) && rawAmbientRgb.length === 3 && rawAmbientRgb.every(Number.isFinite);
+    const ambientCeiling = ambientValid
+      ? Math.max(rawAmbientRgb[0], rawAmbientRgb[1], rawAmbientRgb[2], 0)
+      : WINDOW_DEFAULT_AMBIENT_CEILING;
+    // THE OUTDOOR MATCH's two ends — see the floor subsystem's identical read.
+    const indoorRgb = ambientValid ? rawAmbientRgb : [ambientCeiling, ambientCeiling, ambientCeiling];
+    const rawOutdoorRgb = getOutdoorLightRgb();
+    const outdoorRgb =
+      Array.isArray(rawOutdoorRgb) && rawOutdoorRgb.length === 3 && rawOutdoorRgb.every(Number.isFinite)
+        ? rawOutdoorRgb
+        : indoorRgb;
     const debugChannel = Number.isFinite(state.debugChannel) ? Math.max(0, Math.round(state.debugChannel)) : 0;
     const key = [
       enabled ? 1 : 0,
@@ -532,9 +543,22 @@ export function createWindowTileSurfaceSubsystem({
       p.contrast,
       p.dawnDuskTint,
       p.nightTint,
+      p.goldenBoost,
+      p.tintAmount,
+      p.outdoorHue,
+      p.ccExposure,
+      p.ccContrast,
+      p.ccSaturation,
+      p.ccTemperature,
+      p.ccTint,
+      p.ccColorFilter,
+      p.ccGamma,
       dayFactor01.toFixed(4),
       twilight01.toFixed(4),
       ambientCeiling.toFixed(4),
+      indoorRgb.map((v) => v.toFixed(4)).join(','),
+      outdoorRgb.map((v) => v.toFixed(4)).join(','),
+      p.outdoorMatch,
       p.glassWarpPx,
       p.glassDispersion,
       p.glassScale,
@@ -550,14 +574,28 @@ export function createWindowTileSurfaceSubsystem({
       const seedOffset = computeSeedOffset(p.glassSeed);
       const dawnDusk = Array.isArray(p.dawnDuskTint) ? p.dawnDuskTint : WINDOW_DEFAULT_DAWN_DUSK_TINT_RGB;
       const night = Array.isArray(p.nightTint) ? p.nightTint : WINDOW_DEFAULT_NIGHT_TINT_RGB;
-      const nightToTwilight = lerpRgb(night, dawnDusk, twilight01);
-      const daylightTint = lerpRgb(nightToTwilight, [1, 1, 1], dayFactor01);
+      const daylightTint = windowDaylightTint({
+        dawnDusk,
+        night,
+        twilight01,
+        dayFactor01,
+        goldenBoost: p.goldenBoost,
+        tintAmount: p.tintAmount,
+      });
+      const targetLight = windowTargetLight({
+        outdoorRgb,
+        hueRgb: daylightTint,
+        outdoorMatch: p.outdoorMatch,
+        outdoorHue: p.outdoorHue,
+      });
       for (const entry of entries.values()) {
         if (!entry.built) continue;
         entry.debugChannel = debugChannel;
         if (Number.isFinite(p.strength)) entry.built.setStrength(p.strength);
         if (Number.isFinite(p.contrast)) entry.built.setContrast(p.contrast);
         entry.built.setAmbientCeiling(ambientCeiling);
+        entry.built.setIndoorLight(indoorRgb);
+        entry.built.setTargetLight(targetLight);
         entry.built.setGlass({
           warpPx: p.glassWarpPx,
           dispersion: p.glassDispersion,
@@ -570,6 +608,15 @@ export function createWindowTileSurfaceSubsystem({
           seedOffset: [seedOffset.ox, seedOffset.oy],
         });
         entry.built.setDaylightTint(daylightTint);
+        entry.built.setColor({
+          exposure: p.ccExposure,
+          contrast: p.ccContrast,
+          saturation: p.ccSaturation,
+          temperature: p.ccTemperature,
+          tint: p.ccTint,
+          filter: p.ccColorFilter,
+          gamma: p.ccGamma,
+        });
         entry.built.setDebugChannel(debugChannel);
       }
     }

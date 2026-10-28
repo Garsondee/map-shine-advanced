@@ -114,7 +114,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.37, // 2026-10-17 author's live-tuned defaults (was 0.38)
+    default: 0.07, // 2026-10-27 author's live-tuned defaults (was 0.37)
     category: 'Light',
     label: 'Core strength',
     help: 'How strongly the light pool shows right next to the flame. 1 = full. Turn it down to take the glare off the area closest to the candle while keeping the wide glow.',
@@ -124,7 +124,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.58, // 2026-10-17 author's live-tuned defaults (was 0.11)
+    default: 0.33, // 2026-10-27 author's live-tuned defaults (was 0.58)
     category: 'Light',
     label: 'Bounce glow',
     help: 'A wide, soft fill of bounced light that reaches all the way to the Light radius, on top of the core. 0 = none (the original look). Raise it with a big Light radius to light a whole room faintly.',

@@ -23,39 +23,45 @@ import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { tierChip, scopeGlyph, healthBadge } from '../../widgets/badges.js';
 import { buildArmButton, buildNameComposer } from '../../widgets/inline-actions.js';
 import { DIAL_DRIVE_TYPES } from '../../../core/dials-schema.js';
-import { POPOUT_CLASS } from './studio-style.js';
+import { groupOf, groupEffects } from './effect-catalog.js';
 
-/** Pinned card ids — one Set for the module's lifetime, seeded once from the
- * persisted client setting (see `pinnedSeeded` below) and written back on
- * every render. Matches the mock's own `state.pinned`. */
-const pinned = new Set();
-/** Has `pinned` been seeded from `ctx.getPinnedEffects()` yet? Guards against
- * re-seeding (and so clobbering a live toggle) on every render — this
- * module has no per-instance state to hang it on, same reasoning as
- * `activeFilter` just below being module-level too. */
-let pinnedSeeded = false;
-/** Popped-out card ids -> their floating mini-panel element, so the main
- * grid can skip re-rendering a card currently shown as its own window (the
- * FOH/ROH double-control bug's shape, one level up: never render the same
- * live param twice), and so `closeAllPopouts()` can tear them down when the
- * Studio itself closes ("pop-outs are views — closing the Studio closes its
- * children", UI-Testament.md §5.2). */
-const poppedOut = new Map();
-/** Card ids whose ADVANCED section is open. Module state, not DOM state: every
- * action on the page rebuilds the whole grid, which used to snap every open
- * section shut. Written by each `<details>`'s own `toggle` event. */
-const advancedOpen = new Set();
-/** Card ids whose "my presets" list is expanded — same reason as above. */
+/*
+ * THE LIBRARY AND THE ONE OPEN EFFECT (2026-10-28, author: "I'm never editing
+ * two effects at the same time, how can we use that fact to make a better UX").
+ * The department is in one of two views: the LIBRARY (every effect as a small
+ * tile, in the groups `effect-catalog.js` defines) or ONE effect's editor,
+ * filling the pane. It used to draw all ~30 cards fully open in one column,
+ * which is what pins, pop-outs, category chips and per-card "Advanced" folds
+ * were all working around; they went with it.
+ *
+ * Module state, not DOM state: every action rebuilds the department, and the
+ * Studio closing must not forget which effect was open. `openEffect` and
+ * `recent` also persist per GM through ctx.getEffectsMemory/setEffectsMemory.
+ */
+/** The effect whose editor is showing, or null for the library. */
+let openEffect = null;
+/** Most-recently opened effect ids, newest first. */
+let recent = [];
+const RECENT_MAX = 4;
+/** Has the memory above been seeded from ctx yet? (Once — a re-seed would undo a live click.) */
+let memorySeeded = false;
+/** The last memory written, so a re-render that changed nothing doesn't write the setting again. */
+let lastSavedMemory = '';
+/** The library's filter box and its "On only" chip. */
+let libraryQuery = '';
+let onlyOn = false;
+/** Where the library was scrolled to, so "back" lands where the GM left it. */
+let libraryScroll = 0;
+/** Card ids whose "my presets" list is expanded — survives the rebuild every action causes. */
 const presetManagerOpen = new Set();
 /** Card id -> the enable state its card was last DRAWN in. Lets a re-render
  * draw the switch in its previous state and flip it a frame later, so the
  * thumb actually slides instead of teleporting (see buildStudioEffectCard). */
 const lastEnabled = new Map();
 
-/** Torn down by shell.js on Studio close. */
-export function closeAllPopouts() {
-  for (const win of poppedOut.values()) win.remove();
-  poppedOut.clear();
+/** Note `effectId` as the newest recent effect. */
+function touchRecent(effectId) {
+  recent = [effectId, ...recent.filter((id) => id !== effectId)].slice(0, RECENT_MAX);
 }
 
 function sectionLabel(text) {
@@ -363,9 +369,11 @@ function buildPresetRow(model) {
  * `renderDept`), so `getValue`/`getEnabled` inside it are the live accessors
  * the caller's `modelFactory` returns, not a snapshot.
  * @param {object} model - see effects-department's own JSDoc typedef below.
+ * @param {{groupLabel: string, onBack: () => void, onPrev?: () => void, onNext?: () => void}} nav -
+ *   the editor's way back to the library and along its group.
  * @returns {HTMLElement}
  */
-function buildStudioEffectCard(model) {
+function buildStudioEffectCard(model, nav) {
   const accVar = model.accVar ?? '--shine';
   const isOn = model.enabled !== false;
 
@@ -397,6 +405,9 @@ function buildStudioEffectCard(model) {
   // title genuinely truncates (ellipsis) instead of spilling into its neighbour.
   const head = el('div', 'msa-card-head');
   const headTop = el('div', 'msa-card-top');
+  const back = iconButton('chev', 'Back to all effects (Esc)', 'msa-back', 'All effects');
+  back.addEventListener('click', nav.onBack);
+  headTop.append(back);
   const ic = el('span', 'msa-card-ico');
   ic.innerHTML = iconMarkup(model.icon ?? 'gear');
   const nameWrap = el('span', 'msa-card-names');
@@ -414,8 +425,17 @@ function buildStudioEffectCard(model) {
     statusLine.dataset.tip = statusText;
     statusLine.dataset.tipTruncated = '';
   }
-  nameWrap.append(name, statusLine);
+  const crumb = el('span', 'msa-card-crumb', nav.groupLabel);
+  nameWrap.append(crumb, name, statusLine);
   headTop.append(ic, nameWrap);
+  // Step through the effect's own group without going back to the library.
+  if (nav.onPrev && nav.onNext) {
+    const prev = iconButton('chev', 'Previous effect in this group', 'msa-prev', 'Previous effect');
+    const next = iconButton('chev', 'Next effect in this group', 'msa-next', 'Next effect');
+    prev.addEventListener('click', nav.onPrev);
+    next.addEventListener('click', nav.onNext);
+    headTop.append(prev, next);
+  }
 
   if (typeof model.onToggleEnabled === 'function') {
     // A real track+thumb switch (mythica-machina-press#550) — the old control
@@ -474,26 +494,6 @@ function buildStudioEffectCard(model) {
   );
   headMeta.append(el('span', 'msa-grow'));
 
-  // State-aware, like the enable switch above — a pinned card's own button
-  // used to say "Pin to top" even though clicking it would UNpin; the label
-  // describes what THIS click does, not just what the control is.
-  const isPinned = pinned.has(model.id);
-  const pinBtn = iconButton('pin', isPinned ? 'Unpin (remove from top)' : 'Pin to top');
-  pinBtn.setAttribute('aria-pressed', String(isPinned));
-  pinBtn.addEventListener('click', () => {
-    if (pinned.has(model.id)) pinned.delete(model.id);
-    else pinned.add(model.id);
-    model.onRequestRerender?.();
-  });
-  headMeta.append(pinBtn);
-
-  if (typeof model.onPopOut === 'function') {
-    const popBtn = iconButton('popout', 'Pop out for side-by-side tuning');
-    // The window grows out of the button that made it (see popOutCard).
-    popBtn.addEventListener('click', () => model.onPopOut(popBtn.getBoundingClientRect()));
-    headMeta.append(popBtn);
-  }
-
   if (typeof model.onPaint === 'function') {
     // `paintVerb` (2026-08-19, effects-population round) -- most onPaint
     // hooks open the mask brush ("Paint X"), but candle/lightning have no
@@ -536,8 +536,18 @@ function buildStudioEffectCard(model) {
     card.append(row);
   }
 
+  // ---- jump bar: one chip per section, filled in once the sections exist ----
+  // Sticky under the editor's top edge, so on a long effect (Water has 54
+  // controls) any section is one press away wherever the GM has scrolled to.
+  const jump = el('nav', 'msa-jump');
+  jump.setAttribute('aria-label', 'Jump to section');
+  card.append(jump);
+  /** @type {Array<{label: string, el: HTMLElement}>} */
+  const sections = [];
+
   // ---- FOH strip: presets (if any) + fohKeys --------------------------------
   const foh = el('div', 'msa-foh');
+  sections.push({ label: 'Main', el: foh });
   const hasBuiltinPresets = Array.isArray(model.presets) && model.presets.length > 0;
   // MY PRESETS (mythica-machina-press#102) — the world-scoped named-preset
   // library (MapShine.saveEffectPreset/applyEffectPreset/listEffectPresets/
@@ -627,55 +637,50 @@ function buildStudioEffectCard(model) {
   const resolveExtra = (v) => (typeof v === 'function' ? (v() ?? []) : (v ?? []));
   for (const extraEl of resolveExtra(model.extra)) card.append(extraEl);
 
-  // ---- Advanced: ROH, categorised, + extraAdvanced -------------------------
+  // ---- the rest of the controls, as open sections ---------------------------
+  // These sat in a closed "Advanced" fold while ~30 cards shared one column.
+  // With one effect on screen there is room for all of them, so each schema
+  // category is its own labelled section, reachable from the jump bar.
   const roh = rohGroups(model.schema, model.fohKeys);
-  const extraAdvanced = resolveExtra(model.extraAdvanced);
-  if (roh.length > 0 || extraAdvanced.length > 0) {
-    const details = el('details', 'msa-adv');
-    // ⚠️ REMEMBERED ACROSS RE-RENDERS. Every action on the page rebuilds the
-    // whole grid, so an Advanced section a GM had open snapped shut whenever
-    // ANYTHING happened — flipping a different card's switch, pinning, picking
-    // a filter. Whether each card's section is open is module state now, written
-    // by the `toggle` event (which also fires for the search palette's
-    // programmatic `d.open = true`).
-    details.open = advancedOpen.has(model.id);
-    details.addEventListener('toggle', () => {
-      if (details.open) advancedOpen.add(model.id);
-      else advancedOpen.delete(model.id);
-    });
-    const summary = el('summary', 'msa-adv-sum');
-    // A `.msa-chev` span, not a `▸` baked into textContent — `<summary>`
-    // already draws its OWN native disclosure triangle (suppressed via
-    // studio-style.js's `summary::-webkit-details-marker` rule); before that
-    // CSS existed this rendered as TWO triangles side by side. Same shape
-    // diag/effect-controls.js's own `.msa-chev` already solved. An icon, so it
-    // takes the theme's stroke and rotates with the open state like the rest.
-    const chev = el('span', 'msa-chev');
-    chev.innerHTML = iconMarkup('chev', 'style="width:11px;height:11px"');
-    summary.append(chev, document.createTextNode(`Advanced — ${roh.reduce((n, g) => n + g.keys.length, 0)} controls`));
-    details.append(summary);
-    const body = el('div', 'msa-adv-body');
-    for (const { category, keys } of roh) {
-      body.append(sectionLabel(category));
-      const wrap = el('div', 'msa-adv-group');
-      for (const key of keys) {
-        const decl = model.schema[key];
-        const row = buildParamControl(key, decl, {
-          value: model.getValue(key),
-          onChange: (v) => model.onChange(key, v),
-        });
-        row.dataset.msaParam = key;
-        row.classList.add('msa-param-row');
-        wrap.append(row);
-      }
-      body.append(wrap);
+  for (const { category, keys } of roh) {
+    const section = el('section', 'msa-section');
+    section.append(sectionLabel(category));
+    const wrap = el('div', 'msa-section-body');
+    for (const key of keys) {
+      const decl = model.schema[key];
+      const row = buildParamControl(key, decl, {
+        value: model.getValue(key),
+        onChange: (v) => model.onChange(key, v),
+      });
+      row.dataset.msaParam = key;
+      row.classList.add('msa-param-row');
+      wrap.append(row);
     }
-    // Opaque advanced-only content (specular's 3 shimmer-layer strips is
-    // the canonical case — see diag/effect-controls.js's own JSDoc) — after
-    // the categorised ROH groups, same position the old shell uses.
-    for (const extraEl of extraAdvanced) body.append(extraEl);
-    details.append(body);
-    card.append(details);
+    section.append(wrap);
+    card.append(section);
+    sections.push({ label: category, el: section });
+  }
+  // Opaque advanced-only content (specular's 3 shimmer-layer strips is the
+  // canonical case — see diag/effect-controls.js's own JSDoc), after the
+  // categorised sections, same position the old shell used.
+  const extraAdvanced = resolveExtra(model.extraAdvanced);
+  if (extraAdvanced.length > 0) {
+    const section = el('section', 'msa-section');
+    section.append(sectionLabel('More'), ...extraAdvanced);
+    card.append(section);
+    sections.push({ label: 'More', el: section });
+  }
+
+  // Worth a bar only once there is somewhere to jump to.
+  if (sections.length >= 3) {
+    for (const { label, el: target } of sections) {
+      const chip = el('button', 'msa-chip', label);
+      chip.type = 'button';
+      chip.addEventListener('click', () => target.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+      jump.append(chip);
+    }
+  } else {
+    jump.remove();
   }
 
   return card;
@@ -684,8 +689,9 @@ function buildStudioEffectCard(model) {
 /**
  * @typedef {object} EffectCardModel
  * @property {string} id @property {string} title @property {string} [icon]
- * @property {string} [accVar] - a LANTERN category token name, e.g. '--c-atmos'.
- * @property {string} [filterCategory] - one of FILTER_CATEGORIES' keys, for the strip.
+ * @property {string} [accVar] - a LANTERN category token name, e.g. '--c-atmos';
+ *   defaults to the effect's catalog group's own (see effect-catalog.js, which
+ *   is also what decides the group — a card no longer names its category).
  * @property {{tier:number,maxTier?:number,source?:string}} [tier]
  * @property {{suffix:string,found:boolean}} [mask]
  * @property {string[]} [presets] @property {(name:string)=>void} [onPresetPick]
@@ -703,7 +709,7 @@ function buildStudioEffectCard(model) {
  * @property {(paramId:string)=>unknown} getValue
  * @property {(paramId:string,value:unknown)=>void} onChange
  * @property {boolean} [enabled] @property {(next:boolean)=>void} [onToggleEnabled]
- * @property {()=>void} [onPaint] @property {()=>void} [onPopOut]
+ * @property {()=>void} [onPaint]
  * @property {string} [paintVerb] - overrides the paint button's "Paint" verb
  *   (e.g. 'Place' for an anchor-placement onPaint rather than a mask brush).
  * @property {string|(()=>string)} [status]
@@ -723,34 +729,26 @@ function buildStudioEffectCard(model) {
  */
 
 /**
- * The category filter strip. `filterCategory` per effect is this session's
- * own proposal (no per-effect taxonomy exists in src/ today) — worth an
- * author countersign; see Petition P10.
+ * Make sure the next render shows the effect the search palette wants, before
+ * it goes looking for the control. Called by shell.js on every "go to this
+ * control".
+ *
+ * ⚠️ SEARCH USED TO DO NOTHING. The grid's category chip and card filter were
+ * module state that outlived the Studio closing, and the palette only ever
+ * looked in the grid as drawn — so once a GM had clicked, say, "Post", picking
+ * any Water or Fireflies result closed the palette and silently went nowhere.
+ * Now the palette names the effect it wants and that effect's editor opens.
+ * @param {string} effectId
  */
-const FILTER_CATEGORIES = Object.freeze({
-  gameplay: { label: 'Gameplay', accVar: '--c-gameplay' },
-  lighting: { label: 'Lighting', accVar: '--c-lighting' },
-  atmos: { label: 'Atmosphere', accVar: '--c-atmos' },
-  surface: { label: 'Surface', accVar: '--c-surface' },
-  particles: { label: 'Particles', accVar: '--c-particles' },
-  post: { label: 'Post', accVar: '--c-post' },
-});
-
-let activeFilter = null;
-/** In-grid search query (mythica-machina-press#548) — module-level so it
- * survives a chip click's full re-render, same posture as `activeFilter`.
- * Deliberately separate from search-palette.js's own global overlay: that
- * one jumps OUT to a flat cross-effect result list (finds one param
- * anywhere); this filters the grid IN PLACE (finds which whole cards are
- * relevant), a different question with a different answer shape. */
-let searchQuery = '';
+export function revealEffectCard(effectId) {
+  openEffect = effectId;
+  touchRecent(effectId);
+}
 
 /**
- * Does this card match a search query? Same plain-substring convention
- * search-palette.js's own header documents as the validated, non-fuzzy
- * behaviour (label+title+help) — applied here at the CARD level (title, or
- * any one of its params' label/help/category) rather than the param level,
- * since this filters whole cards, not individual rows.
+ * Does this effect match the library's filter? Plain lowercase substring, the
+ * same convention search-palette.js documents: the effect's title, or any one
+ * of its params' label/help/category.
  * @param {EffectCardModel} model @param {string} ql - already lowercased/trimmed.
  * @returns {boolean}
  */
@@ -765,226 +763,307 @@ function cardMatchesSearch(model, ql) {
 }
 
 /**
- * Render the EFFECTS department body into `container` (a `.deptscroll`).
+ * Render the EFFECTS department body into `container` (a `.deptscroll`): the
+ * library, or the one open effect.
  * @param {HTMLElement} container
  * @param {{effectCardFactories: Map<string, () => EffectCardModel>,
- *   getPinnedEffects?: () => string[], setPinnedEffects?: (ids: string[]) => void}} ctx
+ *   getEffectsMemory?: () => {open: string|null, recent: string[]},
+ *   setEffectsMemory?: (memory: {open: string|null, recent: string[]}) => void}} ctx
  * @returns {string} the department subtitle for the shell's deptHead.
  */
 export function renderEffectsDepartment(container, ctx) {
-  if (!pinnedSeeded) {
-    pinnedSeeded = true;
-    for (const id of ctx.getPinnedEffects?.() ?? []) pinned.add(id);
-  }
-  const models = [...ctx.effectCardFactories.entries()].map(([id, factory]) => ({ id, model: factory() }));
-
-  // THE RESET-ALL ROW (2026-10-24, on the author's own ask: "a large obvious
-  // and well placed button in MSA Studio to reset all the maps effects to
-  // their default values"). Its own full-width row, ABOVE the filter/search
-  // strip, so it reads as acting on the whole department rather than as one
-  // more chip among the category filters. Two-click armed like every other
-  // destructive control in this room (`buildArmButton`) — this one can touch
-  // every registered effect's tuning in a single press.
-  const resetAllRow = el('div', 'msa-resetall');
-  const resettable = models.filter(({ model }) => hasResettableParams(model));
-  const resetAllBtn = buildArmButton({
-    icon: 'reset',
-    label: 'Reset ALL effects to defaults',
-    armedLabel: () => `Click again to reset all ${resettable.length} effects`,
-    title: "Put every registered effect's tuning on this scene back to its shipped defaults.",
-    armedTitle: 'This resets EVERY effect card below — click again within a few seconds to confirm.',
-    className: 'msa-btn',
-    onConfirm: () => {
-      for (const { model } of resettable) resetModelToDefaults(model);
-      renderEffectsDepartment(container, ctx);
-    },
-  });
-  resetAllBtn.disabled = resettable.length === 0;
-  resetAllRow.append(resetAllBtn);
-  const resetAllNote = el(
-    'span',
-    'msa-resetall-note',
-    resettable.length > 0 ? `Affects all ${resettable.length} registered effects on this scene.` : ''
-  );
-  resetAllRow.append(resetAllNote);
-
-  const strip = el('div', 'msa-strip');
-  // Fixed at exactly two columns (mythica-machina-press#548) — the previous
-  // auto-fill(minmax(320px,...)) happily packed in a 3rd column on any wide
-  // Studio window, which is what made the header-overlap bug (see
-  // buildStudioEffectCard) bite in practice: three columns left too little
-  // width per card for the badge/tool cluster. `align-items:start` (in the
-  // stylesheet): grid items default to `stretch` — confirmed live in the Studio
-  // preview harness, opening Water's 54-control Advanced section stretched its
-  // row-1 neighbour (Bloom, one slider) to Water's full ~1700px height.
-  const grid = el('div', 'msa-grid');
-
-  function makeChip(label, accVar, filterKey) {
-    const b = el('button', 'msa-chip', label);
-    b.type = 'button';
-    b.style.setProperty('--acc', `var(${accVar})`);
-    b.setAttribute('aria-pressed', String(activeFilter === filterKey));
-    b.addEventListener('click', () => {
-      activeFilter = filterKey;
-      renderEffectsDepartment(container, ctx);
-    });
-    return b;
-  }
-  strip.append(makeChip('All', '--shine', null));
-  for (const [key, { label, accVar }] of Object.entries(FILTER_CATEGORIES)) strip.append(makeChip(label, accVar, key));
-
-  // IN-GRID SEARCH (mythica-machina-press#548) — filters the ALREADY
-  // category-filtered grid live, without a full re-render (which would
-  // rebuild this very input and drop keyboard focus after every character —
-  // confirmed by reading how this department commits to the DOM,
-  // `container.innerHTML = ''` on every render, below). Toggles `.hidden`
-  // on the already-built card elements instead.
-  // Wrapped with its own icon (mythica-machina-press#548) so it visually
-  // reads as a lighter-weight, secondary "filter what's on screen" control —
-  // distinct from the room-header's pill-shaped, kbd-hinted global search box
-  // right above it, which is a different action (jump to one control anywhere
-  // in the Studio) even though the two sat close enough to look redundant.
-  const searchWrap = el('div', 'msa-field');
-  searchWrap.innerHTML = iconMarkup('search');
-  const searchBox = document.createElement('input');
-  searchBox.type = 'search';
-  searchBox.placeholder = 'Filter the cards below by name or control…';
-  searchBox.value = searchQuery;
-  searchBox.setAttribute('aria-label', 'Filter effects in this category');
-  searchWrap.append(searchBox);
-  strip.append(searchWrap);
-
-  const visible = models
-    .filter(({ model }) => !activeFilter || model.filterCategory === activeFilter)
-    .filter(({ id }) => !poppedOut.has(id))
-    .sort((a, b) => (pinned.has(b.id) ? 1 : 0) - (pinned.has(a.id) ? 1 : 0));
-  // Persisted every render (cheap, idempotent when nothing changed) rather
-  // than threading ctx into buildStudioEffectCard's own pin-button handler
-  // just to call this in one more place — a filter-chip click re-persisting
-  // the same array is harmless.
-  ctx.setPinnedEffects?.([...pinned]);
-  /** @type {Array<{model: EffectCardModel, el: HTMLElement}>} */
-  const cardEls = [];
-  for (const { id, model } of visible) {
-    model.onRequestRerender = () => renderEffectsDepartment(container, ctx);
-    decorateModel(model, id, ctx);
-    // Detaches to a floating mini-panel for side-by-side lookdev (Testament
-    // §5.2). Synthesised here, not per-effect data — every card gets one.
-    // `originRect` is the pop-out button's own rect: the new window scales out
-    // from there rather than from nowhere.
-    model.onPopOut = (originRect) => {
-      poppedOut.set(
-        model.id,
-        popOutCard(model, ctx, () => renderEffectsDepartment(container, ctx), originRect)
-      );
-      renderEffectsDepartment(container, ctx);
-    };
-    const cardEl = buildStudioEffectCard(model);
-    cardEls.push({ model, el: cardEl });
-    grid.append(cardEl);
-  }
-  if (visible.length === 0) {
-    grid.append(
-      el(
-        'div',
-        'msa-empty',
-        models.length === 0
-          ? 'No effects registered yet.'
-          : poppedOut.size > 0
-            ? 'Every matching card is popped out.'
-            : 'No effects in this category.'
-      )
-    );
-  }
-  // Search-only empty state — distinct from the category one above, since
-  // the category empty state renders INSTEAD of cards (no cardEls to
-  // toggle), while this one hides ALREADY-BUILT cards live.
-  const noSearchMatch = el('div', 'msa-empty', 'Nothing in this category matches your search.');
-  noSearchMatch.hidden = true;
-  grid.append(noSearchMatch);
-
-  /** Apply `query` live to the already-built cards — no re-render, so the
-   * search box itself never loses focus mid-type. Re-run on every render
-   * too (a chip click rebuilds the grid from scratch), so an active search
-   * survives switching categories. */
-  function applySearchFilter(query) {
-    searchQuery = (query ?? '').trim().toLowerCase();
-    let anyVisible = false;
-    for (const { model, el: cardEl } of cardEls) {
-      const match = cardMatchesSearch(model, searchQuery);
-      cardEl.hidden = !match;
-      if (match) anyVisible = true;
+  if (!memorySeeded) {
+    memorySeeded = true;
+    const saved = ctx.getEffectsMemory?.();
+    if (saved) {
+      // A search that opened an effect before the first render has already set these.
+      openEffect ??= saved.open ?? null;
+      if (recent.length === 0) recent = [...(saved.recent ?? [])];
     }
-    noSearchMatch.hidden = cardEls.length === 0 || anyVisible;
   }
-  searchBox.addEventListener('input', () => applySearchFilter(searchBox.value));
-  applySearchFilter(searchQuery);
+  // An effect that is no longer registered (a module turned off) falls back to the library.
+  if (openEffect && !ctx.effectCardFactories.has(openEffect)) openEffect = null;
+  recent = recent.filter((id) => ctx.effectCardFactories.has(id));
 
-  container.innerHTML = '';
-  container.append(resetAllRow, strip, grid);
-  return `${models.length} registered — every card generated from its schema`;
+  const memory = JSON.stringify({ open: openEffect, recent });
+  if (memory !== lastSavedMemory) {
+    lastSavedMemory = memory;
+    ctx.setEffectsMemory?.({ open: openEffect, recent: [...recent] });
+  }
+
+  const rerender = () => renderEffectsDepartment(container, ctx);
+  /** Switch view, keeping the library's scroll and starting an effect at its top. */
+  const show = (effectId) => {
+    if (openEffect === null) libraryScroll = container.scrollTop;
+    openEffect = effectId;
+    if (effectId) touchRecent(effectId);
+    rerender();
+    container.scrollTop = effectId ? 0 : libraryScroll;
+  };
+
+  // Esc goes back to the library — attached once per container (the shell
+  // builds a fresh one each time it renders a department), never in a field,
+  // where Esc belongs to the field.
+  if (!container.dataset.msaEsc) {
+    container.dataset.msaEsc = '1';
+    container.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || openEffect === null) return;
+      if (e.target instanceof Element && e.target.matches('input,select,textarea')) return;
+      e.preventDefault();
+      show(null);
+    });
+  }
+
+  const subtitle = openEffect
+    ? renderEditor(container, ctx, show, rerender)
+    : renderLibrary(container, ctx, show, rerender);
+  // Switching views re-renders only this department, not the shell's header
+  // above it, so keep that header's subtitle in step here.
+  const sub = container.parentElement?.querySelector('.depthead .sub');
+  if (sub) {
+    sub.textContent = subtitle;
+    sub.dataset.tip = subtitle;
+  }
+  return subtitle;
 }
 
 /**
- * A card, detached into its own small floating window — a VIEW, never a
- * second live control over the same param (the exact bug FOH/ROH's own
- * partition law exists to prevent, one level up: two independent DOM nodes
- * for one value, silently disagreeing). The grid re-renders without this
- * card the moment it pops out; closing the window re-adds it.
- *
- * The window opens by scaling up from the button that made it (`originRect`),
- * so it reads as that card coming OUT of the grid rather than a window
- * appearing from nowhere; it starts at .96, never at 0.
- * @param {object} model @param {object} ctx @param {() => void} onClosed
- * @param {DOMRect} [originRect] the pop-out button's rect.
- * @returns {HTMLElement} the floating window, so the caller can track/remove it.
+ * One effect, filling the department.
+ * @param {HTMLElement} container @param {object} ctx
+ * @param {(effectId: string|null) => void} show @param {() => void} rerender
+ * @returns {string} subtitle
  */
-function popOutCard(model, ctx, onClosed, originRect) {
-  const win = el('div', POPOUT_CLASS);
-  const top = 100 + poppedOut.size * 24;
-  const left = 140 + poppedOut.size * 24;
-  win.style.top = `${top}px`;
-  win.style.left = `${left}px`;
-  if (originRect) {
-    // Clamped to the window's own box: the button may be scrolled far out of
-    // view (or off to the side), and scaling from a point a screen away would
-    // make the whole window slide in from it instead of just growing.
-    const within = (v, max) => Math.round(Math.min(max, Math.max(0, v)));
-    win.style.setProperty('--ox', `${within(originRect.left + originRect.width / 2 - left, 360)}px`);
-    win.style.setProperty('--oy', `${within(originRect.top + originRect.height / 2 - top, 120)}px`);
-  }
-  const head = el('div', 'msa-pop-head');
-  const title = el('span', 'msa-pop-title', model.title);
-  const closeBtn = iconButton('x', 'Close (returns the card to the grid)');
-  closeBtn.addEventListener('click', () => {
-    poppedOut.delete(model.id);
-    win.remove();
-    onClosed();
+function renderEditor(container, ctx, show, rerender) {
+  const id = openEffect;
+  const model = ctx.effectCardFactories.get(id)();
+  model.onRequestRerender = rerender;
+  decorateModel(model, id, ctx);
+
+  const group = groupOf(id);
+  const siblings = groupEffects([...ctx.effectCardFactories.keys()]).find((g) => g.group === group)?.ids ?? [id];
+  const at = siblings.indexOf(id);
+  const step = (by) => show(siblings[(at + by + siblings.length) % siblings.length]);
+  model.accVar ??= group.accVar;
+  const card = buildStudioEffectCard(model, {
+    groupLabel: group.label,
+    onBack: () => show(null),
+    ...(siblings.length > 1 ? { onPrev: () => step(-1), onNext: () => step(1) } : {}),
   });
-  head.append(title, closeBtn);
-  win.append(head);
-  // A fresh model (re-fetched, never the closed-over one) each time the
-  // pop-out itself needs to redraw — same "never a captured readout" rule
-  // as everything else this canon renders.
-  const rerenderCard = () => {
-    win.querySelector('[data-msa-effect]')?.remove();
-    const freshModel = ctx.effectCardFactories.get(model.id)?.() ?? model;
-    freshModel.onRequestRerender = rerenderCard;
-    decorateModel(freshModel, model.id, ctx);
-    freshModel.onPopOut = undefined; // already popped out; no second popout button on a popout
-    win.append(buildStudioEffectCard(freshModel));
+  card.classList.add('msa-card--open');
+
+  container.innerHTML = '';
+  container.append(card);
+  return `${group.label} — ${at + 1} of ${siblings.length}`;
+}
+
+/**
+ * The library: every registered effect as a small tile, in its catalog group.
+ * @param {HTMLElement} container @param {object} ctx
+ * @param {(effectId: string|null) => void} show @param {() => void} rerender
+ * @returns {string} subtitle
+ */
+function renderLibrary(container, ctx, show, rerender) {
+  const models = new Map();
+  for (const [id, factory] of ctx.effectCardFactories) {
+    const model = factory();
+    model.onRequestRerender = rerender;
+    models.set(id, model);
+  }
+  const grouped = groupEffects([...models.keys()]);
+
+  // ---- toolbar: filter box + "On only" ---------------------------------------
+  // The filter hides tiles in place, without a re-render (which would rebuild
+  // this very input and drop focus after every character).
+  const bar = el('div', 'msa-libbar');
+  const field = el('div', 'msa-field');
+  field.innerHTML = iconMarkup('search');
+  const input = document.createElement('input');
+  input.type = 'search';
+  input.placeholder = 'Find an effect or a control…';
+  input.value = libraryQuery;
+  input.setAttribute('aria-label', 'Find an effect');
+  field.append(input);
+  const onChip = el('button', 'msa-chip', 'On only');
+  onChip.type = 'button';
+  onChip.title = 'Show only the effects that are switched on';
+  onChip.setAttribute('aria-pressed', String(onlyOn));
+  onChip.addEventListener('click', () => {
+    onlyOn = !onlyOn;
+    rerender();
+  });
+  bar.append(field, onChip);
+
+  /** @type {Array<{id: string, tile: HTMLElement}>} */
+  const tiles = [];
+  const makeTile = (id) => {
+    const tile = buildEffectTile(id, models.get(id), () => show(id));
+    tiles.push({ id, tile });
+    return tile;
   };
-  rerenderCard();
-  document.body.appendChild(win);
-  return win;
+
+  const body = el('div', 'msa-lib');
+  // ---- recent ------------------------------------------------------------------
+  const recentIds = recent.filter((id) => models.has(id));
+  const recentBlock = el('div', 'msa-libgroup msa-libgroup--recent');
+  if (recentIds.length > 0) {
+    const head = el('div', 'msa-libhead');
+    head.innerHTML = iconMarkup('clock');
+    head.append(el('span', 'msa-libhead-name', 'Recent'));
+    const grid = el('div', 'msa-libgrid');
+    for (const id of recentIds) grid.append(buildEffectTile(id, models.get(id), () => show(id)));
+    recentBlock.append(head, grid);
+    body.append(recentBlock);
+  }
+
+  // ---- the groups ----------------------------------------------------------------
+  /** @type {Array<{block: HTMLElement, ids: string[]}>} */
+  const groupBlocks = [];
+  for (const { group, ids } of grouped) {
+    const block = el('div', 'msa-libgroup');
+    block.style.setProperty('--acc', `var(${group.accVar})`);
+    const head = el('div', 'msa-libhead');
+    head.innerHTML = iconMarkup(group.icon);
+    const onCount = ids.filter((id) => models.get(id).enabled !== false).length;
+    head.append(
+      el('span', 'msa-libhead-name', group.label),
+      el('span', 'msa-libhead-count', `${onCount} of ${ids.length} on`)
+    );
+    const grid = el('div', 'msa-libgrid');
+    for (const id of ids) {
+      const tile = makeTile(id);
+      tile.style.setProperty('--acc', `var(${models.get(id).accVar ?? group.accVar})`);
+      grid.append(tile);
+    }
+    block.append(head, grid);
+    body.append(block);
+    groupBlocks.push({ block, ids });
+  }
+  const noMatch = el('div', 'msa-empty', models.size === 0 ? 'No effects registered yet.' : 'No effect matches that.');
+  body.append(noMatch);
+
+  /** Apply the filter box and "On only" to the tiles already built. */
+  function applyFilter() {
+    libraryQuery = input.value;
+    const ql = libraryQuery.trim().toLowerCase();
+    const shown = new Set();
+    for (const { id, tile } of tiles) {
+      const model = models.get(id);
+      const match = cardMatchesSearch(model, ql) && (!onlyOn || model.enabled !== false);
+      tile.hidden = !match;
+      if (match) shown.add(id);
+    }
+    for (const { block, ids } of groupBlocks) block.hidden = !ids.some((id) => shown.has(id));
+    // Recent is a shortcut, not a result list — out of the way while filtering.
+    recentBlock.hidden = Boolean(ql) || onlyOn;
+    noMatch.hidden = shown.size > 0;
+    return shown;
+  }
+  input.addEventListener('input', applyFilter);
+  // Enter opens the first match: type a few letters, Enter, and you're in.
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const first = tiles.find(({ tile }) => !tile.hidden);
+    if (first) {
+      e.preventDefault();
+      show(first.id);
+    }
+  });
+  applyFilter();
+
+  // ---- reset all, at the foot: it acts on everything, so it is out of the way -
+  const resettable = [...models.values()].filter((model) => hasResettableParams(model));
+  const resetAllRow = el('div', 'msa-resetall');
+  const resetAllBtn = buildArmButton({
+    icon: 'reset',
+    label: 'Reset all effects to defaults',
+    armedLabel: () => `Click again to reset all ${resettable.length} effects`,
+    title: "Put every registered effect's tuning on this scene back to its shipped defaults.",
+    armedTitle: 'This resets EVERY effect — click again within a few seconds to confirm.',
+    className: 'msa-btn',
+    onConfirm: () => {
+      for (const model of resettable) resetModelToDefaults(model);
+      rerender();
+    },
+  });
+  resetAllBtn.disabled = resettable.length === 0;
+  resetAllRow.append(
+    resetAllBtn,
+    el(
+      'span',
+      'msa-resetall-note',
+      resettable.length > 0 ? `Affects all ${resettable.length} registered effects on this scene.` : ''
+    )
+  );
+
+  container.innerHTML = '';
+  container.append(bar, body, resetAllRow);
+  const total = models.size;
+  const on = [...models.values()].filter((m) => m.enabled !== false).length;
+  return `${total} effects in ${grouped.length} groups — ${on} on`;
+}
+
+/**
+ * One library tile: press the name to open the effect, flip the switch to
+ * turn it on or off without leaving the library. Two sibling buttons, never a
+ * button inside a button.
+ * @param {string} id @param {EffectCardModel} model @param {() => void} onOpen
+ * @returns {HTMLElement}
+ */
+function buildEffectTile(id, model, onOpen) {
+  const isOn = model.enabled !== false;
+  const tile = el('div', 'msa-etile');
+  tile.dataset.msaTile = id;
+  const wasOn = lastEnabled.has(id) ? lastEnabled.get(id) : isOn;
+  lastEnabled.set(id, isOn);
+  tile.dataset.enabled = String(wasOn);
+
+  const open = el('button', 'msa-etile-open');
+  open.type = 'button';
+  open.title = `Open ${model.title ?? id}`;
+  const ic = el('span', 'msa-etile-ico');
+  ic.innerHTML = iconMarkup(model.icon ?? 'gear');
+  const name = el('span', 'msa-etile-name', model.title ?? id);
+  name.dataset.tip = model.title ?? id;
+  name.dataset.tipTruncated = '';
+  open.append(ic, name);
+  if (model.mask && !model.mask.found) {
+    const warn = el('span', 'msa-etile-warn');
+    warn.innerHTML = iconMarkup('warn');
+    warn.title = `Needs a ${model.mask.suffix} mask`;
+    open.append(warn);
+  }
+  open.addEventListener('click', onOpen);
+  tile.append(open);
+
+  if (typeof model.onToggleEnabled === 'function') {
+    const sw = el('button', 'msa-switch');
+    sw.type = 'button';
+    sw.setAttribute('role', 'switch');
+    sw.setAttribute('aria-checked', String(wasOn));
+    sw.setAttribute('aria-label', `${model.title ?? id} enabled`);
+    sw.title = isOn ? 'On — click to turn off' : 'Off — click to turn on';
+    sw.addEventListener('click', () => {
+      model.onToggleEnabled(!isOn);
+      // Same settle-then-redraw timing as the card's own switch (see buildStudioEffectCard).
+      requestAnimationFrame(() => model.onRequestRerender?.());
+    });
+    tile.append(sw);
+    if (wasOn !== isOn) {
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          tile.dataset.enabled = String(isOn);
+          sw.setAttribute('aria-checked', String(isOn));
+        })
+      );
+    }
+  }
+  return tile;
 }
 
 /**
  * Attach the department-level hooks every card needs onto its model — the same
  * "attach what the card needs onto model itself" shape `onRequestRerender`
- * already uses. Shared by the grid AND the pop-out window: the pop-out used to
- * re-fetch a bare model from its factory and so silently lost "my presets" and
- * the health-badge link that the very same card has in the grid.
+ * already uses.
  * @param {EffectCardModel} model @param {string} id @param {object} ctx
  */
 function decorateModel(model, id, ctx) {

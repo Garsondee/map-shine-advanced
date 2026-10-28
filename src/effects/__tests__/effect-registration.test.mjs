@@ -6,6 +6,7 @@
  * The Foundry settings adapter + live render wiring are browser-only.
  */
 import { validateParamsSchema } from '../../core/params-schema.js';
+import { setSafeLevel } from '../../core/safe-mode.js';
 import { UI_SHADOW_PARAMS, UI_WINDOW_SHADOW } from '../ui-window-shadow.js';
 import { GRADE, GRADE_LOOK_PARAMS } from '../grade/grade.js';
 import { BLOOM, BLOOM_PARAMS } from '../bloom.js';
@@ -395,7 +396,9 @@ export function run(t) {
 
     // 11 global (2026-09-14: +studioPinnedEffects, hidden internal UI state; 2026-10-25: +prepareBeforeSwitch
     // and +switchWaitSeconds, the loading-audit gate's two world settings) + 2 per-effect.
-    ok('one effect → 11 global + 2 per-effect descriptors', descriptors.length === 13);
+    // 2026-10-26: +transitionStyle, +transitionPace, +transitionOverride (the one-transition system).
+    // 2026-10-27: +safeMode (the crash ladder's switch, epic mmp-fpu).
+    ok('one effect → 15 global + 2 per-effect descriptors', descriptors.length === 17);
 
     const master = byKey(GLOBAL_SETTING_KEYS.msaEnabled);
     ok(
@@ -506,9 +509,23 @@ export function run(t) {
       // "most" descriptors, so a FUTURE accidental config:false still fails
       // this test loudly.
       'every descriptor is config:true, except the one deliberate internal exception',
-      descriptors.every((d) => d.config === true || d.key === GLOBAL_SETTING_KEYS.studioPinnedEffects)
+      descriptors.every(
+        (d) =>
+          d.config === true ||
+          d.key === GLOBAL_SETTING_KEYS.studioPinnedEffects ||
+          d.key === GLOBAL_SETTING_KEYS.transitionOverride
+      )
     );
-    ok('no manifests → just the 11 global descriptors', describeEffectSettings([]).length === 11);
+    ok('no manifests → just the 15 global descriptors', describeEffectSettings([]).length === 15);
+    const safeModeSetting = describeEffectSettings([]).find((d) => d.key === GLOBAL_SETTING_KEYS.safeMode);
+    ok(
+      'safe mode is a client enum defaulting to automatic, requiring a reload (the rung is read before any shader is built)',
+      safeModeSetting?.scope === 'client' &&
+        safeModeSetting?.kind === 'enum' &&
+        safeModeSetting?.default === 'auto' &&
+        safeModeSetting?.requiresReload === true &&
+        ['auto', 'off', 'careful', 'minimal'].every((v) => v in safeModeSetting.choices)
+    );
     ok(
       'the master off-switch exists even with zero effects registered — it gates BEFORE the cascade',
       describeEffectSettings([]).some((d) => d.key === GLOBAL_SETTING_KEYS.msaEnabled)
@@ -532,6 +549,21 @@ export function run(t) {
       'derived layers drive the resolver: player OFF wins even at Quality',
       resolveEffectEnabled(UI_WINDOW_SHADOW, layers) === false
     );
+
+    // The crash ladder's lowest working rung overrides the profile for THIS load only; the stored
+    // setting is never touched, so leaving safe mode restores exactly what the player had.
+    setSafeLevel(2);
+    const limp = deriveEffectLayers('uiWindowShadow', (k) => store[k]);
+    setSafeLevel(1);
+    const careful = deriveEffectLayers('uiWindowShadow', (k) => store[k]);
+    setSafeLevel(0);
+    const restored = deriveEffectLayers('uiWindowShadow', (k) => store[k]);
+    ok(
+      'safe mode level 2 forces the low profile without touching the store',
+      limp.profile === 'low' && store[GLOBAL_SETTING_KEYS.profile] === 'quality'
+    );
+    ok('level 1 leaves the player profile alone', careful.profile === 'quality');
+    ok('leaving safe mode gives the player their own profile back', restored.profile === 'quality');
 
     // Totality: a non-function reader degrades to defaults, never throws.
     const empty = deriveEffectLayers('uiWindowShadow', null);

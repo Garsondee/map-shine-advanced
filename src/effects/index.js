@@ -18,7 +18,12 @@ export { createParticleEngine } from './particles/particle-engine.js';
 export { WIND_DIAGNOSTIC_PARTICLES } from './particles/wind-diagnostic-particles.js';
 export { createGustEngine } from './particles/particle-engine.js';
 export { createFireParticleEngine } from './particles/particle-engine.js';
-export { createCritterEngine, allocateCritterBuffers, createCritterZoneBuffer } from './particles/particle-engine.js';
+export {
+  createCritterEngine,
+  allocateCritterBuffers,
+  allocateWindCells,
+  createCritterZoneBuffer,
+} from './particles/particle-engine.js';
 export { WIND_GUSTS } from './particles/wind-gusts.js';
 export { buildLightVisibilityPass } from './lighting/lighting-pass.js';
 export {
@@ -106,9 +111,12 @@ export {
   computeAmbientColors,
   computeGlobalLightFloor,
   maxRgb,
+  sceneLightLevel,
   FOUNDRY_LIGHT_WEIGHTS,
   mixRgb,
   buildWorldSpaceOutdoorsGate,
+  buildOutdoorsMaskAtXY,
+  buildInsideRectNode,
   // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — `vt-pan-viewer.js`
   // needs the slot cap to know how many slots to push/clear per frame.
   FLUID_SHADOW_TINT_MAX_ITEMS,
@@ -124,6 +132,14 @@ export {
   LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
   ELEVATION_RANK_FRACTION_DIVISOR,
 } from './lighting/point-light-illumination.js';
+export {
+  pushCanopyLightUniforms,
+  resolveCanopyLight,
+  computeCanopyLight,
+  buildCanopyLightTerm,
+  CANOPY_FLAG_IS_VEGETATION_MIRROR,
+  CANOPY_FLAG_IS_TREE_MIRROR,
+} from './lighting/canopy-light.js';
 export { buildPointLightColorationMaterial, computeColorationAlpha } from './lighting/point-light-coloration.js';
 // S2.15 (Performance-Audit-2026-08.md §3.1's MRT-merge plan) — the dedicated-
 // target/blit infrastructure the viewer's own render sequence wires up.
@@ -435,6 +451,49 @@ export { createPrismSurfaceSubsystem } from './prism/prism-surface-subsystem.js'
 // door here to export, the identical posture Prism's own export block above
 // already documents.
 export { IRIDESCENCE, IRIDESCENCE_PARAMS, IRIDESCENCE_PRESETS, iridescencePreset } from './iridescence/iridescence.js';
+// WIND TRAILS (2026-10-27) — sleek white strokes that ride the shared wind field
+// at its real speed; drawn by the ribbon engine (particles/gust-runtime.js).
+export {
+  WIND_TRAILS,
+  WIND_TRAILS_PARAMS,
+  buildWindTrailsSystem,
+  windTrailsLook,
+  windTrailsMeshSegments,
+} from './wind-trails.js';
+// TEMPERATURE EFFECTS (2026-10-27) — the Temperature fader's icy / warm grade,
+// frost frame and outdoor heat ripple (folded into grade/grade-present.js).
+export { TEMPERATURE_EFFECTS, TEMPERATURE_EFFECTS_PARAMS } from './temperature/temperature.js';
+export {
+  IDENTITY_TEMPERATURE_GRADE,
+  createTemperatureFxStepper,
+  applyTemperatureGrade,
+  resolveTemperatureGrade,
+  temperatureBands,
+  temperatureColor,
+  stepFrost,
+  heatRipplePx,
+  stepHeatScroll,
+  HEAT_TAP_Y_FREQ,
+} from './temperature/temperature-model.js';
+export { buildTemperatureNoiseData, TEMPERATURE_NOISE_SIZE } from './temperature/temperature-noise.js';
+// TABLE (2026-10-27) — the scene recessed in a brass-rimmed velvet games table
+// (effects/table/): the card's params, the pure ray model, and the world-pass subsystem.
+export { TABLE, TABLE_PARAMS } from './table/table.js';
+export { tableEyeHeight, tableTopHeightPx, traceTablePixel, resolveTableFrame } from './table/table-model.js';
+export { createTableSubsystem } from './table/table-subsystem.js';
+
+// PARALLAX (2026-10-28) — real depth between the floors: each layer scaled about the view centre by
+// its height above the viewed floor (effects/parallax/): the card's params, the pure depth maths,
+// and the per-frame mesh transforms the viewer drives.
+export { PARALLAX, PARALLAX_PARAMS } from './parallax/parallax.js';
+export {
+  resolveParallaxFrame,
+  floorLadder,
+  viewElevationAt,
+  parallaxScale,
+  createFloorGlide,
+} from './parallax/parallax-model.js';
+export { createParallaxSubsystem } from './parallax/parallax-subsystem.js';
 export {
   hash as iridescenceHash,
   mapNoiseScale as iridescenceMapNoiseScale,
@@ -495,6 +554,7 @@ export {
   WINDOW_DEFAULT_CONTRAST,
 } from './window/window-render.js';
 export { createWindowSurfaceSubsystem } from './window/window-surface-subsystem.js';
+export { buildWindowWeatherGainNode, WINDOW_WEATHER_DEFAULTS } from './window/window-weather.js';
 // mythica-machina-press#538/#539 — the per-TILE population, ADDED beside the
 // per-floor subsystem above; see that file's own header for why.
 export { createWindowTileSurfaceSubsystem } from './window/window-tile-surface-subsystem.js';
@@ -593,7 +653,7 @@ export {
 // to cancel its own grade inside torch pools, and that compensator was the cost
 // of grading after lighting. Ships neutral (`realism01 = 0` is a mathematical
 // no-op) so Foundry parity is intact until the author dials it in.
-export { createSkyHandle, luminance, saturation } from './sky-access.js';
+export { createSkyHandle, lightGoldenTint, luminance, saturation } from './sky-access.js';
 
 // THE GRADE ENGINE (effects/grade/, docs/planning/Grade.md) — ONE grade
 // primitive at TWO scopes. The desaturation a light CANNOT do
@@ -839,6 +899,8 @@ export {
   FIREFLIES_FOH,
   firefliesPreset,
 } from './critters/fireflies.js';
+// DUST — motes over a painted `_Dust` zone, lit only where the `_Window` light falls (the fourth zone of the same engine).
+export { DUST, DUST_PARAMS, DUST_PRESETS, DUST_FOH, dustPreset } from './critters/dust.js';
 export { createCritterSubsystem } from './critters/critter-subsystem.js';
 export { createCritterRegistration } from './critters/critter-registration.js';
 // PRECIPITATION (P1, docs/planning/Precipitation.md) — the FALL. ⚠️ BUILT and
@@ -932,6 +994,8 @@ export {
   // decks" model. Pure CPU math plus one TSL sample remap; see cloud-shade.js's
   // own header for why these sit beside the shading rather than in a new file.
   cloudTopsGate,
+  // THE SHARED EYE (2026-10-28): where the deck hangs, from scene/scene-eye.js.
+  cloudTopsEyeMagnification,
   buildCloudTopsParallaxWorldXY,
   CLOUD_TOPS_CAMERA_HEIGHT_PER_VIEW_WIDTH,
   CLOUD_TOPS_MAX_PARALLAX,

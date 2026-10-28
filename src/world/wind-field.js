@@ -86,7 +86,78 @@
  * @module world/wind-field
  */
 
-import { BEAUFORT_COEFFICIENT, BEAUFORT_MAX } from './wind-scale.js';
+import { WIND_DIAL_MAX_METRES_PER_SECOND, windStrength01ForSpeed01 } from './wind-scale.js';
+import { windFlowVector } from './wind-bake.js';
+import { getSafeProfile } from '../core/safe-mode.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⭐ 2026-10-27 — ONE REAL SPEED FOR EVERYTHING THAT MOVES WITH THE WIND
+// ─────────────────────────────────────────────────────────────────────────────
+// The author, watching the wind overlay: *"Almost nothing seemed to be reacting
+// in time with these high red large arrow waves... the rain moves at a
+// COMPLETELY different pace entirely"* and *"Overall wave speed seemed extremely
+// low. A grid space in Foundry in PF2E is 5ft x 5ft - so you could try and find
+// real world values and get the visuals to match them."*
+//
+// Two different clocks were in play. Turbulence was Taylor-advected at the real
+// wind speed, but the gust fronts — the red waves she was watching — travelled
+// at a hand-set `900 px/s × mix(0.4, 1, speed)`, a number with no unit behind it
+// and no knowledge of the scene's grid. Every consumer then added its own third
+// and fourth clocks on top. Now:
+//
+//   - the dial is linear in m/s (`wind-scale.js`, 70 m/s at full), so a field
+//     vector in dial units converts to m/s by ×70 and to world px/s by
+//     ×pixelsPerMetre — {@link windFieldPxPerSecPerUnit};
+//   - gust fronts AND turbulence are carried downwind at that one real speed
+//     (Taylor's frozen-turbulence hypothesis — a gust IS a patch of fast air,
+//     so it arrives at the speed the air does);
+//   - `pixelsPerMetre` comes from the scene's own grid (`core/scene-scale.js`),
+//     carried on the ambient wind object, so a 200 px / 5 ft map gets the same
+//     real speed as a 100 px one rather than half of it.
+
+/** The px/m a 100 px / 5 ft square gives — the fallback when a caller has no
+ *  scene scale to pass (`core/scene-scale.js` derives the real one). */
+export const WIND_DEFAULT_PIXELS_PER_METRE = 65.6;
+
+/**
+ * World px/s per unit of field vector — the ONE conversion from what
+ * `sampleWind` returns (dial units: `flow × speed01 × gust`) to how fast air
+ * at that point really moves on screen. Works on numbers or TSL nodes.
+ * @param {number|*} pixelsPerMetre
+ * @returns {number|*}
+ */
+export function windFieldPxPerSecPerUnit(pixelsPerMetre) {
+  if (typeof pixelsPerMetre === 'number') return WIND_DIAL_MAX_METRES_PER_SECOND * pixelsPerMetre;
+  return pixelsPerMetre.mul(WIND_DIAL_MAX_METRES_PER_SECOND);
+}
+
+/**
+ * How far along its "gale character" ramp the wind is, 0..1, reached at
+ * {@link WIND_GALE_CHARACTER_MPS}. Every speed-keyed SHAPE in this file (how
+ * often gusts come, how fine their pattern is, how turbulent open ground gets)
+ * ramps on this — in REAL m/s — rather than on the raw dial, so moving the dial's
+ * labelling (2026-10-27) changed none of them at a given real speed.
+ * @param {*} TSL @param {*} speed01 - float node.
+ */
+export function windGaleCharacterNode(TSL, speed01) {
+  const { float, clamp } = TSL;
+  return clamp(speed01.mul(float(WIND_DIAL_MAX_METRES_PER_SECOND / WIND_GALE_CHARACTER_MPS)), float(0), float(1));
+}
+/**
+ * TSL twin of `wind-scale.js#windStrength01ForSpeed01` — Beaufort force ÷ 12
+ * from the live dial, for any shader LOOK tuned on the old 0..1 (see that
+ * function for why). `B = (v / 0.836)^(2/3)`, capped at 12.
+ * @param {*} TSL @param {*} speed01 - float node.
+ */
+export function windStrength01Node(TSL, speed01) {
+  const { float, clamp, pow, max } = TSL;
+  const mps = max(speed01, float(0)).mul(float(WIND_DIAL_MAX_METRES_PER_SECOND));
+  return clamp(pow(mps.div(float(0.836)), float(2 / 3)).div(float(12)), float(0), float(1));
+}
+/** Hurricane threshold (Beaufort 12 / Saffir-Simpson Cat 1). Gust and
+ *  turbulence character is fully developed here; beyond it the wind only
+ *  gets faster, which the real-speed advection already shows. */
+export const WIND_GALE_CHARACTER_MPS = 33;
 
 // ── The organic drift/gust/flutter constants that used to live here
 // ── (WIND_SPACE_FREQ / WIND_DRIFT / WIND_GUST_RATE / WIND_FLUTTER_RATE /
@@ -169,13 +240,13 @@ const WIND_TURBULENCE_BASE_LENGTH_M = 32;
  * different scale currently gets eddies of the wrong physical size, which is a
  * known limitation and not a silent one.
  */
-const WIND_TURBULENCE_ASSUMED_PX_PER_M = 65.6;
+const WIND_TURBULENCE_ASSUMED_PX_PER_M = WIND_DEFAULT_PIXELS_PER_METRE;
 /** How many octaves the stack runs. A build-time QUALITY TIER, never a uniform
  *  (`tsl/no-uniform-gates`). Honest cost: `curlNoise2D` is 4 noise evaluations,
  *  so 4 octaves is 16 — against the 13 the old model spent (2 octaves = 8, plus
  *  the 5 the now-deleted organic term used). Dropping to 3 is cheaper than what
  *  this replaces. */
-const WIND_TURBULENCE_OCTAVES_DEFAULT = 4;
+export const WIND_TURBULENCE_OCTAVES_DEFAULT = 4;
 /**
  * How fast the LARGEST eddy evolves in place, per second.
  *
@@ -217,6 +288,17 @@ const WIND_TI_OPEN = 0.16;
 /** Built-up / close to geometry — real suburban-to-urban intensity. */
 const WIND_TI_ROUGH = 0.3;
 /**
+ * ⚠️ A LOOK CHOICE ON TOP OF THE PHYSICS (2026-10-27, author: *"Boost the amount
+ * of wind turbulence outside so that we get some turbulence appearing at higher
+ * wind values."*). At a constant `I` the swirl is always the same FRACTION of the
+ * mean, so in a gale every arrow points the same way — honest for a weather mast
+ * 10 m up, but a battle map is at ground level among walls, trees and debris,
+ * where the gusty, swirling part of a storm is what you actually see. Outdoor
+ * intensity is multiplied by `1 + this × galeCharacter`, so it is unchanged in a
+ * breeze and rises to ~2.2× (I ≈ 0.35-0.65) at hurricane force.
+ */
+const WIND_TI_GALE_BOOST = 1.2;
+/**
  * THE DOORWAY / SHEAR-LAYER PEAK, and why a number far above the others is
  * physically honest rather than a fudge for drama.
  *
@@ -229,7 +311,7 @@ const WIND_TI_ROUGH = 0.3;
  * total vector all the way around, exactly as before, without the model having
  * to claim turbulence exceeds the wind that drives it.
  */
-const WIND_TI_SHEAR_PEAK = 0.55;
+const WIND_TI_SHEAR_PEAK = 0.75; // was 0.55 — raised 2026-10-27 with the doorway push, author: "Make the effect stronger which pushes wind AROUND buildings and into open doorways."
 /** A sealed room. Not zero — real rooms have residual air motion — but small
  *  enough that it reads as still, and multiplied by `U` it reaches exactly zero
  *  at a dead calm regardless (#498). */
@@ -243,7 +325,21 @@ const WIND_TI_SEALED = 0.02;
 // own consumer — a lower baseline means the pre-clamp overshoot the cap has
 // to correct is smaller and less frequent, not just silently corrected
 // every time).
-const WALL_DEFLECT_REDIRECT_GAIN = 1.0;
+const WALL_DEFLECT_REDIRECT_GAIN = 1.8;
+// ↑ RAISED 1.0→1.8 (2026-10-27, author: *"Make the effect stronger which pushes
+// wind AROUND buildings"*) — together with the corner speed-up below.
+
+/**
+ * CORNER SPEED-UP (2026-10-27). Air forced around a building ACCELERATES at its
+ * corners and along its flanks — measured speed-ups are 1.2-1.5× the free stream
+ * (the reason building corners are the windiest spots in a city). The energy cap
+ * in {@link deflectAroundWalls} used to forbid that outright, because particle
+ * kernels feed the result back into a stored velocity every frame and any ratio
+ * above 1 compounds. So the ratio is now a parameter: 1 (the old hard cap) for
+ * the feedback paths, this for the FIELD sample, which is recomputed fresh from
+ * the dial every frame and can never compound.
+ */
+export const WALL_CORNER_SPEEDUP = 1.35;
 
 // How strongly the OPTIONAL chaotic impact kick (see `deflectAroundWalls`'s
 // own header) scatters a mote relative to how much speed the impact is
@@ -328,19 +424,34 @@ export const WIND_SHADOW_DEPTH = 0.85;
 // (`effects/vegetation.js#VEGETATION_KINDS`) delivers vertically, here
 // delivered horizontally, and it costs one subtraction.
 
-/** How fast a gust front sweeps downwind, in world px/sec. ~900 px/s is about
- *  9 grid squares a second on a 100 px map — fast enough to read as a gust
- *  crossing rather than a pattern fading in place, slow enough to watch it
- *  arrive. Tune-by-eye, same posture as every other look constant here. */
-export const WIND_GUST_TRAVEL_PX_PER_SEC = 900;
-/** World→noise scale ALONG the wind. ~1/0.00035 ≈ 2,900 px between gust
- *  features — several rooms, so a gust is a weather event crossing the map, not
- *  a local eddy (that is what `computeWindTurbulence`'s octaves already are). */
-export const WIND_GUST_SPACE_FREQ = 0.00035;
+// ⚠️ 2026-10-27: THE TRAVEL SPEED IS NO LONGER A CONSTANT. Gust fronts used to
+// sweep at `900 px/s × mix(0.4, 1, speed)` — a pace unrelated to the wind they
+// were part of and to the scene's grid, which is the "rain moves at a
+// COMPLETELY different pace" the author reported. They now ride the real mean
+// wind (Taylor advection, exactly as the turbulence stack does), so a gust
+// crosses a 5 ft square in `1.52 m ÷ U` seconds — 0.04 s in a 35 m/s hurricane.
+//
+// The pattern's SIZE is real too, in metres: a gust's along-wind length is the
+// distance the air covers in a gust's lifetime (a few seconds), so it grows
+// with the wind — `U × WIND_GUST_PERIOD_S`, held between the bounds below so a
+// breeze's gusts still fit a room and a hurricane's still fit a battle map.
+/** How long a typical gust takes to pass a point, seconds. Real gusts last
+ *  ~2-5 s (the WMO gust is a 3 s average); 2.5 keeps several visible on a map. */
+export const WIND_GUST_PERIOD_S = 2.5;
+/** Bounds on a gust's along-wind length, metres. */
+export const WIND_GUST_LENGTH_MIN_M = 9;
+export const WIND_GUST_LENGTH_MAX_M = 60;
 /** Cross-wind scale, as a FRACTION of the along-wind one. Below 1 so a gust
  *  front is broad and only gently wavy — a front is a line of weather, not a
  *  blob. At 0 fronts would be perfectly straight infinite walls. */
-export const WIND_GUST_CROSS_FREQ_RATIO = 0.35;
+export const WIND_GUST_CROSS_FREQ_RATIO = 0.4;
+/** A gust grows and dies while it travels rather than being a frozen stamp —
+ *  how many lifetimes per gust period the pattern evolves through. */
+export const WIND_GUST_EVOLVE_PER_PERIOD = 0.35;
+/** World→noise scale ALONG the wind at the DEFAULT scene scale and a gust of
+ *  {@link WIND_GUST_LENGTH_MIN_M} — kept for the probe and tests; the live
+ *  value is computed per speed and per scene in {@link computeGustEnvelope}. */
+export const WIND_GUST_SPACE_FREQ = 1 / (WIND_GUST_LENGTH_MIN_M * WIND_DEFAULT_PIXELS_PER_METRE);
 // ─────────────────────────────────────────────────────────────────────────────
 // GUST RATE FOLLOWS WIND SPEED (2026-08-15, author, after the first cut shipped
 // with gustiness as an independent dial): *"I think linking gustiness to overall
@@ -366,31 +477,34 @@ export const WIND_GUST_CROSS_FREQ_RATIO = 0.35;
 //      exactly what the author is NOT asking for. `..._GALE` sits near the
 //      noise's own median so blasts and brief lulls alternate rapidly. A gale
 //      is violent AND uneven; a constant is neither.
-/** The threshold at a dead calm — high, so a gust is a rare event. */
-export const WIND_GUST_THRESHOLD_CALM = 0.82;
-/** The threshold at full wind — near the noise median, so blasts arrive in
- *  rapid succession while still genuinely alternating. See point 3 above for
- *  why this is not 0. */
-export const WIND_GUST_THRESHOLD_GALE = 0.42;
-/** How much finer the gust pattern gets at full wind — more fronts across the
- *  same map, i.e. a shorter gap between blasts. */
-export const WIND_GUST_FREQ_GALE_SCALE = 2.6;
-/** Travel-speed multiplier at a dead calm; reaches 1 at full wind. A gust that
- *  crawls across the map at gale strength reads as fog, not wind. */
-export const WIND_GUST_TRAVEL_CALM_SCALE = 0.4;
-/** Width of the smoothstep band above the threshold. NARROW = discrete (a gust
- *  arrives and passes); wide would smear it back into the continuous wobble
- *  this term exists to replace. */
-export const WIND_GUST_SHARPNESS = 0.25;
-/** The envelope between gusts, at FULL gustiness. Deliberately well below 1 —
- *  the lull is half of what makes a gust read as a gust. */
-export const WIND_GUST_LULL = 0.55;
-/** The envelope AT a gust, at full gustiness. Above 1 because a real gust
- *  exceeds the mean wind; the dial is the mean, not the ceiling. Chosen with
- *  `WIND_GUST_LULL` so the time-average lands near 1 given how often the
- *  threshold above is actually crossed — a gusty scene should not read as a
- *  quieter scene. */
-export const WIND_GUST_PEAK = 2;
+// ⚠️ 2026-10-27 RETUNE — "single waves alone in a sea of inactivity". The
+// thresholds used to be compared against `n·0.5+0.5`, but MaterialX Perlin's
+// spread is only ~±0.25 around its median, so the 0.25-wide smoothstep band
+// above a 0.62 threshold was almost never climbed to the top: most of the map
+// sat at the 0.55 lull and the occasional crest barely reached peak. The
+// thresholds now act on a STANDARDISED noise (`z`, roughly unit spread — see
+// {@link WIND_GUST_NOISE_SPREAD}), the lull is shallower, and a second, finer
+// octave gives gusts of more than one size.
+/** Divides the summed noise into a roughly unit-spread `z`. */
+export const WIND_GUST_NOISE_SPREAD = 0.3;
+/** The threshold (in `z`) at a dead calm — high, so a gust is an event. */
+export const WIND_GUST_THRESHOLD_CALM = 0.9;
+/** The threshold at a fully developed gale — below the median, so more than
+ *  half the map is inside a gust at any moment while lulls still cross it.
+ *  See point 3 above for why this is never -∞. */
+export const WIND_GUST_THRESHOLD_GALE = -0.35;
+/** Width (in `z`) of the band over which a gust rises to its peak. */
+export const WIND_GUST_SHARPNESS = 0.7;
+/** The envelope between gusts, at FULL gustiness. Below 1 (a lull is half of
+ *  what makes a gust read as one) but no longer a dead sea: real lulls sit at
+ *  ~0.6-0.8 of the mean. */
+export const WIND_GUST_LULL = 0.7;
+/** The envelope AT a gust's crest, at full gustiness. Real peak gust factors are
+ *  1.4-1.7 over open ground and ~2 among buildings; the finer octave adds its
+ *  own ±{@link WIND_GUST_RIPPLE} on top, so crests vary. */
+export const WIND_GUST_PEAK = 1.75;
+/** Gust-to-gust variety: the finer octave modulates the envelope by ±this. */
+export const WIND_GUST_RIPPLE = 0.18;
 /**
  * THE SHIPPED DEFAULT gustiness — now FULL, and the reason it moved.
  *
@@ -459,48 +573,296 @@ export function windFlowVectorNode(TSL, directionDeg) {
  *   it backwards would send fronts marching upwind, which is this project's
  *   own recurring frame-of-reference bug class ([[feedback_y_flip_recurring_risk]]).
  * @param {*} args.gustiness01 - float node, 0..1.
+ * @param {{clockMs:*, gustPhase:*}} [args.advection] - the ambient's INTEGRATED
+ *   advection uniforms ({@link createWindAdvectionUniforms}). Every live caller
+ *   passes it: the fronts are then placed by how far they have travelled, so a
+ *   wind fade changes their pace and never teleports them. Omitted → the old
+ *   `speed × t` placement, exact only while the speed holds still (tests and
+ *   probes that pin a constant wind).
  * @returns {*} a float node — 1 at gustiness 0, ranging between
  *   `WIND_GUST_LULL` and `WIND_GUST_PEAK` at gustiness 1.
  */
-export function computeGustEnvelope(TSL, { centerXY, time, directionDeg, gustiness01, speed01 }) {
-  const { float, vec2, mx_noise_float: perlin, clamp, mix, smoothstep } = TSL;
-  const t = time.mul(float(0.001)); // ms → seconds, same conversion every other term here uses
+export function computeGustEnvelope(
+  TSL,
+  { centerXY, time, directionDeg, gustiness01, speed01, pixelsPerMetre, advection }
+) {
+  return createGustEnvelopeSampler(TSL, { centerXY, directionDeg, gustiness01, speed01, pixelsPerMetre, advection })(
+    time
+  );
+}
+
+/**
+ * ⭐ THE GUST ENVELOPE AT ONE PLACE, AT ANY NUMBER OF MOMENTS (2026-10-27) —
+ * {@link computeGustEnvelope} split in two: everything that depends only on the
+ * place and the wind (direction, gust length, the along/across coordinates, the
+ * threshold) is built ONCE here; the returned function adds only what moves
+ * with time (the phase, the evolve term, the two noises and the shaping).
+ *
+ * ⚠️ WHY IT EXISTS: SHADER SIZE IS A CRASH, NOT A COST. A candle remembers ~8 s
+ * of wind by sampling this at 14 past moments (`effects/candle-wind-state.js`),
+ * unrolled into the vertex stage of the flame and of every candle LIGHT shader.
+ * Calling `computeGustEnvelope` per moment rebuilt all of the place-only maths
+ * 14 times over. On Windows, Chrome compiles WGSL inside its GPU process, and a
+ * cold load compiling a burst of shaders that large stalled that process past
+ * its watchdog: `RESULT_CODE_HUNG`, then "A valid external Instance reference no
+ * longer exists" and every context on the page lost at once. The look-back now
+ * pays only the time-dependent half per moment — byte-identical output.
+ *
+ * @param {*} TSL
+ * @param {object} args - {@link computeGustEnvelope}'s arguments, minus `time`.
+ * @returns {(time: *) => *} ms node → the envelope, a float node.
+ */
+export function createGustEnvelopeSampler(
+  TSL,
+  { centerXY, directionDeg, gustiness01, speed01, pixelsPerMetre, advection }
+) {
+  const { float, vec2, mx_noise_float: perlin, clamp, mix, smoothstep, max, min } = TSL;
   // THE SPEED LINK — see the "GUST RATE FOLLOWS WIND SPEED" block above. Absent
   // `speed01` ⇒ `float(0)`, i.e. the CALM end of every ramp: rare, slow, coarse
   // gusts. That is the honest default for a caller with no wind-speed concept
   // (it cannot claim a gale), and it keeps this function total rather than
   // requiring a fourth mandatory argument every existing call site would have
   // to grow.
-  const s = speed01 !== undefined ? clamp(speed01, float(0), float(1)) : float(0);
+  const speed = speed01 !== undefined ? clamp(speed01, float(0), float(1)) : float(0);
+  // The SHAPE ramps on real m/s (fully developed at hurricane force) — see
+  // {@link windGaleCharacterNode}.
+  const s = windGaleCharacterNode(TSL, speed);
+  const ppm = pixelsPerMetre !== undefined ? float(pixelsPerMetre) : float(WIND_DEFAULT_PIXELS_PER_METRE);
   // THE FLOW direction, and its perpendicular. Through the ONE shared helper
   // ({@link windFlowVectorNode}) that `sampleWind`'s own coherent term also
   // uses — they MUST stay the same: a gust front travelling at an angle to
   // the wind it is modulating would read as two unrelated weather systems.
   const flow = windFlowVectorNode(TSL, directionDeg);
   const perp = vec2(flow.y.negate(), flow.x);
-  // ALONG-FLOW coordinate, advected downwind. Subtracting the travel term means
-  // a point reads the pattern value that started upwind of it — i.e. the
-  // pattern moves TOWARD the point, which is what "the gust arrives" means.
-  // Travel speed and pattern fineness BOTH ramp with wind speed (levers 1-2 in
-  // the block above this function): a gale's fronts sit closer together AND
-  // cross the map faster, which together are "the gap between wind blasts gets
-  // shorter".
-  const travelPxPerSec = float(WIND_GUST_TRAVEL_PX_PER_SEC).mul(mix(float(WIND_GUST_TRAVEL_CALM_SCALE), float(1), s));
-  const spaceFreq = float(WIND_GUST_SPACE_FREQ).mul(mix(float(1), float(WIND_GUST_FREQ_GALE_SCALE), s));
-  const along = centerXY.x.mul(flow.x).add(centerXY.y.mul(flow.y)).sub(t.mul(travelPxPerSec));
+  // ⭐ THE REAL SPEED (2026-10-27). Fronts ride the mean wind — the SAME px/s
+  // the turbulence stack is advected at and every consumer moves at
+  // ({@link windFieldPxPerSecPerUnit}). Subtracting the travel term means a
+  // point reads the pattern value that started upwind of it, i.e. the gust
+  // ARRIVES.
+  const travelPxPerSec = speed.mul(windFieldPxPerSecPerUnit(ppm));
+  // A gust's along-wind length is the distance the air covers in a gust's
+  // lifetime — longer in a gale, bounded so it stays a feature of the map.
+  const metresPerSecond = speed.mul(float(WIND_DIAL_MAX_METRES_PER_SECOND));
+  const gustLengthM = clamp(
+    metresPerSecond.mul(float(WIND_GUST_PERIOD_S)),
+    float(WIND_GUST_LENGTH_MIN_M),
+    float(WIND_GUST_LENGTH_MAX_M)
+  );
+  const spaceFreq = float(1).div(gustLengthM.mul(ppm));
+  const along = centerXY.x.mul(flow.x).add(centerXY.y.mul(flow.y));
   const across = centerXY.x.mul(perp.x).add(centerXY.y.mul(perp.y));
-  const n = perlin(vec2(along.mul(spaceFreq), across.mul(spaceFreq.mul(float(WIND_GUST_CROSS_FREQ_RATIO)))));
-  const n01 = n.mul(float(0.5)).add(float(0.5)); // mx_noise_float is [-1,1]
-  // THE DISCRETENESS. Below the threshold this is flat 0 — a genuine lull, not
-  // a small value — and it climbs to 1 across a narrow band. The threshold
-  // FALLS with wind speed (lever 1): "extremely few and far between" at a
-  // breeze, blast after blast at full gale — and it deliberately stops short of
-  // 0, because a threshold of 0 saturates this to a constant and deletes the
-  // gusting entirely (lever 3).
+  const fineFreq = spaceFreq.mul(float(2.3));
+  // The place-only halves of both noise coordinates, built once.
+  const alongCoarse = along.mul(spaceFreq);
+  const acrossCoarse = across.mul(spaceFreq).mul(float(WIND_GUST_CROSS_FREQ_RATIO));
+  const alongFine = along.mul(fineFreq).add(float(41.7));
+  const acrossFine = across.mul(fineFreq).mul(float(0.6)).add(float(19.3));
+  // How fast the coarse octave slides, noise units per second (the integrated
+  // phase's own rate — see `windGustPhaseRate`).
+  const phaseRate = metresPerSecond.div(gustLengthM);
+  // THE DISCRETENESS. Below the threshold the coarse shape is flat — a genuine
+  // lull — and it climbs to the crest across the sharpness band. The threshold
+  // FALLS with wind speed (lever 1): rare blasts in a breeze, more than half the
+  // map gusting in a hurricane — never everywhere (lever 3).
   const threshold = mix(float(WIND_GUST_THRESHOLD_CALM), float(WIND_GUST_THRESHOLD_GALE), s);
-  const gustShape = smoothstep(threshold, threshold.add(float(WIND_GUST_SHARPNESS)), n01);
-  const shaped = mix(float(WIND_GUST_LULL), float(WIND_GUST_PEAK), gustShape);
-  return mix(float(1), shaped, clamp(gustiness01, float(0), float(1)));
+  const thresholdTop = threshold.add(float(WIND_GUST_SHARPNESS));
+  const gust01 = clamp(gustiness01, float(0), float(1));
+
+  return (time) => {
+    const t = time.mul(float(0.001)); // ms → seconds, same conversion every other term here uses
+    // A gust grows and dies as it travels: the coarse octave rides exactly at U,
+    // the finer one slightly faster and drifting across-wind, so the composite
+    // keeps re-forming instead of sliding past as one frozen stamp.
+    //
+    // `phase` is how many noise units the coarse octave has slid — `travel ×
+    // spaceFreq`. INTEGRATED when the caller has the ambient's advection (see the
+    // "INTEGRATED ADVECTION" block above `createWindAdvectionState`): the speed and
+    // the gust length both move during a wind fade, and their product times `t`
+    // is what turned the fronts into white noise.
+    const phase = advection
+      ? advection.gustPhase.add(phaseRate.mul(windAdvectionDtSecNode(TSL, time, advection)))
+      : t.mul(travelPxPerSec).mul(spaceFreq);
+    const evolve = t.mul(float(WIND_GUST_EVOLVE_PER_PERIOD / WIND_GUST_PERIOD_S));
+    const coarse = perlin(vec2(alongCoarse.sub(phase), acrossCoarse.add(evolve)));
+    const fine = perlin(vec2(alongFine.sub(phase.mul(float(1.18 * 2.3))), acrossFine.sub(evolve.mul(float(1.7)))));
+    const z = coarse.add(fine.mul(float(0.45))).div(float(WIND_GUST_NOISE_SPREAD));
+    const gustShape = smoothstep(threshold, thresholdTop, z);
+    const ripple = float(1).add(
+      clamp(fine.div(float(WIND_GUST_NOISE_SPREAD)), float(-1), float(1)).mul(float(WIND_GUST_RIPPLE))
+    );
+    const shaped = mix(float(WIND_GUST_LULL), float(WIND_GUST_PEAK), gustShape).mul(ripple);
+    const bounded = min(max(shaped, float(0.4)), float(2.2));
+    return mix(float(1), bounded, gust01);
+  };
+}
+
+/**
+ * How fast the mean wind carries things across the map, world px/s — the speed
+ * gust fronts travel at, and the one every consumer moving WITH the wind should
+ * use. Plain-JS twin of the TSL travel term above.
+ * @param {number} speed01 @param {number} [pixelsPerMetre]
+ */
+export function windTravelPxPerSec(speed01, pixelsPerMetre = WIND_DEFAULT_PIXELS_PER_METRE) {
+  const s = Number.isFinite(speed01) ? Math.min(1, Math.max(0, speed01)) : 0;
+  const ppm = Number.isFinite(pixelsPerMetre) && pixelsPerMetre > 0 ? pixelsPerMetre : WIND_DEFAULT_PIXELS_PER_METRE;
+  return s * windFieldPxPerSecPerUnit(ppm);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⭐ INTEGRATED ADVECTION (2026-10-27) — a pattern carried by the wind is placed
+// by HOW FAR THE AIR HAS TRAVELLED, never by `speed × t`.
+// ─────────────────────────────────────────────────────────────────────────────
+// Author, fading 0 → 100% wind and rain over Fade Time 1m: *"wind thrashes
+// vegetation to insane amounts very quickly, the rain darkening of the window
+// effect goes berserk, it becomes a strobing nightmare."*
+//
+// ⚠️ THE BUG CLASS. Every travelling pattern here was placed at `x − U·t`, with
+// `t` the seconds since the world loaded. That is exact while `U` holds still
+// and wrong the moment it moves: the pattern's speed is `d(U·t)/dt = U + t·dU/dt`,
+// and `t` is in the THOUSANDS. A 0 → 100% ramp over 60 s an hour into a session
+// slid the turbulence by ~4,600 px/s × 3,600 s ÷ 60 s ≈ 280,000 px/s and the gust
+// fronts across hundreds of noise cells per second — white noise, which every
+// consumer then read as a gust: bushes thrashing, rain lashing sideways, the
+// window's storm waves strobing. An instant change only ever made ONE jump,
+// which is why nobody saw it until fades existed. (`computeWindTurbulence`'s own
+// 2026-10-27 note found the SAME shape for a gust envelope varying in SPACE;
+// this is its twin in TIME.)
+//
+// THE FIX is what the torrent layer already did (`stepTorrentState`) and what
+// the cloud deck does: integrate on the CPU, once per frame, `∫ U dt`, and hand
+// the shaders the DISTANCE. A speed change then changes how fast the pattern
+// moves from now on, and never where it already is.
+//
+// Consumers ask for the field at their OWN time (a bush lags the tree by its
+// arrival delay, a candle remembers ~8 s of wind). Those are a step back from
+// `clockMs` at today's rate — {@link windAdvectionDtSecNode} — clamped, so a
+// consumer on a different clock (the critters run on wall time) can be at most
+// a bounded constant off, which is smooth, rather than `t` off, which is not.
+
+/** How far behind `clockMs` a consumer may ask (the candle history is ~8.4 s). */
+export const WIND_ADVECTION_LOOKBACK_MAX_S = 30;
+/** How far ahead — one frame's worth of clock skew, no more. */
+export const WIND_ADVECTION_LEAD_MAX_S = 1;
+/** The longest single integration step — a stalled tab must not leap the pattern. */
+export const WIND_ADVECTION_STEP_MAX_S = 0.25;
+
+/**
+ * How fast the gust pattern's coarse octave slides, in NOISE units per second.
+ * Plain-JS twin of `computeGustEnvelope`'s own `travel × spaceFreq` — the px/m
+ * cancels (both the travel and the gust's length are in real metres), so this
+ * is scene-scale-free.
+ * @param {number} speed01 @returns {number}
+ */
+export function windGustPhaseRate(speed01) {
+  const s = Number.isFinite(speed01) ? Math.min(1, Math.max(0, speed01)) : 0;
+  const mps = s * WIND_DIAL_MAX_METRES_PER_SECOND;
+  const lengthM = Math.min(WIND_GUST_LENGTH_MAX_M, Math.max(WIND_GUST_LENGTH_MIN_M, mps * WIND_GUST_PERIOD_S));
+  return mps / lengthM;
+}
+
+/**
+ * @typedef {object} WindAdvectionState - every integral a wind-carried pattern
+ *   needs, in seconds of the clock `clockMs` is on.
+ * @property {number} clockMs - the clock value the integrals are current at.
+ * @property {number[]} speedFlowSec - `∫ flow · speed01 dt` (vec2). × `windFieldPxPerSecPerUnit(ppm)` = world px.
+ * @property {number[]} strengthFlowSec - `∫ flow · strength01 dt` (vec2), strength = Beaufort ÷ 12.
+ * @property {number[]} flowSec - `∫ flow dt` (vec2) — a constant-speed drift that still turns with the wind.
+ * @property {number} strengthSec - `∫ strength01 dt`.
+ * @property {number} gustPhase - `∫ windGustPhaseRate(speed01) dt`, noise units.
+ */
+
+/** @returns {WindAdvectionState} */
+export function createWindAdvectionState() {
+  return { clockMs: 0, speedFlowSec: [0, 0], strengthFlowSec: [0, 0], flowSec: [0, 0], strengthSec: 0, gustPhase: 0 };
+}
+
+/**
+ * Advance the integrals one frame. Pure: returns a new state. `dtSec` is the
+ * delta of the SAME clock `tMs` is on, clamped to `[0, WIND_ADVECTION_STEP_MAX_S]`.
+ * @param {WindAdvectionState|null} state
+ * @param {{tMs: number, dtSec: number, speed01: number, directionDeg: number}} frame
+ * @returns {WindAdvectionState}
+ */
+export function stepWindAdvection(state, { tMs, dtSec, speed01, directionDeg }) {
+  const prev = state ?? createWindAdvectionState();
+  const dt = Number.isFinite(dtSec) && dtSec > 0 ? Math.min(dtSec, WIND_ADVECTION_STEP_MAX_S) : 0;
+  const s = Number.isFinite(speed01) ? Math.min(1, Math.max(0, speed01)) : 0;
+  const strength = windStrength01ForSpeed01(s);
+  const f = windFlowVector(Number.isFinite(directionDeg) ? directionDeg : 0);
+  return {
+    clockMs: Number.isFinite(tMs) ? tMs : prev.clockMs,
+    speedFlowSec: [prev.speedFlowSec[0] + f.x * s * dt, prev.speedFlowSec[1] + f.y * s * dt],
+    strengthFlowSec: [prev.strengthFlowSec[0] + f.x * strength * dt, prev.strengthFlowSec[1] + f.y * strength * dt],
+    flowSec: [prev.flowSec[0] + f.x * dt, prev.flowSec[1] + f.y * dt],
+    strengthSec: prev.strengthSec + strength * dt,
+    gustPhase: prev.gustPhase + windGustPhaseRate(s) * dt,
+  };
+}
+
+/**
+ * The uniform bag the shaders read — one per owner (the viewer's ambient wind),
+ * plus one per consumer that copies the ambient into its own uniforms rather
+ * than binding it (the precipitation renderers, which re-read the handle every
+ * frame because the handle is reassigned on a bake).
+ * @param {*} TSL - needs `uniform, float, vec2`.
+ * @returns {{clockMs:*, speedFlowSec:*, strengthFlowSec:*, flowSec:*, strengthSec:*, gustPhase:*}}
+ */
+export function createWindAdvectionUniforms(TSL) {
+  const { uniform, float, vec2 } = TSL;
+  return {
+    clockMs: uniform(float(0)),
+    speedFlowSec: uniform(vec2(0, 0)),
+    strengthFlowSec: uniform(vec2(0, 0)),
+    flowSec: uniform(vec2(0, 0)),
+    strengthSec: uniform(float(0)),
+    gustPhase: uniform(float(0)),
+  };
+}
+
+/**
+ * Write a {@link WindAdvectionState} — or another uniform bag's current values —
+ * into a uniform bag. Never throws; a missing source leaves the bag as it was.
+ * @param {ReturnType<typeof createWindAdvectionUniforms>|null} dst
+ * @param {WindAdvectionState|ReturnType<typeof createWindAdvectionUniforms>|null|undefined} src
+ */
+export function writeWindAdvectionUniforms(dst, src) {
+  if (!dst || !src) return;
+  const num = (v) => (v && typeof v === 'object' && 'value' in v ? v.value : v);
+  const vec = (v) => {
+    const raw = num(v);
+    if (Array.isArray(raw)) return raw;
+    return raw && Number.isFinite(raw.x) ? [raw.x, raw.y] : null;
+  };
+  const setF = (u, v) => {
+    const n = num(v);
+    if (Number.isFinite(n)) u.value = n;
+  };
+  const setV = (u, v) => {
+    const a = vec(v);
+    if (a && Number.isFinite(a[0]) && Number.isFinite(a[1])) u.value.set(a[0], a[1]);
+  };
+  setF(dst.clockMs, src.clockMs);
+  setV(dst.speedFlowSec, src.speedFlowSec);
+  setV(dst.strengthFlowSec, src.strengthFlowSec);
+  setV(dst.flowSec, src.flowSec);
+  setF(dst.strengthSec, src.strengthSec);
+  setF(dst.gustPhase, src.gustPhase);
+}
+
+/**
+ * Seconds from the integrals' clock to the time a consumer asked for — 0 for a
+ * consumer on the same clock at "now", negative for a look-back — clamped (see
+ * the block header for why the clamp is what keeps a foreign clock smooth).
+ * @param {*} TSL @param {*} time - ms node. @param {{clockMs:*}} advection
+ * @returns {*} float node, seconds.
+ */
+export function windAdvectionDtSecNode(TSL, time, advection) {
+  const { float, clamp } = TSL;
+  return clamp(
+    time.sub(advection.clockMs).mul(float(0.001)),
+    float(-WIND_ADVECTION_LOOKBACK_MAX_S),
+    float(WIND_ADVECTION_LEAD_MAX_S)
+  );
 }
 
 /**
@@ -599,12 +961,18 @@ export function computeGustEnvelope(TSL, { centerXY, time, directionDeg, gustine
  *   position/time/seed of its own to hash from, so generating the
  *   randomness is the caller's job (see particle-runtime.js/gust-runtime.js's
  *   own call sites for the hash used). Both-or-neither with `chaosAmount`.
+ * @param {number} [args.maxSpeedRatio=1] - the energy cap: the result's speed
+ *   never exceeds `input × this`. 1 for anything that feeds back into a stored
+ *   velocity; {@link WALL_CORNER_SPEEDUP} for a fresh field sample.
  * @param {*} [args.chaosAmount] - float node, 0..1 — how strongly to apply
  *   the kick (typically the SAME narrow near-wall proximity already driving
  *   this call, not the wide one — see the momentum-guard call sites).
  * @returns {*} a vec2 node — the deflected vector.
  */
-export function deflectAroundWalls(TSL, { vector, awayDirX, awayDirY, proximity, chaosDirX, chaosDirY, chaosAmount }) {
+export function deflectAroundWalls(
+  TSL,
+  { vector, awayDirX, awayDirY, proximity, chaosDirX, chaosDirY, chaosAmount, maxSpeedRatio = 1 }
+) {
   const { vec2, dot, max, min, length, mix, float } = TSL;
   const n = vec2(awayDirX, awayDirY);
   const t = vec2(awayDirY.negate(), awayDirX);
@@ -628,7 +996,9 @@ export function deflectAroundWalls(TSL, { vector, awayDirX, awayDirY, proximity,
   // just above) produced.
   const inputSpeed = length(vector);
   const rawSpeed = length(rawDeflected);
-  const deflected = rawDeflected.mul(min(float(1), inputSpeed.div(max(rawSpeed, float(1e-4)))));
+  const deflected = rawDeflected.mul(
+    min(float(1), inputSpeed.mul(float(maxSpeedRatio)).div(max(rawSpeed, float(1e-4))))
+  );
   return mix(vector, deflected, proximity);
 }
 
@@ -786,19 +1156,37 @@ export function curlNoise2D(TSL, { p, timeSec, spaceFreq, rate, phaseX = 0, phas
  * @param {*} [args.windSpeed01] - float node 0..1. Omitted → 1 (full
  *   strength, uncapped) — a caller with no wind-speed concept at all still
  *   gets turbulence, with no ceiling to measure it against.
+ * @param {{clockMs:*, speedFlowSec:*}} [args.advection] - the ambient's
+ *   integrated advection uniforms; see {@link computeGustEnvelope}'s param of
+ *   the same name. Omitted → `U·t`, exact only for a constant wind.
  * @returns {*} a vec2 node, its magnitude NEVER exceeding `windSpeed01` (see
  *   the energy cap in this function's own header).
  */
 export function computeWindTurbulence(
   TSL,
-  { centerXY, time, openness, exteriorOpenness, windSpeed01, directionDeg, octaves = WIND_TURBULENCE_OCTAVES_DEFAULT }
+  {
+    centerXY,
+    time,
+    openness,
+    exteriorOpenness,
+    windSpeed01,
+    directionDeg,
+    advectSpeed01,
+    pixelsPerMetre,
+    advection,
+    // The crash ladder's rung 2 builds half the octaves (core/safe-mode.js); rungs 0-1 build the full
+    // stack the field was tuned on. Resolved at graph-build time, like every tier choice (Law 4).
+    octaves = getSafeProfile().windTurbulenceOctaves,
+  }
 ) {
-  // FUNCTION form for `pow`, never the method — this codebase's own
-  // `reference_tsl_method_chaining_trap`.
-  const { float, clamp, mix, pow } = TSL;
+  const { float, clamp, mix } = TSL;
   const t = time.mul(float(0.001)); // ms → seconds
 
-  const speed01 = windSpeed01 !== undefined ? clamp(windSpeed01, float(0), float(1)) : float(1);
+  // ⚠️ NOT clamped to 1: callers pass the GUSTED speed here (`speed × envelope`),
+  // and a gust above the dial's mean is exactly when the swirl should be
+  // strongest. Only the negative end is guarded.
+  const speed01 = windSpeed01 !== undefined ? clamp(windSpeed01, float(0), float(2.5)) : float(1);
+  const ppm = pixelsPerMetre !== undefined ? float(pixelsPerMetre) : float(WIND_TURBULENCE_ASSUMED_PX_PER_M);
 
   // ── TAYLOR ADVECTION ────────────────────────────────────────────────────
   // Taylor's frozen-turbulence hypothesis: eddies are carried past a point by
@@ -813,18 +1201,41 @@ export function computeWindTurbulence(
   // and a gale stopped being the same field at two volumes. Absent
   // `directionDeg` ⇒ no advection at all, a JS branch emitting the identical
   // graph as before (`tsl/no-uniform-gates`).
+  //
+  // ⚠️ ADVECTED AT THE MEAN, NEVER THE GUSTED SPEED (2026-10-27). `x − U·t` with
+  // a `U` that varies across the map (a gust envelope multiplied in) stretches
+  // the pattern by `∇U·t`, and `t` is seconds since the world loaded — after an
+  // hour the swirl had been sheared into noise. `advectSpeed01` is the dial's
+  // own mean; the gusted value is only ever the AMPLITUDE (below).
+  //
+  // ⚠️ AND INTEGRATED, NEVER `U·t`, WHEN THE CALLER HAS THE ADVECTION — the
+  // same mistake in time that the note above fixed in space: a mean speed that
+  // MOVES (a Remote wind fade) slid the eddies by `t·dU/dt`, hundreds of
+  // thousands of px/s an hour in. `speedFlowSec` is `∫ flow·U dt`, so the
+  // offset is the distance the air has really travelled; see the "INTEGRATED
+  // ADVECTION" block above `createWindAdvectionState`.
   let samplePos = centerXY;
   if (directionDeg !== undefined) {
-    const metresPerSecond = float(BEAUFORT_COEFFICIENT).mul(pow(speed01.mul(float(BEAUFORT_MAX)), float(1.5)));
-    const pxPerSecond = metresPerSecond.mul(float(WIND_TURBULENCE_ASSUMED_PX_PER_M));
-    samplePos = centerXY.sub(windFlowVectorNode(TSL, directionDeg).mul(pxPerSecond).mul(t));
+    const meanSpeed01 =
+      advectSpeed01 !== undefined ? clamp(advectSpeed01, float(0), float(1)) : clamp(speed01, float(0), float(1));
+    const flow = windFlowVectorNode(TSL, directionDeg);
+    const pxPerUnit = windFieldPxPerSecPerUnit(ppm);
+    samplePos = advection
+      ? centerXY.sub(
+          advection.speedFlowSec
+            .add(flow.mul(meanSpeed01).mul(windAdvectionDtSecNode(TSL, time, advection)))
+            .mul(pxPerUnit)
+        )
+      : centerXY.sub(flow.mul(meanSpeed01.mul(pxPerUnit)).mul(t));
   }
 
   // ── THE fBm STACK ───────────────────────────────────────────────────────
   // Lacunarity 2, gain `2^(−1/3)` — the Kolmogorov `−5/3` slope. Smaller
   // eddies also turn over faster (turnover ~ λ/u), so each octave's churn rate
   // rises with the lacunarity rather than being hand-set per octave.
-  const baseSpaceFreq = 1 / (WIND_TURBULENCE_BASE_LENGTH_M * WIND_TURBULENCE_ASSUMED_PX_PER_M);
+  // The eddy sizes are metres, converted with the scene's own px/m (2026-10-27;
+  // was the assumed 65.6 for every map).
+  const baseSpaceFreq = float(1 / WIND_TURBULENCE_BASE_LENGTH_M).div(ppm);
   const octaveCount = Math.max(1, Math.floor(octaves));
   let stack = null;
   let amplitudeSum = 0;
@@ -836,7 +1247,7 @@ export function computeWindTurbulence(
     const vec = curlNoise2D(TSL, {
       p: samplePos,
       timeSec: t,
-      spaceFreq: baseSpaceFreq * scale,
+      spaceFreq: baseSpaceFreq.mul(float(scale)),
       rate: WIND_TURBULENCE_BASE_CHURN_RATE * scale,
       phaseX: 97 + i * 131,
       phaseY: 131 - i * 197,
@@ -860,7 +1271,12 @@ export function computeWindTurbulence(
   const opennessVal = openness !== undefined ? clamp(openness, float(0), float(1)) : float(1);
   const exteriorOpennessVal = exteriorOpenness !== undefined ? clamp(exteriorOpenness, float(0), float(1)) : float(1);
   const shelteredIntensity = mix(float(WIND_TI_SEALED), float(WIND_TI_SHEAR_PEAK), opennessVal);
-  const openIntensity = mix(float(WIND_TI_ROUGH), float(WIND_TI_OPEN), exteriorOpennessVal);
+  // The gale boost (see WIND_TI_GALE_BOOST) keys on the MEAN wind's character —
+  // outdoors only; a doorway's shear peak is already the strongest term here.
+  const meanForCharacter =
+    advectSpeed01 !== undefined ? clamp(advectSpeed01, float(0), float(1)) : clamp(speed01, float(0), float(1));
+  const galeBoost = float(1).add(windGaleCharacterNode(TSL, meanForCharacter).mul(float(WIND_TI_GALE_BOOST)));
+  const openIntensity = mix(float(WIND_TI_ROUGH), float(WIND_TI_OPEN), exteriorOpennessVal).mul(galeBoost);
   const intensity = mix(shelteredIntensity, openIntensity, exteriorOpennessVal);
 
   // Multiplied, never clamped — so `U = 0` is exactly zero by construction and
@@ -1032,9 +1448,21 @@ export function sampleWind(
     exteriorOpenness: exteriorOpennessOverride,
     windSpeed01,
     directionDeg: directionDegOverride,
+    advectSpeed01: advectSpeed01Override,
+    pixelsPerMetre: pixelsPerMetreOverride,
+    advection: advectionOverride,
   }
 ) {
   const { float, vec2, clamp, texture } = TSL;
+  // The ambient's integrated advection (see `createWindAdvectionState`) — the
+  // override exists for the same reason the others do: the kernel's `organic`
+  // getter calls this WITHOUT `wind` and must still advect identically.
+  const advection = advectionOverride !== undefined ? advectionOverride : wind ? wind.advection : undefined;
+  // The scene's real px/m and the dial's MEAN speed — the two things every
+  // real-speed term below needs (see this file's 2026-10-27 header block).
+  const pixelsPerMetre =
+    pixelsPerMetreOverride !== undefined ? pixelsPerMetreOverride : wind ? wind.pixelsPerMetre : undefined;
+  const advectSpeed01 = advectSpeed01Override !== undefined ? advectSpeed01Override : wind ? wind.speed01 : undefined;
   // ⭐ THE ORGANIC DRIFT/GUST/FLUTTER LAYER IS GONE (2026-09-04,
   // mythica-machina-press#497 Stage 2 / #499). It was five noise evaluations
   // hand-rolled into a stand-in for a spectrum: one low-frequency wandering
@@ -1137,6 +1565,8 @@ export function sampleWind(
           // gets blast after blast. See `computeGustEnvelope`'s own "GUST RATE
           // FOLLOWS WIND SPEED" block.
           speed01: wind.speed01,
+          pixelsPerMetre,
+          advection,
         })
       : undefined;
 
@@ -1169,6 +1599,9 @@ export function sampleWind(
     directionDeg: directionDegOverride !== undefined ? directionDegOverride : wind ? wind.directionDeg : undefined,
     windSpeed01:
       cappedSpeed01 !== undefined && gustEnvelope !== undefined ? cappedSpeed01.mul(gustEnvelope) : cappedSpeed01,
+    advectSpeed01,
+    pixelsPerMetre,
+    advection,
   });
   // The field's non-directional half is now the fBm stack alone. Its own
   // intensity is already `I · U`, so it reaches exactly zero at a dead calm by
@@ -1230,6 +1663,7 @@ export function sampleWind(
     awayDirX: wallAwayDirX,
     awayDirY: wallAwayDirY,
     proximity: wallProximity,
+    maxSpeedRatio: WALL_CORNER_SPEEDUP,
   });
 
   // Gate the whole coherent term by openness (sampled earlier, above — see

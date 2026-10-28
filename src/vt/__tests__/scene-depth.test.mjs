@@ -22,12 +22,14 @@ import {
   DEPTH_FLAG_IS_LEVEL_BACKGROUND,
   DEPTH_FLAG_IS_LEVEL_FOREGROUND,
   DEPTH_FLAG_IS_TILE,
+  DEPTH_FLAG_IS_TOKEN,
   resolveSceneDepthFloorIndex,
   buildSceneDepthWriterMaterial,
   buildSceneDepthProxyMesh,
   querySceneDepth,
 } from '../scene-depth.js';
 import { FLUID_PRESENCE_EDGE0 } from '../../effects/fluid/fluid-render.js';
+import { decodeLayerScale01 } from '../../scene/index.js';
 
 /** A minimal chainable node — supports the TSL method chains this module's
  * own TSL-building functions call (`.level().a`/`.r`, `.lessThan()`,
@@ -191,14 +193,16 @@ export function run(t) {
       computeSceneDepthFlags({ kind: 'tile', restrictsLight: true }) ===
         (DEPTH_FLAG_IS_TILE | DEPTH_FLAG_RESTRICTS_LIGHT)
     );
-    ok('flags: an unrecognised kind sets no kind bit', computeSceneDepthFlags({ kind: 'token' }) === 0);
+    ok('flags: a token sets its own bit', computeSceneDepthFlags({ kind: 'token' }) === DEPTH_FLAG_IS_TOKEN);
+    ok('flags: an unrecognised kind sets no kind bit', computeSceneDepthFlags({ kind: 'weather' }) === 0);
     ok(
       'flags: every named bit fits in one byte (0-255), no overlap',
       DEPTH_FLAG_RESTRICTS_LIGHT +
         DEPTH_FLAG_RESTRICTS_WEATHER +
         DEPTH_FLAG_IS_LEVEL_BACKGROUND +
         DEPTH_FLAG_IS_LEVEL_FOREGROUND +
-        DEPTH_FLAG_IS_TILE <=
+        DEPTH_FLAG_IS_TILE +
+        DEPTH_FLAG_IS_TOKEN <=
         255
     );
   }
@@ -438,7 +442,10 @@ export function run(t) {
       payload.args[0].__kind === 'uniform'
     );
     ok('writer: R is the floor index, normalised', payload.args[0].value === 2 / 255);
-    ok('writer: G (outdoors) is a real 0, the named KNOWN GAP — never undefined', payload.args[1].value === 0);
+    ok(
+      'writer: G is the layer’s parallax scale — "scale 1" without object nodes, never undefined',
+      Math.abs(decodeLayerScale01(payload.args[1].value) - 1) < 1e-12
+    );
     ok(
       'writer: B (flags) is a UNIFORM, never a baked shader constant — same pipeline-recompile risk as R',
       payload.args[2].__kind === 'uniform'

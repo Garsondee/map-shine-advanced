@@ -43,7 +43,7 @@
  *
  * @module effects/precipitation/storm-fog-field
  */
-import { windFlowVectorNode } from '../../world/index.js';
+import { windFlowVectorNode, windStrength01Node, windAdvectionDtSecNode } from '../../world/index.js';
 
 /** World-px wavelength of the base mist bank, before domain warp. Roughly
  * midway between the squall field's own band width (~900px) and the cloud
@@ -86,17 +86,31 @@ export const MIST_WIND_THIN_FLOOR = 0.15;
  * @param {*} inputs.windDirDeg - float node, a compass bearing naming where
  *   the wind blows TOWARD (`world/wind-bake.js#windFlowVector`'s convention).
  * @param {*} inputs.windSpeed01 - float node, 0..1.
+ * @param {object} [inputs.advection] - the wind's INTEGRATED advection uniforms
+ *   (`world/wind-field.js#createWindAdvectionUniforms`). Omitted → `toward × t ×
+ *   speed`, which during a wind fade (or a turn) swung the whole bank by
+ *   thousands of px a second.
  * @returns {*} float node, 0..1 — 1 means "the air here is as thick as this
  *   field ever gets"; the caller's own intensity uniform is what decides how
  *   opaque that reads.
  */
-export function buildStormFogField(TSL, { worldXY: rawXY, timeMs, windDirDeg, windSpeed01 }) {
+export function buildStormFogField(TSL, { worldXY: rawXY, timeMs, windDirDeg, windSpeed01: dialSpeed01, advection }) {
+  // Beaufort strength — tuned on the old dial (2026-10-27).
+  const windSpeed01 = windStrength01Node(TSL, dialSpeed01);
   const { float, mx_fractal_noise_float: fbm, clamp } = TSL;
 
   const toward = windFlowVectorNode(TSL, windDirDeg);
   const t = timeMs.mul(float(0.001));
   const driftPxPerSec = float(MIST_CALM_DRIFT_PX_PER_SEC).add(windSpeed01.mul(float(MIST_WIND_DRIFT_PX_PER_SEC)));
-  const drift = toward.mul(t.mul(driftPxPerSec));
+  // INTEGRATED when the advection is given: the calm drift is `∫ flow dt` and
+  // the wind's share `∫ flow · strength dt`, so the bank keeps its place and only
+  // its pace (and heading) changes when the wind does.
+  const drift = advection
+    ? advection.flowSec
+        .mul(float(MIST_CALM_DRIFT_PX_PER_SEC))
+        .add(advection.strengthFlowSec.mul(float(MIST_WIND_DRIFT_PX_PER_SEC)))
+        .add(toward.mul(driftPxPerSec).mul(windAdvectionDtSecNode(TSL, timeMs, advection)))
+    : toward.mul(t.mul(driftPxPerSec));
 
   const p = rawXY.sub(drift).mul(float(MIST_FREQ));
 

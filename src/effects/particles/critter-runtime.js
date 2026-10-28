@@ -39,6 +39,11 @@
  * ninth; anything new must be PACKED into these (see how `life` doubles as the
  * decision timer and `custom` carries heading / height / gait / aux).
  *
+ * DUST MOTES are the fourth kind and the odd one out: they are not creatures, but they are the same
+ * machine (a painted zone, agents that steer, a procedural body), and their brain wants the wind grid.
+ * That is the eighth storage buffer, so a mote leaves two arena buffers it has no use for (`life`,
+ * `phase`) unbound; see `KINDS.mote.unused`.
+ *
  * @module effects/particles/critter-runtime
  */
 import { ParticleArena, BYTES_PER_PARTICLE } from './particle-arena.js';
@@ -52,6 +57,9 @@ import { buildMaggotBrain } from '../critters/maggot-brain.js';
 import { buildMaggotMaterials } from '../critters/maggot-render.js';
 import { buildFireflyBrain, FIREFLY_SYNC } from '../critters/firefly-brain.js';
 import { buildFireflyMaterials } from '../critters/firefly-render.js';
+import { buildMoteBrain } from '../critters/mote-brain.js';
+import { buildMoteMaterials } from '../critters/mote-render.js';
+import { packWindCells, WIND_CELL_VEC4_STRIDE } from '../../world/index.js';
 
 /** The CPU clock handed to shaders is wrapped so `sin()` keeps its precision all session. */
 const TIME_WRAP_SEC = 1000;
@@ -71,6 +79,7 @@ const STAMP_TOLERANCE = 0.5 / STAMP_STEPS;
  */
 const KINDS = Object.freeze({
   fly: Object.freeze({
+    unused: Object.freeze([]),
     brain: buildFlyBrain,
     materials: buildFlyMaterials,
     sizeParam: 'size',
@@ -79,6 +88,7 @@ const KINDS = Object.freeze({
     renderOrders: Object.freeze({ shadow: 1, body: 3 }),
   }),
   maggot: Object.freeze({
+    unused: Object.freeze([]),
     brain: buildMaggotBrain,
     materials: buildMaggotMaterials,
     sizeParam: 'size',
@@ -87,6 +97,7 @@ const KINDS = Object.freeze({
     renderOrders: Object.freeze({ body: 0 }),
   }),
   firefly: Object.freeze({
+    unused: Object.freeze([]),
     brain: buildFireflyBrain,
     materials: buildFireflyMaterials,
     sizeParam: 'size',
@@ -94,6 +105,18 @@ const KINDS = Object.freeze({
     speedParam: 'speed',
     colonyClock: true,
     renderOrders: Object.freeze({ body: 0, glow: 1 }),
+  }),
+  // A mote keeps no decision timer and no state ordinal, so `life` and `phase` are never touched and never
+  // bound: five arena buffers + the zone buffer + the wind cells = 7 of the 8 a compute stage may bind.
+  mote: Object.freeze({
+    unused: Object.freeze(['life', 'phase']),
+    wind: true,
+    brain: buildMoteBrain,
+    materials: buildMoteMaterials,
+    sizeParam: 'size',
+    variationParam: 'sizeVariation',
+    speedParam: 'speed',
+    renderOrders: Object.freeze({ glow: 0 }),
   }),
 });
 
@@ -114,14 +137,39 @@ export function allocateCritterBuffers(THREE, capacity) {
 }
 
 /**
+ * The wind handle's per-cell storage buffer for a kind that reads the wind grid (`windHandle.kernel`),
+ * rounded UP to a bucket of cells so that a scene with a slightly different grid reuses it. Like every
+ * storage buffer it can never be freed, so the caller keeps the result for the session (see
+ * `critter-subsystem.js`'s `shared`).
+ *
+ * @param {*} THREE @param {number} cellCount
+ * @returns {{node: *, cells: number}}
+ */
+export function allocateWindCells(THREE, cellCount) {
+  const BUCKET = 16384;
+  const cells = Math.max(1, Math.ceil(Math.max(1, cellCount) / BUCKET)) * BUCKET;
+  return { node: THREE.TSL.instancedArray(cells * WIND_CELL_VEC4_STRIDE, 'vec4'), cells };
+}
+
+/** The grid a wind handle's kernel closes over, as a key: a different one needs a different kernel. */
+export function windGridKey(handle) {
+  const g = handle?.grid;
+  if (!g || !handle?.cells) return 'none';
+  return `${g.originX},${g.originY},${g.cellSize},${g.cols},${g.rows}|${handle.ambient ? 1 : 0}`;
+}
+
+/**
  * @param {object} deps
  * @param {*} deps.THREE - injected (this file imports none).
- * @param {'fly'|'maggot'|'firefly'} deps.kind
+ * @param {'fly'|'maggot'|'firefly'|'mote'} deps.kind
  * @param {{buffers: Record<string, *>, capacity: number}} deps.memory - from {@link allocateCritterBuffers}.
  * @param {{node: *}} deps.zoneBuffer - the shared zone buffer (`createCritterZoneBuffer`).
  * @param {object} deps.plan - the tier plan (`critterTierPlan`).
  * @param {number} [deps.zDepth=0] @param {number} [deps.renderOrder=0] - the MESH's order (see fire's note: not the scene's).
  * @param {*} [deps.illumTexNode] @param {*} [deps.colorationTexNode] @param {*} [deps.depthTexNode] @param {*} [deps.depthFlagsTexNode]
+ * @param {*} [deps.viewRectNode] - motes only: the viewer's `uViewRect`, for mapping a floor point to the lighting buffers.
+ * @param {object|null} [deps.windHandle] @param {{node: *}|null} [deps.windCells] - motes only: the wind grid and
+ *   the storage buffer its cells are packed into (`allocateWindCells`). Absent, a mote reads the map-wide wind.
  * @param {() => number} [deps.random] - the per-frame salt source. `Math.random` by default; a lab injects a seeded one.
  * @param {{seeded: boolean, signature: number|null, colony: number}|null} [deps.resume] - a predecessor's
  *   {@link resumeToken}: a tier change rebuilds the engine around the SAME arena, and the swarm in it is
@@ -139,6 +187,9 @@ export function createCritterEngine({
   colorationTexNode = null,
   depthTexNode = null,
   depthFlagsTexNode = null,
+  viewRectNode = null,
+  windHandle = null,
+  windCells = null,
   random = Math.random,
   resume = null,
 }) {
@@ -150,7 +201,21 @@ export function createCritterEngine({
   const bank = createUniformBank(TSL, { ...CRITTER_UNIFORM_DEFAULTS, ...CRITTER_KIND_DEFAULTS[kind] });
   const u = bank.get;
   const zoneSampler = buildZoneSampler(TSL, { buffer: zoneBuffer.node, u });
-  const brain = spec.brain(TSL, { u, zone: zoneSampler });
+  const unused = new Set(spec.unused);
+  // The wind grid, for a kind that reads it: only when the handle has real cells AND a buffer was supplied.
+  // Anything less is "no wind data" and the brain falls back to the map-wide wind, exactly as fire's does.
+  const wind =
+    spec.wind && windCells?.node && windHandle?.grid && windHandle?.cells
+      ? { handle: windHandle, cellBuffer: windCells.node }
+      : null;
+  let windVersion = -1;
+  const pushWindCells = (handle) => {
+    if (!wind || !handle?.cells || handle.version === windVersion) return;
+    packWindCells(windCells.node.value, handle.cells, handle.grid.cols * handle.grid.rows);
+    windVersion = handle.version;
+  };
+  pushWindCells(windHandle);
+  const brain = spec.brain(TSL, { u, zone: zoneSampler, wind });
 
   // 24 fresh random bits per frame from the CPU (a float holds an integer this size exactly).
   const frameSalt = u('rand').mul(16777216).floor().toUint();
@@ -166,10 +231,12 @@ export function createCritterEngine({
     const P = buffers.position.element(i).toVar();
     const V = buffers.velocity.element(i).toVar();
     const AGE = buffers.age.element(i).toVar();
-    const TMR = buffers.life.element(i).toVar();
+    // A buffer a kind never touches is not read here either: a storage buffer that is bound but unused still
+    // counts against the stage's eight.
+    const TMR = unused.has('life') ? float(0) : buffers.life.element(i).toVar();
     const Sraw = seedNode ?? buffers.seed.element(i).toVar();
     const C = buffers.custom.element(i).toVar();
-    const PH = buffers.phase.element(i).toVar();
+    const PH = unused.has('phase') ? float(0) : buffers.phase.element(i).toVar();
     const homeRec = zoneSampler.home(fi);
     const look = readSeed(TSL, Sraw, u(spec.variationParam));
     return {
@@ -215,9 +282,9 @@ export function createCritterEngine({
     buffers.seed.element(i).assign(slot.S.add(slot.homeStamp));
     buffers.position.element(i).assign(fresh.P);
     buffers.velocity.element(i).assign(fresh.V);
-    buffers.life.element(i).assign(fresh.TMR);
+    if (!unused.has('life')) buffers.life.element(i).assign(fresh.TMR);
     buffers.custom.element(i).assign(fresh.C);
-    buffers.phase.element(i).assign(fresh.PH);
+    if (!unused.has('phase')) buffers.phase.element(i).assign(fresh.PH);
     buffers.age.element(i).assign(float(99));
   })().compute(capacity);
 
@@ -253,9 +320,9 @@ export function createCritterEngine({
     const keep = (old, advanced, fresher) => select(simulate, select(reborn, fresher, advanced), old);
     buffers.position.element(i).assign(keep(s.P, next.P, fresh.P));
     buffers.velocity.element(i).assign(keep(s.V, next.V, fresh.V));
-    buffers.life.element(i).assign(keep(s.TMR, next.TMR, fresh.TMR));
+    if (!unused.has('life')) buffers.life.element(i).assign(keep(s.TMR, next.TMR, fresh.TMR));
     buffers.custom.element(i).assign(keep(s.C, next.C, fresh.C));
-    buffers.phase.element(i).assign(keep(s.PH, next.PH, fresh.PH));
+    if (!unused.has('phase')) buffers.phase.element(i).assign(keep(s.PH, next.PH, fresh.PH));
     buffers.age
       .element(i)
       .assign(select(simulate, select(reborn, float(0), min(s.AGE.add(dtReal), float(1e5))), s.AGE));
@@ -280,6 +347,7 @@ export function createCritterEngine({
     colorationTexNode,
     depthTexNode,
     depthFlagsTexNode,
+    viewRectNode,
     zDepth,
   });
   const scene = new THREE.Scene();
@@ -350,9 +418,28 @@ export function createCritterEngine({
       bank.setMany(params);
     },
 
-    /** The camera's world rect: the perspective centre follows the view (fire's own contract). */
-    setView(rect) {
-      bank.set('camCentre', [(rect.minX + rect.maxX) * 0.5, (rect.minY + rect.maxY) * 0.5]);
+    /**
+     * The camera's world rect, and the frame's scene eye (`scene/scene-eye.js`). The perspective centre and
+     * height are the SHARED eye's — the one the Table, Parallax, the clouds and the rain are drawn by — so a
+     * firefly at height h slides exactly like a floor layer at height h. The kind's own `perspective` dial
+     * then scales how tall it is drawn against that eye. No eye (a lab): the rect's centre and the 1000 px
+     * camera the critters were tuned at.
+     */
+    setView(rect, eye = null) {
+      if (eye && Number.isFinite(eye.height) && eye.height > 0) {
+        bank.set('camCentre', [eye.x, eye.y]);
+        bank.set('camHeight', eye.height);
+      } else {
+        bank.set('camCentre', [(rect.minX + rect.maxX) * 0.5, (rect.minY + rect.maxY) * 0.5]);
+      }
+      // Where a world point lands in the lighting buffers, for a kind with no viewer-owned `viewRectNode`.
+      bank.set('viewMin', [rect.minX, rect.minY]);
+      bank.set('viewSize', [Math.max(1, rect.maxX - rect.minX), Math.max(1, rect.maxY - rect.minY)]);
+    },
+
+    /** Refresh the wind cells in place after a rebake (same grid; a regrid needs a new engine, see `windGridKey`). */
+    updateWind(handle) {
+      pushWindCells(handle);
     },
 
     /**
@@ -378,14 +465,16 @@ export function createCritterEngine({
       seeded = true;
     },
 
-    step(renderer, { dtSec, tMs, worldRect }) {
+    step(renderer, { dtSec, tMs, worldRect, eye = null }) {
       if (!zoneValid || disposed) return;
-      if (worldRect) this.setView(worldRect);
+      if (worldRect) this.setView(worldRect, eye);
       // ONE step length for everything that keeps time. The colony's clock must advance by exactly what the
       // fireflies' own clocks do, or a hitch (a hidden tab) would leave them a long way from the beat.
       const dt = Math.min(MAX_DT_SEC, Math.max(0, Number.isFinite(dtSec) ? dtSec : 0));
       bank.set('dt', dt);
       bank.set('timeSec', ((tMs || 0) / 1000) % TIME_WRAP_SEC);
+      // The wind field's noise runs on the unwrapped clock: wrapping it would jump every eddy once per wrap.
+      if (wind) bank.set('windTimeMs', tMs || 0);
       bank.set('rand', random());
       if (spec.colonyClock) {
         colony = (colony + dt / Math.max(FIREFLY_SYNC.PERIOD_FLOOR, u('flashPeriod').value)) % 1;
@@ -407,14 +496,16 @@ export function createCritterEngine({
         const stride = Math.max(minStride, Math.round(all.length / capacity));
         return { data: all.subarray(0, n * stride), stride };
       };
+      // A buffer the kind never binds has no GPU backing to read (`KINDS.mote.unused`): it reads as empty.
+      const skipped = (stride) => ({ data: new Float32Array(0), stride });
       const [position, velocity, age, life, seed, custom, phase] = await Promise.all([
         read(buffers.position, 2),
         read(buffers.velocity, 2),
         read(buffers.age, 1),
-        read(buffers.life, 1),
+        unused.has('life') ? skipped(1) : read(buffers.life, 1),
         read(buffers.seed, 1),
         read(buffers.custom, 4),
-        read(buffers.phase, 1),
+        unused.has('phase') ? skipped(1) : read(buffers.phase, 1),
       ]);
       return {
         position: position.data,

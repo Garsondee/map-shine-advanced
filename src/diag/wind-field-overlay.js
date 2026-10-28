@@ -21,6 +21,8 @@
  * @module diag/wind-field-overlay
  */
 
+import { WIND_DIAL_MAX_METRES_PER_SECOND } from '../world/index.js';
+
 /** A ceiling, not a target — high enough that the 1x-4x resolution lever
  * (Wind.md's own resolution knob, previewed here) has real room to run
  * before the cap-growth safety net kicks in and coarsens it back down. A
@@ -313,7 +315,15 @@ const HEAD_START_T = 0.6; // the arrowhead flare begins here (fraction along the
 const HEAD_MAX_RADIUS = 0.09; // the flare's widest point (a real "shoulder", not a gentle taper)
 const TIP_RADIUS = 0.012; // the very tip — a sharp point
 const EDGE_SOFT = 0.035; // silhouette antialiasing width
-const ARROW_SCALE = 0.42; // how far a full-strength gust extends the tip
+// ⭐ 2026-10-27 — THE OVERLAY READS REAL SPEED. The field is in dial units and
+// the dial became linear to 70 m/s, so a field vector × 70 IS metres per second.
+// Colour and length now key on that: blue = calm, amber ≈ a gale (17 m/s), red =
+// hurricane force (33 m/s, the length cap), and the white "over the cap" glow
+// beyond it. Length rises as `(v / 33)^0.7`, so a breeze still shows a visible
+// arrow rather than a dot.
+const OVERLAY_MPS_PER_FIELD_UNIT = WIND_DIAL_MAX_METRES_PER_SECOND;
+const OVERLAY_FULL_MPS = 33;
+const OVERLAY_LENGTH_CURVE = 0.7;
 const ARROW_MAX_TIP_FRACTION = 0.46; // the tip never visually extends past this (quad half-extent is 0.5)
 const CALM_EMISSION = 0.4; // brightness floor at zero wind (the shaft stays visible)
 // SATURATION TELL — when the RAW magnitude exceeds the visual length clamp,
@@ -379,7 +389,8 @@ function projectOnSegment(TSL, p, a, b) {
  * @returns {{material: *}}
  */
 export function buildWindArrowMaterial({ THREE, uGlobalTimeMs, windHandle }) {
-  const { uv, attribute, vec2, vec3, vec4, float, length, dot, clamp, smoothstep, mix, max, min, select } = THREE.TSL;
+  const { uv, attribute, vec2, vec3, vec4, float, length, dot, clamp, smoothstep, mix, max, min, select, pow } =
+    THREE.TSL;
 
   const centerXY = attribute('center', 'vec2');
   // Real per-point exposure (2026-07-21) — baked per-vertex the SAME way the
@@ -397,10 +408,16 @@ export function buildWindArrowMaterial({ THREE, uGlobalTimeMs, windHandle }) {
   // THE PRIMARY SAMPLE — this cell's own anchor, the SAME field every other
   // consumer reads.
   const gust = sampleAt(centerXY);
-  const rawTip = gust.mul(float(ARROW_SCALE));
-  // A strong prevailing wind + baked correction (Tier 1) can exceed the
-  // organic noise's old ~[-1,1] range by a wide margin — clamp the TIP
-  // LENGTH (not the shape math) so a gale saturates the arrow at the quad's
+  // Real speed → a 0..N fraction of hurricane force (see OVERLAY_FULL_MPS).
+  const gustLen = length(gust);
+  const fullFraction = pow(
+    clamp(gustLen.mul(float(OVERLAY_MPS_PER_FIELD_UNIT / OVERLAY_FULL_MPS)), float(0), float(4)),
+    float(OVERLAY_LENGTH_CURVE)
+  );
+  const gustDir = gust.div(max(gustLen, float(1e-6)));
+  const rawTip = gustDir.mul(fullFraction.mul(float(ARROW_MAX_TIP_FRACTION)));
+  // A gust can exceed hurricane force by a wide margin — clamp the TIP
+  // LENGTH (not the shape math) so it saturates the arrow at the quad's
   // edge instead of overshooting it into an unreadable blob.
   const rawLen = length(rawTip);
   const tip = rawTip.mul(min(float(1), float(ARROW_MAX_TIP_FRACTION).div(max(rawLen, float(1e-6)))));
@@ -412,7 +429,10 @@ export function buildWindArrowMaterial({ THREE, uGlobalTimeMs, windHandle }) {
   const midWorldPos = centerXY.add(tipDir.mul(float(MID_SAMPLE_WORLD_OFFSET)));
   const vMid = sampleAt(midWorldPos);
   const perpDir = vec2(tipDir.y.negate(), tipDir.x);
-  const rawBend = dot(vMid.mul(float(ARROW_SCALE)), perpDir).mul(float(BEND_SCALE));
+  const rawBend = dot(
+    vMid.mul(float((ARROW_MAX_TIP_FRACTION * OVERLAY_MPS_PER_FIELD_UNIT) / OVERLAY_FULL_MPS)),
+    perpDir
+  ).mul(float(BEND_SCALE));
   const bendAmount = clamp(rawBend, float(-BEND_MAX), float(BEND_MAX));
   const bend = perpDir.mul(bendAmount);
 
@@ -493,7 +513,7 @@ const HEAT_ALPHA_STRONG = 0.275; // a clear, but still see-through, red where it
  * drawn on FULL-cell quads (`buildWindOverlayGeometry` at `sizePx ≈ spacing`)
  * BENEATH the arrow mesh.
  *
- * Deliberately shares `ARROW_SCALE`/`ARROW_MAX_TIP_FRACTION` with the arrow
+ * Deliberately shares `OVERLAY_FULL_MPS`/`OVERLAY_LENGTH_CURVE` with the arrow
  * material so "full strength" means the SAME magnitude in both — an arrow
  * saturating its length cap and its cell going full-red are the same event,
  * never two different thresholds the eye has to reconcile.
@@ -505,7 +525,7 @@ const HEAT_ALPHA_STRONG = 0.275; // a clear, but still see-through, red where it
  * @returns {{material: *}}
  */
 export function buildWindHeatmapMaterial({ THREE, uGlobalTimeMs, windHandle }) {
-  const { attribute, vec3, vec4, float, length, clamp, mix } = THREE.TSL;
+  const { attribute, vec3, vec4, float, length, clamp, mix, pow } = THREE.TSL;
 
   const centerXY = attribute('center', 'vec2');
   const gust = windHandle.node(THREE.TSL, {
@@ -516,7 +536,14 @@ export function buildWindHeatmapMaterial({ THREE, uGlobalTimeMs, windHandle }) {
   // The SAME magnitude measure the arrow uses (see this function's own doc for
   // why they must agree) — pre-clamp length, normalised by the arrow's own
   // visual-length cap, so 1.0 = "as strong as the arrow can show".
-  const magnitude = clamp(length(gust.mul(float(ARROW_SCALE))).div(float(ARROW_MAX_TIP_FRACTION)), float(0), float(1));
+  const magnitude = clamp(
+    pow(
+      clamp(length(gust).mul(float(OVERLAY_MPS_PER_FIELD_UNIT / OVERLAY_FULL_MPS)), float(0), float(4)),
+      float(OVERLAY_LENGTH_CURVE)
+    ),
+    float(0),
+    float(1)
+  );
 
   const cold = vec3(HEAT_COLD[0], HEAT_COLD[1], HEAT_COLD[2]);
   const midTint = vec3(HEAT_MID[0], HEAT_MID[1], HEAT_MID[2]);

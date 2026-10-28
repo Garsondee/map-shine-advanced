@@ -105,10 +105,15 @@ import {
   sampleWind,
   computeWindTurbulence,
   computeGustEnvelope,
+  createGustEnvelopeSampler,
   deflectAroundWalls,
   windFlowVectorNode,
   WIND_SHADOW_DEPTH,
+  WALL_CORNER_SPEEDUP,
+  windStrength01Node,
 } from './wind-field.js';
+import { sampleBakedWindField, bakedSliceFor, buildWindFieldBakeMaterial } from './wind-field-bake.js';
+import { GUST_HISTORY_STEP_S, GUST_HISTORY_TAPS, sampleGustHistoryTap } from './wind-gust-history.js';
 
 /**
  * @typedef {object} WindGridSpec
@@ -179,6 +184,12 @@ import {
  *   upwind occlusion, `wind-enclosure.js#upwindShelter` — A was an unused
  *   constant 1 before 2026-08-01).
  * @param {*} [spec.liveTexture] - Tier 2's published D_live target texture.
+ * @param {*} [spec.fieldTexture] - RG half-float, the wind field baked for THIS frame's clock
+ *   (`world/wind-field-bake.js`). With an ambient and a grid it makes `node({baked:'now'})` one read.
+ * @param {*} [spec.fieldLagTexture] - the same field `groundLagSec` earlier (`baked:'lagged'`).
+ * @param {*} [spec.gustHistoryTexture] - the atlas of recorded gust magnitudes
+ *   (`world/wind-gust-history.js`): the wind's recent past, one tile per 0.6 s moment.
+ * @param {*} [spec.gustHistoryGridIndex] - float uniform NODE: the latest recorded moment, decided by the baker.
  * @param {WindCellArrays} [spec.cells]
  * @param {(x: number, y: number) => number} [spec.cpuExposureAt] - the CPU
  *   point query for sky/shelter exposure at a world position.
@@ -192,6 +203,10 @@ export function createWindHandle({
   opennessTexture = null,
   wallAvoidTexture = null,
   liveTexture = null,
+  fieldTexture = null,
+  fieldLagTexture = null,
+  gustHistoryTexture = null,
+  gustHistoryGridIndex = null,
   cells = null,
   cpuExposureAt = null,
 } = {}) {
@@ -203,20 +218,45 @@ export function createWindHandle({
   const wallAvoidFieldRef = grid && wallAvoidTexture ? { texture: wallAvoidTexture, ...gridOf(grid) } : undefined;
   const liveFieldRef = grid && liveTexture ? { texture: liveTexture, ...gridOf(grid) } : undefined;
   const ambientRef = ambientWind ?? undefined;
+  // THE BAKED FIELD (world/wind-field-bake.js) — `sampleWind` evaluated once per frame into a texture
+  // on the wind grid, one slice for "now" and one for "a moment ago" (vegetation's bushes). Present only
+  // with a live ambient AND a grid: without them there is no field to have baked.
+  const fieldNowRef = ambientRef && grid && fieldTexture ? { texture: fieldTexture, grid: gridOf(grid) } : undefined;
+  const fieldLagRef =
+    ambientRef && grid && fieldLagTexture ? { texture: fieldLagTexture, grid: gridOf(grid) } : undefined;
+  // THE RECORDED GUST HISTORY — needs the live ambient (the magnitudes it records), the grid, and the
+  // baker's `gridIndex` uniform (which moment is latest).
+  const gustHistoryRef =
+    ambientRef && grid && gustHistoryTexture && gustHistoryGridIndex
+      ? { texture: gustHistoryTexture, gridIndex: gustHistoryGridIndex, grid: gridOf(grid) }
+      : undefined;
 
   /**
    * THE TSL SHAPE — for any ordinary material. Every field ref is forwarded by
    * this function; the caller supplies only what is genuinely its own (where
    * it is, what time it is, and how sheltered that spot is).
    *
+   * ## `baked` — READ the field instead of recomputing it
+   * A consumer that samples at the frame's own clock passes `baked: 'now'`; one that
+   * samples a moment late (a bush) passes `baked: 'lagged'`. When this handle carries
+   * the baked field, the call becomes ONE filtered texture read and the shader contains
+   * no noise at all — see `world/wind-field-bake.js` for what that was worth (19.7 s →
+   * ~1 s of compile for the candle flame). With no baked field on the handle (a lab, a
+   * test, the very first frame) the argument is ignored and the analytic field is
+   * built exactly as before, so passing it is always safe.
+   *
    * @param {*} TSL - THREE.TSL.
    * @param {object} args
    * @param {*} args.centerXY - vec2 node, the WORLD position being sampled.
    * @param {*} args.time - the shared clock node (uGlobalTimeMs, ms).
+   * @param {'now'|'lagged'} [args.baked] - read the per-frame baked field.
    * @returns {*} a vec2 node — a lean direction × strength, exactly as
    *   `sampleWind` returns (each caller scales it into its own space).
    */
-  function node(TSL, { centerXY, time }) {
+  function node(TSL, { centerXY, time, baked }) {
+    const slice = bakedSliceFor(baked);
+    const fieldRef = slice === 'now' ? fieldNowRef : slice === 'lag' ? fieldLagRef : undefined;
+    if (fieldRef) return sampleBakedWindField(TSL, { texture: fieldRef.texture, grid: fieldRef.grid, centerXY });
     return sampleWind(TSL, {
       centerXY,
       time,
@@ -225,6 +265,161 @@ export function createWindHandle({
       wallAvoidField: wallAvoidFieldRef,
       liveField: liveFieldRef,
     });
+  }
+
+  /**
+   * ⭐ THE SAME FIELD, IN "STRENGTH" UNITS (2026-10-27) — for every effect whose
+   * LOOK (how far a branch bends, a flame leans, a rope swings) was tuned when
+   * the dial's 0..1 was Beaufort force ÷ 12. The dial became linear to 70 m/s
+   * that day, which shrank the raw field 2-3× at everyday speeds (12 m/s used
+   * to read 0.5, now 0.18). Rather than retune a dozen effects by eye, this
+   * rescales the field by `strength ÷ speed01` — the MEAN wind reads exactly
+   * what it read before at the same real speed, while every gust, lull, swirl
+   * and wall-deflection in the field is carried through untouched, so a bush
+   * surges inside the very red band the overlay draws. Above hurricane force
+   * the mean saturates at 1 (the old dial's top), the gusts on top of it do not.
+   * Things that MOVE with the air use `node()` and the real px/s instead.
+   *
+   * @param {*} TSL @param {{centerXY: *, time: *}} args
+   * @returns {*} vec2 node.
+   */
+  /**
+   * A CHEAP look-back sampler (2026-10-27, for `effects/candle-wind-state.js`):
+   * returns `(timeMs) => magnitude` of the COHERENT wind at a FIXED point, in the
+   * same strength units as {@link strengthNode} — the gusting prevailing wind,
+   * gated by this point's openness and building shelter, without turbulence.
+   *
+   * ⚠️ WHY IT EXISTS: a candle that remembers being blown out samples the wind
+   * at ~15 past moments. Through `strengthNode` each sample is a full field
+   * (a 4-octave curl-noise turbulence stack + the gust envelope, ~20 noise
+   * calls), and 15 of them unrolled into one shader lost the GPU device in the
+   * lab. The parts that depend only on POSITION (openness, wind shadow) are read
+   * once here; only the gust envelope — the travelling front that actually
+   * snuffs candles — is re-evaluated per moment (2 noise calls).
+   *
+   * @param {*} TSL @param {{centerXY: *}} args
+   * @returns {(timeMs: *) => *}
+   */
+  function gustMagnitudeAt(TSL, { centerXY }) {
+    const { float, vec2, clamp, texture, max } = TSL;
+    if (!ambientRef) return () => float(0);
+    const at = (field) => {
+      const uv = vec2(
+        centerXY.x.sub(float(field.originX)).div(float(field.cellSize * field.cols)),
+        centerXY.y.sub(float(field.originY)).div(float(field.cellSize * field.rows))
+      );
+      return texture(field.texture, clamp(uv, vec2(0, 0), vec2(1, 1)));
+    };
+    const openness = bakedFieldRef ? at(bakedFieldRef).z : float(1);
+    const shadow = wallAvoidFieldRef ? at(wallAvoidFieldRef).w : float(0);
+    const gate = openness.mul(float(1).sub(shadow.mul(float(WIND_SHADOW_DEPTH))));
+    const s = ambientRef.speed01;
+    // Everything that does not move with time — strength × the place's gate, and
+    // the gust envelope's own place-only half — is built ONCE per candle; each of
+    // the ~14 look-back moments pays only the time-dependent half. See
+    // `createGustEnvelopeSampler`'s header: the unrolled look-back's size is what
+    // hung the GPU process on a cold load.
+    const scaled = windStrength01Node(TSL, s).mul(gate);
+    const gustAt =
+      ambientRef.gustiness01 !== undefined
+        ? createGustEnvelopeSampler(TSL, {
+            centerXY,
+            directionDeg: ambientRef.directionDeg,
+            gustiness01: ambientRef.gustiness01,
+            speed01: s,
+            pixelsPerMetre: ambientRef.pixelsPerMetre,
+            // A look-back moment steps back from the integrated fronts at
+            // today's rate (`windAdvectionDtSecNode`) — never `speed × t`.
+            advection: ambientRef.advection,
+          })
+        : null;
+    return (timeMs) => max(gustAt ? scaled.mul(gustAt(timeMs)) : scaled, float(0));
+  }
+
+  /**
+   * THE BAKE PASS for this handle's layout (world/wind-field-bake.js): a material whose fragment is
+   * `sampleWind` at each grid texel's world position. The handle builds it because the handle owns the
+   * assembly of the field's inputs — the owner of the bake draws it into `fieldTexture` /
+   * `fieldLagTexture` each frame (twice, with different `uBakeTimeMs`) and never names a field ref itself.
+   *
+   * @param {*} THREE
+   * @returns {{material: *, uBakeTimeMs: *}|null} null when there is nothing to bake (no live ambient,
+   *   no grid, or no baked openness).
+   */
+  function buildFieldBake(THREE) {
+    if (!ambientRef || !grid || !bakedFieldRef) return null;
+    return buildWindFieldBakeMaterial(THREE, {
+      ambient: ambientRef,
+      bakedField: bakedFieldRef,
+      wallAvoidField: wallAvoidFieldRef,
+      liveField: liveFieldRef,
+      grid: gridOf(grid),
+    });
+  }
+
+  /**
+   * READ THE WIND'S RECENT PAST at a fixed point (epic mmp-fpu, `world/wind-gust-history.js`): the same
+   * magnitudes `gustMagnitudeAt` would compute for each of the last `GUST_HISTORY_TAPS` moments, as
+   * texture fetches instead of noise. `tap(k)` is the magnitude `k` moments before the latest (`k = 0` is
+   * the latest, recorded at the start of the current 0.6 s step). What a candle needs to age each tap —
+   * the latest moment's index and the step — comes with it.
+   *
+   * @param {*} TSL @param {{centerXY: *}} args
+   * @returns {{tap: (k: number) => *, gridIndex: *, stepSec: number, taps: number}|null} null when this
+   *   handle records no history (a lab, a test, a windless scene): the caller keeps the analytic ladder.
+   */
+  function gustHistory(TSL, { centerXY }) {
+    if (!gustHistoryRef) return null;
+    const { float } = TSL;
+    return {
+      tap: (k) =>
+        sampleGustHistoryTap(TSL, {
+          texture: gustHistoryRef.texture,
+          grid: gustHistoryRef.grid,
+          centerXY,
+          momentIndex: gustHistoryRef.gridIndex.sub(float(k)),
+        }),
+      gridIndex: gustHistoryRef.gridIndex,
+      stepSec: GUST_HISTORY_STEP_S,
+      taps: GUST_HISTORY_TAPS,
+    };
+  }
+
+  /**
+   * THE HISTORY'S BAKE PASS: a material whose fragment is `gustMagnitudeAt` — the very function the old
+   * ladder evaluated per candle — over the whole grid, at `uBakeTimeMs`. The owner draws it once per
+   * recorded moment into a one-tile target and copies that into the atlas.
+   * @param {*} THREE
+   * @returns {{material: *, uBakeTimeMs: *}|null}
+   */
+  function buildGustHistoryBake(THREE) {
+    if (!ambientRef || !grid || !bakedFieldRef) return null;
+    const TSL = THREE.TSL;
+    const { uniform, float, vec2, vec4, uv } = TSL;
+    const g = gridOf(grid);
+    const uBakeTimeMs = uniform(float(0));
+    const frame = uv();
+    const worldXY = vec2(
+      frame.x.mul(float(g.cellSize * g.cols)).add(float(g.originX)),
+      frame.y.mul(float(g.cellSize * g.rows)).add(float(g.originY))
+    );
+    const magnitude = gustMagnitudeAt(TSL, { centerXY: worldXY })(uBakeTimeMs);
+    const material = new THREE.NodeMaterial();
+    material.name = 'wind.gust.history.bake';
+    material.fragmentNode = vec4(magnitude, float(0), float(0), float(1));
+    material.depthTest = false;
+    material.depthWrite = false;
+    material.transparent = false;
+    material.blending = THREE.NoBlending;
+    return { material, uBakeTimeMs };
+  }
+
+  function strengthNode(TSL, args) {
+    const v = node(TSL, args);
+    if (!ambientRef) return v;
+    const { float, max } = TSL;
+    const s = ambientRef.speed01;
+    return v.mul(windStrength01Node(TSL, s).div(max(s, float(1e-4))));
   }
 
   /**
@@ -330,6 +525,8 @@ export function createWindHandle({
               // a calm-weather rate while every material around them followed
               // the wind.
               speed01: ambientRef.speed01,
+              pixelsPerMetre: ambientRef.pixelsPerMetre,
+              advection: ambientRef.advection,
             })
           )
         : undefined;
@@ -386,6 +583,7 @@ export function createWindHandle({
             awayDirX: wallAwayDirX,
             awayDirY: wallAwayDirY,
             proximity: wallProximity,
+            maxSpeedRatio: WALL_CORNER_SPEEDUP,
           });
           return deflected.mul(float(1).sub(windShadow.mul(float(WIND_SHADOW_DEPTH))));
         });
@@ -410,6 +608,9 @@ export function createWindHandle({
             openness,
             exteriorOpenness: openness,
             windSpeed01: cappedSpeed01(),
+            advectSpeed01: ambientRef ? ambientRef.speed01 : undefined,
+            pixelsPerMetre: ambientRef ? ambientRef.pixelsPerMetre : undefined,
+            advection: ambientRef ? ambientRef.advection : undefined,
           })
         );
       },
@@ -428,6 +629,9 @@ export function createWindHandle({
             openness,
             exteriorOpenness: openness,
             windSpeed01: cappedSpeed01(),
+            advectSpeed01: ambientRef ? ambientRef.speed01 : undefined,
+            pixelsPerMetre: ambientRef ? ambientRef.pixelsPerMetre : undefined,
+            advection: ambientRef ? ambientRef.advection : undefined,
           })
         );
       },
@@ -469,6 +673,14 @@ export function createWindHandle({
     layoutVersion,
     /** True once a real bake has happened — before that every shape answers "open outdoors". */
     hasBake: !!bakedFieldRef,
+    /** True when `node()`/`strengthNode()` can READ the per-frame baked field (`baked: 'now'|'lagged'`). */
+    hasField: !!fieldNowRef,
+    /** The baked field's textures, so the owner can compare identities (a new one is a new binding). */
+    fieldTexture,
+    fieldLagTexture,
+    /** True when `gustHistory()` can READ recorded gust magnitudes (the candle memory without the noise). */
+    hasGustHistory: !!gustHistoryRef,
+    gustHistoryTexture,
     /**
      * The live ambient uniform NODES (`{directionDeg, speed01}`), or null in a
      * windless scene. Exposed because a consumer legitimately needs the raw
@@ -492,6 +704,11 @@ export function createWindHandle({
      */
     restFieldTexture: opennessTexture ?? null,
     node,
+    strengthNode,
+    gustMagnitudeAt,
+    buildFieldBake,
+    gustHistory,
+    buildGustHistoryBake,
     kernel,
     cpuAt,
   });

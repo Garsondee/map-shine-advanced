@@ -53,5 +53,5 @@ export { createFireParticleEngine } from './fire-particle-runtime.js';
 // Three exports, all allocation: the agents' memory (allocated once per kind and never freed,
 // like every arena here), the shared zone-perception buffer, and the engine that builds the
 // kernels and materials over them. See critter-runtime.js's header for the whole account.
-export { createCritterEngine, allocateCritterBuffers } from './critter-runtime.js';
+export { createCritterEngine, allocateCritterBuffers, allocateWindCells } from './critter-runtime.js';
 export { createCritterZoneBuffer } from './critter-zone-buffer.js';

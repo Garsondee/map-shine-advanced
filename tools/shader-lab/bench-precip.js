@@ -67,7 +67,8 @@ import { evaluate, saveCanvasPng } from './contract.js';
 import { createPrecipEngine } from '../../src/effects/particles/precip-runtime.js';
 import { createPrecipSplashEngine } from '../../src/effects/particles/precip-splash-runtime.js';
 import { createMantleRuntime } from '../../src/effects/precipitation/mantle-runtime.js';
-import { createPrecipCurtain } from '../../src/effects/precipitation/curtain-render.js';
+import { createPrecipCurtain, VEIL_TINT } from '../../src/effects/precipitation/curtain-render.js';
+import { createTorrent } from '../../src/effects/precipitation/torrent-render.js';
 import {
   PRECIP_SPECIES,
   PRECIP_SPECIES_IDS,
@@ -77,6 +78,9 @@ import {
 /** The synthetic world this bench rains on. Deliberately wide-ish so the
  * parallax has room to read; not a real map's bounds. */
 const WORLD = Object.freeze({ minX: 0, minY: 0, maxX: 2000, maxY: 1500 });
+
+/** The torrent's own quad — see its use site. */
+const TORRENT_LAB_RECT = Object.freeze({ minX: -10000, minY: -8000, maxX: 12000, maxY: 9500 });
 
 /** Lab capacity, well under the species rows' production numbers (15k/20k).
  * A lab that runs the full production count is slower to iterate on and tells
@@ -164,6 +168,9 @@ class PrecipDriver {
       curtainStrength: 1,
       curtainBandDepth: 0.8,
       curtainBandScale: 1,
+      // ⭐ THE TORRENT (torrent-render.js) — a fourth isolator, same reason.
+      torrent: true,
+      torrentStrength: 1,
       gustiness01: 0.6,
       splashSizeScale: 1,
       splashAlphaScale: 1,
@@ -390,6 +397,12 @@ class PrecipDriver {
       this.curtains.set(id, curtain);
     }
 
+    // ONE torrent, like production — it is not per species.
+    // Its quad is MUCH larger than the lab's world: the torrent's waves are
+    // world-space and thousands of px apart, so `zoom` > 1 has to show the
+    // map they cross, not a postage stamp of it.
+    this.torrent = createTorrent({ THREE, worldRect: TORRENT_LAB_RECT, renderOrder: 12, openSkyTexture });
+
     this.applyState();
     this._fitCamera();
 
@@ -479,6 +492,17 @@ class PrecipDriver {
           windAirSpeedPxS: s.windAirSpeedPxS,
         });
       }
+
+      if (active && this.torrent) {
+        this.torrent.setFrame({
+          intensity01: frame.torrent01,
+          tint: VEIL_TINT.rain,
+          rgbMul: frame.rgbMul,
+          alphaMul: frame.alphaMul,
+        });
+        this.torrent.setSkyReachTexture(s.skyGate ? this.buildSkyReachTexture() : null, WORLD);
+        this.torrent.setTuning({ torrentStrength: s.torrentStrength });
+      }
     }
   }
 
@@ -496,6 +520,7 @@ class PrecipDriver {
     const rect = { minX: cx - halfW, maxX: cx + halfW, minY: cy - halfH, maxY: cy + halfH };
     for (const engine of this.engines.values()) engine.setWorldRect(rect);
     for (const engine of this.splashEngines.values()) engine.setWorldRect(rect);
+    this.torrent?.setView(rect, this.canvas?.width);
   }
 
   set(partial) {
@@ -526,6 +551,7 @@ class PrecipDriver {
     const splash = this.splashEngines.get(this.activeSpecies);
     if (splash?.ok) splash.step(this.renderer, dt / 1000, this._virtualNowMs, this.wind);
     this.curtains.get(this.activeSpecies)?.step(this._virtualNowMs, this.wind);
+    this.torrent?.step(this._virtualNowMs, this.wind, dt / 1000);
 
     this._drawLayers();
     return this.readout();
@@ -550,6 +576,8 @@ class PrecipDriver {
     if (this.state.arrival && splash?.ok) this.renderer.render(splash.scene, this.camera);
     if (this.state.curtain && curtain?.hasContent) this.renderer.render(curtain.scene, this.camera);
     if (this.state.fall && engine) this.renderer.render(engine.scene, this.camera);
+    // Nearest the eye — production's `scenes` order puts it after everything.
+    if (this.state.torrent && this.torrent?.hasContent) this.renderer.render(this.torrent.scene, this.camera);
   }
 
   _frame(realMs) {
@@ -576,6 +604,7 @@ class PrecipDriver {
       // rain" are different failures with different causes.
       arrival: this.splashEngines.get(this.activeSpecies)?.debugState() ?? null,
       curtain: this.curtains.get(this.activeSpecies)?.debugState() ?? null,
+      torrent: this.torrent?.debugState() ?? null,
       layers: { fall: this.state.fall, arrival: this.state.arrival, curtain: this.state.curtain },
       axes: {
         precip01: this.state.precip01,

@@ -15,6 +15,7 @@ import {
   DARKNESS_PUBLISH_MIN_INTERVAL_MS,
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
+  isGlobalLightSystemOwned,
   GLOBAL_LIGHT_DAYLIGHT_MAX,
   deriveSceneBackground,
   readSceneBackground,
@@ -333,6 +334,35 @@ export function run(t) {
     ok(
       'an unreadable live source (all nulls) never triggers a pointless republish',
       shouldPublishGlobalLightWindow(next, last, { liveDisabled: null, liveMax: null }, 10000, 0) === false
+    );
+  }
+
+  // ---- a game system that owns Global Illumination (2026-10-27) ----------
+  {
+    const sent = { enabled: true, max: 0.25 };
+    // PF2e rules-based vision: its own window replaces ours in the same call.
+    const pf2e = { liveDisabled: false, liveMax: 1 - (0.25 + 0.001) };
+    ok('⭐ PF2e replacing our window ⇒ the system owns it', isGlobalLightSystemOwned(sent, pf2e) === true);
+    ok(
+      'a system forcing it OFF (PF2e without rules-based vision) also owns it',
+      isGlobalLightSystemOwned(sent, { liveDisabled: true, liveMax: 1 }) === true
+    );
+    ok(
+      'our window landed as sent ⇒ not owned (core Foundry, dnd5e)',
+      isGlobalLightSystemOwned(sent, { liveDisabled: false, liveMax: 0.25 }) === false
+    );
+    ok(
+      'a difference under one publish step is float noise, not ownership',
+      isGlobalLightSystemOwned(sent, { liveDisabled: false, liveMax: 0.25 + DARKNESS_PUBLISH_STEP / 2 }) === false
+    );
+    ok(
+      'an unreadable live source never claims ownership',
+      isGlobalLightSystemOwned(sent, { liveDisabled: null, liveMax: null }) === false
+    );
+    ok('nothing sent ⇒ nothing to compare', isGlobalLightSystemOwned(null, pf2e) === false);
+    ok(
+      'and the drift repair this replaces WOULD have fired forever against PF2e',
+      shouldPublishGlobalLightWindow(sent, sent, pf2e, 10000, 0) === true
     );
   }
 

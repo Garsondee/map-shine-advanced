@@ -28,6 +28,8 @@ export {
   prewarmVtPanViewerAdjacentFloors,
   isVtPanViewerFloorPrepared,
   afterNextVtPanViewerFrame,
+  captureVtPanViewerFrame,
+  getVtPanViewerParallaxStep,
   setVtPanViewerGpuProbe,
   // PER-PASS GPU TIMING (docs/planning/Performance.md). Distinct from the probe
   // above: that one measures the WHOLE frame and must throttle the loop to do
@@ -66,6 +68,7 @@ export {
   getVtPanViewerTimeDialState,
   getVtPanViewerTodHour,
   setVtPanViewerSkyRealism,
+  setVtPanViewerSkyLook,
   setVtPanViewerGradeEnvStrength,
   setVtPanViewerSunLatitude,
   setVtPanViewerCloudCover,

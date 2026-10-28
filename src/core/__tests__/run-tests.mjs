@@ -7,6 +7,8 @@ import { run as runDialsSchema } from './dials-schema.test.mjs';
 import { run as runImpulseSchema } from './impulse-schema.test.mjs';
 import { run as runSceneScale } from './scene-scale.test.mjs';
 import { run as runAxisDerivation } from './axis-derivation.test.mjs';
+import { run as runSafeMode } from './safe-mode.test.mjs';
+import { run as runCompilePolicy } from './compile-policy.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -31,6 +33,8 @@ const suites = [
   ['impulse-schema', runImpulseSchema],
   ['scene-scale', runSceneScale],
   ['axis-derivation', runAxisDerivation],
+  ['safe-mode', runSafeMode],
+  ['compile-policy', runCompilePolicy],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

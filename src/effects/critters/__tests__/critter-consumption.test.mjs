@@ -20,13 +20,15 @@
  * and the probes check the pixel.)
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
-import { allocateCritterBuffers, createCritterEngine } from '../../particles/critter-runtime.js';
+import { allocateCritterBuffers, createCritterEngine, allocateWindCells } from '../../particles/critter-runtime.js';
+import { createWindHandle } from '../../../world/index.js';
 import { createCritterZoneBuffer } from '../../particles/critter-zone-buffer.js';
 import { CRITTER_UNIFORM_DEFAULTS, CRITTER_KIND_DEFAULTS } from '../critter-uniforms.js';
 import { critterTierPlan, CRITTER_TIER_COUNT } from '../critter-species.js';
 import { SMELLY_FLIES_PARAMS } from '../smelly-flies.js';
 import { MAGGOTS_PARAMS } from '../maggots.js';
 import { FIREFLIES_PARAMS } from '../fireflies.js';
+import { DUST_PARAMS } from '../dust.js';
 import { WEATHER_FACTOR_PARAMS, WEATHER_DRIVE_PARAMS } from '../critter-weather.js';
 import { hexToRgb01 } from '../../candle-flame-geometry.js';
 
@@ -61,6 +63,9 @@ const KINDS = Object.freeze([
   { label: 'SMELLY_FLIES', kind: 'fly', family: 'fly', schema: SMELLY_FLIES_PARAMS },
   { label: 'MAGGOTS', kind: 'maggot', family: 'fly', schema: MAGGOTS_PARAMS },
   { label: 'FIREFLIES', kind: 'firefly', family: 'firefly', schema: FIREFLIES_PARAMS },
+  // The motes are built twice: once on the real wind grid (the kernel path `windHandle.kernel` takes) and once
+  // without one (the map-wide `windPush` fallback), and a control must be consumed by the union of the two.
+  { label: 'DUST', kind: 'mote', family: 'mote', schema: DUST_PARAMS, wind: true },
 ]);
 
 /** A renderer stand-in just rich enough for three's own WGSL builder (compute is captured, never run). */
@@ -122,8 +127,21 @@ const stubTex = () => {
   return THREE.TSL.texture(tex);
 };
 
+/** A small, real wind handle (live ambient, an all-open grid) and the storage buffer its cells are packed into. */
+function moteWind() {
+  const cols = 8;
+  const rows = 8;
+  const handle = createWindHandle({
+    version: 1,
+    ambientWind: { directionDeg: THREE.TSL.uniform(0), speed01: THREE.TSL.uniform(0.3) },
+    grid: { originX: 0, originY: 0, cellSize: 25, cols, rows },
+    cells: { openness: new Float32Array(cols * rows).fill(1) },
+  });
+  return { windHandle: handle, windCells: allocateWindCells(THREE, cols * rows) };
+}
+
 /** Build one engine at a rung and return the set of uniform names its kernels and materials asked for. */
-function consumedUniforms(kind, family, tier) {
+function consumedUniforms(kind, family, tier, windDeps = {}) {
   const cap = 64;
   const memory = allocateCritterBuffers(THREE, cap);
   const zoneBuffer = createCritterZoneBuffer({ THREE, maxCells: 4096, homeCapacities: [cap] });
@@ -137,6 +155,7 @@ function consumedUniforms(kind, family, tier) {
     colorationTexNode: stubTex(),
     depthTexNode: stubTex(),
     depthFlagsTexNode: stubTex(),
+    ...windDeps,
   });
   engine.setZone({
     field: { originX: 0, originY: 0, cellW: 10, cellH: 10, cols: 20, rows: 20, signature: 1 },
@@ -170,8 +189,20 @@ function consumedUniforms(kind, family, tier) {
 
 export function run(t) {
   const top = CRITTER_TIER_COUNT - 1;
-  for (const { label, kind, family, schema } of KINDS) {
+  for (const { label, kind, family, schema, wind } of KINDS) {
     const { names, built } = consumedUniforms(kind, family, top);
+    if (wind) {
+      const withWind = consumedUniforms(kind, family, top, moteWind());
+      t.ok(
+        `${label}: the engine builds on a real wind grid too (${withWind.built.kernels} kernels, ${withWind.built.materials} materials)`,
+        withWind.built.kernels >= 2 && withWind.built.materials >= 1
+      );
+      t.ok(
+        `${label}: the wind path reads the wind-time uniform the fallback does not`,
+        withWind.names.has('windTimeMs') && !names.has('windTimeMs')
+      );
+      for (const n of withWind.names) names.add(n);
+    }
     t.ok(
       `${label}: the real engine built (${built.kernels} kernels, ${built.materials} materials)`,
       built.kernels >= 2 && built.materials >= 1

@@ -123,6 +123,29 @@ export function computeSun(todHour, config = DEFAULT_SUN_CONFIG) {
   // fades within ±12°. Warmth/long-shadow looks key from this, day or dusk.
   const twilight01 = clamp01(1 - Math.abs(elevationDeg) / 12);
 
+  // The GOLDEN-HOUR bell, 0..1 — peaks at +2° (sun just above the horizon, the
+  // photographer's hour of long raking light) and is gone by −6° / +16°. A
+  // different question from `twilight01` (which peaks AT the horizon and is
+  // symmetric): this one is skewed above it, because golden light is a
+  // sun-is-up phenomenon, and it is what the warm grade and the long, strong
+  // shadows both key from so the two can never disagree about when it is.
+  const goldenX = (elevationDeg - 2) / (elevationDeg < 2 ? 8 : 14);
+  const golden01 = smoothstep01(1 - Math.abs(goldenX));
+
+  // THE AFTERGLOW bell, 0..1 — the light AFTER the golden hour, while the sky
+  // is still lit but the sun is gone: rises as the sun sets (+1° → −3°), holds
+  // through civil and nautical twilight and fades only as the sky itself goes
+  // dark (gone at −18°, with `fullDarkElevationDeg`). Author,
+  // 2026-10-27: *"immediately after golden hour the colouration returns to
+  // normal long before it gets dark ... isn't at all what happens"* — the
+  // golden bell ends at −6°, but darkness keys off `skyFactor01`, which is
+  // still ~0.74 there, so for a long stretch the scene sat in plain white light.
+  const afterglow01 = smoothstep01((1 - elevationDeg) / 5) * smoothstep01((elevationDeg + 18) / 9);
+  // Where on that afterglow the light sits: 0 = the rose glow just after the
+  // sun goes (−2°), 1 = the deep blue hour (−13° and below). Spread over 11°
+  // so the swing from rose to blue is a slow turn, never a lurch.
+  const blueHour01 = smoothstep01((-2 - elevationDeg) / 11);
+
   return Object.freeze({
     todHour: h,
     elevationDeg,
@@ -131,6 +154,9 @@ export function computeSun(todHour, config = DEFAULT_SUN_CONFIG) {
     dayFactor01,
     skyFactor01,
     twilight01,
+    golden01,
+    afterglow01,
+    blueHour01,
     /** The named section of the sky (see SKY_PHASES). */
     phase: phaseAtElevation(elevationDeg).key,
     /** True while the sun is climbing — what tells dawn from dusk at the SAME

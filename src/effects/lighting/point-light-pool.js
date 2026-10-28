@@ -835,6 +835,9 @@ function createLightEntry({
 export function createPointLightPool({
   THREE,
   getWindHandle,
+  /** `(x, y) => number[]|null` — the golden-hour colour a light standing at (x, y) must carry on its ambient
+   * tones (`sky-access.js#lightGoldenTint`), null when none. Optional: un-wired rigs keep untinted tones. */
+  getLightSkyTint = null,
   envLight,
   blendSunVisibilityAcrossFloors,
   sceneColor,
@@ -1300,6 +1303,18 @@ export function createPointLightPool({
    *   (`lastGridSizePixels`) for diagnostics; this pool has no reason to own
    *   that viewer-level readout itself.
    */
+  /**
+   * The light's ambient tones carrying the sky's golden-hour colour where it stands outdoors, so the light does not
+   * paint neutral over the golden fill (see `sky-access.js#lightGoldenTint`). Returns `ambient` itself when there is
+   * no tint, so the common case allocates nothing.
+   */
+  function skyTintedAmbient(ambient, light) {
+    const tint = getLightSkyTint ? getLightSkyTint(light.x, light.y) : null;
+    if (!tint) return ambient;
+    const mul = (c) => [c[0] * tint[0], c[1] * tint[1], c[2] * tint[2]];
+    return { background: mul(ambient.background), dim: mul(ambient.dim), bright: mul(ambient.bright) };
+  }
+
   function update(darkness01, activeRegions, env, darknessRealism01, currentFloor) {
     const windHandle = getWindHandle();
     // THE ONE SHARED ANIMATION-CLOCK WRITE — once per FRAME, not once per
@@ -2130,6 +2145,7 @@ export function createPointLightPool({
           const localDarkness01 = computeRegionAdjustedDarkness(light.x, light.y, darkness01, activeRegions);
           localAmbient = computeAmbientColors({ ...env, darkness01: localDarkness01 }, darknessRealism01);
         }
+        localAmbient = skyTintedAmbient(localAmbient, light);
         const attenuationEased = easeAttenuation(light.attenuation01);
         const exposure = computeExposure(light.luminosity01);
         const expectedDepth = resolveExpectedDepth
@@ -2407,6 +2423,7 @@ export function createPointLightPool({
         const localDarkness01 = computeRegionAdjustedDarkness(light.x, light.y, darkness01, activeRegions);
         localAmbient = computeAmbientColors({ ...env, darkness01: localDarkness01 }, darknessRealism01);
       }
+      localAmbient = skyTintedAmbient(localAmbient, light);
       // SUN SHADOWS are NOT applied here — the light's own material samples
       // the baked field per-FRAGMENT. Two earlier attempts DID scale these
       // uniforms by a per-light scalar and both failed the same way: a

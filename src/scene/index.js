@@ -42,6 +42,24 @@ export {
   buildQuadPositions,
 } from './world-quad.js';
 
+// THE SCENE EYE (2026-10-28) — the one pretend camera every depth effect agrees on: the Table, Parallax,
+// clouds, rain, fire and critters (scene/scene-eye.js's header is the map).
+export {
+  SCENE_EYE_DEFAULT_FOV_DEG,
+  REFERENCE_EYE_PX,
+  sceneEyeHeight,
+  resolveSceneEye,
+  eyeScale,
+  eyeCameraForFixed,
+  LAYER_SCALE_LN_SPAN,
+  encodeLayerScale01,
+  decodeLayerScale01,
+  layerScaleEncodeNode,
+  layerScaleDecodeNode,
+  liftedLookupNode,
+  liftedLookup,
+} from './scene-eye.js';
+
 // THE MASK AUTHORITY (scene/mask-authority.js's header is the map). The
 // catalog is the ONLY legal home of mask suffix knowledge — the
 // `masks/authority-only` tripwire enforces that; consumers import it from here.
@@ -112,6 +130,20 @@ export { createDepthAuthority, BELOW_EVERYTHING } from './depth-authority.js';
 // THE EXACT DISTANCE TRANSFORM on a byte grid — one implementation, shared by critter zones and the rain-on-glass
 // flow field (it lived privately inside critter-zone.js until a second consumer needed it).
 export { squaredDistanceField, EDT_INF } from './grid-edt.js';
+
+// THE ROOM MAP (scene/room-map.js's header is the map) — every room on a floor, as the walls divide it, filled and
+// numbered, with distance-to-wall and each room's outlook. Shared through its cache so any effect can ask.
+export {
+  buildRoomMap,
+  createRoomMapCache,
+  computeRoomMapGridSpec,
+  roomIdAt,
+  roomSunFacing,
+  roomOutlookAt,
+  decodeRoomVecByte,
+  ROOM_DIST_PX_PER_UNIT,
+  ROOM_WALL_THICKNESS_DEFAULT_PX,
+} from './room-map.js';
 
 // ONE-TIME RGBA EXPANSION of a one-byte mask grid, cached by array identity, so floor PREPARE can do it off screen and
 // the commit frame gets the bytes for free (loading audit P-06).

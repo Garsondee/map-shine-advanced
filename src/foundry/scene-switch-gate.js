@@ -37,6 +37,19 @@
  *    collections; if neither scene nor level changes there is nothing to prepare.
  *  - IT DOES NOT KNOW WHAT "PREPARE" MEANS. `prepare(request, control)` is
  *    injected by the composition root (boot.js), which owns the viewer.
+ *  - A COLD PREPARE RUNS WITH FOUNDRY'S ROOT HIDDEN (2026-10-27). In vanilla the
+ *    gap between `Canvas#initialize` and the first `#draw` is a microtask; the gate
+ *    stretches it to the whole prepare. PIXI's application ticker is already
+ *    rendering then, and `canvas.root` is a fresh container (visible) whose groups
+ *    have never been drawn — `PrimaryCanvasGroup#_render` destructures
+ *    `_backgroundColor`, which only `EnvironmentCanvasGroup#initialize` sets
+ *    (`F:canvas/groups/primary.mjs:257`, `environment.mjs:180`). It threw
+ *    "undefined is not iterable" on the first frame, and because PIXI's `_tick`
+ *    drops its frame request before running listeners, that one throw also stopped
+ *    Foundry's render loop until the draw re-added its listeners. Author-reported
+ *    on a cold load of a huge scene. `beforePrepare` hides the root for a cold
+ *    request — the exact state `Canvas#draw` itself puts it in (`board.mjs:1106`)
+ *    and lifts when the draw ends (`:1249`), so nothing has to undo it.
  *
  * Pure decision parts (`classifyViewRequest`, `createViewGate`) are Node-tested
  * with fakes; `installSceneSwitchGate` is the only part that touches Foundry.
@@ -90,12 +103,15 @@ export function classifyViewRequest(state, target) {
  * @param {() => object} deps.readState - the canvas as it is now (see `classifyViewRequest`).
  * @param {(event: string, detail?: object) => void} [deps.onEvent] - told what the gate is doing, for the
  *   floor-change timeline (`diag/floor-timeline.js`). Its own failures never reach the switch.
+ * @param {(request: object) => void} [deps.beforePrepare] - runs synchronously before every prepare, with the
+ *   classified request (the live install hides Foundry's root for a cold one — see the header). Its own
+ *   failures never reach the switch.
  * @returns {{
  *   run: (scene: {id: string}, options: object, proceed: (scene: object, options: object) => Promise<any>) => Promise<any>,
  *   getStatus: () => object
  * }}
  */
-export function createViewGate({ prepare, isEnabled, readState, onEvent }) {
+export function createViewGate({ prepare, isEnabled, readState, onEvent, beforePrepare }) {
   const emit = (event, detail) => {
     try {
       onEvent?.(event, detail);
@@ -140,6 +156,11 @@ export function createViewGate({ prepare, isEnabled, readState, onEvent }) {
       stats.last = { ...request, atMs: perfNowMs() };
       const control = { isCancelled: () => myGeneration !== generation };
       emit('request', { kind: request.kind, sceneId: request.sceneId, levelId: request.levelId });
+      try {
+        beforePrepare?.(request);
+      } catch (err) {
+        log.error(`the gate's before-prepare step threw — ignored, the switch continues:`, err);
+      }
 
       const promise = (async () => {
         let outcome = null;
@@ -195,6 +216,7 @@ export function installSceneSwitchGate({
   readState = readLiveCanvasState,
   getSceneClass,
   onEvent,
+  beforePrepare = hideRootForColdDraw,
 } = {}) {
   const SceneClass = (getSceneClass ?? (() => globalThis.CONFIG?.Scene?.documentClass))();
   let proto = SceneClass?.prototype;
@@ -212,7 +234,7 @@ export function installSceneSwitchGate({
   if (proto.view[GATE_MARK]) return { installed: true, reason: 'already installed' };
 
   const original = proto.view;
-  const gate = createViewGate({ prepare, isEnabled, readState, onEvent });
+  const gate = createViewGate({ prepare, isEnabled, readState, onEvent, beforePrepare });
   const gated = function gatedView(options) {
     // `this` is the Scene document. Every failure of the gate's own code is
     // handled INSIDE `run` (and falls through to `proceed`); an error from
@@ -228,6 +250,22 @@ export function installSceneSwitchGate({
     return { installed: false, reason: `could not replace Scene#view: ${err?.message ?? err}` };
   }
   return { installed: true, reason: null, gate };
+}
+
+/**
+ * Before a COLD prepare: hide `canvas.root`, as `Canvas#draw` will the moment it starts (see the header).
+ * A scene or level request leaves it alone — the old scene is drawn and must stay on screen.
+ *
+ * @param {{kind: string}} request
+ * @param {object} [c] - the canvas (defaults to the live one; injected by the tests).
+ * @returns {boolean} whether the root was hidden by this call
+ */
+export function hideRootForColdDraw(request, c = globalThis.canvas) {
+  if (request?.kind !== 'cold') return false;
+  const root = c?.root;
+  if (!root || root.visible === false) return false;
+  root.visible = false;
+  return true;
 }
 
 /** The live canvas, as `classifyViewRequest` wants it. */

@@ -81,6 +81,7 @@ import {
   windFlowVectorNode,
 } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
+import { eyeCameraForFixed } from '../../scene/index.js';
 import { packSpawnPoints } from '../fire/fire-spawn-points.js';
 import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
 import { fakeCurl2D } from './curl-noise.js';
@@ -553,6 +554,13 @@ export function createFireParticleEngine({
    */
   const uCamCentre = uniform(vec2(0, 0));
   const uCamHeight = uniform(float(PERSPECTIVE_CAMERA_HEIGHT));
+  // THE SHARED EYE (scene/scene-eye.js): `cameraHeight` is the camera this was tuned against with a 1000 px eye;
+  // the frame's eye height scales it, so embers recede and loom with the Table and the floors.
+  let camTuned = PERSPECTIVE_CAMERA_HEIGHT;
+  let eyeHeight = 0;
+  const pushCamHeight = () => {
+    uCamHeight.value = eyeCameraForFixed(camTuned, eyeHeight);
+  };
   /**
    * THE DEPTH-AUTHORITY OCCLUSION GATE's OWN INPUT — this engine's population is
    * one representative elevation per sync (`fire-subsystem.js`'s own doc on
@@ -1449,8 +1457,13 @@ export function createFireParticleEngine({
       // distributed over the real paint rather than waiting out a full lifespan.
       seeded = false;
     },
-    step(renderer, { dtSec, tMs, worldRect: rect }) {
+    step(renderer, { dtSec, tMs, worldRect: rect, eye = null }) {
       if (rect) this.setWorldRect(rect);
+      if (eye && eye.height > 0) {
+        uCamCentre.value.set(eye.x, eye.y);
+        eyeHeight = eye.height;
+        pushCamHeight();
+      }
       uDtSec.value = Math.min(0.05, Math.max(0, dtSec || 0));
       uTimeMs.value = tMs || 0;
       if (!seeded) this.init(renderer);
@@ -1508,7 +1521,10 @@ export function createFireParticleEngine({
       // allowed to ask for more particles than exist; it just cannot get them,
       // and silently capping is far better than indexing past the buffer.
       if (Number.isFinite(p2.activeCount)) uActiveCount.value = Math.max(0, Math.min(capacity, p2.activeCount));
-      if (Number.isFinite(p2.cameraHeight)) uCamHeight.value = Math.max(1, p2.cameraHeight);
+      if (Number.isFinite(p2.cameraHeight)) {
+        camTuned = Math.max(1, p2.cameraHeight);
+        pushCamHeight();
+      }
     },
     updateWind(nextHandle) {
       // `uWindDirDeg` is read BY REFERENCE, so a direction change needs no

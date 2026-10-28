@@ -26,6 +26,7 @@ import {
   describeLoad,
   hardRevealDue,
   blockerSignature,
+  nextNoProgressCount,
   recordVisibility,
   activeHiddenMs,
   HARD_REVEAL_MS,
@@ -42,6 +43,38 @@ import { formatBlockerLines } from '../loading-screen.js';
 export function run(t) {
   const { ok } = t;
   const mk = (nowMs = 1000) => createLoadState({ sceneId: 'sceneA', sceneName: 'Test Scene', nowMs });
+
+  // --- THE WHOLE-LOAD BAR (2026-10-27) ------------------------------------
+  {
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.WARMING, { total: 1, nowMs: 0 }); // the old "0 of 1" compile placeholder
+    const a = describeLoad(s, 0).overall;
+    const b = describeLoad(s, 5000).overall;
+    const c = describeLoad(s, 60000).overall;
+    ok('overall bar moves through a 0-of-1 placeholder phase', b > a && c > b);
+    ok('overall bar never claims 100% before completeLoad', c < 1);
+    ok('overall bar is past the early phases once warming starts', a > 0.3);
+
+    const t = mk(0);
+    beginPhase(t, LOAD_PHASES.ART, { total: 10, nowMs: 0 });
+    reportProgress(t, LOAD_PHASES.ART, { done: 8, nowMs: 100 });
+    const hi = describeLoad(t, 100).overall;
+    reportProgress(t, LOAD_PHASES.ART, { done: 1, nowMs: 200 });
+    ok('overall bar never goes backwards', describeLoad(t, 200).overall >= hi);
+    ok('describeLoad reports the step', describeLoad(t, 200).stepIndex === 4 && describeLoad(t, 200).stepCount === 6);
+
+    const u = createLoadState({
+      sceneId: 'x',
+      sceneName: 'x',
+      nowMs: 0,
+      phaseExpectedMs: { [LOAD_PHASES.WARMING]: 1000 },
+    });
+    beginPhase(u, LOAD_PHASES.ART, { total: 2, nowMs: 0 });
+    reportProgress(u, LOAD_PHASES.ART, { done: 2, nowMs: 1 });
+    ok('learned phase times re-weight the bar', describeLoad(u, 1).overall > describeLoad(t, 100).overall);
+    completeLoad(u, 10);
+    ok('a completed load is 100%', describeLoad(u, 10).overall === 1);
+  }
 
   // --- THE FLOOR-SWITCH GUARANTEE -----------------------------------------
   {
@@ -630,6 +663,38 @@ export function run(t) {
       'a malformed blocker does not throw and does not collide with a real one',
       blockerSignature([{}]) === '?:?' && blockerSignature([{}]) !== blockerSignature([{ key: 'x', count: 0 }])
     );
+  }
+
+  // --- A HIDDEN TAB IS NOT "NO PROGRESS" (#587, with #582's rule) ----------
+  // A tab in the background cannot clear a blocker that waits on a frame (rAF is
+  // stopped), while the readiness polls keep running on a timer. Counted naively,
+  // ~20 s of looking away read as "stopped making progress" and the curtain lifted on
+  // a scene whose effects had not compiled. The count must not move while hidden.
+  {
+    ok(
+      'a visible poll on the same blockers advances the count',
+      nextNoProgressCount(4, { sameSignature: true, tabHidden: false }) === 5
+    );
+    ok(
+      'a visible poll on CHANGED blockers is progress and resets it',
+      nextNoProgressCount(19, { sameSignature: false, tabHidden: false }) === 0
+    );
+    ok(
+      'a poll taken while hidden proves nothing: it zeroes the count even on identical blockers',
+      nextNoProgressCount(19, { sameSignature: true, tabHidden: true }) === 0
+    );
+
+    // The scenario that bit: first paint is done, the warm-up waits on a frame, the user
+    // alt-tabs. Hidden polls arrive at ~1 Hz and the blockers never change.
+    let count = 0;
+    for (let i = 0; i < 25; i++) count = nextNoProgressCount(count, { sameSignature: true, tabHidden: false });
+    ok('twenty-five visible unchanged polls build a long count (a genuinely stuck load still trips)', count === 25);
+    for (let i = 0; i < 600; i++) count = nextNoProgressCount(count, { sameSignature: true, tabHidden: true });
+    ok('ten minutes of hidden polls never reach any threshold', count === 0);
+    count = nextNoProgressCount(count, { sameSignature: true, tabHidden: false });
+    ok('coming back starts a FRESH run of visible polls, it does not inherit the tab’s silence', count === 1);
+    for (let i = 0; i < 9; i++) count = nextNoProgressCount(count, { sameSignature: true, tabHidden: false });
+    ok('…and a load that really is stuck after the return still accumulates toward the give-up', count === 10);
   }
 
   // --- the blocker list is capped, and SAYS it is --------------------------

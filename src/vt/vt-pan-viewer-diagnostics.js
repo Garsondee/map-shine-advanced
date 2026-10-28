@@ -541,6 +541,8 @@ export function describeParallelShaderCompile({ isWebGPUBackend, isWebGLBackend,
  * @param {number} args.pixelRatio @param {any} args.mount @param {number} args.textureLimit
  * @param {any} args.alphaGridStats @param {any} args.sunShadows @param {any} args.envLight @param {any} args.world
  * @param {string} args.displayLayerName @param {any} args.currentCoarseBudget @param {any} args.gpuProbe
+ * @param {{report: () => object}|null} [args.pipelineGovernor] - vt/pipeline-governor.js; its compile census
+ *   is reported under `shaders.governor`.
  * @param {number[]} args.frameGapTimes @param {number} args.HITCH_THRESHOLD_MS @param {any[]} args.hitchLog
  * @param {any} args.lastError @param {Set<string>} args.heldPanKeys @param {{x:number,y:number}} args.panVelocity
  * @param {number|null} args.targetHalfSpanPx @param {any} args.view
@@ -561,6 +563,7 @@ export function buildViewerDiagnostics({
   warmUpPipelinesCreated = null,
   warmUpSimPipelinesCreated = null,
   postContentPipelinesCreated = null,
+  pipelineGovernor = null,
   warmUpError = null,
   warmUpSimError = null,
   prefetchSkippedPacks,
@@ -639,6 +642,12 @@ export function buildViewerDiagnostics({
     // res:scene are not built, so the DECLARED pass is not fully live
     // even though this reading genuinely is.
     envSnapshot: _active?.getEnvSnapshotInfo?.() ?? { available: false },
+    // TEMPERATURE EFFECTS (2026-10-27) — the bands, the frost's grown
+    // coverage, the ripple in px, and which warp layers the present has
+    // compiled in right now.
+    temperatureEffects: _active?.getTemperatureEffectsInfo?.() ?? { available: false },
+    table: _active?.getTableInfo?.() ?? { available: false },
+    parallax: _active?.getParallaxInfo?.() ?? { available: false },
     // PILLAR 11 — MSA's own vision/fog mask. Reports the rasteriser's health
     // (pooled/drawn/gating) SEPARATELY from `owningVision` (is the composite
     // actually reading it), because "works but not wired in" and "wired in but
@@ -742,6 +751,12 @@ export function buildViewerDiagnostics({
       // kept separate from the initial warm-up's, because they are two
       // different events and one pair of fields cannot honestly report both.
       postContentPipelinesCreated,
+      // THE PIPELINE GOVERNOR'S CENSUS (vt/pipeline-governor.js, epic mmp-fpu): how many pipelines were made
+      // on a worker thread versus on the GPU process's main thread, which compiles are still running, and the
+      // slowest ones with their WGSL size. The number to watch is the slowest SYNCHRONOUS compile: past ~10 s
+      // it is on the road to Chrome's 15 s watchdog, which is what takes every WebGL/WebGPU context on the
+      // page down together.
+      governor: pipelineGovernor?.report?.() ?? null,
       warmUpError,
       warmUpSimError,
       // Program COUNT is the thing that explodes as effects land (N effects x

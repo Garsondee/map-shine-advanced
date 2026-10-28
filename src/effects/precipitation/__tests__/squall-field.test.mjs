@@ -56,7 +56,7 @@ export function run(t) {
   {
     // "at a larger wavelength" — the curtain must sample the gust envelope
     // COARSER than the vegetation does, or the bands are grass-sized.
-    t.ok('the curtain samples gusts coarser than 1:1', CURTAIN_GUST_SCALE > 0 && CURTAIN_GUST_SCALE < 1);
+    t.ok('⭐ the curtain samples the wind`s own gust fronts 1:1 (2026-10-27)', CURTAIN_GUST_SCALE === 1);
     // "anisotropically stretched along the wind" — weather arrives in LINES.
     t.ok('the cell is stretched along the wind, not isotropic', CELL_ANISOTROPY > 1);
     t.ok('the cell is a slow, large-scale noise', CELL_FREQ > 0 && CELL_FREQ < 0.01);

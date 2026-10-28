@@ -30,6 +30,8 @@ import {
   computeAmbientColors,
   computeGlobalLightFloor,
   maxRgb,
+  sceneLightLevel,
+  SCENE_LIGHT_LEVEL_MIN,
   FOUNDRY_LIGHT_WEIGHTS,
   buildEnvironmentalLightMaterials,
   FLUID_SHADOW_TINT_MAX_ITEMS,
@@ -229,6 +231,17 @@ export function run(t) {
       'a floor entirely below the base changes nothing',
       nearRgb(maxRgb([0.8, 0.8, 0.8], [0.1, 0.1, 0.1]), [0.8, 0.8, 0.8])
     );
+  }
+
+  // ---- sceneLightLevel (what weather bodies scale by after the lighting multiply)
+  {
+    ok('full daylight => 1', sceneLightLevel([1, 1, 1]) === 1);
+    ok('absent ambient fails to fully lit', sceneLightLevel(null) === 1 && sceneLightLevel(undefined) === 1);
+    ok('a non-finite channel fails to fully lit', sceneLightLevel([NaN, 0.1, 0.1]) === 1);
+    ok('pitch dark floors at the minimum, never 0', sceneLightLevel([0, 0, 0]) === SCENE_LIGHT_LEVEL_MIN);
+    ok('a dim scene is dimmer than a bright one', sceneLightLevel([0.2, 0.2, 0.3]) < sceneLightLevel([0.8, 0.8, 0.8]));
+    ok('over-bright ambient clamps to 1', sceneLightLevel([2, 2, 2]) === 1);
+    ok('luminance weights green most', sceneLightLevel([0, 0.5, 0]) > sceneLightLevel([0.5, 0, 0]));
   }
 
   // ======================================================================

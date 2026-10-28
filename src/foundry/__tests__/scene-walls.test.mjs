@@ -13,12 +13,27 @@ import {
   deriveWallBlocksExterior,
   deriveWallLooksLikeWindow,
   deriveWallAperture,
+  deriveWallRoomBarrier,
   watchSceneWallStructure,
   watchDoorOpenings,
 } from '../scene-walls.js';
 
 export function run(t) {
   const { ok } = t;
+
+  // ROOM BARRIERS (scene/room-map.js): light's rooms. Ordinary walls, windows and every door divide; a wall that only
+  // stops movement (a furniture fence, light and sight both NONE) does not — the Compound's stepped edge, 2026-10-28.
+  ok('room barrier: an ordinary wall divides rooms', deriveWallRoomBarrier({ light: 20, sight: 20 }));
+  ok('room barrier: an unset wall (schema defaults) divides rooms', deriveWallRoomBarrier({}));
+  ok(
+    'room barrier: a window (light NONE, sight PROXIMITY) divides rooms',
+    deriveWallRoomBarrier({ light: 0, sight: 30 })
+  );
+  ok('room barrier: a movement-only wall does not', !deriveWallRoomBarrier({ light: 0, sight: 0 }));
+  ok(
+    'room barrier: a door always does, even one that lets light through',
+    deriveWallRoomBarrier({ light: 0, sight: 0, door: 1 })
+  );
 
   // WALL_MOVEMENT_TYPES: NONE=0, NORMAL=20 (verified against common/constants.mjs
   // — move is an alias of the shared EDGE_SENSE_TYPES scale, NOT an independent

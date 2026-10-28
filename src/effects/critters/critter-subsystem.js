@@ -2,8 +2,8 @@
  * CRITTER SUBSYSTEM — the lifecycle around the engines: what a painted zone turns
  * into, how many agents live in it right now, and what the sky says about them.
  *
- * ONE factory, two groups (`smellyFlies`: maggots under flies, over one painted
- * `_Flies` zone; `fireflies`: a colony over `_Fireflies`). A group is a table row —
+ * ONE factory, four groups (`smellyFlies`: flies over a painted `_Flies` zone; `maggots`; `fireflies`: a
+ * colony over `_Fireflies`; `dust`: motes over `_Dust`, lit by the window light). A group is a table row —
  * which engines it owns, which param sizes each, which activity law thins each — so
  * a fourth kind of critter is a row and a body, never a copy of this file. THREE and
  * every GPU allocator are INJECTED (the fire subsystem's own shape): this module
@@ -49,7 +49,14 @@ import {
   zoneGridSignature,
   createSlotStamper,
 } from './critter-zone.js';
-import { flyActivity, maggotActivity, fireflyActivity, approach, activeSlotCount } from './critter-activity.js';
+import {
+  flyActivity,
+  maggotActivity,
+  fireflyActivity,
+  moteActivity,
+  approach,
+  activeSlotCount,
+} from './critter-activity.js';
 import { skyFeel, weatherDrive, CALM_DRIVE } from './critter-weather.js';
 import { nearestTokenSlots, TOKEN_SLOTS } from './critter-token.js';
 import {
@@ -63,6 +70,7 @@ import {
   FIREFLY_FLASH_STYLES,
 } from './critter-species.js';
 import { createShadowHandle } from '../shadow-access.js';
+import { windGridKey } from '../particles/critter-runtime.js';
 import { hexToRgb01 } from '../candle-flame-geometry.js';
 
 const log = createLogger('critter-subsystem');
@@ -106,10 +114,22 @@ const ENGINE_SPECS = Object.freeze({
     // the twilight window × weather
     activity: (env, p) => fireflyActivity(env, p),
   }),
+  // Dust is in the air at every hour; only a gale thins it. It is also the one kind that reads the wind GRID
+  // and the scene's lighting buffers, so the subsystem hands it both (`wind`, `lit`).
+  mote: Object.freeze({
+    family: 'mote',
+    capacity: CRITTER_CAPACITY.mote,
+    renderOrder: 30,
+    perZoneParam: 'countPerZone',
+    tauSec: 4,
+    wind: true,
+    lit: true,
+    activity: (env, p) => moteActivity(env, p),
+  }),
 });
 
 /**
- * Which engine each effect (group) owns. Three effects, three masks, three engines: one group is one
+ * Which engine each effect (group) owns. Four effects, four masks, four engines: one group is one
  * painted zone, one engine and one `syncZone` profiler id. (The flies and the maggots used to share a group
  * and a mask; they are separate effects now, so a corpse can have either or both.)
  */
@@ -117,6 +137,7 @@ const GROUPS = Object.freeze({
   smellyFlies: Object.freeze({ engines: Object.freeze(['fly']), syncZone: 'light.smellyFliesSync' }),
   maggots: Object.freeze({ engines: Object.freeze(['maggot']), syncZone: 'light.maggotsSync' }),
   fireflies: Object.freeze({ engines: Object.freeze(['firefly']), syncZone: 'light.firefliesSync' }),
+  dust: Object.freeze({ engines: Object.freeze(['mote']), syncZone: 'light.dustSync' }),
 });
 
 /** The reaction time of the weather's push on the survivors (wind, shelter, cold): wind does not snap on. */
@@ -194,8 +215,67 @@ export function critterUniformValues(kind, params, shadow = null) {
   } else if (kind === 'firefly') {
     out.color = hexToRgb01(params?.color ?? '#b8ff3a');
     out.flashStyleIndex = Math.max(0, FIREFLY_FLASH_STYLES.indexOf(params?.flashStyle));
+  } else if (kind === 'mote') {
+    out.color = hexToRgb01(params?.color ?? '#fff1dc');
   }
   return out;
+}
+
+/** The reference height the dust's sunbeam slant is measured at: the shadow handle's throw per px of it. */
+const SUN_SLANT_REF_PX = 100;
+/** A beam never slants more than this many px of floor per px of height, however low the sun. */
+const SUN_SLANT_MAX = 2.5;
+/** The window light's range never reads as less than this (a moonlit window is still a window). */
+const BEAM_RANGE_MIN = 0.08;
+/** …and, with no outdoor light to measure it against, is this. */
+const BEAM_RANGE_DEFAULT = 0.45;
+
+const lumaOf = (rgb) => 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+
+/**
+ * What the sky tells a dust mote about its light: where the sun's ray through a mote lands on the floor
+ * (floor px per px of height, the shadow handle's own throw so the beam leans with the building shadows)
+ * and how low the sun is (a low sun crosses more air and the dust scatters more of it).
+ *
+ * @param {object|null} env
+ * @returns {{sunShift: number[], sunLow: number, night: number}} `night` is 0 by day and 1 in full dark
+ */
+export function moteSkyFromEnv(env) {
+  const cast = createShadowHandle({ sun: env?.sun ?? null, weather: env?.weather ?? null }).forCaster({
+    heightPx: SUN_SLANT_REF_PX,
+    strength01: 1,
+  });
+  let x = cast.offsetX / SUN_SLANT_REF_PX;
+  let y = cast.offsetY / SUN_SLANT_REF_PX;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    x = 0;
+    y = 0;
+  }
+  const len = Math.hypot(x, y);
+  if (len > SUN_SLANT_MAX) {
+    x = (x / len) * SUN_SLANT_MAX;
+    y = (y / len) * SUN_SLANT_MAX;
+  }
+  const golden = Number(env?.sun?.golden01);
+  const day = Number(env?.sun?.dayFactor01);
+  const night = Number.isFinite(day) ? 1 - Math.min(1, Math.max(0, day)) : 0;
+  return { sunShift: [x, y], sunLow: Number.isFinite(golden) ? Math.min(1, Math.max(0, golden)) : 0, night };
+}
+
+/**
+ * The room's own light and the window light's full range, as the dust shader wants them: `lightBase` is the
+ * indoor ambient (what `scene.illum` holds in a room with no window and no lamp — the `_Window` effect's own
+ * `indoor` term), and `beamRef` how much brighter than that a full window can make the floor (the outdoor
+ * light minus the indoor), floored so a moonlit window still reads and defaulted when either is unknown.
+ *
+ * @param {readonly number[]|null} indoorRgb @param {readonly number[]|null} outdoorRgb
+ * @returns {{lightBase: number[], beamRef: number}}
+ */
+export function moteLightFromScene(indoorRgb, outdoorRgb) {
+  const ok = (v) => Array.isArray(v) && v.length >= 3 && v.slice(0, 3).every(Number.isFinite);
+  const base = ok(indoorRgb) ? [indoorRgb[0], indoorRgb[1], indoorRgb[2]] : [0.3, 0.3, 0.3];
+  const range = ok(indoorRgb) && ok(outdoorRgb) ? lumaOf(outdoorRgb) - lumaOf(indoorRgb) : BEAM_RANGE_DEFAULT;
+  return { lightBase: base, beamRef: Math.min(1.5, Math.max(BEAM_RANGE_MIN, range)) };
 }
 
 /**
@@ -222,7 +302,7 @@ export function flyShadowFromSky(env, params) {
 /**
  * @param {object} deps
  * @param {*} deps.THREE - injected.
- * @param {'smellyFlies'|'maggots'|'fireflies'} deps.group
+ * @param {'smellyFlies'|'maggots'|'fireflies'|'dust'} deps.group
  * @param {() => object} deps.getRenderState - `{enabled, params, perfTier, floorIndex, elevation,
  *   gridPx, maskGrid, maskVersion}`. REQUIRED and deliberately not defaulted: a defaulted
  *   render-state seam is how water shipped every control inert with a green test suite.
@@ -234,6 +314,11 @@ export function flyShadowFromSky(env, params) {
  * @param {*} [deps.illumTexNode] @param {*} [deps.colorationTexNode] - the scene's illumination (the `lit` rung).
  * @param {*} [deps.depthTexNode] @param {*} [deps.depthFlagsTexNode] - the depth-authority occlusion gate.
  * @param {(elevation: number) => number} [deps.resolveExpectedDepth]
+ * @param {*} [deps.viewRectNode] - dust: the viewer's `uViewRect`, mapping a floor point into the lighting buffers.
+ * @param {() => object|null} [deps.getWindHandle] - dust: the LIVE wind handle (a getter: it is rebuilt on a rebake).
+ * @param {(THREE: *, cellCount: number) => {node: *}} [deps.allocateWindCells] - dust: `allocateWindCells`.
+ * @param {() => (readonly number[]|null)} [deps.getIndoorLightRgb] @param {() => (readonly number[]|null)} [deps.getOutdoorLightRgb]
+ *   - dust: the room's own ambient and the light outside, for telling the window light from the room's.
  * @param {() => number} [deps.random] - the engines' salt source (a lab injects a seeded one).
  * @returns {{scene: *, sync: Function, hasContent: boolean, getStatus: () => object, dispose: () => void}}
  */
@@ -250,6 +335,11 @@ export function createCritterSubsystem({
   depthTexNode = null,
   depthFlagsTexNode = null,
   resolveExpectedDepth = null,
+  viewRectNode = null,
+  getWindHandle = null,
+  allocateWindCells = null,
+  getIndoorLightRgb = null,
+  getOutdoorLightRgb = null,
   random = Math.random,
 }) {
   const groupDef = GROUPS[group];
@@ -293,6 +383,8 @@ export function createCritterSubsystem({
   let lastFaultMessage = '';
   let lastShadowKey = '';
   let shadowValues = null;
+  let lastMoteSkyKey = '';
+  let moteSky = null;
   /** Bumped whenever the shared zone buffer must be rewritten (a field or ANY engine's homes changed). */
   let zoneDirty = false;
 
@@ -383,7 +475,10 @@ export function createCritterSubsystem({
       };
       slots.set(spec.kind, slot);
     }
-    if (slot.engine && slot.tier === tier) return slot;
+    // A kind that reads the wind grid bakes the grid's size into its kernel, so a new grid is a new engine.
+    const windHandle = spec.wind ? (getWindHandle?.() ?? null) : null;
+    const windKey = spec.wind ? windGridKey(windHandle) : '';
+    if (slot.engine && slot.tier === tier && slot.windKey === windKey) return slot;
     // A tier change rebuilds the kernels and materials (a rung changes which shader nodes exist) around the
     // SAME arena: the successor carries on from the swarm the old engine left in it rather than reseeding, and
     // the old engine gives back what the renderer holds for it (geometry, materials, pipelines).
@@ -393,6 +488,13 @@ export function createCritterSubsystem({
       slot.engine.dispose?.();
     }
     const plan = critterTierPlan(spec.family, tier);
+    // The wind cells' storage buffer outlives the engine (it cannot be freed), keyed by size bucket.
+    const windCells =
+      windKey !== 'none' && windKey !== '' && typeof allocateWindCells === 'function'
+        ? shared(THREE, `wind:${Math.ceil((windHandle.grid.cols * windHandle.grid.rows) / 16384)}`, () =>
+            allocateWindCells(THREE, windHandle.grid.cols * windHandle.grid.rows)
+          )
+        : null;
     slot.engine = createEngine({
       THREE,
       kind: spec.kind,
@@ -404,11 +506,15 @@ export function createCritterSubsystem({
       colorationTexNode,
       depthTexNode,
       depthFlagsTexNode,
+      viewRectNode,
+      windHandle: windCells ? windHandle : null,
+      windCells,
       random,
       resume,
     });
     slot.plan = plan;
     slot.tier = tier;
+    slot.windKey = windKey;
     slot.placed = false; // a new engine has to be told where the zone is
     slot.pushed = false; // ...and what its params are
     slot.pushedDrive = null; // ...and what the weather is doing to it
@@ -474,13 +580,15 @@ export function createCritterSubsystem({
    *   frame's live token snapshot (`foundry/token-activity.js#collectActiveTokenPoints`), for the
    *   fly/firefly "startled by a nearby token" response (`critter-token.js`). Absent ⇒ CALM_DRIVE's
    *   sibling: every token slot reads as the far sentinel and nothing startles.
+   * @param {{x:number,y:number,height:number}|null} [eye] - the frame's scene eye (`scene/scene-eye.js`): the one
+   *   perspective every depth effect shares. Absent ⇒ the rect's centre and the critters' own 1000 px camera.
    */
-  function sync(renderer, nowMs, dtSec, worldRect, env = null, tokenPoints = []) {
+  function sync(renderer, nowMs, dtSec, worldRect, env = null, tokenPoints = [], eye = null) {
     // Standing down after a fault: the swarm is hidden and the frame goes on without it.
     if (fault && nowMs < fault.untilMs) return;
     profiler?.beginById(groupDef.syncZone);
     try {
-      syncUnguarded(renderer, nowMs, dtSec, worldRect, env, tokenPoints);
+      syncUnguarded(renderer, nowMs, dtSec, worldRect, env, tokenPoints, eye);
     } catch (err) {
       const message = String(err?.message ?? err);
       fault = { message, count: (fault?.count ?? 0) + 1, untilMs: nowMs + FAULT_RETRY_MS };
@@ -499,7 +607,7 @@ export function createCritterSubsystem({
     }
   }
 
-  function syncUnguarded(renderer, nowMs, dtSec, worldRect, env, tokenPoints = []) {
+  function syncUnguarded(renderer, nowMs, dtSec, worldRect, env, tokenPoints = [], eye = null) {
     const state = getRenderState() ?? {};
     const params = state.params ?? {};
     const wantsAny = specs.some((s) => (Number(params[s.perZoneParam]) || 0) > 0);
@@ -545,6 +653,27 @@ export function createCritterSubsystem({
     }
     const expectedDepth =
       typeof resolveExpectedDepth === 'function' ? resolveExpectedDepth(Number(state.elevation) || 0) : 0;
+
+    // ── the dust's light: the sun's slant, and the room's own light against the window's ──
+    let moteValues = null;
+    if (group === 'dust') {
+      const indoor = getIndoorLightRgb?.() ?? null;
+      const outdoor = getOutdoorLightRgb?.() ?? null;
+      const key = [
+        env?.sun?.elevationDeg?.toFixed?.(2),
+        env?.sun?.azimuthDeg?.toFixed?.(2),
+        env?.sun?.golden01?.toFixed?.(3),
+        env?.sun?.dayFactor01?.toFixed?.(3),
+        env?.weather?.cloudCover01?.toFixed?.(2),
+        indoor?.map((v) => v.toFixed(3)).join(','),
+        outdoor?.map((v) => v.toFixed(3)).join(','),
+      ].join('|');
+      if (key !== lastMoteSkyKey) {
+        lastMoteSkyKey = key;
+        moteSky = { ...moteSkyFromEnv(env), ...moteLightFromScene(indoor, outdoor) };
+      }
+      moteValues = moteSky;
+    }
 
     // ── activity, params, step ──
     let any = false;
@@ -595,18 +724,23 @@ export function createCritterSubsystem({
       if (
         params !== slot.lastParams ||
         shadow !== slot.lastShadow ||
+        moteValues !== slot.lastMote ||
         expectedDepth !== slot.lastDepth ||
         !slot.pushed
       ) {
         const values = critterUniformValues(spec.kind, params, shadow);
         values.expectedDepth = expectedDepth;
+        if (moteValues) Object.assign(values, moteValues);
         slot.engine.setParams(values);
         slot.lastParams = params;
         slot.lastShadow = shadow;
+        slot.lastMote = moteValues;
         slot.lastDepth = expectedDepth;
         slot.pushed = true;
       }
-      slot.engine.step(renderer, { dtSec, tMs: nowMs, worldRect });
+      // A rebake changes the wind cells' contents, not their layout: refresh them in place.
+      if (spec.wind) slot.engine.updateWind?.(getWindHandle?.() ?? null);
+      slot.engine.step(renderer, { dtSec, tMs: nowMs, worldRect, eye });
       any = any || slot.engine.hasContent;
       engines.push({
         kind: spec.kind,
@@ -635,6 +769,8 @@ export function createCritterSubsystem({
     get hasContent() {
       return hasContent;
     },
+    /** The live engines, for a lab or a probe that reads the agents back (`engine.readback`: diagnostic only, it stalls the GPU). */
+    debugEngines: () => [...slots.values()].map((s) => s.engine).filter(Boolean),
     getStatus: () => ({
       ...lastStatus,
       fault: fault ? { message: fault.message, count: fault.count } : null,

@@ -26,6 +26,7 @@ import { run as runVegetationRender } from './vegetation-render.test.mjs';
 import { run as runVegetationShadow } from './vegetation-shadow-subsystem.test.mjs';
 import { run as runShadowAccess } from './shadow-access.test.mjs';
 import { run as runSkyAccess } from './sky-access.test.mjs';
+import { run as runShaderBudget } from './shader-budget.test.mjs';
 import { run as runDoorGraphics } from './door-graphics.test.mjs';
 import { run as runDoorGraphicsRender } from './door-graphics-render.test.mjs';
 import { run as runApertureGobo } from './aperture-gobo.test.mjs';
@@ -34,6 +35,8 @@ import { run as runTileMotionNodes } from './tile-motion-nodes.test.mjs';
 import { run as runLens } from './lens.test.mjs';
 import { run as runLensMotion } from './lens-motion.test.mjs';
 import { run as runLensRender } from './lens-render.test.mjs';
+import { run as runWindTrails } from './wind-trails.test.mjs';
+import { run as runCandleWindState } from './candle-wind-state.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -64,6 +67,8 @@ const t = {
 
 const suites = [
   ['effect-registration', runEffectRegistration],
+  ['wind-trails', runWindTrails],
+  ['candle-wind-state', runCandleWindState],
   ['effect-tier', runEffectTier],
   ['effect-tier-consumption', runEffectTierConsumption],
   ['depth-of-field-blur', runDepthOfFieldBlur],
@@ -83,6 +88,7 @@ const suites = [
   ['vegetation-shadow-subsystem', runVegetationShadow],
   ['shadow-access', runShadowAccess],
   ['sky-access', runSkyAccess],
+  ['shader-budget', runShaderBudget],
   ['door-graphics', runDoorGraphics],
   ['door-graphics-render', runDoorGraphicsRender],
   ['aperture-gobo', runApertureGobo],

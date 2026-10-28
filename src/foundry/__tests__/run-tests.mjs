@@ -12,6 +12,7 @@ import { run as runCameraPath } from './camera-path.test.mjs';
 import { run as runCanvasCompositing } from './canvas-compositing.test.mjs';
 import { run as runCanvasLifecycle } from './canvas-lifecycle.test.mjs';
 import { run as runSceneSwitchGate } from './scene-switch-gate.test.mjs';
+import { run as runTransitionBridge } from './transition-bridge.test.mjs';
 import { run as runProgressNotice } from './progress-notice.test.mjs';
 import { run as runPrepareCoordinator } from './prepare-coordinator.test.mjs';
 import { run as runSceneActivationGate } from './scene-activation-gate.test.mjs';
@@ -25,6 +26,7 @@ import { run as runPf2eDarknessStanddown } from './pf2e-darkness-standdown.test.
 import { run as runTimeAuthority } from './time-authority.test.mjs';
 import { run as runAlmanacDiagnostics } from './almanac-diagnostics.test.mjs';
 import { run as runCalendarInstall } from './calendar-install.test.mjs';
+import { run as runSceneOutline } from './scene-outline.test.mjs';
 import { run as runSceneEnvironment } from './scene-environment.test.mjs';
 import { run as runSceneLights } from './scene-lights.test.mjs';
 import { run as runSceneSyntheticLights } from './scene-synthetic-lights.test.mjs';
@@ -40,6 +42,7 @@ import { run as runSceneOcclusionSources } from './scene-occlusion-sources.test.
 import { run as runSceneGeometry } from './scene-geometry.test.mjs';
 import { run as runSceneLayers } from './scene-layers.test.mjs';
 import { run as runSceneTokens } from './scene-tokens.test.mjs';
+import { run as runOffBoardPrivacy } from './off-board-privacy.test.mjs';
 import { run as runSceneTiles } from './scene-tiles.test.mjs';
 import { run as runTileMotion } from './tile-motion.test.mjs';
 import { run as runTileMotionRuntime } from './tile-motion-runtime.test.mjs';
@@ -94,6 +97,7 @@ const suites = [
   ['canvas-compositing', runCanvasCompositing],
   ['canvas-lifecycle', runCanvasLifecycle],
   ['scene-switch-gate', runSceneSwitchGate],
+  ['transition-bridge', runTransitionBridge],
   ['progress-notice', runProgressNotice],
   ['prepare-coordinator', runPrepareCoordinator],
   ['scene-activation-gate', runSceneActivationGate],
@@ -107,6 +111,7 @@ const suites = [
   ['time-authority', runTimeAuthority],
   ['almanac-diagnostics', runAlmanacDiagnostics],
   ['calendar-install', runCalendarInstall],
+  ['scene-outline', runSceneOutline],
   ['scene-environment', runSceneEnvironment],
   ['scene-lights', runSceneLights],
   ['scene-synthetic-lights', runSceneSyntheticLights],
@@ -122,6 +127,7 @@ const suites = [
   ['scene-geometry', runSceneGeometry],
   ['scene-layers', runSceneLayers],
   ['scene-tokens', runSceneTokens],
+  ['off-board-privacy', runOffBoardPrivacy],
   ['scene-tiles', runSceneTiles],
   ['tile-motion', runTileMotion],
   ['tile-motion-runtime', runTileMotionRuntime],

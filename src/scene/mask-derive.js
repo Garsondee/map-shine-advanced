@@ -1567,19 +1567,51 @@ function rasterizeAuthoredIncremental(spec, sources, absentValue, tokens, prev) 
  *   what changed since `prev`: `cover`/`outdoors` in SHARED cells, `sky`/`overhead` (the raw sky-reach
  *   height and overhead composites) in CASTER cells. Ignored without `prev`.
  */
-function deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildingByte, prev = null, dirty = null }) {
+function deriveGateProducts({
+  gridSpec,
+  casterSpecActive,
+  outdoors,
+  outdoorsCaster = null,
+  comp,
+  buildingByte,
+  prev = null,
+  dirty = null,
+}) {
   const gw = gridSpec.w;
   const w = casterSpecActive.w;
-  const map = worldIndexMap(casterSpecActive, outdoors.spec);
   const od = outdoors.data;
+  // ⚠️ BUILDING AND OVERHEAD READ `_Outdoors` AT CASTER RESOLUTION (2026-10-28,
+  // author: building shadows — and overhead items' shadows — "leave a gap
+  // between the outer edge of the building and where the shadow starts", a gap
+  // cloud shadows skipped too). They used to read the SHARED 512 grid through a
+  // nearest-neighbour `worldIndexMap`, and that grid is a POINT sample (one tap
+  // per ~14 world px on Mad Scientist's Compound): its indoor/outdoor edge can
+  // sit a whole coarse texel outside the real wall. `coverBuilding` is the walls
+  // channel the receiver gate and the self-exclusion both read, so the building
+  // footprint grew by up to that texel and the shadow was switched off across
+  // it; the overhead exterior test likewise stripped coverage from a
+  // wall-mounted item's outer edge. The caster-resolution rasterization of the
+  // SAME sources already existed (`outdoorsCaster`) — this only stops ignoring it.
+  const oc = outdoorsCaster && outdoorsCaster.spec.w === w && outdoorsCaster.spec.h === casterSpecActive.h;
+  const map = oc ? null : worldIndexMap(casterSpecActive, outdoors.spec);
+  const cod = oc ? outdoorsCaster.data : od;
+  const outdoorsAt = oc
+    ? (gx, gy) => cod[gy * w + gx]
+    : (gx, gy) => {
+        const rowBase = map.row[gy];
+        const c = map.col[gx];
+        return rowBase < 0 || c < 0 ? 255 : od[rowBase + c];
+      };
   const hasBuilding = buildingByte >= 0;
   const hasOverhead = comp.hasOverhead;
 
   // The REGION each group must recompute. Without a predecessor that is everything.
   const rOutdoors = prev
-    ? dirty.outdoors
-      ? preimageRect(map, dirty.outdoors, casterSpecActive)
-      : null
+    ? oc
+      ? (dirty.outdoorsCaster ?? null)
+      : dirty.outdoors
+        ? preimageRect(map, dirty.outdoors, casterSpecActive)
+        : null
     : fullRect(casterSpecActive);
   const rSky = prev ? rectUnion(dirty.cover, dirty.outdoors) : fullRect(gridSpec);
   const rBuilding = hasBuilding ? rOutdoors : null;
@@ -1615,11 +1647,9 @@ function deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildi
     const cb = coverBuilding.data;
     const bd = casterBuilding.data;
     for (let gy = rBuilding.y0; gy <= rBuilding.y1; gy++) {
-      const rowBase = map.row[gy];
       let i = gy * w + rBuilding.x0;
       for (let gx = rBuilding.x0; gx <= rBuilding.x1; gx++, i++) {
-        const c = map.col[gx];
-        const outdoorsByte = rowBase < 0 || c < 0 ? 255 : od[rowBase + c];
+        const outdoorsByte = outdoorsAt(gx, gy);
         const indoorness = 255 - outdoorsByte;
         cb[i] = indoorness;
         bd[i] = indoorness >= HEIGHT_COVERAGE_THRESHOLD ? buildingByte : 0;
@@ -1662,11 +1692,9 @@ function deriveGateProducts({ gridSpec, casterSpecActive, outdoors, comp, buildi
       const cov = coverOverhead.data;
       const cas = casterOverhead.data;
       for (let gy = rOverhead.y0; gy <= rOverhead.y1; gy++) {
-        const rowBase = map.row[gy];
         let i = gy * w + rOverhead.x0;
         for (let gx = rOverhead.x0; gx <= rOverhead.x1; gx++, i++) {
-          const c = map.col[gx];
-          const outdoorsByte = rowBase < 0 || c < 0 ? 255 : od[rowBase + c];
+          const outdoorsByte = outdoorsAt(gx, gy);
           const isExterior = outdoorsByte >= OVERHEAD_EXTERIOR_THRESHOLD;
           const gated = isExterior ? rawCov[i] : 0;
           cov[i] = gated;
@@ -2090,6 +2118,7 @@ export function deriveFloorProducts({
         // cells that may differ from it: the gate patches its own outputs from exactly that.
         fromOutdoorsId: prevOutdoors ? memo.idOf(prevOutdoors.outdoors) : 0,
         dirtyShared: shared.region,
+        dirtyCaster: caster.region,
         // ⚠️ WHAT ACTUALLY FED `outdoors`, per source. `outdoorsSource` below says
         // only "authored vs default"; when a floor's grid comes out wrong this
         // says WHICH of its sources did it. See `describeAuthoredSources`.
@@ -2193,6 +2222,7 @@ export function deriveFloorProducts({
           gridSpec,
           casterSpecActive,
           outdoors,
+          outdoorsCaster,
           comp,
           buildingByte,
           prev: patchable ? gm : null,
@@ -2202,6 +2232,7 @@ export function deriveFloorProducts({
                 sky: compSame ? null : comp.dirtySky,
                 overhead: compSame ? null : comp.dirtyOverhead,
                 outdoors: outdoorsSame ? null : om.dirtyShared,
+                outdoorsCaster: outdoorsSame ? null : om.dirtyCaster,
               }
             : null,
         }),

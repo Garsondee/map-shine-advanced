@@ -77,19 +77,23 @@
  *
  * @module effects/precipitation/squall-field
  */
-import { computeGustEnvelope, windFlowVectorNode } from '../../world/index.js';
+import {
+  computeGustEnvelope,
+  windFlowVectorNode,
+  windStrength01Node,
+  windAdvectionDtSecNode,
+} from '../../world/index.js';
 
 /**
- * How much coarser the gust envelope is sampled for the curtain than for a
- * blade of grass — §3.4's *"at a larger wavelength"*.
- *
- * A gust front that makes a bush shiver is metres across; a squall band that
- * makes a courtyard grey is tens of them. Dividing the sample position widens
- * the pattern by exactly this factor, which also widens the travel (the
- * advection term is unscaled), so a big front crosses the map fast — which is
- * what big fronts do.
+ * ⚠️ RETIRED 2026-10-27 — the curtain used to sample the gust envelope at
+ * `worldXY × 0.11`: fronts 9× wider than the wind's AND, because the advection
+ * term was unscaled, crossing the map 9× faster. That is the author's *"the rain
+ * moves at a COMPLETELY different pace entirely"*, measured. The envelope's own
+ * gusts are now sized in real metres and grow with the wind (9-60 m), which is
+ * the "tens of metres" a squall band wants, so the curtain reads the field's
+ * fronts 1:1 — the very bands the overlay draws, at the very speed it draws them.
  */
-export const CURTAIN_GUST_SCALE = 0.11;
+export const CURTAIN_GUST_SCALE = 1;
 
 /**
  * The slow "weather cell" — one octave, deliberately. §3.4 asks for *"one slow
@@ -115,8 +119,9 @@ export const CELL_FREQ = 0.0011;
  */
 export const CELL_ANISOTROPY = 5.5;
 
-/** World px/s the cell pattern drifts downwind at full gale. Slow: this is the
- * WEATHER moving, not the wind. */
+/** World px/s the cell pattern drifts downwind at hurricane-force strength
+ * (scaled by `windStrength01Node`, Beaufort ÷ 12). Slow: this is the WEATHER
+ * moving, not the wind. */
 export const CELL_DRIFT_PX_PER_SEC = 46;
 
 /**
@@ -167,14 +172,31 @@ export const CELL_CONTRAST = 0.85;
  * @param {*} inputs.speed01 - float node.
  * @param {*} inputs.gustiness01 - float node.
  * @param {*} [inputs.bandDepth] - float node overriding {@link BAND_DEPTH}.
+ * @param {*} [inputs.pixelsPerMetre] - float node, the scene's px/m (the wind
+ *   handle's `ambient.pixelsPerMetre`), so the fronts are the field's own.
  * @param {*} [inputs.scale] - float node; multiplies the sample position, so
  *   values BELOW 1 make bands WIDER. A static authoring dial, not an animated
  *   one — trap 1 forbids a scale that breathes, not a scale that is chosen.
+ * @param {object} [inputs.advection] - the wind's INTEGRATED advection uniforms
+ *   (`world/wind-field.js#createWindAdvectionUniforms`, copied from the handle's
+ *   ambient each frame). All three consumers must pass the same one, or their
+ *   bands part company. Omitted → `speed × t`, which flings the bands during a
+ *   wind fade (see that module's "INTEGRATED ADVECTION" block).
  * @returns {*} float node, 0..1. **1 means "full weather here"**, not "a gust".
  */
 export function buildSquallField(
   TSL,
-  { worldXY: rawXY, timeMs, directionDeg, speed01, gustiness01, bandDepth = null, scale = null }
+  {
+    worldXY: rawXY,
+    timeMs,
+    directionDeg,
+    speed01,
+    gustiness01,
+    bandDepth = null,
+    scale = null,
+    pixelsPerMetre,
+    advection,
+  }
 ) {
   const { float, vec2, mx_noise_float: perlin, mix, clamp } = TSL;
   // ONE scaling, applied before anything reads a position — so the gust half
@@ -185,12 +207,19 @@ export function buildSquallField(
   // ⭐ THE SAME FRONTS THE VEGETATION BENDS TO, at curtain scale — and now at
   // the SAME angle, with no rotation between them. See this module's header
   // for the `−90` bridge that used to be needed here and why it is gone.
+  //
+  // ⚠️ 2026-10-27: sampled at the TRUE world position, not the scaled one. The
+  // `scale` dial above widens the slow weather cells; applied to the gusts it
+  // would also speed them up and the curtain would leave the wind behind again
+  // (see CURTAIN_GUST_SCALE). The lock that matters is curtain ↔ wind.
   const gust = computeGustEnvelope(TSL, {
-    centerXY: worldXY.mul(float(CURTAIN_GUST_SCALE)),
+    centerXY: rawXY,
     time: timeMs,
     directionDeg,
     gustiness01,
     speed01,
+    pixelsPerMetre,
+    advection,
   });
 
   // ── THE SLOW WEATHER CELL ──
@@ -202,8 +231,14 @@ export function buildSquallField(
 
   // ⚠️ ONE ADVECTION TERM, applied to the coordinate BEFORE the octave is
   // taken — trap 2. Independent per-band offsets decorrelate and never resync.
-  const t = timeMs.mul(float(0.001));
-  const drift = t.mul(float(CELL_DRIFT_PX_PER_SEC)).mul(speed01);
+  // INTEGRATED when the wind's advection is given: `∫ strength dt`, so a wind
+  // fade changes the cells' pace instead of flinging them by `t · dStrength/dt`.
+  const strength = windStrength01Node(TSL, speed01);
+  const drift = advection
+    ? advection.strengthSec
+        .add(strength.mul(windAdvectionDtSecNode(TSL, timeMs, advection)))
+        .mul(float(CELL_DRIFT_PX_PER_SEC))
+    : timeMs.mul(float(0.001)).mul(float(CELL_DRIFT_PX_PER_SEC)).mul(strength);
   const alongRaw = worldXY.x.mul(toward.x).add(worldXY.y.mul(toward.y)).sub(drift);
   const acrossRaw = worldXY.x.mul(across.x).add(worldXY.y.mul(across.y));
 

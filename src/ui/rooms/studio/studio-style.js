@@ -20,9 +20,6 @@
 
 import { HOVER_GATE, MOTION_KEYFRAMES, uiKitCss, uiKitHoverCss } from '../room-style.js';
 
-/** Class on a detached pop-out window so the shared component rules reach it. */
-export const POPOUT_CLASS = 'msa-studio-pop';
-
 /**
  * @param {string} roomId - the room element's id (no `#`).
  * @param {string[]} accentVars - the distinct `--c-*` tokens the rail uses.
@@ -30,15 +27,16 @@ export const POPOUT_CLASS = 'msa-studio-pop';
  */
 export function studioCss(roomId, accentVars) {
   const R = `#${roomId}`;
-  // Both the room and any detached pop-out window.
-  const IN = `:is(${R}, .${POPOUT_CLASS})`;
+  // Everything the shared kit styles lives inside the room. (It also reached a
+  // detached pop-out card window until the Effects library replaced those.)
+  const IN = R;
   const RAIL = `${R} .rail button`;
 
   return `
 /* ---- the room ------------------------------------------------------------ */
-${R}{top:44px; left:24px; width:1180px; height:800px;
+${R}{top:44px; left:24px; width:620px; height:800px;
   max-width:calc(100vw - 460px); max-height:calc(100vh - 60px);
-  min-width:760px; min-height:520px; resize:both;
+  min-width:500px; min-height:520px; resize:both;
   position:fixed; z-index:100; background:var(--glass);
   backdrop-filter:blur(var(--glass-blur));
   border:1px solid var(--line); border-radius:var(--r-room);
@@ -121,15 +119,50 @@ ${IN} .msa-chev{display:inline-block; transition:transform 160ms var(--ease-out)
 ${IN} details[open] > summary .msa-chev{transform:rotate(90deg)}
 
 /* ---- effects department ------------------------------------------------------ */
+/* The library: grouped tiles, every effect on one screen. */
+${IN} .msa-libbar{display:flex; align-items:center; gap:8px; margin-bottom:4px}
+${IN} .msa-libbar .msa-field{flex:1 1 auto}
+${IN} .msa-lib{display:flex; flex-direction:column; gap:14px; margin:10px 0 18px}
+${IN} .msa-libhead{display:flex; align-items:center; gap:7px; margin-bottom:6px;
+  font-size:.7rem; font-weight:600; color:var(--ink1)}
+${IN} .msa-libhead .ico{width:14px; height:14px; color:var(--acc, var(--ink2))}
+${IN} .msa-libhead-count{margin-left:auto; font-weight:400; color:var(--ink2)}
+${IN} .msa-libgrid{display:grid; gap:6px; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr))}
+${IN} .msa-etile{display:flex; align-items:center; gap:6px; min-width:0; padding:0 8px 0 0;
+  background:var(--bg1); border:1px solid var(--line); border-left:3px solid var(--acc, var(--shine));
+  border-radius:var(--r-ctl); transition:border-color 120ms ease, background-color 120ms ease}
+${IN} .msa-etile-open{flex:1; min-width:0; display:flex; align-items:center; justify-content:flex-start; gap:7px;
+  height:32px; min-height:0; margin:0; padding:0 4px 0 8px; text-align:left; font:inherit; font-size:.76rem;
+  color:var(--ink0); background:none; border:0; box-shadow:none; cursor:pointer}
+${IN} .msa-etile-open:focus-visible{outline:2px solid var(--shine); outline-offset:-2px; border-radius:var(--r-ctl)}
+${IN} .msa-etile-ico{display:inline-flex; flex:none; color:var(--acc, var(--shine))}
+${IN} .msa-etile-ico .ico{width:14px; height:14px}
+${IN} .msa-etile-name{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+${IN} .msa-etile-warn{display:inline-flex; flex:none; color:var(--warn)}
+${IN} .msa-etile-warn .ico{width:13px; height:13px}
+/* An off effect reads quieter, but its switch stays at full strength. */
+${IN} .msa-etile[data-enabled="false"] .msa-etile-open{color:var(--ink2)}
+${IN} .msa-etile[data-enabled="false"] .msa-etile-ico{opacity:.5}
 ${IN} .msa-resetall{display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-  margin-bottom:12px; padding:10px 12px; background:var(--bg1);
+  padding:10px 12px; background:var(--bg1);
   border:1px solid var(--line); border-radius:var(--r-card)}
 ${IN} .msa-resetall .msa-btn{font-weight:600}
 ${IN} .msa-resetall-note{color:var(--ink2); font-size:.72rem}
-${IN} .msa-strip{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px}
-${IN} .msa-grid{display:grid; gap:12px; align-content:start; align-items:start;
-  grid-template-columns:repeat(2, minmax(0, 1fr))}
 ${IN} .msa-empty{color:var(--ink2); font-size:.8rem; padding:20px}
+
+/* The one open effect. The jump bar sticks to the top of the scroll area
+   (which has 16px of padding, hence -16px) so every section is one press away. */
+${IN} .msa-card--open{border-left-width:1px; border-top:3px solid var(--acc, var(--shine))}
+${IN} .msa-card-crumb{color:var(--ink2); font-size:.64rem; letter-spacing:.06em}
+${IN} .msa-back .ico{transform:rotate(180deg)}
+${IN} .msa-prev .ico{transform:rotate(-90deg)}
+${IN} .msa-next .ico{transform:rotate(90deg)}
+${IN} .msa-jump{position:sticky; top:-16px; z-index:2; display:flex; flex-wrap:wrap; gap:5px;
+  margin:0 -14px 0 -16px; padding:7px 14px 7px 16px; background:var(--bg1);
+  border-top:1px solid var(--line); border-bottom:1px solid var(--line)}
+${IN} .msa-jump .msa-chip{padding:2px 9px; font-size:.68rem}
+${IN} .msa-section{scroll-margin-top:52px}
+${IN} .msa-section-body{display:flex; flex-wrap:wrap; gap:4px}
 
 ${IN} .msa-card{position:relative; display:flex; flex-direction:column; gap:8px;
   padding:12px 14px 12px 16px; background:var(--bg1); border:1px solid var(--line);
@@ -180,25 +213,8 @@ ${IN} .msa-copy[data-state="done"]{color:var(--ok)}
 ${IN} .msa-copy[data-state="fail"]{color:var(--fail)}
 ${IN} .msa-compose{display:flex; gap:6px; align-items:center; flex:1; min-width:0;
   animation:msaFadeUp 160ms var(--ease-out) both}
-${IN} .msa-adv{border:1px solid var(--line); border-radius:7px; background:var(--bg2)}
-${IN} .msa-adv-sum{display:flex; align-items:center; gap:6px; padding:6px 9px; border-radius:7px;
-  cursor:pointer; user-select:none; font-size:.7rem; font-weight:600; color:var(--ink1);
-  transition:color 120ms ease, background-color 120ms ease}
-${IN} .msa-adv[open] > .msa-adv-sum{border-bottom-left-radius:0; border-bottom-right-radius:0}
-${IN} .msa-adv-body{display:flex; flex-direction:column; padding:2px 9px 9px;
-  animation:msaFadeUp 180ms var(--ease-out) both}
-${IN} .msa-adv-group{display:flex; flex-wrap:wrap; gap:4px}
 ${IN} .msa-sec{font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink2);
   font-weight:600; margin:9px 0 3px}
-
-/* ---- pop-out windows ----------------------------------------------------------- */
-.${POPOUT_CLASS}{position:fixed; width:360px; max-height:70vh; overflow-y:auto; z-index:400;
-  padding:10px; background:var(--glass); backdrop-filter:blur(var(--glass-blur));
-  border:1px solid var(--line-strong); border-radius:var(--r-room); box-shadow:var(--shadow3);
-  font:12px/1.4 var(--font); color:var(--ink0); scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent;
-  transform-origin:var(--ox, 0) var(--oy, 0); animation:msaPopIn 160ms var(--ease-out) both}
-.${POPOUT_CLASS} .msa-pop-head{display:flex; align-items:center; gap:8px; margin-bottom:6px}
-.${POPOUT_CLASS} .msa-pop-title{font-weight:700; font-size:.8rem; color:var(--ink0); flex:1}
 
 /* ---- scene / painter / cues / lab -------------------------------------------- */
 ${IN} .msa-panel{display:flex; flex-direction:column; gap:8px; padding:11px 13px;
@@ -265,7 +281,7 @@ ${IN} .msa-pending span{flex:1}
    Gated so a tap on a touch screen never leaves a stuck hover state. */
 ${HOVER_GATE}{
 ${uiKitHoverCss(IN)}
-  ${IN} .msa-adv-sum:hover{color:var(--ink0); background:var(--bg3)}
+  ${IN} .msa-etile:hover{background:var(--bg2); border-color:var(--line-strong)}
   ${IN} .msa-tile:hover{background:var(--bg2); border-color:var(--line-strong)}
   ${RAIL}:hover{background:var(--bg3); color:var(--ink0)}
   ${R} .rail button[aria-pressed="true"]:hover{background:color-mix(in oklab, currentColor 18%, transparent)}

@@ -38,6 +38,9 @@
  * @module effects/precipitation/storm-fog-render
  */
 import { buildStormFogField } from './storm-fog-field.js';
+import { createWindAdvectionUniforms, writeWindAdvectionUniforms } from '../../world/index.js';
+import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
+import { markCompileDeferrable } from '../../core/compile-policy.js';
 
 /**
  * How opaque the fog gets at `intensity01 = 1` and `strength = 1`.
@@ -72,6 +75,8 @@ export function createStormFog({
   zDepth = 0,
   renderOrder = 0,
   openSkyTexture = null,
+  /** `buf:scene.illum` — fog darkens in a building's shadow like the ground. Absent ⇒ compiled out. */
+  illumTexture = null,
 }) {
   const TSL = THREE.TSL;
   const { Fn, float, vec2, vec3, vec4, uniform, mix, positionGeometry } = TSL;
@@ -79,6 +84,8 @@ export function createStormFog({
   const uTimeMs = uniform(float(0));
   const uWindDirDeg = uniform(float(0));
   const uWindSpeed01 = uniform(float(0));
+  /** The wind's integrated travel, copied from the handle in `step` like the two above. */
+  const uAdvection = createWindAdvectionUniforms(TSL);
   /** The combined populations' weighted `fog01` — see this module's own
    * header for why this is a SUM, not a per-species value. */
   const uIntensity01 = uniform(float(0));
@@ -88,6 +95,8 @@ export function createStormFog({
    * body rides — fog lit like noon at midnight is the same "stops belonging
    * to the scene" mistake the curtain's own header names. */
   const uRgbMul = uniform(float(1));
+  /** The golden-hour colour of the light (`sky-access.js#lightGoldenTint`), (1,1,1) when none. */
+  const uSkyTint = uniform(vec3(1, 1, 1));
   const uAlphaMul = uniform(float(1));
 
   const uSkyReachRect = uniform(vec4(0, 0, 1, 1));
@@ -102,6 +111,8 @@ export function createStormFog({
 
   const material = new THREE.NodeMaterial();
 
+  markCompileDeferrable(material, 'storm fog');
+
   /** Axis-aligned quad spanning the scene rect — `positionGeometry.xy` IS
    * world space, same as the curtain's own `worldXY`. */
   const worldXY = positionGeometry.xy;
@@ -111,9 +122,17 @@ export function createStormFog({
     timeMs: uTimeMs,
     windDirDeg: uWindDirDeg,
     windSpeed01: uWindSpeed01,
+    advection: uAdvection,
   });
 
-  material.colorNode = Fn(() => uTint.mul(uRgbMul))();
+  const uSceneLight = uniform(float(1));
+  const shade = buildWeatherShadeNode(TSL, {
+    illumTexNode: illumTexture ? TSL.texture(illumTexture) : null,
+    uSceneLight,
+  });
+  material.colorNode = Fn(() =>
+    shade ? uTint.mul(uRgbMul).mul(uSkyTint).mul(shade) : uTint.mul(uRgbMul).mul(uSkyTint)
+  )();
 
   material.opacityNode = Fn(() => {
     // LAW 3, restated a second time in this system: an indoor pixel stays
@@ -168,6 +187,7 @@ export function createStormFog({
         const dg = wind.ambient.directionDeg?.value;
         if (Number.isFinite(sp)) uWindSpeed01.value = sp;
         if (Number.isFinite(dg)) uWindDirDeg.value = dg;
+        writeWindAdvectionUniforms(uAdvection, wind.ambient.advection);
       }
     },
 
@@ -181,7 +201,10 @@ export function createStormFog({
       uIntensity01.value = intensity01;
       if (Array.isArray(frame?.tint) && frame.tint.length === 3) uTint.value.set(...frame.tint);
       if (Number.isFinite(frame?.rgbMul)) uRgbMul.value = frame.rgbMul;
+      if (Array.isArray(frame?.skyTintRgb) && frame.skyTintRgb.length === 3) uSkyTint.value.set(...frame.skyTintRgb);
+      else uSkyTint.value.set(1, 1, 1);
       if (Number.isFinite(frame?.alphaMul)) uAlphaMul.value = frame.alphaMul;
+      if (Number.isFinite(frame?.sceneLight01)) uSceneLight.value = frame.sceneLight01;
     },
 
     setSkyReachTexture(texture, rect) {

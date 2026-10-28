@@ -541,6 +541,42 @@ export function shouldPublishGlobalLightWindow(next, last, live, nowMs, lastPubl
   return nowMs - lastPublishedAtMs >= DARKNESS_PUBLISH_MIN_INTERVAL_MS;
 }
 
+/**
+ * DOES THE GAME SYSTEM OWN GLOBAL ILLUMINATION? (2026-10-27) — asked straight
+ * after MSA's own publish, with the live source read back in the same tick.
+ *
+ * The author: *"What's the most sensible way to fix this to maintain
+ * compatibility with game systems?"* Some systems decide daylight vision
+ * themselves and overwrite whatever window is passed to
+ * `canvas.environment.initialize`. PF2e 8.2 does it in
+ * `EnvironmentCanvasGroupPF2e#initialize`: it merges the scene's PREPARED
+ * `globalLight` (`enabled` + `darkness`) over the passed config every time,
+ * and under rules-based vision that prepared value is always "on, up to
+ * darkness 0.749" — PF2e's own line between dim light and darkness.
+ *
+ * MSA's window never lands there, so `shouldPublishGlobalLightWindow`'s drift
+ * repair saw a mismatch forever and re-published every 250 ms, each one a
+ * full Foundry lighting + vision refresh, for nothing. When this says yes, the
+ * caller stops sending a window at all and publishes darkness alone: the
+ * system's own rule is what its players expect, and darkness is the one fact
+ * MSA owns that every system reads (PF2e's light level is `1 − darkness`).
+ *
+ * Only a disagreement IMMEDIATELY after our own `initialize` counts — Foundry
+ * rebuilding from the scene document later (a Scene Config save) is drift,
+ * which the repair above still owns for systems that do not override.
+ *
+ * @param {{enabled: boolean, max: number}|null} sent - the window just published.
+ * @param {{liveDisabled: boolean|null, liveMax: number|null}|null} live - `readSceneGlobalLightRaw()` right after.
+ * @returns {boolean}
+ */
+export function isGlobalLightSystemOwned(sent, live) {
+  if (!sent || !live) return false;
+  if (live.liveDisabled === null || live.liveDisabled === undefined) return false;
+  if (!live.liveDisabled !== sent.enabled) return true;
+  if (!sent.enabled) return false;
+  return Number.isFinite(live.liveMax) && Math.abs(live.liveMax - (sent.max ?? 0)) >= DARKNESS_PUBLISH_STEP;
+}
+
 /* -------------------------------------------- */
 /*  Ambient palette                             */
 /* -------------------------------------------- */

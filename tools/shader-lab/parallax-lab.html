@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Parallax lab</title>
+    <style>
+      body {
+        background: #111;
+        color: #ccc;
+        font: 12px monospace;
+        margin: 8px;
+      }
+      #wrap {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      canvas {
+        display: block;
+        background: #000;
+        max-width: 100%;
+        cursor: grab;
+      }
+      #panel {
+        width: 300px;
+        flex: none;
+        max-height: 720px;
+        overflow-y: auto;
+      }
+      #panel h4 {
+        margin: 10px 0 4px;
+        color: #9cc;
+      }
+      #panel label {
+        display: grid;
+        grid-template-columns: 110px 1fr 44px;
+        gap: 4px;
+        align-items: center;
+        margin: 2px 0;
+      }
+      #floors button {
+        margin-right: 4px;
+      }
+      pre {
+        white-space: pre-wrap;
+        max-height: 160px;
+        overflow: auto;
+        margin: 6px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div>
+      Parallax lab: <code>window.parallaxLab</code> — a three-floor stack with trees, drawn by the REAL
+      <code>createParallaxSubsystem</code> (mesh transforms, exactly as the viewer does) inside the REAL Table surface.
+      The faint 100&nbsp;px grid is never moved. Drag to pan, wheel to zoom, buttons change floor.
+    </div>
+    <div id="wrap">
+      <canvas id="view" width="1280" height="720"></canvas>
+      <div id="panel"><div id="floors"></div></div>
+    </div>
+    <pre id="status">loading…</pre>
+    <script type="module" src="/tools/shader-lab/parallax-lab.js"></script>
+  </body>
+</html>

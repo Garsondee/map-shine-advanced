@@ -51,8 +51,8 @@ export function run(t) {
   // The flow-energy VISIBILITY gate — the whole "only where the flow is fast"
   // behaviour. A real smoothstep band: 0 <= flowLo < flowHi.
   t.ok(
-    'WIND_GUSTS declares a real flow-energy gate band (0 <= flowLo < flowHi)',
-    WG.params.flowLo >= 0 && WG.params.flowHi > WG.params.flowLo
+    'WIND_GUSTS declares a real m/s gate band (0 <= gateLoMps < gateHiMps)',
+    WG.params.gateLoMps >= 0 && WG.params.gateHiMps > WG.params.gateLoMps
   );
 
   // Ribbon look: a positive width and an opacity ceiling in (0, 1].
@@ -65,7 +65,6 @@ export function run(t) {
 
   // Shared physics knobs, same meaning as the diagnostic particles.
   t.ok('WIND_GUSTS declares a positive windGain', WG.params.windGain > 0);
-  t.ok('WIND_GUSTS declares an outdoorGaleBoost above 1 (a real speed-up)', WG.params.outdoorGaleBoost > 1);
   t.ok('WIND_GUSTS declares a positive accelToMaxSeconds', WG.params.accelToMaxSeconds > 0);
 
   // Lifespan with non-overlapping fade windows (2 x fadeMs <= lifeMs).

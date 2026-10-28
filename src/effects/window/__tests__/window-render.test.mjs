@@ -17,10 +17,11 @@ import {
   computeWindowFloorGateVisibility,
   WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR,
   WINDOW_DEPTH_FLAG_IS_TILE_MIRROR,
+  WINDOW_DEPTH_FLAG_IS_TOKEN_MIRROR,
 } from '../window-render.js';
 import { WINDOW_DEBUG_CHANNELS } from '../window.js';
 import { WINDOW_DEFAULT_AMBIENT_CEILING } from '../window-cookie.js';
-import { DEPTH_FLAG_RESTRICTS_LIGHT, DEPTH_FLAG_IS_TILE } from '../../../vt/scene-depth.js';
+import { DEPTH_FLAG_RESTRICTS_LIGHT, DEPTH_FLAG_IS_TILE, DEPTH_FLAG_IS_TOKEN } from '../../../vt/scene-depth.js';
 
 /** A 1×1 texture — enough for a node to reference; never sampled here. */
 function stubTexture() {
@@ -432,7 +433,12 @@ export function run(t) {
     ok(
       'the mirrors match vt/scene-depth.js real flag values exactly',
       WINDOW_DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR === DEPTH_FLAG_RESTRICTS_LIGHT &&
-        WINDOW_DEPTH_FLAG_IS_TILE_MIRROR === DEPTH_FLAG_IS_TILE
+        WINDOW_DEPTH_FLAG_IS_TILE_MIRROR === DEPTH_FLAG_IS_TILE &&
+        WINDOW_DEPTH_FLAG_IS_TOKEN_MIRROR === DEPTH_FLAG_IS_TOKEN
+    );
+    ok(
+      'a token ranked above the floor is lit by window light, not blocked by it',
+      computeWindowFloorGateVisibility({ storedDepth: 0.1, expectedDepth: 0.5, flagsByte: DEPTH_FLAG_IS_TOKEN }) === 1
     );
 
     ok(

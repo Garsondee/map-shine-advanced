@@ -312,6 +312,9 @@ const IMPULSES = [
   },
 ];
 
+/** The transitions board's throwaway state (see `transitionBoard` below). */
+const fakeTransition = { defaults: { preset: 'cinematic', pace: 'measured' }, armed: null };
+
 const remote = installRemote({
   impulses: IMPULSES,
   // 2026-08-18 fix: the Remote's OWN dial (astrolabe-dial.js), matching the
@@ -498,6 +501,39 @@ const remote = installRemote({
     },
   },
   onOpenTileMotion: () => tileMotion.toggle(),
+  // THE TRANSITIONS BOARD (GM) — the default every cut plays, and a one-off armed for the next
+  // scene change. Throwaway state: the real ones are world settings (boot.js#transitionBoard).
+  // The Foundry list is a stand-in for CONFIG.Canvas.sceneTransitions.
+  transitionBoard: {
+    getDefaults: () => fakeTransition.defaults,
+    onSetPreset: (id) => {
+      fakeTransition.defaults.preset = id;
+      log(`transition preset -> ${id}`);
+    },
+    onSetPace: (id) => {
+      fakeTransition.defaults.pace = id;
+      log(`transition pace -> ${id}`);
+    },
+    listOverrideChoices: () => [
+      { id: 'longFade', label: 'Long fade to black', group: 'msa' },
+      { id: 'dipWhite', label: 'Dip to white', group: 'msa' },
+      { id: 'slowDissolve', label: 'Slow dissolve', group: 'msa' },
+      { id: 'swirl', label: 'Swirl', group: 'foundry' },
+      { id: 'dots', label: 'Dots', group: 'foundry' },
+      { id: 'glitch', label: 'Glitch', group: 'foundry' },
+    ],
+    getOverride: () => fakeTransition.armed,
+    onArm: (o) => {
+      fakeTransition.armed = o;
+      log(`transition armed -> ${o.type}, ${o.durationMs} ms`);
+      remote.refreshTransitionBoard();
+    },
+    onDisarm: () => {
+      fakeTransition.armed = null;
+      log('transition disarmed');
+      remote.refreshTransitionBoard();
+    },
+  },
   // THE PLAYER LIGHTS BOARD (GM) — which carried-light modes players may pick.
   // Throwaway state: the real one is a scene flag (foundry/player-light-
   // permissions.js); its read-back is what the picker's chips use, so this

@@ -34,7 +34,7 @@ import { bloomCounterParams, bloomCounterUniforms, regionFill } from './fire-bil
 import { fireScaleChain, fireWindMotion01, FIRE_FUELS, deriveFireSeed } from './fire-geometry.js';
 import { SPAWN_POINT_STRIDE, labelAtWorldPoint } from './fire-spawn-points.js';
 import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
-import { windFlowVector } from '../../world/index.js';
+import { windFlowVector, windStrength01ForSpeed01 } from '../../world/index.js';
 
 /** The widest a single flame gets, in metres of fuel: past this a painted region is split into several flames. */
 export const MAX_CLUSTER_RADIUS_M = 0.9;
@@ -140,6 +140,24 @@ const smooth01 = (x, a, b) => {
 export function viewCameraHeight(rect) {
   const halfW = Math.max(1, ((rect?.maxX ?? 0) - (rect?.minX ?? 0)) * 0.5);
   return Math.max(400, halfW * 3);
+}
+
+/**
+ * THE SHARED EYE (2026-10-28, scene/scene-eye.js): the billows' camera as a multiple of the frame's scene eye.
+ * `viewCameraHeight`'s three half-widths, at a 16:9 view and the Table's default 45°, is 2.2 eye heights
+ * (3 × 16/9 ÷ 2.414) — so flames keep exactly the lean that fixed the "hail of comets", while now sharing
+ * the eye's centre and following its Perspective. Read it as: a flame is drawn at 1/2.2 of its height
+ * against the shared eye.
+ */
+export const BILLOW_CAMERA_PER_EYE = 2.2;
+
+/**
+ * The billows' camera height for this frame: from the scene eye when there is one, else from the rect.
+ * @param {{minX:number,maxX:number}} rect @param {{height:number}|null} [eye]
+ */
+export function billowCameraHeight(rect, eye = null) {
+  if (eye && Number.isFinite(eye.height) && eye.height > 0) return Math.max(400, eye.height * BILLOW_CAMERA_PER_EYE);
+  return viewCameraHeight(rect);
 }
 
 /**
@@ -601,7 +619,11 @@ export function createBillowEngine({
       const clusters = planMemo.clusters;
 
       const ambient = windHandle?.ambient ?? null;
-      const windSpeed01 = Number.isFinite(ambient?.speed01?.value) ? ambient.speed01.value : 0;
+      // Beaufort strength, not the raw dial — the dial went linear to 70 m/s on
+      // 2026-10-27 and this response was tuned when 0..1 was force ÷ 12.
+      const windSpeed01 = Number.isFinite(ambient?.speed01?.value)
+        ? windStrength01ForSpeed01(ambient.speed01.value)
+        : 0;
       const windDirDeg = Number.isFinite(ambient?.directionDeg?.value) ? ambient.directionDeg.value : 0;
       const wdir = windFlowVector(windDirDeg);
       const canAsk = !!(windHandle?.hasBake && typeof windHandle.cpuAt === 'function');
@@ -614,13 +636,16 @@ export function createBillowEngine({
       const life = { ...br.life };
       if (!br.rekindle) life.rekindleDelaySec = 1e9;
 
-      const cx = (rect.minX + rect.maxX) * 0.5;
-      const cy = (rect.minY + rect.maxY) * 0.5;
+      // The perspective centre is the shared eye's (the TRUE view centre) when there is one: the rect this
+      // engine is handed is clamped to the scene, which put the centre off the view whenever it hung past the map.
+      const eye = ctx.eye ?? null;
+      const cx = eye ? eye.x : (rect.minX + rect.maxX) * 0.5;
+      const cy = eye ? eye.y : (rect.minY + rect.maxY) * 0.5;
       const env = {
         tSec: timeSec,
         camX: cx,
         camY: cy,
-        cameraHeight: viewCameraHeight(rect),
+        cameraHeight: billowCameraHeight(rect, eye),
         parallax: br.parallax,
         tilt: br.tilt,
         projection: 'top',

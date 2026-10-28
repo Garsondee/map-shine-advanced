@@ -56,6 +56,7 @@
  * @module effects/lighting/animations/candle-flicker
  */
 
+import { buildCandleWindState, scaleCandleHistory } from '../../candle-wind-state.js';
 import { buildFlickerRatioNode } from './light-animation-clock.js';
 
 /**
@@ -224,7 +225,7 @@ function scalePulse(TSL, pulse, scale) {
  *   must never fully extinguish a fire's cast light.
  * @returns {{n: *, brightnessPulse: *, warmth: *, life: *}}
  */
-function candleLife(TSL, time, amplification, quality, wind, windResponse, allowSnuff = true) {
+function candleLife(TSL, time, amplification, quality, wind, windResponse, allowSnuff = true, windHistory = null) {
   // mx_noise_float, NOT mx_perlin_noise_float — the latter is internal-only in
   // the vendored three build (see light-animation-clock.js#buildFlickerNode).
   const { float, vec2, mx_noise_float: perlin, clamp, smoothstep, mix, length, max } = TSL;
@@ -257,6 +258,7 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse, allow
     const unit = remap(perlin(vec2(time, float(0))));
     const n = unit.mul(amplitude);
     return {
+      presence: null, // tier 0 has no wind coupling, so its flame is never out
       n: hoist(n, 'vCandleLifeN'),
       brightnessPulse: hoist(float(0.55).add(n), 'vCandleBrightnessPulse'),
       warmth: hoist(unit.sub(float(0.5)).mul(float(2)), 'vCandleWarmth'),
@@ -288,9 +290,26 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse, allow
   const gutterN = perlin(vec2(time.mul(float(GUTTER_RATE)), float(31)));
   const noiseDip = smoothstep(float(0.5), float(0.9), gutterN);
   const windMag = wind ? length(wind).mul(windResponse ?? float(1)) : float(0);
-  const windDip = wind
-    ? clamp(windMag.sub(float(WIND_GUTTER_MAG_THRESHOLD)).div(float(WIND_GUTTER_MAG_RANGE)), float(0), float(1))
-    : float(0);
+  // THE CANDLE'S MEMORY (2026-10-27) — when the caller hands a look-back
+  // sampler and this light may be snuffed, the SAME state the flame sprite
+  // builds (`effects/candle-wind-state.js`): longer guttering, out for a while
+  // after a snuff, then a slow regrowth — so the light dies and returns WITH its
+  // flame instead of blinking. Fire (`allowSnuff: false`) keeps the plain dip.
+  const windState =
+    wind && windHistory && allowSnuff
+      ? buildCandleWindState(TSL, {
+          magNow: windMag,
+          magAt: (t) => windHistory.at(t).mul(windResponse ?? float(1)),
+          // The recorded past, when the handle has one (epic mmp-fpu) — texture fetches, not noise.
+          history: scaleCandleHistory(windHistory.history, windResponse ?? float(1)),
+          timeMs: windHistory.timeMs,
+        })
+      : null;
+  const windDip = windState
+    ? windState.gutter01
+    : wind
+      ? clamp(windMag.sub(float(WIND_GUTTER_MAG_THRESHOLD)).div(float(WIND_GUTTER_MAG_RANGE)), float(0), float(1))
+      : float(0);
   const dip = max(noiseDip, windDip);
   const life = clamp(flick.mul(float(1).sub(dip.mul(float(GUTTER_DEPTH)))), float(0), float(1));
 
@@ -305,13 +324,21 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse, allow
   // alone contradicted the flame it was supposed to be lighting FOR).
   const snuff =
     wind && allowSnuff ? smoothstep(float(WIND_SNUFF_MAG_LOW), float(WIND_SNUFF_MAG_HIGH), windMag) : float(0);
-  const brightnessPulse = mix(float(BRIGHT_FLOOR), float(BRIGHT_CEIL), life).mul(float(1).sub(snuff));
+  const brightnessPulse = windState
+    ? mix(float(BRIGHT_FLOOR), float(BRIGHT_CEIL), life).mul(windState.alive01).mul(windState.struggle)
+    : mix(float(BRIGHT_FLOOR), float(BRIGHT_CEIL), life).mul(float(1).sub(snuff));
   const warmth = life.sub(float(0.5)).mul(float(2));
+  // PRESENCE — 0 while the flame is OUT. The illumination core multiplies its whole output by this, because
+  // `brightnessPulse` reaching 0 only blacks the light's colour: the mix toward the light's ambient floor survives it
+  // and paints the full polygon (a hard-edged pale fan). Squared so the fade in/out is eased, not linear.
+  const aliveNow = windState ? windState.alive01 : float(1).sub(snuff);
+  const presence = aliveNow.mul(aliveNow);
   return {
     n: hoist(n, 'vCandleLifeN'),
     brightnessPulse: hoist(brightnessPulse, 'vCandleBrightnessPulse'),
     warmth: hoist(warmth, 'vCandleWarmth'),
     life: hoist(life, 'vCandleLife'),
+    presence: hoist(presence, 'vCandlePresence'),
   };
 }
 
@@ -438,10 +465,20 @@ export function buildCandleFlickerIlluminationSeed({
   quality = 0,
   wind,
   windResponse,
+  windHistory = null,
 }) {
   const { float, mix, smoothstep, max } = THREE.TSL;
   const amplification = uIntensityRaw.div(float(5));
-  const { n, brightnessPulse, life } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
+  const { n, brightnessPulse, life, presence } = candleLife(
+    THREE.TSL,
+    time,
+    amplification,
+    quality,
+    wind,
+    windResponse,
+    true,
+    windHistory
+  );
   const jitteredRatio = buildFlickerRatioNode(THREE.TSL, uRatio, n);
   const seed = computeSwitchColorBand(jitteredRatio);
 
@@ -457,7 +494,7 @@ export function buildCandleFlickerIlluminationSeed({
   // across the pool (MAX-blend with the scene ambient means a dip below
   // ambient simply keeps the ambient, so the candle can't darken the floor).
   const finalColor = compressed.mul(brightnessPulse);
-  return { finalColor };
+  return { finalColor, presence01: presence ?? null };
 }
 
 /**
@@ -564,10 +601,20 @@ export function buildCandleFlickerColorationSeed({
   quality = 0,
   wind,
   windResponse,
+  windHistory = null,
 }) {
   const { float, vec2, vec3, mix, clamp, mx_noise_float: perlin } = THREE.TSL;
   const amplification = uIntensityRaw.div(float(5));
-  const { brightnessPulse, warmth, life } = candleLife(THREE.TSL, time, amplification, quality, wind, windResponse);
+  const { brightnessPulse, warmth, life } = candleLife(
+    THREE.TSL,
+    time,
+    amplification,
+    quality,
+    wind,
+    windResponse,
+    true,
+    windHistory
+  );
 
   // TIER ≥1 — warm↔cool temperature shift on the authored light colour.
   let tinted = uLightColor;

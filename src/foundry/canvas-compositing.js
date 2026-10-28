@@ -810,7 +810,12 @@ export function applyArtSuppression({ silent = false } = {}) {
     // stays on screen through the redraw instead of being covered by a grey fill.
     // Reversed by `restoreFoundryArt`, so a Foundry-rendered scene keeps its
     // transitions.
-    if (canvas.transition) canvas.transition.renderable = false;
+    if (canvas.transition) {
+      canvas.transition.renderable = false;
+      // Foundry's own flag for "an external workflow owns transitions" (F:canvas/transition.mjs:35):
+      // core skips playing its effect, and MSA plays the cut itself (ui/scene-transition.js).
+      canvas.transition.isLocked = true;
+    }
   } catch (err) {
     console.error('[MSA] interface seam: suppressing Foundry primary/effects failed:', err);
     return {
@@ -859,7 +864,10 @@ export function restoreFoundryArt() {
     }
     // The fourth lever, reversed: Foundry's scene transitions work again.
     const transition = typeof canvas !== 'undefined' ? (canvas?.transition ?? null) : null;
-    if (transition) transition.renderable = true;
+    if (transition) {
+      transition.renderable = true;
+      transition.isLocked = false; // Foundry draws the map again: its own transitions run again
+    }
     return restored;
   } catch (err) {
     console.error('[MSA] interface seam: restoring canvas.primary/canvas.effects failed:', err);

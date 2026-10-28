@@ -180,9 +180,12 @@ export function run(t) {
   // constant with a `mix(0.4, 1, speed)` ramp, so the two ends of the dial
   // moved far more alike than they should.
   {
-    const at = (speed01, timeMs) => {
+    // Averaged over many points and a short step (2026-10-27): with the dial
+    // linear to 70 m/s a single point over half a second at a gale moves a whole
+    // eddy and the one-sample ratio becomes a coin toss.
+    const at = (speed01, timeMs, i) => {
       const v = computeWindTurbulence(T, {
-        centerXY: T.vec2(1000, 1000),
+        centerXY: T.vec2(1000 + i * 211, 1000 + i * 97),
         time: T.float(timeMs),
         openness: T.float(1),
         exteriorOpenness: T.float(1),
@@ -196,15 +199,20 @@ export function run(t) {
     // change rather than amplitude (a gale is bigger as well as faster, and
     // only the faster part is the claim being made here).
     const drift = (speed01) => {
-      const a = at(speed01, 10000);
-      const b = at(speed01, 10500);
-      const scale = Math.max(Math.abs(a), Math.abs(b), 1e-9);
-      return Math.abs(b - a) / scale;
+      let num = 0;
+      let den = 0;
+      for (let i = 0; i < 48; i++) {
+        const a = at(speed01, 10000, i);
+        const b = at(speed01, 10100, i);
+        num += Math.abs(b - a);
+        den += Math.max(Math.abs(a), Math.abs(b), 1e-9);
+      }
+      return num / den;
     };
     const breeze = drift(0.15);
     const gale = drift(0.75);
     ok(
-      `⭐ a gale's field sweeps past faster than a breeze's (${breeze.toFixed(3)} vs ${gale.toFixed(3)} per half-second)`,
+      `⭐ a gale's field sweeps past faster than a breeze's (${breeze.toFixed(3)} vs ${gale.toFixed(3)} per tenth of a second)`,
       gale > breeze
     );
   }
@@ -232,8 +240,12 @@ export function run(t) {
     // σ = I·U is LINEAR in U. The old energy cap clipped above roughly half
     // dial, so doubling the speed there changed almost nothing — which is a
     // large part of why the top of the dial all looked alike.
-    const half = rms(0.4);
-    const full = rms(0.8);
+    // Compared above hurricane force (33 m/s, dial ≈ 0.47), where the
+    // deliberate outdoor gale boost (WIND_TI_GALE_BOOST, 2026-10-27) has
+    // saturated — below it the boost makes the rise steeper than linear on
+    // purpose, which is a look choice and not the clamp this test guards.
+    const half = rms(0.5);
+    const full = rms(1.0);
     ok(
       `⭐ turbulence scales linearly with wind speed, not clipped (${half.toFixed(3)} -> ${full.toFixed(3)})`,
       Math.abs(full / half - 2) < 0.05

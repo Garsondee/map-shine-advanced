@@ -46,9 +46,11 @@ const MIN_FLIP = 0.08;
  * body inside its outline ("a minimal internal volume"): a 2 px line round a 3 px stick leaves nothing to colour.
  */
 const TWIG_THICK = 1.5;
+/** The free end of a stick is this fraction of its base thickness. */
+const TWIG_TAPER = 0.42;
 /** The most a line may take of a shape's width, in leaf units: leaves, twigs. Interiors keep the rest. */
 const MAX_INK_LEAF = 0.16;
-const MAX_INK_TWIG = 0.07;
+const MAX_INK_TWIG = 0.05;
 /** Pale wood of a freshly broken end (straight sRGB), from the author's wood sheet. */
 const CUT_WOOD = [226 / 255, 170 / 255, 108 / 255];
 /** Dice for callers that have none (tests, the shadow's old look): a plain leaf. */
@@ -90,12 +92,17 @@ export function leafDistance(TSL, u, v, rnd = null) {
   return select(abs(u).lessThan(1), abs(vb).sub(w), max(abs(u).sub(1), abs(vb)).add(0.02));
 }
 
-function capsule(TSL, u, v, ax, ay, bx, by, r) {
+/**
+ * A stick from (ax, ay) to (bx, by): radius `r` at the BASE (a) tapering to `taper` x r at the free end (b) —
+ * a branch is never a sausage (the author, 2026-10-31: "you lack tapering").
+ */
+function capsule(TSL, u, v, ax, ay, bx, by, r, taper = TWIG_TAPER) {
   const { vec2, clamp, dot, length } = TSL;
   const pa = vec2(u.sub(ax), v.sub(ay));
   const ba = vec2(bx - ax, by - ay);
   const h = clamp(dot(pa, ba).div((bx - ax) ** 2 + (by - ay) ** 2), 0, 1);
-  return length(pa.sub(ba.mul(h))).sub(r * TWIG_THICK);
+  const radius = h.mul(taper - 1).add(1).mul(r * TWIG_THICK);
+  return length(pa.sub(ba.mul(h))).sub(radius);
 }
 
 /** Rotation by `a` radians (a number or a node) about (du, dv). */
@@ -164,7 +171,7 @@ function twigForkLeaf(TSL, u, v, r) {
   const dx = pax.sub(bax.mul(hh));
   const dy = pay.sub(bay.mul(hh));
   d = min(d, TSL.sqrt(dx.mul(dx).add(dy.mul(dy))).sub(0.11));
-  d = min(d, capsule(TSL, u, v, -0.35, 0, -0.1, -0.33, 0.09));
+  d = min(d, capsule(TSL, u, v, -0.35, 0, -0.1, -0.33, 0.11));
   const q = rotated(TSL, u, v, float(-0.9).add(r1.sub(0.5).mul(0.7)), 0.62, 0.48);
   return min(d, leafDistance(TSL, q.u.mul(3.2), q.v.mul(3.2), [r2, r0, r3, r1]).div(3.2));
 }
@@ -181,23 +188,23 @@ function twigY(TSL, u, v) {
 function twigNubs(TSL, u, v) {
   const { min } = TSL;
   let d = capsule(TSL, u, v, -0.92, 0, 0.92, 0.05, 0.12);
-  d = min(d, capsule(TSL, u, v, -0.32, 0, -0.16, 0.3, 0.08));
-  d = min(d, capsule(TSL, u, v, 0.22, 0.03, 0.4, -0.29, 0.08));
-  return min(d, capsule(TSL, u, v, 0.58, 0.04, 0.74, 0.24, 0.07));
+  d = min(d, capsule(TSL, u, v, -0.32, 0, -0.16, 0.3, 0.1));
+  d = min(d, capsule(TSL, u, v, 0.22, 0.03, 0.4, -0.29, 0.1));
+  return min(d, capsule(TSL, u, v, 0.58, 0.04, 0.74, 0.24, 0.09));
 }
 
 /** Design 3 — a short heavy stub with a knot and one broken-off spur: a chunk of limb. */
 function twigStub(TSL, u, v) {
   const { min } = TSL;
-  let d = capsule(TSL, u, v, -0.55, 0, 0.55, 0.03, 0.22);
+  let d = capsule(TSL, u, v, -0.55, 0, 0.55, 0.03, 0.22, 0.72);
   d = min(d, capsule(TSL, u, v, 0.15, 0.1, 0.32, 0.42, 0.1));
-  return min(d, capsule(TSL, u, v, 0.55, 0.03, 0.8, 0.0, 0.14));
+  return min(d, capsule(TSL, u, v, 0.55, 0.03, 0.8, 0.0, 0.15, 0.8));
 }
 
 /** Design 4 — a leafy sprig: a thin stick carrying three small leaves along it. */
 function twigSprig(TSL, u, v, r) {
   const { min, float } = TSL;
-  let d = capsule(TSL, u, v, -0.9, 0, 0.7, 0.04, 0.08);
+  let d = capsule(TSL, u, v, -0.9, 0, 0.7, 0.04, 0.12);
   const spots = [
     [-0.05, 0.1, -0.9],
     [0.42, -0.1, 0.95],

@@ -113,6 +113,7 @@ export function run(t) {
     ok('⭐ twigs: at least five designs, picked by the leaf dice', /TWIG_DESIGNS = (\d+)/.test(shape) && Number(/TWIG_DESIGNS = (\d+)/.exec(shape)[1]) >= 5 && /design = floor\(reroll/.test(shape));
     ok('⭐ outlines keep an interior: the line is capped to a share of the shape, and sticks are fattened', /MAX_INK_TWIG = 0\.0\d+/.test(shape) && /MAX_INK_LEAF/.test(shape) && /r \* TWIG_THICK/.test(shape));
     ok('⭐ twigs: freshly broken ends are pale wood from her sheet', /CUT_WOOD = \[226/.test(shape) && /endMask/.test(shape));
+    ok('⭐ twigs taper: a stick is thick at its base and thin at its free end, never a sausage', /TWIG_TAPER = 0\.[1-6]\d*/.test(shape) && /h\.mul\(taper - 1\)/.test(shape));
     const tbl = (name) => {
       const m = new RegExp(String.raw`const ${name} = \[([^\]]+)\]`).exec(runtime);
       return m ? m[1].split(',').map(Number) : null;

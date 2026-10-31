@@ -207,7 +207,9 @@ export function getActiveSceneBackground(sceneDoc, getRouteFn) {
   if (!sceneDoc) {
     return { ok: false, error: 'no active scene (canvas.scene is null) — open a scene in Foundry first' };
   }
-  const src = sceneDoc.background?.src;
+  // `Scene#background` is a deprecated v14 shim for `firstLevel.background` that logs a warning on
+  // every read; only fall back to it on a pre-Level scene (no `firstLevel`).
+  const src = sceneDoc.firstLevel ? sceneDoc.firstLevel.background?.src : sceneDoc.background?.src;
   if (!src) {
     return { ok: false, error: `scene "${sceneDoc.name}" has no background image set` };
   }
@@ -283,7 +285,7 @@ export function getActiveSceneFloors(sceneDoc, getRouteFn) {
   return computeActiveSceneFloors(sceneDoc, getRouteFn);
 }
 
-/** @type {{sceneDoc: object, name: *, bgSrc: *, levels: object[], result: object}|null} */
+/** @type {{sceneDoc: object, name: *, levels: object[], result: object}|null} */
 let _floorsCache = null;
 
 /** Visit every Level doc without allocating an array. */
@@ -308,12 +310,12 @@ function snapshotFloorsInputs(sceneDoc, result) {
       vis: Array.from(lvl?.visibility?.levels ?? []),
     })
   );
-  return { sceneDoc, name: sceneDoc.name, bgSrc: sceneDoc.background?.src, levels, result };
+  return { sceneDoc, name: sceneDoc.name, levels, result };
 }
 
 /** Compare the live scene against what the cached result was derived from. */
 function floorsCacheStillValid(hit, sceneDoc) {
-  if (hit.name !== sceneDoc.name || hit.bgSrc !== sceneDoc.background?.src) return false;
+  if (hit.name !== sceneDoc.name) return false;
   let same = true;
   const count = forEachLevel(sceneDoc, (lvl, i) => {
     if (!same) return;

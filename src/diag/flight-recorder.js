@@ -644,7 +644,7 @@ export function captureEnvironment(MapShine) {
       height: s.height ?? null,
       padding: s.padding ?? null,
       gridSize: s.grid?.size ?? null,
-      background: s.background?.src ?? null,
+      background: (s.firstLevel ? s.firstLevel.background : s.background)?.src ?? null,
       tokenCount: s.tokens?.size ?? null,
       tileCount: s.tiles?.size ?? null,
       levelCount: Array.isArray(s.levels) ? s.levels.length : (s.levels?.size ?? null),

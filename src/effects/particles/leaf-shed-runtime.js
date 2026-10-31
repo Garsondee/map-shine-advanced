@@ -72,6 +72,8 @@ import {
   WALL_MOMENTUM_GUARD_HIGH,
   WIND_DEFAULT_PIXELS_PER_METRE,
   windFieldPxPerSecPerUnit,
+  curlNoise2D,
+  windGridUvNode,
 } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import {
@@ -117,6 +119,13 @@ const FADE_OUT_SEC = 1.2;
  */
 const KIND_CARRY = [1, 0.72, 0.45];
 const KIND_TAU_SEC = [0.3, 0.5, 0.9];
+/**
+ * How fast an airborne body TURNS onto the air's heading when it follows the trees (its speed still lags by
+ * KIND_TAU_SEC). A leaf in a gale crosses a gust-wander feature (about 250 px) in under half a second, so a
+ * 0.3 s lag on the direction too left it flying where the air WAS: against the canopy beside it the
+ * correlation of their turns was 0.1–0.2 (lab, 2026-10-31). Turning quickly is what a light leaf does.
+ */
+const TURN_TAU_SEC = 0.06;
 const KIND_FALL_MPS = [1.5, 2.4, 4.5];
 const KIND_FLUTTER = [1, 0.5, 0.12];
 /** How much the air's eddies toss each kind about (random jinks, sudden lifts): a twig barely notices. */
@@ -257,6 +266,12 @@ export function createLeafShedEngine({
   // Size gain per px of height — a gentle 'nearer is bigger' (see the draw's note).
   const uLiftScale = uniform(0);
   const uExpectedDepth = uniform(0);
+  // Follow the trees: 1 = ride their gust wander (0 = off), at the Vegetation card's Gust turbulence (its default).
+  const uFollow = uniform(1);
+  const uTreeGust = uniform(0.79);
+  // The trees' clump grid (Vegetation: Clump size 500 px × a tree's 1.5) and their turn (Clump direction spread 45°).
+  const uClumpPx = uniform(750);
+  const uClumpTurnRad = uniform((45 * Math.PI) / 180);
   const pixelsPerMetreNode = windHandle?.ambient?.pixelsPerMetre ?? float(WIND_DEFAULT_PIXELS_PER_METRE);
   const pxPerSecPerFieldUnit = windFieldPxPerSecPerUnit(pixelsPerMetreNode);
 
@@ -264,9 +279,59 @@ export function createLeafShedEngine({
   const byKind = (kind, table) =>
     select(kind.lessThan(0.5), float(table[0]), select(kind.lessThan(1.5), float(table[1]), float(table[2])));
 
+  // ── THE AIR A LEAF RIDES IS THE AIR THAT LEANS THE TREES ─────────────────
+  // (The author, 2026-10-31: "I want the trees/leaves/twigs to all use the same wind texture to inform their
+  // movement … the way that trees get pushed around is not reflected in the way that leaves shed from them".)
+  // A canopy's lean (`vt-pan-viewer.js#buildVegetationSwayDisplacementNode`) is built from three things, and a
+  // leaf now takes all three, at its own spot:
+  //   1. THE WIND TEXTURE — the field baked this frame (`baked: 'now'`, the trees' slice), read through our own
+  //      texture node so a re-allocated texture can be rebound without rebuilding the kernel (`updateWind`).
+  //      No bake yet → the analytic field the trees fall back to as well (`windHandle.node`).
+  //   2. THE GUST WANDER — one curl-noise octave at the trees' space frequency, rate and phase, scaled by the
+  //      field's own speed and the Vegetation card's Gust turbulence.
+  //   3. THE CLUMP TURN — each canopy clump turned by up to ± Clump direction spread, blended over the four
+  //      clump cells around the point (the same hash, salt and cell size as a tree's).
+  // The constants mirror the viewer's; leaf-shed.test.mjs fails if either side changes without the other.
+  const TREE_GUST_SPACE_FREQ = 0.004;
+  const TREE_GUST_RATE = 0.55;
+  const TREE_GUST_PHASE = 271;
+  const TREE_CLUMP_SIZE_MUL = 1.5;
+  const TREE_CLUMP_DIR_SALT = 91.3;
+  const fieldGrid = windHandle?.hasField && windHandle?.fieldTexture && windHandle?.grid ? windHandle.grid : null;
+  let fieldTexture = fieldGrid ? windHandle.fieldTexture : null;
+  const fieldTexNodes = [];
+  const sampleField = (pos) => {
+    if (!fieldGrid) return windHandle.node(TSL, { centerXY: pos, time: uTimeMs });
+    const n = TSL.texture(fieldTexture, windGridUvNode(TSL, fieldGrid, pos)).level(float(0));
+    fieldTexNodes.push(n);
+    return n.xy;
+  };
+  const clumpHash = (cell, salt) => fract(sin(dot(cell, vec2(127.1, 311.7)).add(float(salt))).mul(43758.5453));
   const sampleAir = (pos) => {
+    // Walls only: the kernel's lazy parts are built on use, and only the wall fields are used.
     const w = windHandle.kernel(TSL, { centerXY: pos, time: uTimeMs, cellBuffer: windCells });
-    const air = w.coherent.mul(w.openness).add(w.turbulence);
+    const field = sampleField(pos);
+    const wander = curlNoise2D(TSL, {
+      p: pos,
+      timeSec: uTimeMs.mul(float(0.001)),
+      spaceFreq: TREE_GUST_SPACE_FREQ,
+      rate: TREE_GUST_RATE,
+      phaseX: TREE_GUST_PHASE,
+      phaseY: -TREE_GUST_PHASE * 0.61,
+    });
+    // Scaled by the field's own speed, never added flat: dead calm stays dead calm (the trees' rule).
+    const leaned = field.add(wander.mul(uTreeGust).mul(uFollow).mul(field.length()));
+    const cellF = pos.div(uClumpPx);
+    const cell = floor(cellF);
+    const frac = cellF.sub(cell);
+    const bx = smoothstep(0, 1, frac.x);
+    const by = smoothstep(0, 1, frac.y);
+    const h = (dx, dy) => clumpHash(cell.add(vec2(dx, dy)), TREE_CLUMP_DIR_SALT);
+    const blended = TSL.mix(TSL.mix(h(0, 0), h(1, 0), bx), TSL.mix(h(0, 1), h(1, 1), bx), by);
+    const turn = blended.sub(0.5).mul(uClumpTurnRad.mul(2)).mul(uFollow);
+    const ct = cos(turn);
+    const st = sin(turn);
+    const air = vec2(leaned.x.mul(ct).sub(leaned.y.mul(st)), leaned.x.mul(st).add(leaned.y.mul(ct)));
     return { air, w };
   };
 
@@ -362,7 +427,20 @@ export function createLeafShedEngine({
         const target = select(airborne, airPx.mul(carry), airPx.mul(carry).mul(groundPush));
         // Grounded, the relaxation time is the GRIP: small tau = it stops where it lands (the twigs' ice-skating fix).
         const tau = select(airborne, byKind(kind, KIND_TAU_SEC), byKind(kind, KIND_GROUND_TAU_SEC).div(uGrip));
-        const v1raw = vel.add(target.sub(vel).mul(float(1).sub(exp(dt.negate().div(tau)))));
+        const vRelaxed = vel.add(target.sub(vel).mul(float(1).sub(exp(dt.negate().div(tau)))));
+        // Following the trees: the HEADING chases the air's heading quickly, the speed keeps its lag.
+        const turnK = select(airborne, float(1).sub(exp(dt.negate().div(TURN_TAU_SEC))), float(0)).mul(uFollow);
+        const spRelaxed = vRelaxed.length();
+        const targetLen = target.length();
+        const dirRelaxed = vRelaxed.div(max(spRelaxed, 1e-3));
+        const dirTarget = target.div(max(targetLen, 1e-3));
+        const dirBlend = dirRelaxed.add(dirTarget.sub(dirRelaxed).mul(turnK));
+        const dirTurned = select(
+          dirBlend.length().greaterThan(0.05),
+          dirBlend.div(max(dirBlend.length(), 1e-3)),
+          dirTarget
+        );
+        const v1raw = select(spRelaxed.greaterThan(1e-3).and(targetLen.greaterThan(1e-3)), dirTurned.mul(spRelaxed), vRelaxed);
         const speedRaw = v1raw.length();
         // The jink can throw a leaf as fast as it flies: the wall look-ahead must cover that too.
         const jinkReach = speedRaw.mul(0.4).add(pixelsPerMetreNode.mul(2.4));
@@ -398,6 +476,9 @@ export function createLeafShedEngine({
           .mul(pixelsPerMetreNode.mul(2.4).add(speedRaw.mul(0.4)))
           .mul(turbK)
           .mul(gale)
+          // Following the trees, the direction comes from their wander; what is left here is the flutter
+          // of a single leaf in an eddy too small for a tree to feel (a quarter of the old size).
+          .mul(float(1).sub(uFollow.mul(0.75)))
           .mul(select(airborne, float(1), float(0)));
         let move = v1.add(perp.mul(swing).mul(flutterPx)).add(jink);
         if (windCells) {
@@ -669,6 +750,10 @@ export function createLeafShedEngine({
       if (Number.isFinite(p.carry)) uCarry.value = p.carry;
       if (Number.isFinite(p.flutter)) uFlutter.value = p.flutter;
       if (Number.isFinite(p.turbulence)) uTurb.value = p.turbulence;
+      if (Number.isFinite(p.followTrees)) uFollow.value = p.followTrees;
+      if (Number.isFinite(p.treeGustTurbulence)) uTreeGust.value = Math.max(0, p.treeGustTurbulence);
+      if (Number.isFinite(p.treeClumpSizePx) && p.treeClumpSizePx > 0) uClumpPx.value = p.treeClumpSizePx * TREE_CLUMP_SIZE_MUL;
+      if (Number.isFinite(p.treeClumpDirSpread)) uClumpTurnRad.value = (Math.max(0, p.treeClumpDirSpread) * Math.PI) / 180;
       if (Number.isFinite(p.fallSpeed)) uFall.value = p.fallSpeed;
       if (Number.isFinite(p.spin)) uSpin.value = p.spin;
       if (Number.isFinite(p.groundGrip)) uGrip.value = Math.max(0.05, p.groundGrip);
@@ -697,6 +782,12 @@ export function createLeafShedEngine({
       }
       packWindCells(windCells.value, next.cells, cellCols * cellRows);
       windHandleVersion = next.version;
+      // The wind texture is re-allocated with its grid: same grid → rebind it in place; no field at build → the
+      // kernel stays on the analytic field (what the trees read without a bake too).
+      if (fieldGrid && next.hasField && next.fieldTexture && next.fieldTexture !== fieldTexture) {
+        fieldTexture = next.fieldTexture;
+        for (const n of fieldTexNodes) n.value = fieldTexture;
+      }
     },
 
     /** For the debug panel and the lab: prove the engine is alive without a screenshot. */
@@ -708,6 +799,7 @@ export function createLeafShedEngine({
         steps,
         nextSlot: ring.nextSlot,
         hasWindCells: !!windCells,
+        readsWindTexture: !!fieldGrid,
         windHandleVersion,
       };
     },

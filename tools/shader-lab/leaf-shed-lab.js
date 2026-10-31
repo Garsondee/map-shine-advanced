@@ -243,6 +243,8 @@ async function main() {
         treeHeightFt: S.heightFt.tree,
         bushHeightFt: S.heightFt.bush,
         groundElevation: 0,
+        // The Vegetation card's Gust turbulence — leaves follow the canopies' swerve at this strength.
+        gustTurbulence: S.gustTurbulence ?? 0.79,
       }),
       listCanopies: () => [
         {

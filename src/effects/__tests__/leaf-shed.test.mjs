@@ -469,4 +469,59 @@ export function run(t) {
     }
     ok('subsystem: an unwired seam fails loudly', threw);
   }
+
+  // ── 2026-10-31: leaves swerve where the trees swerve (they share the canopies' gust wander) ───────────
+  {
+    const d = LEAF_SHED_PARAMS.followTrees;
+    ok('followTrees: a Motion dial, 0..1, on by default', d && d.category === 'Motion' && d.min === 0 && d.max === 1 && d.default === 1);
+    ok('resolve: followTrees clamps to the schema', resolveLeafShedParams({ followTrees: 9 }).followTrees === 1);
+    const here = new URL('.', import.meta.url);
+    const runtime = readFileSync(new URL('../particles/leaf-shed-runtime.js', here), 'utf8');
+    const viewer = readFileSync(new URL('../../vt/vt-pan-viewer.js', here), 'utf8');
+    const veg = readFileSync(new URL('../vegetation.js', here), 'utf8');
+    const num = (src, re) => Number(re.exec(src)?.[1]);
+    // The leaves copy the trees' constants; if the canopies' wander is retuned, a leaf must not silently stop agreeing.
+    ok(
+      '⭐ followTrees: the leaf wander uses the trees\' space frequency',
+      num(runtime, /TREE_GUST_SPACE_FREQ = ([\d.]+)/) === num(viewer, /VEG_GUST_WANDER_SPACE_FREQ = ([\d.]+)/)
+    );
+    ok(
+      '⭐ followTrees: the leaf wander uses the trees\' churn rate',
+      num(runtime, /TREE_GUST_RATE = ([\d.]+)/) === num(viewer, /VEG_GUST_WANDER_RATE = ([\d.]+)/)
+    );
+    const treeKind = /label: 'Tree canopy'[\s\S]*?gustPhase:\s*(-?\d+)/.exec(veg);
+    ok('⭐ followTrees: the leaf wander uses the tree kind\'s gust phase', treeKind && num(runtime, /TREE_GUST_PHASE = (-?\d+)/) === Number(treeKind[1]));
+    ok('followTrees: scaled by the field\'s own speed, so dead calm stays calm', /wander\.mul\(uTreeGust\)\.mul\(uFollow\)\.mul\(field\.length\(\)\)/.test(runtime));
+    const sub = readFileSync(new URL('../leaf-shed-subsystem.js', here), 'utf8');
+    const boot = readFileSync(new URL('../../boot.js', here), 'utf8');
+    ok('followTrees: the random jink gives way to it', /float\(1\)\.sub\(uFollow\.mul\(0\.75\)\)/.test(runtime));
+    // The author, 2026-10-31: "I want the trees/leaves/twigs to all use the same wind texture to inform their movement".
+    ok(
+      '⭐ same wind texture: a leaf reads the field baked this frame (the slice the trees read), not its own analytic copy',
+      /TSL\.texture\(fieldTexture, windGridUvNode\(TSL, fieldGrid, pos\)\)/.test(runtime) &&
+        /windHandle\?\.hasField && windHandle\?\.fieldTexture/.test(runtime) &&
+        /const field = sampleField\(pos\)/.test(runtime) &&
+        !/w\.coherent\.mul\(w\.openness\)/.test(runtime) &&
+        /baked: lagFraction === 0 \? 'now'/.test(viewer)
+    );
+    ok('same wind texture: no bake yet means the analytic field, as for the trees', /if \(!fieldGrid\) return windHandle\.node\(TSL, \{ centerXY: pos, time: uTimeMs \}\)/.test(runtime));
+    ok('same wind texture: a re-allocated texture is rebound in place, never a stale binding', /for \(const n of fieldTexNodes\) n\.value = fieldTexture/.test(runtime));
+    ok(
+      '⭐ clump turn: the leaf uses the tree clump hash, salt and cell size',
+      /dot\(cell, vec2\(float\(127\.1\), float\(311\.7\)\)\)\.add\(float\(salt\)\)\)\.mul\(float\(43758\.5453\)\)/.test(viewer) &&
+        /dot\(cell, vec2\(127\.1, 311\.7\)\)\.add\(float\(salt\)\)\)\.mul\(43758\.5453\)/.test(runtime) &&
+        /blendedClumpHash\(91\.3 \+ hashSalt\)/.test(viewer) &&
+        num(runtime, /TREE_CLUMP_DIR_SALT = ([\d.]+)/) === 91.3 &&
+        num(runtime, /TREE_CLUMP_SIZE_MUL = ([\d.]+)/) === num(veg, /label: 'Tree canopy'[\s\S]*?clumpSizeMultiplier: ([\d.]+)/) &&
+        /label: 'Tree canopy'[\s\S]*?clumpHashSalt: 0,/.test(veg)
+    );
+    ok(
+      'clump turn: the Vegetation card Clump size and Clump direction spread reach the engine',
+      /treeClumpSizePx: state\.clumpSizePx/.test(sub) &&
+        /treeClumpDirSpread: state\.clumpDirSpread/.test(sub) &&
+        /clumpSizePx: Number\(veg\?\.clumpSizePx\)/.test(boot) &&
+        /clumpDirSpread: Number\.isFinite\(Number\(veg\?\.clumpDirSpread\)\)/.test(boot)
+    );
+    ok('followTrees: the Vegetation card\'s Gust turbulence reaches the engine', /treeGustTurbulence: state\.gustTurbulence/.test(sub) && /gustTurbulence: Number\.isFinite\(Number\(veg\?\.gustTurbulence\)\)/.test(boot));
+  }
 }

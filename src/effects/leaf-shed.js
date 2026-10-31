@@ -362,6 +362,16 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     label: 'Turbulence',
     help: 'How wildly the air tosses a leaf about: sideways jinks, sudden lifts and drops. Grows with the wind. Twigs barely notice.',
   },
+  followTrees: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 1, // 2026-10-31: leaf air and tree lean disagreed by a 19 degree median / 54 degree p90 — they now share the trees' wander
+    category: 'Motion',
+    label: 'Follow the trees',
+    help: 'Leaves and twigs read the same wind texture the trees do. This sets how much they also take the trees’ own swerve: the slow curling gust-wander and the per-clump turn that lean the canopies (the Vegetation card’s Gust turbulence and Clump direction spread). 1 = a leaf flies the way the tree beside it is leaning; 0 = the plain wind, with only its own random jinks.',
+  },
   carry: {
     type: 'float',
     min: 0.2,

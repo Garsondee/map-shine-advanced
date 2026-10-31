@@ -5785,6 +5785,10 @@ function install() {
       pxPerFt: gridPx / feetPerSquare,
       treeHeightFt: Number(veg?.treeHeightFt) || 0,
       bushHeightFt: Number(veg?.bushHeightFt) || 0,
+      // The canopies' gust-wander strength: a leaf follows the trees' swerve at the same strength (leaf-shed-runtime).
+      gustTurbulence: Number.isFinite(Number(veg?.gustTurbulence)) ? Number(veg.gustTurbulence) : undefined,
+      clumpSizePx: Number(veg?.clumpSizePx) > 0 ? Number(veg.clumpSizePx) : undefined,
+      clumpDirSpread: Number.isFinite(Number(veg?.clumpDirSpread)) ? Number(veg.clumpDirSpread) : undefined,
       groundElevation: activeFloorContext?.band?.[0] ?? activeFloorContext?.elevation ?? 0,
     };
   };

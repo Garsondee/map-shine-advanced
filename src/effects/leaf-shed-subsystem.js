@@ -220,7 +220,14 @@ export function createLeafShedSubsystem({
       const eng = ensureEngine(state, sceneRect);
       if (births.length) liveUntilSec = clockSec + LONGEST_LIFE_SEC;
       eng.setSceneRect(sceneRect);
-      eng.setLook({ ...p, gridPx });
+      eng.setLook({
+        ...p,
+        gridPx,
+        // The Vegetation card's own dials: a leaf rides the air the way the canopy it fell from leans.
+        treeGustTurbulence: state.gustTurbulence,
+        treeClumpSizePx: state.clumpSizePx,
+        treeClumpDirSpread: state.clumpDirSpread,
+      });
       eng.setView({
         shadowThrowX: frame.shadowThrow?.x,
         shadowThrowY: frame.shadowThrow?.y,

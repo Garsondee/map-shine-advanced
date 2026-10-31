@@ -41,6 +41,16 @@ const LEAF_HALF_WIDTH = 0.56;
 const LEAF_BASE_BIAS = 0.32;
 /** The flattest a turning leaf gets: a sliver, never a line that aliases away. */
 const MIN_FLIP = 0.08;
+/**
+ * A twig's stick is this much fatter than the radii written below. The author's branch art always keeps a
+ * body inside its outline ("a minimal internal volume"): a 2 px line round a 3 px stick leaves nothing to colour.
+ */
+const TWIG_THICK = 1.5;
+/** The most a line may take of a shape's width, in leaf units: leaves, twigs. Interiors keep the rest. */
+const MAX_INK_LEAF = 0.16;
+const MAX_INK_TWIG = 0.07;
+/** Pale wood of a freshly broken end (straight sRGB), from the author's wood sheet. */
+const CUT_WOOD = [226 / 255, 170 / 255, 108 / 255];
 /** Dice for callers that have none (tests, the shadow's old look): a plain leaf. */
 const NO_DICE = [0.5, 0.5, 0.5, 0.5];
 
@@ -85,7 +95,7 @@ function capsule(TSL, u, v, ax, ay, bx, by, r) {
   const pa = vec2(u.sub(ax), v.sub(ay));
   const ba = vec2(bx - ax, by - ay);
   const h = clamp(dot(pa, ba).div((bx - ax) ** 2 + (by - ay) ** 2), 0, 1);
-  return length(pa.sub(ba.mul(h))).sub(r);
+  return length(pa.sub(ba.mul(h))).sub(r * TWIG_THICK);
 }
 
 /** Rotation by `a` radians (a number or a node) about (du, dv). */
@@ -315,7 +325,7 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
   const flipCos = max(abs(c), MIN_FLIP);
   const d0 = shedDistance(TSL, p, kind, flipCos, rnd);
   const isTwig = kind.greaterThan(1.5);
-  const w = select(isTwig, inkW.mul(0.75), inkW);
+  const w = select(isTwig, min(inkW.mul(0.75), float(MAX_INK_TWIG)), min(inkW, float(MAX_INK_LEAF)));
   const v = p.y.div(flipCos);
   // The brush: one wobble for the line's outer edge, another (decorrelated) for where the
   // colour starts — so the black band swells and thins as it runs round the shape.
@@ -324,11 +334,11 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
   // A twig is ~1.7x the size of a leaf, so the same noise would read smoother on it: sample it finer and
   // swing it harder, so its edge is as ragged on screen as the tree's (the author: "sharper, less noisy than the tree").
   const nk = select(isTwig, float(1.9), float(1));
-  const ampK = select(isTwig, float(1.8), float(1));
+  const ampK = select(isTwig, float(1.25), float(1));
   const outerWobble = brush(TSL, p.x.mul(nk), v.mul(nk), seed).mul(w).mul(0.42).mul(ampK).mul(flipCos);
   const innerWobble = brush(TSL, p.x.add(3.1).mul(nk), v.sub(1.7).mul(nk), seed.add(0.53))
     .mul(w)
-    .mul(0.62)
+    .mul(0.45)
     .mul(ampK)
     .mul(flipCos);
   const d = d0.add(outerWobble);
@@ -347,10 +357,13 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
     .mul(strokeSpan)
     .mul(0.45);
   col = mix(col, strokeInk, stroke);
+  // Freshly broken ends show pale wood (her wood sheet) — the tips of a stick, a wobbled edge, never the sides.
+  const endMask = smoothstep(0.74, 0.8, abs(p.x).add(outerWobble.mul(0.8))).mul(select(isTwig, float(1), float(0)));
+  col = mix(col, vec3(CUT_WOOD[0], CUT_WOOD[1], CUT_WOOD[2]), endMask);
   // The line: black, high contrast — a breath of the fill's hue so it sits in the art, no more.
   // Leaves are outlined black; wood is not — the tree's own line is a dark BROWN (the author, looking at the stump).
   const black = vec3(0.012, 0.014, 0.012).add(rgb.mul(0.05));
-  const brown = vec3(0.022, 0.014, 0.011).add(rgb.mul(0.3));
+  const brown = vec3(0.02, 0.012, 0.008).add(rgb.mul(0.2));
   const ink = select(isTwig, brown, black);
   const dFill = d0.add(innerWobble);
   const fillMask = float(1).sub(smoothstep(w.negate().sub(aa), w.negate().add(aa), dFill));

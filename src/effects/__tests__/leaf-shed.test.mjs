@@ -111,6 +111,8 @@ export function run(t) {
     ok('⭐ twigs: outlined in dark brown, not black (the tree line is brown)', /const brown = vec3/.test(shape) && /select\(isTwig, brown, black\)/.test(shape));
     // The author, 2026-10-31: twigs "need about four more designs … more than one design".
     ok('⭐ twigs: at least five designs, picked by the leaf dice', /TWIG_DESIGNS = (\d+)/.test(shape) && Number(/TWIG_DESIGNS = (\d+)/.exec(shape)[1]) >= 5 && /design = floor\(reroll/.test(shape));
+    ok('⭐ outlines keep an interior: the line is capped to a share of the shape, and sticks are fattened', /MAX_INK_TWIG = 0\.0\d+/.test(shape) && /MAX_INK_LEAF/.test(shape) && /r \* TWIG_THICK/.test(shape));
+    ok('⭐ twigs: freshly broken ends are pale wood from her sheet', /CUT_WOOD = \[226/.test(shape) && /endMask/.test(shape));
     const tbl = (name) => {
       const m = new RegExp(String.raw`const ${name} = \[([^\]]+)\]`).exec(runtime);
       return m ? m[1].split(',').map(Number) : null;
@@ -201,11 +203,7 @@ export function run(t) {
       darkest = Math.min(darkest, lum([a.pool[p * 5 + 2], a.pool[p * 5 + 3], a.pool[p * 5 + 4]]));
     ok('colour match: outline texels are lifted to the fill (no black leaves)', darkest >= lum(a.fill) - 1);
   }
-  ok(
-    'twigs: a tree with brown branches sheds twigs in ITS brown',
-    a.twig.every((c, i) => Math.abs(c - DEFAULT_TWIG_SRGB[i]) < 2)
-  );
-  ok('twigs: a blob with no branches falls back to the measured default', b.twig.join() === DEFAULT_TWIG_SRGB.join());
+  ok('⭐ twigs: always the author's wood-sheet bark colour, whatever the branches measure', a.twig.join() === DEFAULT_TWIG_SRGB.join() && b.twig.join() === DEFAULT_TWIG_SRGB.join());
   ok(
     'canopies: an empty raster is no emitters',
     buildCanopyEmitters({ spec: r1.spec, rgba: new Uint8Array(r1.rgba.length) }, 'tree').length === 0

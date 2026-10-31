@@ -407,9 +407,9 @@ async function main() {
      * A SHAPE SHEET: leaves / clumps / twigs lying still at the real art scale, nothing else drawn — for judging
      * the outline and the form up close (`zoom` 4 ≈ 3× the screen size). `flying` = off the ground, mid-turn.
      */
-    async sheet({ rgb = [0.35, 0.6, 0.22], twigRgb = [0.42, 0.33, 0.31], zoom = 4, perRow = 10, flying = false, kinds = [0, 1, 2] } = {}) {
+    async sheet({ rgb = [0.35, 0.6, 0.22], twigRgb = [158 / 255, 112 / 255, 92 / 255], zoom = 4, perRow = 10, flying = false, kinds = [0, 1, 2] } = {}) {
       lab.patch({ params: { amount: 0 }, show: { tree: false, bush: false }, indoors: false, zoom, centre: [1200, 1200] });
-      const SIZE = [GRID_PX * 0.22, GRID_PX * 0.22 * 1.45, GRID_PX * 0.22 * 1.7];
+      const SIZE = [GRID_PX * 0.22, GRID_PX * 0.22 * 1.45, GRID_PX * 0.22 * 2.1];
       const list = [];
       const span = STAGE_W / zoom;
       for (let row = 0; row < kinds.length; row++)
@@ -440,7 +440,7 @@ async function main() {
      */
     async trace({ kind = 0, n = 12, heightPx = 220, sec = 10, wind = null, from = [700, 500], indoors = false } = {}) {
       lab.patch({ params: { amount: 0 }, indoors, ...(wind ? { wind } : {}) });
-      const SIZE = [GRID_PX * 0.22, GRID_PX * 0.22 * 1.45, GRID_PX * 0.22 * 1.7];
+      const SIZE = [GRID_PX * 0.22, GRID_PX * 0.22 * 1.45, GRID_PX * 0.22 * 2.1];
       const start = engine.debugState().nextSlot;
       const list = [];
       for (let k = 0; k < n; k++)

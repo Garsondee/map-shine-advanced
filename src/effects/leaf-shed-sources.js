@@ -42,8 +42,14 @@
 /** Leaf, clump and twig — the three things a canopy sheds. The order is the shader's. */
 export const SHED_KIND = Object.freeze({ leaf: 0, clump: 1, twig: 2 });
 
-/** The Wilderness pack's branch colour, measured (mean of 11k branch pixels, 2026-10-31). */
-export const DEFAULT_TWIG_SRGB = Object.freeze([106, 84, 78]);
+/**
+ * The author's own wood colours (her wood sheet, 2026-10-31): the BARK of the outside of a branch. Twigs use it
+ * on every map — it is the colour her art uses for wood, where the branch pixels the worker measures vary with the
+ * canopy's shading. The freshly broken ends are the paler {@link WOOD_CUT_SRGB}.
+ */
+export const DEFAULT_TWIG_SRGB = Object.freeze([158, 112, 92]);
+/** The pale wood of a freshly broken end (her wood sheet). */
+export const WOOD_CUT_SRGB = Object.freeze([226, 170, 108]);
 
 /** Alpha (0..255) at or above which a texel is canopy. */
 const CANOPY_ALPHA = 128;
@@ -198,7 +204,7 @@ function describeBlob(members, spec, rgba, kind) {
     fill = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]];
   }
   const fillLum = Math.max(1, luminance(fill[0], fill[1], fill[2]));
-  const twig = bn >= MIN_BRANCH_TEXELS ? [br / bn, bg / bn, bb / bn] : [...DEFAULT_TWIG_SRGB];
+  const twig = [...DEFAULT_TWIG_SRGB];
 
   // The pool: evenly strided through the blob's texels (flood order is spatially
   // coherent, so a stride spreads the points over the whole footprint).
@@ -405,7 +411,7 @@ function makeBirth(e, p, leafPx, heightPx, ramp, random) {
       Math.min(255, Math.max(0, e.pool[s + 4] * v - warm * 0.5)),
     ];
   }
-  const kindSize = kind === SHED_KIND.twig ? 1.7 : kind === SHED_KIND.clump ? 1.45 : e.kind === 'bush' ? 0.95 : 1;
+  const kindSize = kind === SHED_KIND.twig ? 2.1 : kind === SHED_KIND.clump ? 1.45 : e.kind === 'bush' ? 0.95 : 1;
   const sizePx = leafPx * kindSize * (0.8 + random() * 0.4);
   // Born in the lower part of the crown — under the painted leaves, not on top of them.
   const crown = e.kind === 'bush' ? heightPx.bush : heightPx.tree;

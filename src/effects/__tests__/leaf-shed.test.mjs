@@ -203,7 +203,7 @@ export function run(t) {
       darkest = Math.min(darkest, lum([a.pool[p * 5 + 2], a.pool[p * 5 + 3], a.pool[p * 5 + 4]]));
     ok('colour match: outline texels are lifted to the fill (no black leaves)', darkest >= lum(a.fill) - 1);
   }
-  ok('⭐ twigs: always the author's wood-sheet bark colour, whatever the branches measure', a.twig.join() === DEFAULT_TWIG_SRGB.join() && b.twig.join() === DEFAULT_TWIG_SRGB.join());
+  ok('⭐ twigs: always the wood-sheet bark colour, whatever the branches measure', a.twig.join() === DEFAULT_TWIG_SRGB.join() && b.twig.join() === DEFAULT_TWIG_SRGB.join());
   ok(
     'canopies: an empty raster is no emitters',
     buildCanopyEmitters({ spec: r1.spec, rgba: new Uint8Array(r1.rgba.length) }, 'tree').length === 0

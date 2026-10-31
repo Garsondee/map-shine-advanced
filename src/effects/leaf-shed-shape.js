@@ -315,14 +315,22 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
   const flipCos = max(abs(c), MIN_FLIP);
   const d0 = shedDistance(TSL, p, kind, flipCos, rnd);
   const isTwig = kind.greaterThan(1.5);
-  const w = select(isTwig, inkW.mul(0.6), inkW);
+  const w = select(isTwig, inkW.mul(0.75), inkW);
   const v = p.y.div(flipCos);
   // The brush: one wobble for the line's outer edge, another (decorrelated) for where the
   // colour starts — so the black band swells and thins as it runs round the shape.
   const dice4 = dice(TSL, rnd);
   const seed = dice4[0].add(dice4[3].mul(1.7));
-  const outerWobble = brush(TSL, p.x, v, seed).mul(w).mul(0.42).mul(flipCos);
-  const innerWobble = brush(TSL, p.x.add(3.1), v.sub(1.7), seed.add(0.53)).mul(w).mul(0.62).mul(flipCos);
+  // A twig is ~1.7x the size of a leaf, so the same noise would read smoother on it: sample it finer and
+  // swing it harder, so its edge is as ragged on screen as the tree's (the author: "sharper, less noisy than the tree").
+  const nk = select(isTwig, float(1.9), float(1));
+  const ampK = select(isTwig, float(1.8), float(1));
+  const outerWobble = brush(TSL, p.x.mul(nk), v.mul(nk), seed).mul(w).mul(0.42).mul(ampK).mul(flipCos);
+  const innerWobble = brush(TSL, p.x.add(3.1).mul(nk), v.sub(1.7).mul(nk), seed.add(0.53))
+    .mul(w)
+    .mul(0.62)
+    .mul(ampK)
+    .mul(flipCos);
   const d = d0.add(outerWobble);
   const alpha = float(1).sub(smoothstep(aa.negate(), aa, d));
   // The underside: paler and a touch greyer, as a real leaf's is.
@@ -340,7 +348,10 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
     .mul(0.45);
   col = mix(col, strokeInk, stroke);
   // The line: black, high contrast — a breath of the fill's hue so it sits in the art, no more.
-  const ink = vec3(0.012, 0.014, 0.012).add(rgb.mul(0.05));
+  // Leaves are outlined black; wood is not — the tree's own line is a dark BROWN (the author, looking at the stump).
+  const black = vec3(0.012, 0.014, 0.012).add(rgb.mul(0.05));
+  const brown = vec3(0.022, 0.014, 0.011).add(rgb.mul(0.3));
+  const ink = select(isTwig, brown, black);
   const dFill = d0.add(innerWobble);
   const fillMask = float(1).sub(smoothstep(w.negate().sub(aa), w.negate().add(aa), dFill));
   col = mix(ink, col, fillMask);

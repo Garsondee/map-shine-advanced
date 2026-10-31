@@ -42,7 +42,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 4,
     step: 0.05,
-    default: 1,
+    default: 0.15, // 2026-10-31 new default: 1 -> 0.15
     category: 'Shedding',
     label: 'Amount',
     help: 'How many leaves a canopy sheds at a given wind. More wind always means more; this scales the lot.',
@@ -52,7 +52,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 2,
     max: 40,
     step: 0.5,
-    default: 11,
+    default: 15, // 2026-10-31 new default: 11 -> 15
     category: 'Shedding',
     label: 'Starts above (m/s)',
     help: 'Local wind speed below which nothing is torn off. 11 m/s is a strong breeze; 17 m/s a gale; 25 m/s a storm.',
@@ -72,7 +72,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 0.6,
+    default: 0.15, // 2026-10-31 new default: 0.6 -> 0.15
     category: 'Shedding',
     label: 'Bushes',
     help: 'How much bushes shed compared with trees. 0 keeps bushes still.',
@@ -87,7 +87,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
   },
   dropPalmate: {
     type: 'bool',
-    default: true,
+    default: false, // 2026-10-31 new default: true -> false
     category: 'Which leaves drop',
     label: 'Maple',
     help: 'The palmate leaf: five toothed, pointed lobes. Off: this map never drops it. The pictures at the top of the card toggle these too.',
@@ -101,21 +101,21 @@ export const LEAF_SHED_PARAMS = Object.freeze({
   },
   dropCordate: {
     type: 'bool',
-    default: true,
+    default: false, // 2026-10-31 new default: true -> false
     category: 'Which leaves drop',
     label: 'Heart',
     help: 'A broad heart-shaped leaf with a notch at the stem. Off: this map never drops it. The pictures at the top of the card toggle these too.',
   },
   dropHastate: {
     type: 'bool',
-    default: true,
+    default: false, // 2026-10-31 new default: true -> false
     category: 'Which leaves drop',
     label: 'Spear',
     help: 'A narrow blade with two lobes swept back at its base. Off: this map never drops it. The pictures at the top of the card toggle these too.',
   },
   dropSerrated: {
     type: 'bool',
-    default: true,
+    default: false, // 2026-10-31 new default: true -> false
     category: 'Which leaves drop',
     label: 'Toothed',
     help: 'An oval leaf with a sawn, toothed edge. Off: this map never drops it. The pictures at the top of the card toggle these too.',
@@ -133,7 +133,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0.3,
     max: 3,
     step: 0.05,
-    default: 1,
+    default: 0.9, // 2026-10-31 new default: 1 -> 0.9
     category: 'Mix and size',
     label: 'Overall size',
     help: 'Scales every leaf and twig. 1 matches the leaves painted on the Mythica Machina maps (about a fifth of a grid square).',
@@ -143,7 +143,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 0.6,
     step: 0.01,
-    default: 0.12,
+    default: 0.28, // 2026-10-31 new default: 0.12 -> 0.28
     category: 'Mix and size',
     label: 'Broad leaves',
     help: 'Share of what a tree sheds that is a broad leaf (maple, trifoliate, heart, spear or serrated) rather than a plain pointed leaf.',
@@ -153,7 +153,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 0.6,
     step: 0.01,
-    default: 0.1,
+    default: 0.12, // 2026-10-31 new default: 0.1 -> 0.12
     category: 'Mix and size',
     label: 'Twigs',
     help: 'Share of what a tree sheds that is a twig rather than a leaf. Bushes shed no twigs.',
@@ -173,7 +173,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0.4,
     max: 2.5,
     step: 0.05,
-    default: 1,
+    default: 1.75, // 2026-10-31 new default: 1 -> 1.75
     category: 'Mix and size',
     label: 'Twig length',
     help: 'Length of a twig next to a leaf (1 = about two and a half leaves long).',
@@ -224,7 +224,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0.4,
     max: 1.6,
     step: 0.02,
-    default: 1,
+    default: 0.9, // 2026-10-31 new default: 1 -> 0.9
     category: 'Leaves',
     label: 'Brightness',
     help: 'Lightens or darkens every leaf and twig against the map.',
@@ -347,7 +347,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 1,
+    default: 1.75, // 2026-10-31 new default: 1 -> 1.75
     category: 'Motion',
     label: 'Flutter',
     help: 'How much a leaf swings side to side and flips over as it falls. Twigs barely flutter.',
@@ -357,7 +357,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 1,
+    default: 3, // 2026-10-31 new default: 1 -> 3
     category: 'Motion',
     label: 'Turbulence',
     help: 'How wildly the air tosses a leaf about: sideways jinks, sudden lifts and drops. Grows with the wind. Twigs barely notice.',
@@ -377,7 +377,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0.2,
     max: 1.5,
     step: 0.05,
-    default: 0.45, // leaf lab 2026-10-31: at 1 a 24 m/s gale crosses 16 squares a second — gone before it reads as a leaf
+    default: 0.2, // leaf lab 2026-10-31: at 1 a 24 m/s gale crosses 16 squares a second — gone before it reads as a leaf (2026-10-31 new default: 0.45 -> 0.2)
     category: 'Motion',
     label: 'Carried by the wind',
     help: 'How closely a leaf keeps up with the air around it. 1 = as fast as the wind itself.',
@@ -387,7 +387,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0.2,
     max: 3,
     step: 0.05,
-    default: 1,
+    default: 3, // 2026-10-31 new default: 1 -> 3
     category: 'Motion',
     label: 'Fall speed',
     help: 'How fast things sink. Low lets leaves hang in the air and travel further; high drops them quickly.',
@@ -397,7 +397,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 1,
+    default: 1.65, // 2026-10-31 new default: 1 -> 1.65
     category: 'Motion',
     label: 'Spin',
     help: 'How fast leaves and twigs turn and tumble in the air.',
@@ -407,7 +407,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0.2,
     max: 4,
     step: 0.05,
-    default: 1,
+    default: 3.8, // 2026-10-31 new default: 1 -> 3.8
     category: 'Motion',
     label: 'Ground grip',
     help: 'How firmly things stay put once landed. Low lets leaves skitter along in the gusts; high pins them down.',
@@ -417,7 +417,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 20,
     step: 0.5,
-    default: 4,
+    default: 20, // 2026-10-31 new default: 4 -> 20
     category: 'Motion',
     label: 'Time on the ground',
     help: 'Seconds a leaf stays after landing (skittering along while the wind holds) before it fades.',
@@ -429,7 +429,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 1,
+    default: 1.25, // 2026-10-31 new default: 1 -> 1.25
     category: 'Storm lofting',
     label: 'Lofting',
     help: 'How hard a storm throws leaves up into the air, above the trees and bushes, before they fall back. 0 keeps them below the canopy.',
@@ -450,7 +450,7 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.45,
+    default: 0.2, // 2026-10-31 new default: 0.45 -> 0.2
     category: 'Shadow',
     label: 'Shadow',
     help: 'How dark the little shadow a falling leaf casts is. It shrinks into the leaf as the leaf lands.',

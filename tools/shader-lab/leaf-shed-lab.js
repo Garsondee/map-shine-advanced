@@ -179,6 +179,53 @@ async function main() {
     ['/tools/shader-lab/dev/leaf/bush.png', bushRaster],
   ]);
 
+  // ── a stand-in `_Outdoors` mask: white outdoors, black indoors (two painted rooms the wind blows at) ──────
+  const OUT_N = 150;
+  const outData = new Uint8Array(OUT_N * OUT_N * 4);
+  const outTex = new THREE.DataTexture(outData, OUT_N, OUT_N, THREE.RGBAFormat, THREE.UnsignedByteType);
+  outTex.minFilter = THREE.LinearFilter;
+  outTex.magFilter = THREE.LinearFilter;
+  outTex.wrapS = THREE.ClampToEdgeWrapping;
+  outTex.wrapT = THREE.ClampToEdgeWrapping;
+  const ROOMS = [
+    [800, 700, 1400, 1250],
+    [1400, 1000, 1700, 1250],
+  ];
+  function paintOutdoors(withRooms) {
+    for (let y = 0; y < OUT_N; y++)
+      for (let x = 0; x < OUT_N; x++) {
+        const wx = ((x + 0.5) / OUT_N) * SPAN;
+        const wy = ((y + 0.5) / OUT_N) * SPAN;
+        const inside = withRooms && ROOMS.some(([x0, y0, x1, y1]) => wx >= x0 && wx < x1 && wy >= y0 && wy < y1);
+        const v = inside ? 0 : 255;
+        const o = (y * OUT_N + x) * 4;
+        outData[o] = outData[o + 1] = outData[o + 2] = v;
+        outData[o + 3] = 255;
+      }
+    outTex.needsUpdate = true;
+  }
+  paintOutdoors(true);
+  const outdoorsTexNode = TSL.texture(outTex);
+  const uOutdoorsRect = TSL.uniform(new THREE.Vector4(0, 0, SPAN, SPAN));
+  // The rooms, tinted so a shot shows where the black is (the viewer has the lighting to do that).
+  const roomsScene = (() => {
+    const mat = new THREE.NodeMaterial();
+    const m = outdoorsTexNode.sample(TSL.uv()).r;
+    mat.colorNode = TSL.vec4(0.55, 0.1, 0.35, TSL.float(1).sub(m).mul(0.32));
+    mat.transparent = true;
+    mat.depthTest = false;
+    mat.depthWrite = false;
+    mat.side = THREE.DoubleSide;
+    mat.toneMapped = false;
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
+    mesh.frustumCulled = false;
+    mesh.position.set(SPAN / 2, SPAN / 2, 0);
+    mesh.scale.set(SPAN, SPAN, 1);
+    const sc = new THREE.Scene();
+    sc.add(mesh);
+    return sc;
+  })();
+
   // THE REAL SUBSYSTEM, fed what the viewer would feed it: two canopy files covering the stage, the
   // colour grid (here the lab's own resized decode — the worker's twin), the wind, a clock.
   function makeSubsystem() {
@@ -186,6 +233,7 @@ async function main() {
     sub = createLeafShedSubsystem({
       THREE,
       createEngine: (a) => (engine = createLeafShedEngine({ ...a, capacity: 2048 })),
+      engineDeps: { outdoorsTexNode, uOutdoorsRect },
       getRenderState: () => ({
         enabled: true,
         params: S.params,
@@ -273,6 +321,7 @@ async function main() {
     if (sub.hasContent && sub.scene) renderer.render(sub.scene, camera);
     if (S.show?.bush !== false) renderer.render(bushScene, camera);
     if (S.show?.tree !== false) renderer.render(treeScene, camera);
+    if (S.indoors !== false) renderer.render(roomsScene, camera);
     renderer.autoClear = true;
     renderer.setRenderTarget(null);
   }
@@ -339,6 +388,7 @@ async function main() {
       S = { ...JSON.parse(JSON.stringify(BASE)), ...cfg, wind: { ...BASE.wind, ...(cfg.wind ?? {}) } };
       rng = mulberry32(S.seed);
       nowMs = 1000;
+      paintOutdoors(S.indoors !== false);
       makeSubsystem();
       await warm();
       return S;
@@ -347,10 +397,109 @@ async function main() {
     patch(cfg = {}) {
       if (cfg.wind) S.wind = { ...S.wind, ...cfg.wind };
       if (cfg.params) S.params = { ...S.params, ...cfg.params };
-      for (const k of ['zoom', 'centre', 'show', 'heightFt', 'shadowThrow', 'daylight01'])
+      for (const k of ['zoom', 'centre', 'show', 'heightFt', 'shadowThrow', 'daylight01', 'indoors'])
         if (cfg[k] !== undefined) S[k] = cfg[k];
+      if (cfg.indoors !== undefined) paintOutdoors(cfg.indoors !== false);
       applyLook();
       return S;
+    },
+    /**
+     * A SHAPE SHEET: leaves / clumps / twigs lying still at the real art scale, nothing else drawn — for judging
+     * the outline and the form up close (`zoom` 4 ≈ 3× the screen size). `flying` = off the ground, mid-turn.
+     */
+    async sheet({ rgb = [0.35, 0.6, 0.22], twigRgb = [0.42, 0.33, 0.31], zoom = 4, perRow = 10, flying = false } = {}) {
+      lab.patch({ params: { amount: 0 }, show: { tree: false, bush: false }, indoors: false, zoom, centre: [1200, 1200] });
+      const SIZE = [GRID_PX * 0.22, GRID_PX * 0.22 * 1.45, GRID_PX * 0.22 * 1.7];
+      const list = [];
+      const span = STAGE_W / zoom;
+      for (let row = 0; row < 3; row++)
+        for (let k = 0; k < perRow; k++)
+          list.push({
+            x: 1200 - span / 2 + ((k + 0.5) / perRow) * span,
+            y: 1200 - STAGE_H / zoom / 2 + ((row + 0.5) / 3) * (STAGE_H / zoom),
+            kind: row,
+            ramp: 1,
+            sizePx: SIZE[row],
+            rgb: (row === 2 ? twigRgb : rgb.map((c, i) => c * (0.85 + 0.3 * (((k * 7 + i * 3) % 5) / 4)))).map((c) => c * 255),
+            heightPx: flying ? 6 : 0,
+          });
+      engine.writeBirths(list);
+      lab.patch({ wind: { mps: 40 } });
+      step(0);
+      step(0);
+      // The kept/refused roll is made at birth, in a gale; then the air stops and the fade-in finishes.
+      lab.patch({ wind: { mps: 0 } });
+      await lab.advance(0.4);
+      return { births: list.length };
+    },
+    /**
+     * MOTION METRICS: release `n` bodies of one kind high over open ground, follow them, and measure how they
+     * move — flight time, how far each flies, how crooked the path is (path length / net distance), how many
+     * px it moves AFTER landing, and the speed it lands at. Numbers, not a screenshot (the way to judge friction
+     * and turbulence). Never reads in-frame: lab-only buffer reads, the way `inspect` does.
+     */
+    async trace({ kind = 0, n = 12, heightPx = 220, sec = 10, wind = null, from = [700, 500], indoors = false } = {}) {
+      lab.patch({ params: { amount: 0 }, indoors, ...(wind ? { wind } : {}) });
+      const SIZE = [GRID_PX * 0.22, GRID_PX * 0.22 * 1.45, GRID_PX * 0.22 * 1.7];
+      const start = engine.debugState().nextSlot;
+      const list = [];
+      for (let k = 0; k < n; k++)
+        list.push({ x: from[0] + (k % 4) * 90, y: from[1] + Math.floor(k / 4) * 90, kind, ramp: 1, sizePx: SIZE[kind], rgb: [90, 160, 60], heightPx });
+      engine.writeBirths(list);
+      const read = async (node) => new Float32Array(await renderer.getArrayBufferAsync(node.value));
+      const b = engine.labBuffers;
+      const tracks = Array.from({ length: n }, () => ({ pts: [], landed: null }));
+      const steps = Math.round(sec * 30);
+      for (let i = 0; i <= steps; i++) {
+        step(1 / 30);
+        if (i % 3 === 0) {
+          const [pos, cus, vel] = await Promise.all([read(b.position), read(b.custom), read(b.velocity)]);
+          for (let k = 0; k < n; k++) {
+            const j = (start + k) % engine.capacity;
+            if (cus[j * 4 + 3] < 0.5) continue;
+            const t = tracks[k];
+            const pt = { x: pos[j * 2], y: pos[j * 2 + 1], h: cus[j * 4], sp: Math.hypot(vel[j * 2], vel[j * 2 + 1]) };
+            if (!t.landed && pt.h <= 0) t.landed = { ...pt, i: t.pts.length };
+            t.pts.push(pt);
+          }
+        }
+      }
+      const rows = [];
+      for (const t of tracks) {
+        if (t.pts.length < 3) continue;
+        const air = t.landed ? t.pts.slice(0, t.landed.i + 1) : t.pts;
+        let path = 0;
+        for (let i = 1; i < air.length; i++) path += Math.hypot(air[i].x - air[i - 1].x, air[i].y - air[i - 1].y);
+        const net = Math.hypot(air[air.length - 1].x - air[0].x, air[air.length - 1].y - air[0].y);
+        const end = t.pts[t.pts.length - 1];
+        // Sideways wander: RMS distance of the flight from the straight line start → landing (px).
+        const a0 = air[0];
+        const a1 = air[air.length - 1];
+        const L = Math.max(net, 1);
+        let acc = 0;
+        for (const q of air) acc += (((q.x - a0.x) * (a1.y - a0.y) - (q.y - a0.y) * (a1.x - a0.x)) / L) ** 2;
+        const inRoom = t.pts.filter((q) => ROOMS.some(([x0, y0, x1, y1]) => q.x >= x0 && q.x < x1 && q.y >= y0 && q.y < y1)).length;
+        rows.push({
+          insideFrac: +(inRoom / t.pts.length).toFixed(3),
+          wanderPx: +Math.sqrt(acc / air.length).toFixed(0),
+          flightSec: t.landed ? +((t.landed.i * 3) / 30).toFixed(2) : null,
+          flightPx: +net.toFixed(0),
+          crooked: +(path / Math.max(net, 1)).toFixed(2),
+          landSpeed: t.landed ? +t.landed.sp.toFixed(0) : null,
+          groundSlidePx: t.landed ? +Math.hypot(end.x - t.landed.x, end.y - t.landed.y).toFixed(0) : null,
+        });
+      }
+      const avg = (k) => {
+        const v = rows.map((r) => r[k]).filter((x) => x != null);
+        return v.length ? +(v.reduce((a, c) => a + c, 0) / v.length).toFixed(2) : null;
+      };
+      return {
+        kind,
+        tracked: rows.length,
+        mean: { insideFrac: avg('insideFrac'), wanderPx: avg('wanderPx'), flightSec: avg('flightSec'), flightPx: avg('flightPx'), crooked: avg('crooked'), landSpeed: avg('landSpeed'), groundSlidePx: avg('groundSlidePx') },
+        rows: rows.slice(0, 4),
+        firstTrack: (tracks.find((t) => t.pts.length > 3)?.pts ?? []).filter((_, i) => i % 2 === 0).map((q) => [Math.round(q.x), Math.round(q.y), Math.round(q.h)]),
+      };
     },
     async advance(sec, { dt = 1 / 30 } = {}) {
       const n = Math.max(1, Math.round(sec / dt));

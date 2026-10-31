@@ -142,6 +142,16 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     label: 'Flutter',
     help: 'How much a leaf swings side to side and flips over as it falls. Twigs barely flutter.',
   },
+  turbulence: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Motion',
+    label: 'Turbulence',
+    help: 'How wildly the air tosses a leaf about: sideways jinks, sudden lifts and drops. Grows with the wind. Twigs barely notice.',
+  },
   carry: {
     type: 'float',
     min: 0.2,

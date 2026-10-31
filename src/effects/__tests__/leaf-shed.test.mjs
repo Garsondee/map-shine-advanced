@@ -23,6 +23,7 @@ import {
   rampBetween,
 } from '../leaf-shed-sources.js';
 import { createLeafShedSubsystem } from '../leaf-shed-subsystem.js';
+import { readFileSync } from 'node:fs';
 import { validateEffectManifest } from '../effect-manifest.js';
 import { validateParamsSchema } from '../../core/params-schema.js';
 import { speed01ForMetresPerSecond } from '../../world/index.js';
@@ -92,6 +93,36 @@ export function run(t) {
     ok('resolve: garbage falls back to the default', p.amount === LEAF_SHED_PARAMS.amount.default);
     ok('resolve: out-of-range clamps to the schema', p.leafSize === LEAF_SHED_PARAMS.leafSize.max);
     ok('resolve: "full" is never below "starts"', p.fullAtMps > p.startsAboveMps);
+  }
+
+  // ── the 2026-10-31 polish: the brush outline, turbulence, ground friction, the outdoors mask ──────────
+  {
+    const d = LEAF_SHED_PARAMS.turbulence;
+    ok('turbulence: a motion dial exists, on by default, and can be turned off', d && d.default >= 1 && d.min === 0);
+    ok('resolve: turbulence clamps to the schema', resolveLeafShedParams({ turbulence: 99 }).turbulence === d.max);
+    const here = new URL('.', import.meta.url);
+    const shape = readFileSync(new URL('../leaf-shed-shape.js', here), 'utf8');
+    const runtime = readFileSync(new URL('../particles/leaf-shed-runtime.js', here), 'utf8');
+    // The author, looking at her rock-and-vegetation art: "a noisy high contrast black outline".
+    const ink = /const ink = vec3\(([\d.]+), ([\d.]+), ([\d.]+)\)/.exec(shape);
+    ok('⭐ outline: the ink is black (every channel under 0.05), not the fill darkened', !!ink && ink.slice(1).every((x) => Number(x) < 0.05));
+    ok('⭐ outline: the edge is wobbled by the brush noise on both of its boundaries', /d0\.add\(outerWobble\)/.test(shape) && /d0\.add\(innerWobble\)/.test(shape));
+    ok('shape: every body takes the leaf dice (no two leaves alike)', /leafDistance\(TSL, u\.mul\(1\.1\), v\.mul\(1\.1\), rnd\)/.test(shape) && /clumpDistance\(TSL, u, v, rnd\)/.test(shape));
+    const tbl = (name) => {
+      const m = new RegExp(String.raw`const ${name} = \[([^\]]+)\]`).exec(runtime);
+      return m ? m[1].split(',').map(Number) : null;
+    };
+    const keep = tbl('KIND_GROUND_KEEP');
+    const tau = tbl('KIND_GROUND_TAU_SEC');
+    const mob = tbl('KIND_GROUND_MOBILITY');
+    const stick = tbl('KIND_GROUND_STICK_MPS');
+    ok('⭐ ground: a twig is grippier than a clump, a clump than a leaf (keeps less, stops sooner, moves less, needs a harder gust)',
+      !!(keep && tau && mob && stick) &&
+        keep[2] < keep[1] && keep[1] < keep[0] && tau[2] < tau[1] && tau[1] < tau[0] &&
+        mob[2] < mob[1] && mob[1] < mob[0] && stick[2] > stick[1] && stick[1] > stick[0]);
+    ok('⭐ ground: a twig stops at the moment it lands (keeps under 5% of its flight speed)', !!keep && keep[2] < 0.05);
+    ok('outdoors: the kernel steers round the mask and the draw hides what is inside it',
+      /wallSense\(pos, headingRaw/.test(runtime) && /outdoorsGate/.test(runtime) && /outdoorsAt\(pos\)\.greaterThan\(0\.5\)/.test(runtime));
   }
 
   // ── the birth record ───────────────────────────────────────────────────

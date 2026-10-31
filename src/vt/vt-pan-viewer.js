@@ -8041,6 +8041,10 @@ async function startVtPanViewerUnserialized({
         colorationTexNode: envLight.colorationTexNode,
         depthTexNode: envLight.depthTexNode,
         depthFlagsTexNode: envLight.depthFlagsTexNode,
+        // The floor's `_Outdoors` mask (BLACK IS INDOORS): leaves are steered round it and hidden inside it.
+        // The shared node, so a floor change that rebinds its texture reaches us with no rebuild.
+        outdoorsTexNode: envLight.outdoorsTexNode,
+        uOutdoorsRect: envLight.uOutdoorsRect,
       },
     });
 

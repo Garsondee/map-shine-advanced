@@ -107,6 +107,24 @@ const KIND_CARRY = [1, 0.72, 0.45];
 const KIND_TAU_SEC = [0.3, 0.5, 0.9];
 const KIND_FALL_MPS = [1.5, 2.4, 4.5];
 const KIND_FLUTTER = [1, 0.5, 0.12];
+/** How much the air's eddies toss each kind about (random jinks, sudden lifts): a twig barely notices. */
+const KIND_TURB = [1, 0.6, 0.12];
+/**
+ * ON THE GROUND (the author, 2026-10-31: the twigs "look like they are ice skating … they need a lot more
+ * friction otherwise they are mostly sliding, I'm happy for them to move a lot less").
+ *   KEEP     — the fraction of its flight speed a body keeps at the instant it lands (it hits, it does not glide in).
+ *   TAU      — how fast the ground drags its velocity to rest (s): small = grippy.
+ *   MOBILITY — how much of the already-small ground push a body takes: a twig barely shifts, a leaf skitters.
+ */
+const KIND_GROUND_KEEP = [0.3, 0.12, 0.02];
+const KIND_GROUND_TAU_SEC = [0.1, 0.06, 0.025];
+const KIND_GROUND_MOBILITY = [0.5, 0.12, 0.03];
+/**
+ * STICK, THEN SLIP: a landed body only moves while a GUST of at least this many m/s is on it (and gets a
+ * 6 m/s ramp to full push) — a steady gale does not slide it along for ever, only the gust fronts shove it.
+ * A twig needs a near-extreme gust.
+ */
+const KIND_GROUND_STICK_MPS = [13, 19, 30];
 
 /**
  * @param {object} opts
@@ -117,6 +135,9 @@ const KIND_FLUTTER = [1, 0.5, 0.12];
  * @param {object} [opts.windHandle] - THE wind handle; refresh with {@link updateWind}.
  * @param {*} [opts.illumTexNode] @param {*} [opts.colorationTexNode] - the scene's lighting buffers (texture nodes).
  * @param {*} [opts.depthTexNode] @param {*} [opts.depthFlagsTexNode] - the depth authority (the occlusion gate).
+ * @param {*} [opts.outdoorsTexNode] @param {*} [opts.uOutdoorsRect] - THE FLOOR'S `_Outdoors` mask (texture node, shared
+ *   with the lighting; rebound on a floor change) and the world rect it covers (vec4 uniform: minX, minY, maxX, maxY).
+ *   BLACK IS INDOORS: a leaf is steered round it and hidden if it ends up inside. Omitted → everywhere is outdoors.
  * @param {number} [opts.renderOrder]
  */
 export function createLeafShedEngine({
@@ -129,6 +150,8 @@ export function createLeafShedEngine({
   colorationTexNode = null,
   depthTexNode = null,
   depthFlagsTexNode = null,
+  outdoorsTexNode = null,
+  uOutdoorsRect = null,
   renderOrder = 0,
 }) {
   const TSL = THREE.TSL;
@@ -155,6 +178,8 @@ export function createLeafShedEngine({
     clamp,
     fwidth,
     dot,
+    ivec2,
+    textureSize,
     positionGeometry,
   } = TSL;
 
@@ -197,6 +222,7 @@ export function createLeafShedEngine({
   const uFullMps = uniform(26);
   const uCarry = uniform(0.8);
   const uFlutter = uniform(1);
+  const uTurb = uniform(1);
   const uGroundSec = uniform(4);
   const uShadow = uniform(0.45);
   const uInkPx = uniform(2.4);
@@ -220,6 +246,48 @@ export function createLeafShedEngine({
     return { air, w };
   };
 
+  // ── the outdoors mask, seen from the kernel ─────────────────────────────
+  // A texel LOAD at the leaf's own spot (nearest, crisp: a wall is where the paint is), through the
+  // lighting's shared texture node so a floor change rebinds it for us. 1 outdoors, 0 indoors.
+  const hasOutdoors = !!(outdoorsTexNode && uOutdoorsRect);
+  const outdoorsAt = (p) => {
+    if (!hasOutdoors) return float(1);
+    const size = vec2(textureSize(outdoorsTexNode, int(0)));
+    const uvn = clamp(p.sub(uOutdoorsRect.xy).div(max(uOutdoorsRect.zw.sub(uOutdoorsRect.xy), vec2(1, 1))), 0, 0.9999);
+    return outdoorsTexNode.load(ivec2(floor(uvn.mul(size)))).r;
+  };
+  const RING = [0, 1, 2, 3, 4, 5, 6, 7].map((k) => [Math.cos((k * Math.PI) / 4), Math.sin((k * Math.PI) / 4)]);
+  /**
+   * Which way is out, and is the leaf pushing in? Eight taps round the leaf, each weighted by how much more
+   * (or less) outdoors it is than the leaf's own spot: the sum points AWAY from indoors. `blocked` = the
+   * mask a little AHEAD of its heading is indoors. Returns `cancel(v)` — v with whatever of it points into the
+   * black removed (the rest slides along the wall) and a small push out — plus `inside` and `nOut`.
+   */
+  const wallSense = (pos, heading, stepPx) => {
+    if (!hasOutdoors) return { cancel: (v) => v, inside: float(0), blocked: float(0) };
+    const span = uOutdoorsRect.zw.sub(uOutdoorsRect.xy);
+    const size = vec2(textureSize(outdoorsTexNode, int(0)));
+    const texel = span.div(size);
+    // Far enough to see a wall coming: a texel and a half, and never less than ~3 frames of its own travel.
+    const reach = max(max(max(texel.x, texel.y).mul(1.6), 18), stepPx.mul(3));
+    const m0 = outdoorsAt(pos);
+    let g = vec2(0, 0);
+    for (const [cx, cy] of RING) {
+      const dir = vec2(cx, cy);
+      g = g.add(dir.mul(outdoorsAt(pos.add(dir.mul(reach))).sub(m0)));
+    }
+    const gl = g.length();
+    const nOut = select(gl.greaterThan(0.05), g.div(max(gl, 1e-4)), vec2(0, 0));
+    const ahead = outdoorsAt(pos.add(heading.mul(reach)));
+    const inside = m0.lessThan(0.5);
+    const blocked = select(inside.or(ahead.lessThan(0.5)), float(1), float(0));
+    const cancel = (v) => {
+      const into = max(dot(v, nOut.negate()), 0);
+      return v.add(nOut.mul(into.add(pixelsPerMetreNode.mul(0.35))).mul(blocked));
+    };
+    return { cancel, inside: select(inside, float(1), float(0)), blocked };
+  };
+
   // ── the kernel ──────────────────────────────────────────────────────────
   const updateKernel = Fn(() => {
     const i = instanceIndex;
@@ -239,7 +307,8 @@ export function createLeafShedEngine({
       const localMps = air.length().mul(float(MPS_PER_FIELD_UNIT));
       const localRamp = smoothstep(uStartMps, uFullMps, localMps);
       const keepP = clamp(localRamp.div(max(tag.ramp01, 1 / 63).mul(OVER_PROPOSE)), 0, 1);
-      const kept = r(1.7).lessThan(keepP);
+      // A leaf born indoors (a canopy overhanging a roofed building) is never shown.
+      const kept = r(1.7).lessThan(keepP).and(outdoorsAt(pos).greaterThan(0.5));
       position.element(i).assign(pos);
       velocity.element(i).assign(air.mul(pxPerSecPerFieldUnit).mul(uCarry).mul(byKind(kind, KIND_CARRY)).mul(0.3));
       age.element(i).assign(0);
@@ -259,23 +328,51 @@ export function createLeafShedEngine({
         const airPx = air.mul(pxPerSecPerFieldUnit);
         const localMps = air.length().mul(float(MPS_PER_FIELD_UNIT));
         const carry = uCarry.mul(byKind(kind, KIND_CARRY));
-        // On the ground the air only drags a leaf once it is properly blowing.
-        const groundPush = smoothstep(uStartMps.mul(0.5), uFullMps, localMps).mul(0.35);
+        // On the ground the air only shifts a body once it is properly blowing — and a heavy one hardly at all.
+        const stick = byKind(kind, KIND_GROUND_STICK_MPS);
+        const groundPush = smoothstep(stick, stick.add(6), localMps)
+          .mul(0.35)
+          .mul(byKind(kind, KIND_GROUND_MOBILITY));
         const target = select(airborne, airPx.mul(carry), airPx.mul(carry).mul(groundPush));
-        const tau = select(airborne, byKind(kind, KIND_TAU_SEC), float(0.18));
-        const v1 = vel.add(target.sub(vel).mul(float(1).sub(exp(dt.negate().div(tau)))));
-        // Flutter: a sideways swing across the direction of travel, airborne only.
+        // Grounded, the relaxation time is the GRIP: small tau = it stops where it lands (the twigs' ice-skating fix).
+        const tau = select(airborne, byKind(kind, KIND_TAU_SEC), byKind(kind, KIND_GROUND_TAU_SEC));
+        const v1raw = vel.add(target.sub(vel).mul(float(1).sub(exp(dt.negate().div(tau)))));
+        const speedRaw = v1raw.length();
+        // The jink can throw a leaf as fast as it flies: the wall look-ahead must cover that too.
+        const jinkReach = speedRaw.mul(0.4).add(pixelsPerMetreNode.mul(2.4));
+        const headingRaw = select(speedRaw.greaterThan(1e-3), v1raw.div(max(speedRaw, 1e-3)), vec2(1, 0));
+        // Walls of the painted `_Outdoors` mask: steer round them (the part of the velocity pointing into the black goes).
+        const sense = wallSense(pos, headingRaw, speedRaw.add(jinkReach).mul(dt));
+        const v1 = sense.cancel(v1raw);
         const speed = v1.length();
         const dir = select(speed.greaterThan(1e-3), v1.div(max(speed, 1e-3)), vec2(1, 0));
         const perp = vec2(dir.y.negate(), dir.x);
+        const phase = (s) => r(s).mul(6.2832);
+        // Flutter: a sideways swing across the direction of travel, airborne only.
         const omega = float(3.5).add(r(4.7).mul(4));
-        const swing = sin(a.mul(omega).add(r(5.3).mul(6.2832)));
+        const swing = sin(a.mul(omega).add(phase(5.3)));
         const flutterK = byKind(kind, KIND_FLUTTER).mul(uFlutter);
         const flutterPx = pixelsPerMetreNode
           .mul(1.1)
           .mul(flutterK)
           .mul(select(airborne, float(1), float(0)));
-        let move = v1.add(perp.mul(swing).mul(flutterPx));
+        // TURBULENCE (the author, 2026-10-31: "more turbulence on leaf movement"): three incommensurate sines
+        // per axis, each leaf on its own frequencies and phases, so every leaf wanders its own path and none
+        // repeats; stronger the harder it blows. It rides on `move` only, never stored — a jink, not a drift.
+        const turbK = uTurb.mul(byKind(kind, KIND_TURB));
+        const gale = smoothstep(uStartMps.mul(0.6), uFullMps, localMps).mul(0.9).add(0.4);
+        const wob = (s0, f0, f1, f2) =>
+          sin(a.mul(float(f0).add(r(s0).mul(1.9))).add(phase(s0 + 0.5)))
+            .add(sin(a.mul(float(f1).add(r(s0 + 1).mul(2.7))).add(phase(s0 + 1.5))).mul(0.7))
+            .add(sin(a.mul(float(f2).add(r(s0 + 2).mul(4.1))).add(phase(s0 + 2.5))).mul(0.4));
+        const jink = vec2(wob(21, 2.1, 5.7, 11.3), wob(25, 2.6, 6.4, 12.1))
+          // Its size: a fixed 2.4 m/s of eddy plus a share of the leaf's own speed — a fast leaf in a gale is
+          // thrown about in proportion, not just by a fixed amount that a 1000 px/s flight shrugs off.
+          .mul(pixelsPerMetreNode.mul(2.4).add(speedRaw.mul(0.4)))
+          .mul(turbK)
+          .mul(gale)
+          .mul(select(airborne, float(1), float(0)));
+        let move = v1.add(perp.mul(swing).mul(flutterPx)).add(jink);
         if (windCells) {
           const guard = smoothstep(float(WALL_MOMENTUM_GUARD_LOW), float(WALL_MOMENTUM_GUARD_HIGH), w.wallProximity);
           move = deflectAroundWalls(TSL, {
@@ -288,24 +385,36 @@ export function createLeafShedEngine({
             chaosAmount: float(0),
           });
         }
+        // The jink must not carry it back into the black either.
+        move = sense.cancel(move);
         const next = pos.add(move.mul(dt));
-        // Falling: a leaf glides in pulses (it sinks fastest on each swing's turn).
+        // Falling: a leaf glides in pulses (it sinks fastest on each swing's turn) and an updraft can
+        // lift it back up — the lift term goes past zero, so a gust genuinely throws a leaf into the air.
         const fallMps = byKind(kind, KIND_FALL_MPS).mul(float(0.8).add(r(6.1).mul(0.4)));
-        const glide = float(1).add(abs(swing).sub(0.5).mul(flutterK).mul(0.9));
-        const h1 = max(c.x.sub(fallMps.mul(pixelsPerMetreNode).mul(dt).mul(glide)), 0);
+        const updraft = sin(a.mul(float(1.7).add(r(27).mul(1.5))).add(phase(28)))
+          .mul(0.6)
+          .add(sin(a.mul(float(4.1).add(r(29).mul(2))).add(phase(30))).mul(0.4));
+        const glide = float(1)
+          .add(abs(swing).sub(0.5).mul(flutterK).mul(0.9))
+          .sub(max(updraft, 0).mul(turbK).mul(gale).mul(2.6).mul(select(airborne, float(1), float(0))));
+        const rise = rec1.w.mul(1.35).add(float(2));
+        const h1 = clamp(c.x.sub(fallMps.mul(pixelsPerMetreNode).mul(dt).mul(glide)), 0, rise);
         const landsNow = airborne.and(h1.lessThanEqual(0));
         const tooLong = airborne.and(a.greaterThan(MAX_AIR_SEC));
         const groundLife = uGroundSec.mul(float(0.7).add(r(7.9).mul(0.6)));
         const lf1 = select(landsNow.or(tooLong), a.add(groundLife), lf);
         const h2 = select(tooLong, float(0), h1);
-        // Turning: spin and flip while airborne; on the ground it rolls with its speed and settles flat.
+        // Turning: spin and flip while airborne (in bursts, as the turbulence comes and goes); on the ground
+        // it rolls with its speed and settles flat.
         const spinSign = select(r(8.3).greaterThan(0.5), float(1), float(-1));
+        const spinBurst = float(1).add(sin(a.mul(3.7).add(phase(31))).mul(0.8).mul(turbK.min(1.5)));
         const spin = spinSign
           .mul(float(1.5).add(r(9.1).mul(3.5)))
+          .mul(spinBurst)
           .mul(select(kind.greaterThan(1.5), float(0.4), float(1)));
         const roll = clamp(speed.div(pixelsPerMetreNode.mul(2)), 0, 1).mul(0.3);
         const angle = c.y.add(spin.mul(dt).mul(select(airborne, float(1), roll)));
-        const flipRate = float(2).add(r(10.7).mul(5)).mul(flutterK);
+        const flipRate = float(2).add(r(10.7).mul(5)).mul(flutterK).mul(spinBurst);
         const settled = floor(c.z.div(Math.PI).add(0.5)).mul(Math.PI);
         const flip = select(airborne, c.z.add(flipRate.mul(dt)), c.z.add(settled.sub(c.z).mul(min(dt.mul(6), 1))));
         const out = next.x
@@ -314,7 +423,8 @@ export function createLeafShedEngine({
           .or(next.x.greaterThan(uRectMax.x))
           .or(next.y.greaterThan(uRectMax.y));
         position.element(i).assign(next);
-        velocity.element(i).assign(v1);
+        // It hits the ground, it does not glide in: most of the flight speed goes at the moment of landing.
+        velocity.element(i).assign(select(landsNow, v1.mul(byKind(kind, KIND_GROUND_KEEP)), v1));
         custom.element(i).assign(vec4(h2, angle.mod(6.2832), flip.mod(6.2832), c.w));
         age.element(i).assign(a.add(dt));
         // Leaving the scene ends it (nothing renders in the padding).
@@ -370,6 +480,17 @@ export function createLeafShedEngine({
   const vS = Fn(() => world.sub(shadowCentre).div(max(half, 0.5)))().toVarying('vLeafS');
   const vInfo = Fn(() => vec4(iC.y, iC.z, iTag.kind, fade))().toVarying('vLeafInfo');
   const vCol = Fn(() => vec4(iRec1.xyz, half))().toVarying('vLeafCol');
+  // This leaf's four dice (fixed for life: the stamp is unique per birth) — they bend its outline's form and seed its brush.
+  const vRnd = Fn(() => {
+    const st = iRec0.z.mul(0.6180339);
+    return vec4(
+      hash11(st.add(41.3)),
+      hash11(st.add(43.9)),
+      hash11(st.add(47.1)),
+      hash11(st.add(53.7))
+    );
+  })().toVarying('vLeafRnd');
+  const vWorld = Fn(() => world)().toVarying('vLeafWorld');
   // How soft the cast shadow is: a high leaf's is a blur, a landed one's is crisp (in leaf units).
   const vShadowSoft = Fn(() => h.mul(0.06).div(max(half, 0.5)).add(0.04))().toVarying('vLeafShadowSoft');
   // Which half of the leaf faces the light (up-left, the art's own light): the
@@ -402,9 +523,10 @@ export function createLeafShedEngine({
     rgb: vCol.xyz,
     inkW: uInkPx.div(max(vCol.w, 0.5)),
     lightSide: vLight,
+    rnd: vRnd,
   });
   const ps = toLeaf(vS, vInfo.x);
-  const shadowA = shedCoverage(TSL, ps, vInfo.z, vInfo.y, max(aa.mul(1.5), vShadowSoft))
+  const shadowA = shedCoverage(TSL, ps, vInfo.z, vInfo.y, max(aa.mul(1.5), vShadowSoft), vRnd)
     .mul(uShadow)
     .mul(uShadowDay);
   const leafA = look.alpha.mul(vInfo.w);
@@ -412,8 +534,20 @@ export function createLeafShedEngine({
   const outA = leafA.add(shA);
   const lit = litLinear(TSL, { rgb: look.rgb, lit: !!illumTexNode, illumTexNode, colorationTexNode });
   const gate = occlusionGate(TSL, { depthTexNode, depthFlagsTexNode, expectedDepth: uExpectedDepth });
+  // Hidden in the black of `_Outdoors` — a leaf that ends up indoors is not drawn (the kernel steers it round
+  // first; this is the net under that). Sampled per fragment through the mask's own linear filter, so a leaf
+  // sliding over an edge fades out along it instead of popping.
+  let outdoorsGate = float(1);
+  if (outdoorsTexNode && uOutdoorsRect) {
+    const uvw = clamp(
+      vWorld.sub(uOutdoorsRect.xy).div(max(uOutdoorsRect.zw.sub(uOutdoorsRect.xy), vec2(1, 1))),
+      0,
+      1
+    );
+    outdoorsGate = smoothstep(0.3, 0.7, outdoorsTexNode.sample(uvw).r);
+  }
   material.colorNode = lit.mul(leafA.div(max(outA, 1e-4)));
-  material.opacityNode = outA.mul(gate);
+  material.opacityNode = outA.mul(gate).mul(outdoorsGate);
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
@@ -490,11 +624,12 @@ export function createLeafShedEngine({
       if (Number.isFinite(p.fullAtMps)) uFullMps.value = Math.max(p.fullAtMps, uStartMps.value + 0.5);
       if (Number.isFinite(p.carry)) uCarry.value = p.carry;
       if (Number.isFinite(p.flutter)) uFlutter.value = p.flutter;
+      if (Number.isFinite(p.turbulence)) uTurb.value = p.turbulence;
       if (Number.isFinite(p.groundSec)) uGroundSec.value = p.groundSec;
       if (Number.isFinite(p.shadow)) uShadow.value = p.shadow;
-      // The art's outline is ≈ 4 px on a 150 px grid, about half of it inside the shape.
+      // The art's outline is a heavy ≈ 4–5 px band on a 150 px grid (0.021 grid squares), all of it inside the shape.
       const gridPx = Number.isFinite(p.gridPx) && p.gridPx > 0 ? p.gridPx : 150;
-      if (Number.isFinite(p.outline)) uInkPx.value = p.outline * 0.016 * gridPx * Math.max(0.6, p.leafSize ?? 1);
+      if (Number.isFinite(p.outline)) uInkPx.value = p.outline * 0.021 * gridPx * Math.max(0.6, p.leafSize ?? 1);
     },
 
     /** Adopt a newer wind handle after a rebake (refreshed in place; a regrid is refused loudly). */

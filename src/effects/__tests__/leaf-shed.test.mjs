@@ -108,6 +108,8 @@ export function run(t) {
     ok('⭐ outline: the ink is black (every channel under 0.05), not the fill darkened', !!ink && ink.slice(1).every((x) => Number(x) < 0.05));
     ok('⭐ outline: the edge is wobbled by the brush noise on both of its boundaries', /d0\.add\(outerWobble\)/.test(shape) && /d0\.add\(innerWobble\)/.test(shape));
     ok('shape: every body takes the leaf dice (no two leaves alike)', /leafDistance\(TSL, u\.mul\(1\.1\), v\.mul\(1\.1\), rnd\)/.test(shape) && /clumpDistance\(TSL, u, v, rnd\)/.test(shape));
+    // The author, 2026-10-31: twigs "need about four more designs … more than one design".
+    ok('⭐ twigs: at least five designs, picked by the leaf dice', /TWIG_DESIGNS = (\d+)/.test(shape) && Number(/TWIG_DESIGNS = (\d+)/.exec(shape)[1]) >= 5 && /design = floor\(reroll/.test(shape));
     const tbl = (name) => {
       const m = new RegExp(String.raw`const ${name} = \[([^\]]+)\]`).exec(runtime);
       return m ? m[1].split(',').map(Number) : null;

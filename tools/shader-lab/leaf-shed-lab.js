@@ -407,20 +407,20 @@ async function main() {
      * A SHAPE SHEET: leaves / clumps / twigs lying still at the real art scale, nothing else drawn — for judging
      * the outline and the form up close (`zoom` 4 ≈ 3× the screen size). `flying` = off the ground, mid-turn.
      */
-    async sheet({ rgb = [0.35, 0.6, 0.22], twigRgb = [0.42, 0.33, 0.31], zoom = 4, perRow = 10, flying = false } = {}) {
+    async sheet({ rgb = [0.35, 0.6, 0.22], twigRgb = [0.42, 0.33, 0.31], zoom = 4, perRow = 10, flying = false, kinds = [0, 1, 2] } = {}) {
       lab.patch({ params: { amount: 0 }, show: { tree: false, bush: false }, indoors: false, zoom, centre: [1200, 1200] });
       const SIZE = [GRID_PX * 0.22, GRID_PX * 0.22 * 1.45, GRID_PX * 0.22 * 1.7];
       const list = [];
       const span = STAGE_W / zoom;
-      for (let row = 0; row < 3; row++)
+      for (let row = 0; row < kinds.length; row++)
         for (let k = 0; k < perRow; k++)
           list.push({
             x: 1200 - span / 2 + ((k + 0.5) / perRow) * span,
-            y: 1200 - STAGE_H / zoom / 2 + ((row + 0.5) / 3) * (STAGE_H / zoom),
-            kind: row,
+            y: 1200 - STAGE_H / zoom / 2 + ((row + 0.5) / kinds.length) * (STAGE_H / zoom),
+            kind: kinds[row],
             ramp: 1,
-            sizePx: SIZE[row],
-            rgb: (row === 2 ? twigRgb : rgb.map((c, i) => c * (0.85 + 0.3 * (((k * 7 + i * 3) % 5) / 4)))).map((c) => c * 255),
+            sizePx: SIZE[kinds[row]],
+            rgb: (kinds[row] === 2 ? twigRgb : rgb.map((c, i) => c * (0.85 + 0.3 * (((k * 7 + i * 3) % 5) / 4)))).map((c) => c * 255),
             heightPx: flying ? 6 : 0,
           });
       engine.writeBirths(list);

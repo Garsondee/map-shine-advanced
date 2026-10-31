@@ -135,11 +135,10 @@ export function clumpDistance(TSL, u, v, rnd = null) {
   return d;
 }
 
-/** A twig: a forked stick with one small leaf on the fork — fork, length and side thrown by the dice. */
-export function twigDistance(TSL, u, vIn, rnd = null) {
-  const { min, select, float } = TSL;
-  const [r0, r1, r2, r3] = dice(TSL, rnd);
-  const v = select(r3.greaterThan(0.5), vIn, vIn.negate());
+/** One forked-stick twig with a single small leaf on the fork — the original design (design 0). */
+function twigForkLeaf(TSL, u, v, r) {
+  const { min, float } = TSL;
+  const [r0, r1, r2, r3] = r;
   // The main stick bows by a dice-sized amount: a straight stick never looks torn off.
   const bow = r0.sub(0.5).mul(0.2);
   let d = capsule(TSL, u, v.add(bow.mul(u.mul(u).sub(0.72))), -0.85, 0, 0.8, 0.06, 0.15);
@@ -158,6 +157,84 @@ export function twigDistance(TSL, u, vIn, rnd = null) {
   d = min(d, capsule(TSL, u, v, -0.35, 0, -0.1, -0.33, 0.09));
   const q = rotated(TSL, u, v, float(-0.9).add(r1.sub(0.5).mul(0.7)), 0.62, 0.48);
   return min(d, leafDistance(TSL, q.u.mul(3.2), q.v.mul(3.2), [r2, r0, r3, r1]).div(3.2));
+}
+
+/** Design 1 — a Y: one stick that splits into two prongs at its end. */
+function twigY(TSL, u, v) {
+  const { min } = TSL;
+  let d = capsule(TSL, u, v, -0.9, 0, 0.15, 0.02, 0.14);
+  d = min(d, capsule(TSL, u, v, 0.1, 0.02, 0.88, 0.3, 0.11));
+  return min(d, capsule(TSL, u, v, 0.1, 0.02, 0.86, -0.27, 0.1));
+}
+
+/** Design 2 — a bare branch: a long stick with three short nubs left where side shoots broke off. */
+function twigNubs(TSL, u, v) {
+  const { min } = TSL;
+  let d = capsule(TSL, u, v, -0.92, 0, 0.92, 0.05, 0.12);
+  d = min(d, capsule(TSL, u, v, -0.32, 0, -0.16, 0.3, 0.08));
+  d = min(d, capsule(TSL, u, v, 0.22, 0.03, 0.4, -0.29, 0.08));
+  return min(d, capsule(TSL, u, v, 0.58, 0.04, 0.74, 0.24, 0.07));
+}
+
+/** Design 3 — a short heavy stub with a knot and one broken-off spur: a chunk of limb. */
+function twigStub(TSL, u, v) {
+  const { min } = TSL;
+  let d = capsule(TSL, u, v, -0.55, 0, 0.55, 0.03, 0.22);
+  d = min(d, capsule(TSL, u, v, 0.15, 0.1, 0.32, 0.42, 0.1));
+  return min(d, capsule(TSL, u, v, 0.55, 0.03, 0.8, 0.0, 0.14));
+}
+
+/** Design 4 — a leafy sprig: a thin stick carrying three small leaves along it. */
+function twigSprig(TSL, u, v, r) {
+  const { min, float } = TSL;
+  let d = capsule(TSL, u, v, -0.9, 0, 0.7, 0.04, 0.08);
+  const spots = [
+    [-0.05, 0.1, -0.9],
+    [0.42, -0.1, 0.95],
+    [0.8, 0.04, 0.1],
+  ];
+  spots.forEach(([du, dv, a], i) => {
+    const q = rotated(TSL, u, v, float(a).add(r[i].sub(0.5).mul(0.5)), du, dv);
+    d = min(d, leafDistance(TSL, q.u.mul(3.0), q.v.mul(3.0), [r[(i + 1) % 4], r[i], r[(i + 2) % 4], r[3]]).div(3.0));
+  });
+  return d;
+}
+
+/** Design 5 — a crooked branch: two bends, a spur at the elbow. */
+function twigCrook(TSL, u, v) {
+  const { min } = TSL;
+  let d = capsule(TSL, u, v, -0.9, 0.22, -0.12, -0.14, 0.12);
+  d = min(d, capsule(TSL, u, v, -0.12, -0.14, 0.88, 0.16, 0.11));
+  return min(d, capsule(TSL, u, v, -0.12, -0.14, 0.05, -0.46, 0.08));
+}
+
+/** How many twig designs there are (the dice pick one per twig). */
+export const TWIG_DESIGNS = 6;
+
+/**
+ * A twig: one of {@link TWIG_DESIGNS} designs, chosen by the leaf's own dice and mirrored at random —
+ * a forked stick with a leaf, a Y, a bare branch with nubs, a chunk of limb, a leafy sprig, a crooked branch.
+ */
+export function twigDistance(TSL, u, vIn, rnd = null) {
+  const { select, floor } = TSL;
+  const r = dice(TSL, rnd);
+  const v = select(r[3].greaterThan(0.5), vIn, vIn.negate());
+  const design = floor(reroll(TSL, r[1].add(r[2].mul(0.37)), 11.3).mul(TWIG_DESIGNS));
+  const forks = twigForkLeaf(TSL, u, v, r);
+  const y = twigY(TSL, u, v);
+  const nubs = twigNubs(TSL, u, v);
+  const stub = twigStub(TSL, u, v);
+  const sprig = twigSprig(TSL, u, v, r);
+  const crook = twigCrook(TSL, u, v);
+  return select(
+    design.lessThan(0.5),
+    forks,
+    select(
+      design.lessThan(1.5),
+      y,
+      select(design.lessThan(2.5), nubs, select(design.lessThan(3.5), stub, select(design.lessThan(4.5), sprig, crook)))
+    )
+  );
 }
 
 /**

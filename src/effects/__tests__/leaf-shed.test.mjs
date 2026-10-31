@@ -105,15 +105,16 @@ export function run(t) {
     const runtime = readFileSync(new URL('../particles/leaf-shed-runtime.js', here), 'utf8');
     // The author, looking at her rock-and-vegetation art: "a noisy high contrast black outline".
     const ink = /const black = vec3\(([\d.]+), ([\d.]+), ([\d.]+)\)/.exec(shape);
-    ok('⭐ outline: the ink is black (every channel under 0.05), not the fill darkened', !!ink && ink.slice(1).every((x) => Number(x) < 0.05));
+    ok('⭐ outline: leaves are lined in a deeper shade of their own green, never black', /const deep = max\(vec3\(lum/.test(shape) && /select\(isTwig, brown, deep\)/.test(shape) && !/const black = /.test(shape));
     ok('⭐ outline: the edge is wobbled by the brush noise on both of its boundaries', /d0\.add\(outerWobble\)/.test(shape) && /d0\.add\(innerWobble\)/.test(shape));
     ok('shape: every body takes the leaf dice (no two leaves alike)', /leafDistance\(TSL, u\.mul\(1\.1\), v\.mul\(1\.1\), rnd\)/.test(shape) && /clumpDistance\(TSL, u, v, rnd\)/.test(shape));
-    ok('⭐ twigs: outlined in dark brown, not black (the tree line is brown)', /const brown = vec3/.test(shape) && /select\(isTwig, brown, black\)/.test(shape));
+    ok('⭐ twigs: outlined in dark brown, not black (the tree line is brown)', /const brown = vec3/.test(shape) && /select\(isTwig, brown, deep\)/.test(shape));
     // The author, 2026-10-31: twigs "need about four more designs … more than one design".
-    ok('⭐ twigs: at least five designs, picked by the leaf dice', /TWIG_DESIGNS = (\d+)/.test(shape) && Number(/TWIG_DESIGNS = (\d+)/.exec(shape)[1]) >= 5 && /design = floor\(reroll/.test(shape));
-    ok('⭐ outlines keep an interior: the line is capped to a share of the shape, and sticks are fattened', /MAX_INK_TWIG = 0\.0\d+/.test(shape) && /MAX_INK_LEAF/.test(shape) && /r \* TWIG_THICK/.test(shape));
+    ok('⭐ twigs are grown: a zig-zag main axis, Leonardo forks (area conserved), shoots curving back', /sqrt\(float\(1\)\.sub\(f\.mul\(f\)\)\)/.test(shape) && /INTERNODE_TAPER/.test(shape) && /zig\.mul/.test(shape));
+    ok('⭐ broad leaves: five real forms (palmate, trifoliate, cordate, hastate, serrated), no prong-and-circle', /BROAD_LEAF_FORMS = 5/.test(shape) && ['palmateLeaf', 'trifoliateLeaf', 'cordateLeaf', 'hastateLeaf', 'serratedLeaf'].every((n) => shape.includes(`function ${n}`)));
+    ok('⭐ outlines keep an interior: a leaf line is capped, a twig line is a share of its local stick radius', /MAX_INK_LEAF/.test(shape) && /body\.rad\.mul\(INK_OF_RADIUS\)/.test(shape));
     ok('⭐ twigs: freshly broken ends are pale wood from her sheet', /CUT_WOOD = \[226/.test(shape) && /endMask/.test(shape));
-    ok('⭐ twigs taper: a stick is thick at its base and thin at its free end, never a sausage', /TWIG_TAPER = 0\.[1-6]\d*/.test(shape) && /h\.mul\(taper - 1\)/.test(shape));
+    ok('⭐ twigs taper: every segment narrows along its length and each internode is thinner', /mix\(n\(ra\), n\(rb\), h\)/.test(shape) && /INTERNODE_TAPER = 0\.[5-9]/.test(shape));
     const tbl = (name) => {
       const m = new RegExp(String.raw`const ${name} = \[([^\]]+)\]`).exec(runtime);
       return m ? m[1].split(',').map(Number) : null;

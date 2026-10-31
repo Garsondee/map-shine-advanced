@@ -42,7 +42,7 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 3, // author's own default, 2026-10-27
+    default: 0.35, // author's own default, 2026-10-31
     category: 'Look',
     label: 'Density',
     help: 'How many trails at a given wind speed. More wind always means more trails; this scales the lot.',
@@ -52,10 +52,21 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
     min: 2,
     max: 24,
     step: 0.5,
-    default: 6, // author's own default, 2026-10-27
+    default: 8, // author's own default, 2026-10-31
     category: 'Look',
     label: 'Thickness',
     help: 'The fattest point of a trail, in map pixels. Trails taper to a point at both ends.',
+  },
+  sizeVariation: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 0.8,
+    // Author, 2026-10-31: "Include a much wider variety of trail sizes".
+    category: 'Look',
+    label: 'Size variation',
+    help: 'How much trails differ in size. 0 makes every trail the Thickness and Length above; 1 ranges from under half to over twice that, big trails both longer and fatter.',
   },
   lengthSec: {
     type: 'float',
@@ -72,18 +83,32 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 1.95, // author's own default, 2026-10-27
-    // 1 = one full loop, for the trails that loop at all (about half).
+    default: 1.2, // author's own default, 2026-10-31
+    // Up to 1: how many trails loop (half of them at 1). Past 1: more turns per
+    // loop. Loops are always WHOLE turns, so a trail leaves its loop along the
+    // wind (`particles/trail-swirl.js`).
     category: 'Look',
     label: 'Swirl',
-    help: 'How many loops a looping trail turns (about half the trails loop). 0 keeps every trail straight along the wind.',
+    help: 'Up to 1, how many trails loop (about half at 1); above 1, looping trails turn more times. Every loop is whole, so trails run with the wind before and after it. 0 keeps every trail straight.',
+  },
+  swirlVariation: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 0.7,
+    // Author, 2026-10-31: "Ideally I'd need a new 'swirl variation' slider as
+    // they all have the same exact swirl … make the swirls less perfect."
+    category: 'Look',
+    label: 'Swirl variation',
+    help: 'How different each swirl is: loop size, when it happens, how many turns and how lopsided it is. Non-looping trails get a gentle S-bend. 0 makes every swirl the same round loop.',
   },
   opacity: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.15, // author's own default, 2026-10-27
+    default: 0.5, // author's own default, 2026-10-31
     category: 'Look',
     label: 'Opacity',
     help: 'How solid the trails are at their strongest.',
@@ -93,7 +118,7 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
     min: 0.5,
     max: 2.5,
     step: 0.05,
-    default: 2.5, // author's own default, 2026-10-27
+    default: 1.55, // author's own default, 2026-10-31
     category: 'Timing',
     label: 'Lifetime',
     help: 'Average seconds a trail lives, from fade-in to gone. Each varies a little around this.',
@@ -226,6 +251,8 @@ export function buildWindTrailsSystem(params = {}, profile) {
       // The costume (see gust-runtime.js's 2026-10-27 header).
       profile: 'spindle',
       swirl: v('swirl'),
+      swirlVariation: v('swirlVariation'),
+      sizeVariation: v('sizeVariation'),
       segmentSec: v('lengthSec') / WIND_TRAILS_SEGMENTS,
       // …but never longer on the map than this (a hurricane's 0.3 s of path is
       // 10 m; a trail reads as a stroke, not a lane marking).
@@ -246,6 +273,8 @@ export function windTrailsLook(params = {}) {
     widthPx: v('widthPx'),
     opacity: v('opacity'),
     swirl: v('swirl'),
+    swirlVariation: v('swirlVariation'),
+    sizeVariation: v('sizeVariation'),
     lifeSec: v('lifeSec'),
     lengthSec: v('lengthSec'),
     minSpeedMps: v('minSpeedMps'),

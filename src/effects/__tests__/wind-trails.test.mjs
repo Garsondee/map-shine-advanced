@@ -77,10 +77,30 @@ export function run(t) {
   const look = windTrailsLook(custom);
   ok(
     'setLook carries every live control',
-    ['density', 'widthPx', 'opacity', 'swirl', 'lifeSec', 'lengthSec', 'minSpeedMps', 'colorRGB'].every(
-      (k) => k in look
-    )
+    [
+      'density',
+      'widthPx',
+      'opacity',
+      'swirl',
+      'swirlVariation',
+      'sizeVariation',
+      'lifeSec',
+      'lengthSec',
+      'minSpeedMps',
+      'colorRGB',
+    ].every((k) => k in look)
   );
+  ok(
+    '⭐ the 2026-10-31 sliders reach the engine',
+    sys.params.swirlVariation === WIND_TRAILS_PARAMS.swirlVariation.default &&
+      sys.params.sizeVariation === WIND_TRAILS_PARAMS.sizeVariation.default
+  );
+  // The author's 2026-10-31 defaults, pasted from her card.
+  {
+    const want = { density: 0.35, widthPx: 8, lengthSec: 0.2, swirl: 1.2, opacity: 0.5, lifeSec: 1.55, minSpeedMps: 5, color: '#ffffff' };
+    const bad = Object.entries(want).filter(([k, x]) => WIND_TRAILS_PARAMS[k].default !== x);
+    ok(`the author's 2026-10-31 defaults (${bad.map(([k]) => k).join(', ') || 'all match'})`, bad.length === 0);
+  }
   ok('setLook falls back to defaults', windTrailsLook({}).density === WIND_TRAILS_PARAMS.density.default);
   ok(
     'a malformed colour falls back to white, never NaN',

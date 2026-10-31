@@ -141,7 +141,9 @@
  * short-lived (1-2 s), fat, tapered white strokes that curl as they die. The
  * differences are all declaration params read below (all optional; WIND_GUSTS
  * omits them and keeps its own look): `profile: 'spindle'` (fat body, pointed
- * both ends), `swirl` (each trail curls one way, harder as it ages),
+ * both ends), `swirl` + `swirlVariation` (some trails loop a whole number of
+ * turns and rejoin the wind, `trail-swirl.js`), `sizeVariation` (per-trail
+ * width and length),
  * `segmentSec` (the history is sampled on a fixed clock, so a trail's length is
  * seconds-of-path at any frame rate), `lifeJitter`, and `blending: 'normal'`.
  *
@@ -165,6 +167,7 @@ import {
 } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
+import { buildTrailSwirlNodes, buildTrailSizeNodes } from './trail-swirl.js';
 
 const log = createLogger('gust-runtime');
 
@@ -172,11 +175,8 @@ const log = createLogger('gust-runtime');
  * than dead-still ribbons (see candle-flame-render.js's own identical constant). */
 const TIER0_WIND_HANDLE = createWindHandle();
 
-/** A trail's loop radius, metres (≈ 1 square on a 5 ft grid), ±25% per trail —
- *  small enough that a whole loop fits inside the visible stroke. */
-const SWIRL_RADIUS_M = 1.5;
-/** Share of trails that loop at all; the rest sweep straight through. */
-const SWIRL_LOOP_SHARE = 0.55;
+/** How many different lives (seeds) a trail slot cycles through before repeating. */
+const LIFE_SEEDS = 29;
 
 /** Field magnitude → m/s (the dial is linear to 70 m/s — `world/wind-scale.js`). */
 const MPS_PER_FIELD_UNIT = windFieldPxPerSecPerUnit(1);
@@ -235,6 +235,11 @@ export function createGustEngine({
   // a JS-time choice — a different graph, never a uniform gate.
   const spindle = p.profile === 'spindle';
   const swirlOn = Number.isFinite(p.swirl) && p.swirl >= 0;
+  // Per-trail SIZE (width × length) spread by `sizeVariation` — trails only.
+  const sizeOn = Number.isFinite(p.sizeVariation);
+  // Trails re-roll their seed every life (see the end of the update kernel);
+  // the wind-gust ribbons keep their fixed per-slot seed.
+  const varyPerLife = swirlOn || sizeOn;
   let segmentSec = Number.isFinite(p.segmentSec) && p.segmentSec > 0 ? p.segmentSec : 0;
   const lifeJitter = Number.isFinite(p.lifeJitter) ? Math.min(0.9, Math.max(0, p.lifeJitter)) : 0;
   const maxLengthM = Number.isFinite(p.maxLengthM) && p.maxLengthM > 0 ? p.maxLengthM : 0;
@@ -299,6 +304,8 @@ export function createGustEngine({
   const uGateLoMps = uniform(float(p.gateLoMps ?? 8));
   const uGateHiMps = uniform(float(Math.max((p.gateLoMps ?? 8) + 0.1, p.gateHiMps ?? 18)));
   const uSwirl = uniform(float(swirlOn ? p.swirl : 0));
+  const uSwirlVar = uniform(float(Number.isFinite(p.swirlVariation) ? p.swirlVariation : 0));
+  const uSizeVar = uniform(float(sizeOn ? p.sizeVariation : 0));
   const uAccelToMaxSeconds = uniform(float(Math.max(0.05, p.accelToMaxSeconds ?? 1.2)));
   const uLifeMs = uniform(float(Math.max(1, p.lifeMs ?? 4000)));
   const uFadeMs = uniform(float(Math.min(p.fadeMs ?? 1200, (p.lifeMs ?? 4000) / 2)));
@@ -381,6 +388,14 @@ export function createGustEngine({
       ? uLifeMs.mul(float(1 - lifeJitter).add(hash11(seedF.mul(5.31).add(2.9)).mul(float(2 * lifeJitter))))
       : uLifeMs;
 
+  // Each trail's own size multipliers {width, length} — seed-hashed, stable for
+  // its life, shared by the kernel (a long stroke loops lazier) and the draw.
+  const sizeOf = (seedF) =>
+    buildTrailSizeNodes(TSL, {
+      hash: (k) => hash11(seedF.mul(float(1.37 + 0.71 * k)).add(float(61.3 + 5.9 * k))),
+      uSizeVar,
+    });
+
   // A random world point inside the current rect, from two hash salts.
   const randPointInRect = (sa, sb) =>
     vec2(uRectMin.x.add(uRectSize.x.mul(hash11(sa))), uRectMin.y.add(uRectSize.y.mul(hash11(sb))));
@@ -411,7 +426,9 @@ export function createGustEngine({
   const updateKernel = Fn(() => {
     const i = instanceIndex;
     const pos = position.element(i).toVar();
-    const s = seed.element(i);
+    // A var: the seed is rewritten at the end of this kernel on rebirth, and
+    // everything above must read THIS life's seed.
+    const s = seed.element(i).toVar();
 
     // Only the flow VECTOR(s) are needed for the head's target here; the
     // visibility gate re-samples at the FINAL position below (so a
@@ -527,39 +544,34 @@ export function createGustEngine({
       });
     }
     //
-    // THE CURL (swirl). Each trail runs with the air, then — over the back part
-    // of its life — HOOKS into a curl of a fixed real-world radius, turning one
-    // way (seed-picked). A curl's look depends on its radius, not its speed, so
-    // the turn rate is `|v| / R`: a hurricane trail and a breeze trail curl into
-    // the same-sized loop, the fast one just gets there sooner. The heading
-    // offset is integrated in `custom.w` and applied to the MOVE only — the
-    // stored velocity keeps following the field, so the momentum maths above
-    // never fights the curl. (A first cut rotated the target by an angle that
-    // grew with age; at real speeds that drew long straight sticks at random
-    // angles, because the turn was spread over metres of travel.)
+    // THE CURL (swirl). Each trail runs with the air, LOOPS a whole number of
+    // turns somewhere in its life, then runs with the air again. The heading
+    // offset is a function of the trail's AGE (`trail-swirl.js`, header there),
+    // applied to the MOVE only — the stored velocity keeps following the field,
+    // so the momentum maths above never fights the curl. A turn takes a fraction
+    // of a second, so faster air draws a bigger loop.
+    //
+    // ⭐ 2026-10-31 (author: "the end point leaves the wind trail headed in a
+    // direction which ISN'T in line with the wind"): the previous curl turned at
+    // `|v| / R` until it had turned `swirl × 2π` — 432° at swirl 1.2, so every
+    // looper left 72° off the wind. Now it is 0 before the loop and exactly 2πn
+    // after it; loop shape, size and timing are spread per trail by Swirl
+    // variation. (An earlier cut still: rotating the TARGET by an angle growing
+    // with age drew long straight sticks at random angles.)
     let moveVel = vel;
     let swirlTheta = float(0);
     if (swirlOn) {
-      const ageFrac = age.element(i).div(lifeMs).clamp(float(0), float(1));
-      const turnSign = hash11(s.mul(3.91).add(0.7)).greaterThan(float(0.5)).select(float(1), float(-1));
-      const radiusPx = pixelsPerMetreNode
-        .mul(float(SWIRL_RADIUS_M))
-        .mul(float(0.75).add(hash11(s.mul(7.3)).mul(float(0.5))));
-      // ONE LOOP, measured in ANGLE (the anime wind-line loop): from a third of
-      // the way through its life a looping trail turns at `|v| / R` until it has
-      // turned `swirl × 2π`, then carries on straight. Counting angle rather than
-      // time makes it the same loop at any wind speed.
-      const loops = hash11(s.mul(2.71).add(4.1)).lessThan(float(SWIRL_LOOP_SHARE)).select(uSwirl, float(0));
-      const turned = custom.element(i).w.abs();
-      const stillTurning = turned.lessThan(loops.mul(float(Math.PI * 2))).select(float(1), float(0));
-      const omega = vel
-        .length()
-        .div(radiusPx.max(float(1)))
-        .mul(stillTurning)
-        .mul(smoothstep(float(0.28), float(0.36), ageFrac));
-      swirlTheta = custom.element(i).w.add(turnSign.mul(omega).mul(uDtSec));
-      const ct = cos(swirlTheta);
-      const st = sin(swirlTheta);
+      const curl = buildTrailSwirlNodes(TSL, {
+        hash: (k) => hash11(s.mul(float(2.71 + 1.913 * k)).add(float(4.1 + 7.37 * k))),
+        uSwirl,
+        uSwirlVar,
+        lifeMs,
+        ageMs: age.element(i),
+        sizeLen: sizeOn ? sizeOf(s).length : float(1),
+      });
+      swirlTheta = curl.theta;
+      const ct = cos(swirlTheta).mul(curl.speed);
+      const st = sin(swirlTheta).mul(curl.speed);
       moveVel = vec2(vel.x.mul(ct).sub(vel.y.mul(st)), vel.x.mul(st).add(vel.y.mul(ct)));
     }
     const next = pos.add(moveVel.mul(uDtSec));
@@ -621,8 +633,8 @@ export function createGustEngine({
     const gate = smoothstep(uGateLoMps, uGateHiMps, finalFlow.flowMag.mul(float(MPS_PER_FIELD_UNIT)));
     // x = gate (READ BY THE DRAW's opacityNode below — must stay this exact
     // slot); y/z/w are diagnostic-only (flowMag, openness, head speed).
-    // w = the curl's integrated heading for a swirling engine (reset to 0 on
-    // respawn), the head speed otherwise.
+    // w = the curl's heading offset for a swirling engine (0 on respawn), the
+    // head speed otherwise.
     const wSlot = swirlOn ? shouldRespawn.select(float(0), swirlTheta) : vel.length();
     custom.element(i).assign(vec4(gate, finalFlow.flowMag, finalFlow.openness, wSlot));
 
@@ -644,6 +656,18 @@ export function createGustEngine({
     // Age: reborn trails restart at 0 (fade in from nothing); others advance.
     const agedMs = age.element(i).add(uDtSec.mul(1000));
     age.element(i).assign(shouldRespawn.select(float(0), agedMs));
+
+    // A NEW SEED EACH LIFE (trails, 2026-10-31). The seed used to be the slot
+    // index forever, so a slot relived the SAME swirl, size and lifetime every
+    // time — and at a low density only a handful of slots are ever active, so
+    // the whole map showed the same few loops on repeat (author: "they all have
+    // the same exact swirl"). A reborn trail steps its seed on by `capacity`,
+    // wrapping after LIFE_SEEDS lives: every slot cycles through that many
+    // different plans, and seeds stay small enough for the fract(sin) hash.
+    if (varyPerLife) {
+      const nextSeed = s.add(float(capacity)).mod(float(capacity * LIFE_SEEDS));
+      seed.element(i).assign(shouldRespawn.select(nextSeed, s));
+    }
   })().compute(capacity);
 
   // ==========================================================================
@@ -714,7 +738,9 @@ export function createGustEngine({
 
   // A strip vertex's position along the drawn span, in (fractional) ring slots
   // (strip index 0..MESH-1 maps onto the drawn span's tail..head).
-  const spanSeg = (segF) => segMax.sub(meshMax.sub(segF).mul(uSegSpan.div(meshMax)));
+  // A sized trail draws over its own share of the ring (never past its end).
+  const drawSpan = () => (sizeOn ? uSegSpan.mul(sizeOf(seed.element(instanceIndex)).length).min(segMax) : uSegSpan);
+  const spanSeg = (segF) => segMax.sub(meshMax.sub(segF).mul(drawSpan().div(meshMax)));
   // The ring read through a uniform Catmull-Rom spline between the two slots
   // either side of the vertex, with the exact curve tangent. Returns
   // vec4(position.xy, tangent.xy). Neighbour slots clamp at the ring ends.
@@ -772,7 +798,8 @@ export function createGustEngine({
       const fadeIn = ageMs.div(uFadeMs).clamp(float(0), float(1));
       const fadeOut = lifeMsDraw.sub(ageMs).div(uFadeMs).clamp(float(0), float(1));
       const thin = pow(fadeIn.min(fadeOut), float(0.6));
-      halfW = uWidthPx.mul(body).mul(thin).mul(float(0.5));
+      const widthMul = sizeOn ? sizeOf(seed.element(instanceIndex)).width : float(1);
+      halfW = uWidthPx.mul(widthMul).mul(body).mul(thin).mul(float(0.5));
     } else {
       halfW = uWidthPx.mul(pow(t01, float(0.7))).mul(float(0.5));
     }
@@ -951,13 +978,16 @@ export function createGustEngine({
      * Live look controls (Wind Trails' Studio card) — uniforms only, so a
      * slider never rebuilds a kernel. Every field optional.
      * @param {{density?:number, widthPx?:number, opacity?:number, swirl?:number,
-     *   lifeSec?:number, minSpeedMps?:number, colorRGB?:number[], lengthSec?:number}} look
+     *   swirlVariation?:number, sizeVariation?:number, lifeSec?:number,
+     *   minSpeedMps?:number, colorRGB?:number[], lengthSec?:number}} look
      */
     setLook(look = {}) {
       if (Number.isFinite(look.density)) densityMul = Math.max(0, look.density);
       if (Number.isFinite(look.widthPx)) uWidthPx.value = Math.max(0, look.widthPx);
       if (Number.isFinite(look.opacity)) uOpacityMax.value = Math.max(0, Math.min(1, look.opacity));
       if (Number.isFinite(look.swirl) && swirlOn) uSwirl.value = Math.max(0, look.swirl);
+      if (Number.isFinite(look.swirlVariation)) uSwirlVar.value = Math.min(1, Math.max(0, look.swirlVariation));
+      if (Number.isFinite(look.sizeVariation) && sizeOn) uSizeVar.value = Math.min(1, Math.max(0, look.sizeVariation));
       if (Number.isFinite(look.lifeSec) && look.lifeSec > 0) {
         uLifeMs.value = look.lifeSec * 1000;
         uFadeMs.value = Math.min(uFadeMs.value, uLifeMs.value / 2);

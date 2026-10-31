@@ -12,6 +12,7 @@
  *
  * Driving it: `window.windLab` — `set({ wind, bearing, gust, heat, arrows,
  * trails })`, `capture(name)` saves a PNG under `tools/shader-lab/runs/wind-lab/`,
+ * `exposure(name, seconds)` saves a long exposure of the trails (whole paths),
  * `stepSeconds(s)` advances the clock without waiting for real time.
  *
  * @module tools/shader-lab/wind-lab
@@ -193,7 +194,8 @@ async function main() {
   trails.scene.children[0].renderOrder = 7;
 
   let clockMs = 0;
-  function tick(dt) {
+  // `draw` false = advance the sim only (the long exposure draws for itself).
+  function tick(dt, draw = true) {
     clockMs += dt * 1000;
     uTimeMs.value = clockMs;
     ambient.speed01.value = state.wind;
@@ -215,6 +217,7 @@ async function main() {
     arrows.visible = state.arrows;
     if (state.trails)
       trails.step(renderer, { dtSec: dt, tMs: clockMs, worldRect: { minX: 0, minY: 0, maxX: W, maxY: H } });
+    if (!draw) return;
     renderer.autoClear = true;
     renderer.render(world, camera);
     if (state.trails) {
@@ -254,6 +257,33 @@ async function main() {
       renderer.autoClear = true;
     }
     renderer.setRenderTarget(null);
+    return saveTarget(rt, name);
+  }
+
+  /**
+   * LONG EXPOSURE: the map once, then the trails drawn every `everyN` frames for
+   * `seconds` without clearing — each trail's whole path (run in, loop, run out)
+   * piles up as one stroke. A single frame only shows the last `lengthSec`.
+   */
+  async function exposure(name = 'exposure', seconds = 2, everyN = 2) {
+    const rt = new THREE.RenderTarget(W, H, { type: THREE.UnsignedByteType, format: THREE.RGBAFormat });
+    renderer.setRenderTarget(rt);
+    renderer.autoClear = true;
+    renderer.render(world, camera);
+    renderer.autoClear = false;
+    const n = Math.round(seconds * 60);
+    for (let k = 0; k < n; k++) {
+      tick(1 / 60, false);
+      renderer.setRenderTarget(rt);
+      if (k % everyN === 0) renderer.render(trails.scene, camera);
+      if (k % 20 === 19) await renderer.backend.device.queue.onSubmittedWorkDone();
+    }
+    renderer.autoClear = true;
+    renderer.setRenderTarget(null);
+    return saveTarget(rt, name);
+  }
+
+  async function saveTarget(rt, name) {
     const buf = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, W, H);
     rt.dispose();
     const cv = document.createElement('canvas');
@@ -344,6 +374,7 @@ async function main() {
       }
     },
     capture,
+    exposure,
   };
   say('ready');
 }

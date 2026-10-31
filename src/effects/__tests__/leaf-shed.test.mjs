@@ -23,6 +23,8 @@ import {
   rampBetween,
 } from '../leaf-shed-sources.js';
 import { createLeafShedSubsystem } from '../leaf-shed-subsystem.js';
+import { SHED_DESIGNS, renderShedPreview } from '../leaf-shed-preview.js';
+import { pickKind, BROAD_FORM_PARAMS } from '../leaf-shed-sources.js';
 import { readFileSync } from 'node:fs';
 import { validateEffectManifest } from '../effect-manifest.js';
 import { validateParamsSchema } from '../../core/params-schema.js';
@@ -122,9 +124,14 @@ export function run(t) {
       const knobKeys = [...shape.matchAll(/^  (\w+): [\d.]+,$/gm)].map((m) => m[1]);
       ok('⭐ dials: every shape knob is a Studio param with the same default (so the look is unchanged until moved)',
         knobKeys.length >= 12 && knobKeys.every((k) => LEAF_SHED_PARAMS[k] && new RegExp(`  ${k}: ${LEAF_SHED_PARAMS[k].default},`).test(shape)));
-      ok('dials: the runtime turns every shape knob into a uniform and sets it from the params', /uKnobs = Object\.fromEntries\(Object\.entries\(SHAPE_KNOB_DEFAULTS\)/.test(runtime) && /for \(const \[k, u\] of Object\.entries\(uKnobs\)\)/.test(runtime));
+      ok('dials: the runtime turns every shape knob into a uniform and sets it from the params', /\.\.\.Object\.entries\(SHAPE_KNOB_DEFAULTS\)/.test(runtime) && /for \(const \[k, u\] of Object\.entries\(uKnobs\)\)/.test(runtime));
       ok('dials: fall speed, spin and ground grip reach the kernel', /\.mul\(uFall\)/.test(runtime) && /\.mul\(uSpin\)/.test(runtime) && /\.div\(uGrip\)/.test(runtime));
       ok('card: titled "Falling Leaves & Twigs"', LEAF_SHED.title === 'Falling Leaves & Twigs');
+      // Caught in the real Studio 2026-10-31: an unknown category is silently filed under Technical.
+      const order = readFileSync(new URL('../../ui/widgets/param-groups.js', new URL('.', import.meta.url)), 'utf8');
+      const cats = [...new Set(Object.values(LEAF_SHED_PARAMS).map((d) => d.category))];
+      ok('⭐ card: every section this card declares is one the Studio draws (none silently swept into Technical)',
+        cats.every((c) => order.includes(`'${c}',`)));
     }
     const tbl = (name) => {
       const m = new RegExp(String.raw`const ${name} = \[([^\]]+)\]`).exec(runtime);
@@ -141,6 +148,55 @@ export function run(t) {
     ok('⭐ ground: a twig stops at the moment it lands (keeps under 5% of its flight speed)', !!keep && keep[2] < 0.05);
     ok('outdoors: the kernel steers round the mask and the draw hides what is inside it',
       /wallSense\(pos, headingRaw/.test(runtime) && /outdoorsGate/.test(runtime) && /outdoorsAt\(pos\)\.greaterThan\(0\.5\)/.test(runtime));
+  }
+
+  // ── which leaves drop, the design pictures, storm lofting (2026-10-31) ─────────────────────────────
+  {
+    const all = resolveLeafShedParams({});
+    const designs = SHED_DESIGNS.map((d) => d.param);
+    ok('⭐ pick: every design has a drop toggle, on by default', designs.every((k) => LEAF_SHED_PARAMS[k]?.type === 'bool' && all[k] === true));
+    ok('pick: resolve keeps a false toggle false (never coerced to a number)', resolveLeafShedParams({ dropTwig: false }).dropTwig === false);
+    const rolls = (canopy, p) => {
+      const n = { 0: 0, 1: 0, 2: 0, none: 0 };
+      for (let i = 0; i < 200; i++) {
+        const k = pickKind(canopy, p, (i + 0.5) / 200);
+        n[k === null ? 'none' : k]++;
+      }
+      return n;
+    };
+    const base = rolls('tree', all);
+    ok('pick: by default a tree sheds all three kinds in the dialled shares', base[2] === 20 && base[1] === 24 && base[0] === 156);
+    const noTwig = rolls('tree', { ...all, dropTwig: false });
+    ok('⭐ pick: twigs off → no twig ever', noTwig[2] === 0 && noTwig[0] + noTwig[1] === 200);
+    const broadOnly = rolls('tree', { ...all, dropLeaf: false, dropTwig: false });
+    ok('pick: only broad leaves allowed → every drop is a broad leaf', broadOnly[1] === 200);
+    const noneBroad = Object.fromEntries(BROAD_FORM_PARAMS.map((k) => [k, false]));
+    const nothing = rolls('tree', { ...all, ...noneBroad, dropLeaf: false, dropTwig: false });
+    ok('pick: nothing allowed → nothing sheds (no stray births)', nothing.none === 200);
+    const bush = rolls('bush', { ...all, dropLeaf: false });
+    ok('pick: a bush with plain leaves off sheds broad leaves, never twigs', bush[1] === 200 && bush[2] === 0);
+
+    // The pictures: the shader's own shapes, evaluated on the CPU through the scalar stand-in.
+    const cover = (px) => {
+      let n = 0;
+      for (let i = 3; i < px.length; i += 4) if (px[i] > 128) n++;
+      return n;
+    };
+    const pics = Object.fromEntries(SHED_DESIGNS.map((d) => [d.id, renderShedPreview(d.id, {}, 32)]));
+    ok('⭐ pictures: every design draws something', SHED_DESIGNS.every((d) => cover(pics[d.id]) > 15));
+    const sigs = new Set(SHED_DESIGNS.map((d) => Array.from(pics[d.id].filter((_, i) => i % 4 === 3)).join(',')));
+    ok('pictures: the seven designs are seven different shapes', sigs.size === SHED_DESIGNS.length);
+    ok('⭐ pictures follow the sliders: a wider leaf covers more', cover(renderShedPreview('leaf', { leafWidth: 1.6 }, 32)) > cover(pics.leaf) * 1.2);
+    ok('pictures follow the sliders: a thicker twig covers more', cover(renderShedPreview('twig', { twigThickness: 2.5 }, 32)) > cover(pics.twig) * 1.5);
+    const shim = readFileSync(new URL('../leaf-shed-shim.js', new URL('.', import.meta.url)), 'utf8');
+    ok('pictures: drawn by the shader builders themselves, not a copy', /from '\.\/leaf-shed-shape\.js'/.test(readFileSync(new URL('../leaf-shed-preview.js', new URL('.', import.meta.url)), 'utf8')) && /isScalarShim: true/.test(shim));
+
+    const rt = readFileSync(new URL('../particles/leaf-shed-runtime.js', new URL('.', import.meta.url)), 'utf8');
+    ok('⭐ lofting: dials exist, starting at half the wind dial (35 m/s) by default', LEAF_SHED_PARAMS.loft?.default > 0 && LEAF_SHED_PARAMS.loftStartsAboveMps?.default === 35);
+    ok('⭐ lofting: above a tree\'s height a leaf is drawn over the canopies and roofs', /max\(occlusionGate\(/.test(rt) && /max\(outdoorsGate, vAbove\)/.test(rt));
+    ok('lofting: the lift stops after LOFT_SEC, so everything comes down', /LOFT_SEC = \d+/.test(rt) && /smoothstep\(LOFT_SEC - 2, LOFT_SEC, a\)/.test(rt));
+    ok('lofting: a lull never snaps a lofted leaf down (the ceiling is never below it)', /max\(rise, c\.x\)/.test(rt));
+    ok('pick: the broad-leaf forms follow their toggles in the shader', /BROAD_FORM_KNOBS\.forEach\(\(k, i\) => \(uKnobs\[k\]\.value = p\[BROAD_FORM_PARAMS\[i\]\] === false \? 0 : 1\)\)/.test(rt));
   }
 
   // ── the birth record ───────────────────────────────────────────────────

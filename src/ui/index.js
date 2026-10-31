@@ -81,6 +81,8 @@ export { tierChip, scopeGlyph, healthBadge } from './widgets/badges.js';
 // `registerPanel` for the old panel — see rooms/studio/shell.js's own header
 // for why the Studio never imports effects/ or talks to effectRegistry itself.
 export { installStudio } from './rooms/studio/shell.js';
+// Falling Leaves & Twigs' design strip (its card's `extra`, built in boot.js).
+export { buildLeafShedStrip } from './rooms/studio/leaf-shed-strip.js';
 
 // THE REMOTE (U2, docs/holy/UI-Testament.md §4, §9) — Now Playing, the
 // astrolabe + corner clusters, and the camera-path popover this checkpoint;

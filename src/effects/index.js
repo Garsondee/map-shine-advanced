@@ -465,6 +465,8 @@ export {
 // in the canopies' own colours, drawn in the author's own leaf style (particles/leaf-shed-runtime.js).
 export { LEAF_SHED, LEAF_SHED_PARAMS, leafShedCapacity, resolveLeafShedParams } from './leaf-shed.js';
 export { createLeafShedSubsystem } from './leaf-shed-subsystem.js';
+// The design pictures the Studio card draws (the shader's own shapes on the CPU, `leaf-shed-shim.js`).
+export { SHED_DESIGNS, renderShedPreview } from './leaf-shed-preview.js';
 // TEMPERATURE EFFECTS (2026-10-27) — the Temperature fader's icy / warm grade,
 // frost frame and outdoor heat ripple (folded into grade/grade-present.js).
 export { TEMPERATURE_EFFECTS, TEMPERATURE_EFFECTS_PARAMS } from './temperature/temperature.js';

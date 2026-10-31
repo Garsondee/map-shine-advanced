@@ -81,7 +81,8 @@ import {
   unpackBirthTagNodes,
   writeBirth,
 } from '../leaf-shed-birth.js';
-import { buildShedLook, shedCoverage, SHAPE_KNOB_DEFAULTS } from '../leaf-shed-shape.js';
+import { buildShedLook, shedCoverage, SHAPE_KNOB_DEFAULTS, BROAD_FORM_KNOBS } from '../leaf-shed-shape.js';
+import { BROAD_FORM_PARAMS } from '../leaf-shed-sources.js';
 import { OVER_PROPOSE } from '../leaf-shed-sources.js';
 import { litLinear, occlusionGate } from '../critters/critter-surface.js';
 
@@ -93,7 +94,18 @@ const MPS_PER_FIELD_UNIT = windFieldPxPerSecPerUnit(1);
 /** A frame longer than this is a hitch, not time. */
 const MAX_DT_SEC = 0.05;
 /** A leaf still airborne after this long is put down (an updraft cannot keep one aloft forever). */
-const MAX_AIR_SEC = 14;
+const MAX_AIR_SEC = 26;
+/**
+ * STORM LOFTING (the author, 2026-10-31: "at high wind speeds … allow leaves to be lofted into the air,
+ * allowing them to appear above trees and bushes before falling back towards earth eventually").
+ * A leaf is only lifted for this long after it tears off; after that the storm can hold it but not raise
+ * it, so everything comes down in the end (MAX_AIR_SEC is the backstop, never the normal path).
+ */
+const LOFT_SEC = 9;
+/** Lofting grows over this many m/s above its threshold. */
+const LOFT_RAMP_MPS = 10;
+/** How high a storm can carry a leaf, in crown heights. */
+const LOFT_MAX_CROWNS = 3.5;
 /** Seconds a leaf takes to fade in once it is born (it starts under a canopy, so this is short). */
 const FADE_IN_SEC = 0.15;
 /** Seconds of its ground time a leaf spends fading out. */
@@ -228,7 +240,13 @@ export function createLeafShedEngine({
   const uSpin = uniform(1);
   const uGrip = uniform(1);
   // The look dials, one uniform each (see `leaf-shed-shape.js#SHAPE_KNOB_DEFAULTS`).
-  const uKnobs = Object.fromEntries(Object.entries(SHAPE_KNOB_DEFAULTS).map(([k, v]) => [k, uniform(v)]));
+  const uKnobs = Object.fromEntries(
+    [...Object.entries(SHAPE_KNOB_DEFAULTS), ...BROAD_FORM_KNOBS.map((k) => [k, 1])].map(([k, v]) => [k, uniform(v)])
+  );
+  // Storm lofting: how hard, from what local wind; and a tree's height (above it a leaf is over the canopies).
+  const uLoft = uniform(1);
+  const uLoftStart = uniform(35);
+  const uCrownPx = uniform(1e6);
   const uGroundSec = uniform(4);
   const uShadow = uniform(0.45);
   const uInkPx = uniform(2.4);
@@ -269,7 +287,7 @@ export function createLeafShedEngine({
    * mask a little AHEAD of its heading is indoors. Returns `cancel(v)` — v with whatever of it points into the
    * black removed (the rest slides along the wall) and a small push out — plus `inside` and `nOut`.
    */
-  const wallSense = (pos, heading, stepPx) => {
+  const wallSense = (pos, heading, stepPx, overRoofs) => {
     if (!hasOutdoors) return { cancel: (v) => v, inside: float(0), blocked: float(0) };
     const span = uOutdoorsRect.zw.sub(uOutdoorsRect.xy);
     const size = vec2(textureSize(outdoorsTexNode, int(0)));
@@ -286,7 +304,8 @@ export function createLeafShedEngine({
     const nOut = select(gl.greaterThan(0.05), g.div(max(gl, 1e-4)), vec2(0, 0));
     const ahead = outdoorsAt(pos.add(heading.mul(reach)));
     const inside = m0.lessThan(0.5);
-    const blocked = select(inside.or(ahead.lessThan(0.5)), float(1), float(0));
+    // A leaf lofted over the roofs blows across them; the walls only steer what is below the canopy.
+    const blocked = select(inside.or(ahead.lessThan(0.5)), float(1), float(0)).mul(float(1).sub(overRoofs));
     const cancel = (v) => {
       const into = max(dot(v, nOut.negate()), 0);
       return v.add(nOut.mul(into.add(pixelsPerMetreNode.mul(0.35))).mul(blocked));
@@ -349,7 +368,8 @@ export function createLeafShedEngine({
         const jinkReach = speedRaw.mul(0.4).add(pixelsPerMetreNode.mul(2.4));
         const headingRaw = select(speedRaw.greaterThan(1e-3), v1raw.div(max(speedRaw, 1e-3)), vec2(1, 0));
         // Walls of the painted `_Outdoors` mask: steer round them (the part of the velocity pointing into the black goes).
-        const sense = wallSense(pos, headingRaw, speedRaw.add(jinkReach).mul(dt));
+        const overRoofs = smoothstep(uCrownPx.mul(0.9), uCrownPx.mul(1.1), c.x);
+        const sense = wallSense(pos, headingRaw, speedRaw.add(jinkReach).mul(dt), overRoofs);
         const v1 = sense.cancel(v1raw);
         const speed = v1.length();
         const dir = select(speed.greaterThan(1e-3), v1.div(max(speed, 1e-3)), vec2(1, 0));
@@ -401,11 +421,21 @@ export function createLeafShedEngine({
         const updraft = sin(a.mul(float(1.7).add(r(27).mul(1.5))).add(phase(28)))
           .mul(0.6)
           .add(sin(a.mul(float(4.1).add(r(29).mul(2))).add(phase(30))).mul(0.4));
+        // STORM LOFTING: above `loftStartsAboveMps` the air lifts a leaf harder than it falls — steadily, and in
+        // surges on each updraft — for its first LOFT_SEC; a twig barely leaves the ground (KIND_TURB).
+        const loftK = smoothstep(uLoftStart, uLoftStart.add(LOFT_RAMP_MPS), localMps)
+          .mul(uLoft)
+          .mul(byKind(kind, KIND_TURB))
+          .mul(float(1).sub(smoothstep(LOFT_SEC - 2, LOFT_SEC, a)));
+        const airborneF = select(airborne, float(1), float(0));
         const glide = float(1)
           .add(abs(swing).sub(0.5).mul(flutterK).mul(0.9))
-          .sub(max(updraft, 0).mul(turbK).mul(gale).mul(2.6).mul(select(airborne, float(1), float(0))));
-        const rise = rec1.w.mul(1.35).add(float(2));
-        const h1 = clamp(c.x.sub(fallMps.mul(pixelsPerMetreNode).mul(dt).mul(glide)), 0, rise);
+          .sub(max(updraft, 0).mul(turbK).mul(gale).mul(2.6).mul(airborneF))
+          .sub(loftK.mul(float(3.6).add(max(updraft, 0).mul(2.4))).mul(airborneF));
+        // The ceiling: its birth height (plus a little), or up to LOFT_MAX_CROWNS crowns in a storm — and never
+        // below where it already is, so a lull lets a lofted leaf fall rather than snapping it down.
+        const rise = max(rec1.w.mul(1.35).add(float(2)), uCrownPx.mul(float(1).add(loftK.mul(LOFT_MAX_CROWNS - 1))));
+        const h1 = clamp(c.x.sub(fallMps.mul(pixelsPerMetreNode).mul(dt).mul(glide)), 0, max(rise, c.x));
         const landsNow = airborne.and(h1.lessThanEqual(0));
         const tooLong = airborne.and(a.greaterThan(MAX_AIR_SEC));
         const groundLife = uGroundSec.mul(float(0.7).add(r(7.9).mul(0.6)));
@@ -467,7 +497,7 @@ export function createLeafShedEngine({
   // outward off its own tree — out from under the canopy before it had left it. A gentle size
   // lift (≈1.35× at the crown) keeps the 'nearer is bigger' cue without moving it.
   const leafCentre = iPos;
-  const half = iTag.sizePx.mul(0.5).mul(float(1).add(h.mul(uLiftScale)));
+  const half = iTag.sizePx.mul(0.5).mul(float(1).add(min(h.mul(uLiftScale), 0.6)));
   // The cast shadow lands on the ground, thrown down-sun by the leaf's height like every other
   // caster's — capped at a few leaf-lengths so a high leaf's shadow stays a depth cue, not an
   // overdraw bill (a dusk sun throws long).
@@ -542,7 +572,9 @@ export function createLeafShedEngine({
   const shA = shadowA.mul(vInfo.w).mul(float(1).sub(look.alpha));
   const outA = leafA.add(shA);
   const lit = litLinear(TSL, { rgb: look.rgb, lit: !!illumTexNode, illumTexNode, colorationTexNode });
-  const gate = occlusionGate(TSL, { depthTexNode, depthFlagsTexNode, expectedDepth: uExpectedDepth });
+  // Lofted over the canopies (above a tree's height) a leaf is drawn OVER the trees, bushes and roofs.
+  const vAbove = Fn(() => smoothstep(uCrownPx.mul(0.9), uCrownPx.mul(1.1), h))().toVarying('vLeafAbove');
+  const gate = max(occlusionGate(TSL, { depthTexNode, depthFlagsTexNode, expectedDepth: uExpectedDepth }), vAbove);
   // Hidden in the black of `_Outdoors` — a leaf that ends up indoors is not drawn (the kernel steers it round
   // first; this is the net under that). Sampled per fragment through the mask's own linear filter, so a leaf
   // sliding over an edge fades out along it instead of popping.
@@ -556,7 +588,7 @@ export function createLeafShedEngine({
     outdoorsGate = smoothstep(0.3, 0.7, outdoorsTexNode.sample(uvw).r);
   }
   material.colorNode = lit.mul(leafA.div(max(outA, 1e-4)));
-  material.opacityNode = outA.mul(gate).mul(outdoorsGate);
+  material.opacityNode = outA.mul(gate).mul(max(outdoorsGate, vAbove));
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
@@ -621,7 +653,10 @@ export function createLeafShedEngine({
         uShadowThrow.value.set(v.shadowThrowX, v.shadowThrowY);
       }
       if (Number.isFinite(v.daylight01)) uShadowDay.value = Math.min(1, Math.max(0, v.daylight01));
-      if (Number.isFinite(v.crownHeightPx) && v.crownHeightPx > 0) uLiftScale.value = 0.35 / v.crownHeightPx;
+      if (Number.isFinite(v.crownHeightPx) && v.crownHeightPx > 0) {
+        uLiftScale.value = 0.35 / v.crownHeightPx;
+        uCrownPx.value = v.crownHeightPx;
+      }
     },
 
     /**
@@ -638,6 +673,10 @@ export function createLeafShedEngine({
       if (Number.isFinite(p.spin)) uSpin.value = p.spin;
       if (Number.isFinite(p.groundGrip)) uGrip.value = Math.max(0.05, p.groundGrip);
       for (const [k, u] of Object.entries(uKnobs)) if (Number.isFinite(p[k])) u.value = p[k];
+      // Which broad-leaf forms may drop: the dice pick among the allowed ones only.
+      BROAD_FORM_KNOBS.forEach((k, i) => (uKnobs[k].value = p[BROAD_FORM_PARAMS[i]] === false ? 0 : 1));
+      if (Number.isFinite(p.loft)) uLoft.value = p.loft;
+      if (Number.isFinite(p.loftStartsAboveMps)) uLoftStart.value = p.loftStartsAboveMps;
       if (Number.isFinite(p.groundSec)) uGroundSec.value = p.groundSec;
       if (Number.isFinite(p.shadow)) uShadow.value = p.shadow;
       // The art's outline is a heavy ≈ 4–5 px band on a 150 px grid (0.021 grid squares), all of it inside the shape.

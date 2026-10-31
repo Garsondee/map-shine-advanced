@@ -77,6 +77,56 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     label: 'Bushes',
     help: 'How much bushes shed compared with trees. 0 keeps bushes still.',
   },
+  // ── Which leaves drop (the author, 2026-10-31: "select which leaves are allowed to drop in a map") ──
+  dropLeaf: {
+    type: 'bool',
+    default: true,
+    category: 'Which leaves drop',
+    label: 'Pointed leaf',
+    help: 'The plain pointed leaf, the most common thing a canopy sheds. Off: this map never drops it. The pictures at the top of the card toggle these too.',
+  },
+  dropPalmate: {
+    type: 'bool',
+    default: true,
+    category: 'Which leaves drop',
+    label: 'Maple',
+    help: 'The palmate leaf: five toothed, pointed lobes. Off: this map never drops it. The pictures at the top of the card toggle these too.',
+  },
+  dropTrifoliate: {
+    type: 'bool',
+    default: true,
+    category: 'Which leaves drop',
+    label: 'Trefoil',
+    help: 'Three leaflets on one stem. Off: this map never drops it. The pictures at the top of the card toggle these too.',
+  },
+  dropCordate: {
+    type: 'bool',
+    default: true,
+    category: 'Which leaves drop',
+    label: 'Heart',
+    help: 'A broad heart-shaped leaf with a notch at the stem. Off: this map never drops it. The pictures at the top of the card toggle these too.',
+  },
+  dropHastate: {
+    type: 'bool',
+    default: true,
+    category: 'Which leaves drop',
+    label: 'Spear',
+    help: 'A narrow blade with two lobes swept back at its base. Off: this map never drops it. The pictures at the top of the card toggle these too.',
+  },
+  dropSerrated: {
+    type: 'bool',
+    default: true,
+    category: 'Which leaves drop',
+    label: 'Toothed',
+    help: 'An oval leaf with a sawn, toothed edge. Off: this map never drops it. The pictures at the top of the card toggle these too.',
+  },
+  dropTwig: {
+    type: 'bool',
+    default: true,
+    category: 'Which leaves drop',
+    label: 'Twig',
+    help: 'Small forked twigs (trees only). Off: this map never drops it. The pictures at the top of the card toggle these too.',
+  },
   // ── Mix and size ──────────────────────────────────────────────────────────
   leafSize: {
     type: 'float',
@@ -362,6 +412,28 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     label: 'Time on the ground',
     help: 'Seconds a leaf stays after landing (skittering along while the wind holds) before it fades.',
   },
+  // ── Storm lofting (the author, 2026-10-31: "at high wind speeds … allow leaves to be lofted into the air,
+  //    allowing them to appear above trees and bushes before falling back towards earth eventually") ──
+  loft: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Storm lofting',
+    label: 'Lofting',
+    help: 'How hard a storm throws leaves up into the air, above the trees and bushes, before they fall back. 0 keeps them below the canopy.',
+  },
+  loftStartsAboveMps: {
+    type: 'float',
+    min: 10,
+    max: 70,
+    step: 0.5,
+    default: 35,
+    category: 'Storm lofting',
+    label: 'Lofting starts above (m/s)',
+    help: 'Local wind at which leaves start being lofted; it grows over the next 10 m/s. 35 m/s is half the wind dial.',
+  },
   // ── Shadow ────────────────────────────────────────────────────────────────
   shadow: {
     type: 'float',
@@ -424,11 +496,15 @@ export function leafShedCapacity(profile) {
  * Resolved params with every missing/garbage value replaced by its default, and
  * the two wind thresholds kept in order (full can never sit below start).
  * @param {object} [params]
- * @returns {Record<keyof typeof LEAF_SHED_PARAMS, number>}
+ * @returns {Record<keyof typeof LEAF_SHED_PARAMS, number|boolean>}
  */
 export function resolveLeafShedParams(params = {}) {
   const out = {};
   for (const [k, d] of Object.entries(LEAF_SHED_PARAMS)) {
+    if (d.type === 'bool') {
+      out[k] = typeof params?.[k] === 'boolean' ? params[k] : d.default;
+      continue;
+    }
     const v = Number(params?.[k]);
     out[k] = Number.isFinite(v) ? Math.min(d.max, Math.max(d.min, v)) : d.default;
   }

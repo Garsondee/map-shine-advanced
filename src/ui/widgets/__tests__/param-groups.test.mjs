@@ -82,8 +82,13 @@ export function run(t) {
   ok(
     'the canonical order runs surface → emission → behaviour → size → couplings → machinery',
     CATEGORY_ORDER.join(',') ===
-      'Presence,Look,Detail,Flame,Ember,Smoke,Splash,Fall,Veil,Ground,Drips,Light,Motion,Depth,Shape,Extent,Outdoor,Twilight,Weather,Response,Technical'
+      'Presence,Shedding,Which leaves drop,Look,Detail,Leaves,Outline,Twigs,Shadow,Flame,Ember,Smoke,Splash,Fall,Veil,Ground,Drips,Light,Motion,Storm lofting,Depth,Shape,Mix and size,Extent,Outdoor,Twilight,Weather,Response,Technical'
   );
+  // ⚠️ Falling Leaves & Twigs' groups added 2026-10-31, by meaning again: how much sheds and which designs
+  // with Presence, the leaf/outline/twig/shadow drawing with the surface, lofting with Motion, sizes with Shape.
+  for (const c of ['Shedding', 'Which leaves drop', 'Leaves', 'Outline', 'Twigs', 'Shadow', 'Storm lofting', 'Mix and size']) {
+    ok(`${c} is a real category, not silently swept into Technical`, CATEGORY_ORDER.includes(c));
+  }
   // ⚠️ Flame/Ember/Smoke/Depth added 2026-08-09 for fire's particle rebuild, and
   // placed by MEANING rather than appended: the three bodies are SURFACE groups
   // so they sit with Look/Detail, and Depth is a BEHAVIOUR so it sits with

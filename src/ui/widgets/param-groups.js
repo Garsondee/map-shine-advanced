@@ -39,8 +39,16 @@
  */
 export const CATEGORY_ORDER = Object.freeze([
   'Presence',
+  // Falling Leaves & Twigs (2026-10-31): how much sheds, then which designs may drop and how each is drawn —
+  // the author asked for "lots of controls", so ~40 of them in named groups, not one Technical heap.
+  'Shedding',
+  'Which leaves drop',
   'Look',
   'Detail',
+  'Leaves',
+  'Outline',
+  'Twigs',
+  'Shadow',
   // Fire's per-layer SURFACE groups (2026-08-09). A particle fire has three
   // independent bodies — the flame, the sparks and the plume — each with its own
   // count, lifetime, size and brightness, and lumping ~19 controls into 'Look'
@@ -62,10 +70,12 @@ export const CATEGORY_ORDER = Object.freeze([
   'Drips',
   'Light',
   'Motion',
+  'Storm lofting',
   // Perspective strength — a BEHAVIOUR of the particles, belonging to none of
   // the three bodies above.
   'Depth',
   'Shape',
+  'Mix and size',
   'Extent',
   'Outdoor',
   // The critters' two couplings to the sky (2026-10-18). A swarm answers to the TIME OF DAY (fireflies hatch

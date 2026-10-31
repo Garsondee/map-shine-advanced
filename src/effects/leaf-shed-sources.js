@@ -381,22 +381,48 @@ export function planShedBirths({
     while (carry[k] >= 1) {
       carry[k] -= 1;
       if (births.length >= maxBirths) return births;
-      births.push(makeBirth(e, p, leafPx, heightPx, ramp, random));
+      const b = makeBirth(e, p, leafPx, heightPx, ramp, random);
+      if (b) births.push(b);
     }
   }
   return births;
+}
+
+/** The broad-leaf toggles, in the shader's form order (`leaf-shed-shape.js#BROAD_LEAF_FORM_NAMES`). */
+export const BROAD_FORM_PARAMS = Object.freeze(['dropPalmate', 'dropTrifoliate', 'dropCordate', 'dropHastate', 'dropSerrated']);
+
+/**
+ * What a canopy sheds for one roll in 0..1, honouring which designs this map allows (a missing toggle
+ * reads as allowed). Twig and broad-leaf shares stay as dialled; whatever is left is the plain leaf — or,
+ * if plain leaves are off, is shared between the kinds still allowed. Bushes shed no twigs. Null: nothing
+ * this canopy may shed is allowed.
+ * @param {'tree'|'bush'} canopy @param {object} p - resolved params. @param {number} roll
+ * @returns {number|null} a SHED_KIND, or null.
+ */
+export function pickKind(canopy, p, roll) {
+  const leafOk = p.dropLeaf !== false;
+  const broadOk = BROAD_FORM_PARAMS.some((k) => p[k] !== false);
+  const twigOk = canopy === 'tree' && p.dropTwig !== false;
+  const isTree = canopy === 'tree';
+  let twig = twigOk ? p.twigShare : 0;
+  let broad = broadOk && isTree ? p.clumpShare : 0;
+  let leaf = leafOk ? Math.max(0, 1 - twig - broad) : 0;
+  // A bush with plain leaves turned off sheds whichever broad leaves are allowed.
+  if (!isTree && !leafOk && broadOk) broad = 1;
+  const total = twig + broad + leaf;
+  if (total <= 0) return null;
+  const r = roll * total;
+  if (r < twig) return SHED_KIND.twig;
+  if (r < twig + broad) return SHED_KIND.clump;
+  return SHED_KIND.leaf;
 }
 
 function makeBirth(e, p, leafPx, heightPx, ramp, random) {
   const s = Math.floor(random() * e.poolCount) * 5;
   const x = e.pool[s] + (random() - 0.5) * e.texelW;
   const y = e.pool[s + 1] + (random() - 0.5) * e.texelH;
-  let kind = SHED_KIND.leaf;
-  if (e.kind === 'tree') {
-    const roll = random();
-    if (roll < p.twigShare) kind = SHED_KIND.twig;
-    else if (roll < p.twigShare + p.clumpShare) kind = SHED_KIND.clump;
-  }
+  const kind = pickKind(e.kind, p, random());
+  if (kind === null) return null;
   let rgb;
   if (kind === SHED_KIND.twig) {
     const v = 1 + (random() - 0.5) * 0.2 * p.colourVariation;

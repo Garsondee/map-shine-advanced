@@ -775,6 +775,7 @@ import {
   blockerSignature,
   nextNoProgressCount,
   installCompressionStatusBadge,
+  buildLeafShedStrip,
 } from './ui/index.js';
 import {
   SORT_LAYERS,
@@ -11365,6 +11366,8 @@ function install() {
         onChange: (key, value) => opts.setValue({ [key]: value }),
         enabled: readLive().enabled,
         onToggleEnabled: (next) => opts.setValue({ enabled: next }),
+        // Opaque content under the main strip (e.g. Falling Leaves' design pictures), when a card has some.
+        ...(opts.extra ? { extra: opts.extra } : {}),
         status: opts.status ? opts.status(readLive()) : collapsedStatusLine({ enabled: readLive().enabled }),
       };
       // U6 CONTROL HEALTH (mythica-machina-press#194) — opt-in: an effect
@@ -13933,6 +13936,13 @@ function install() {
     accVar: '--c-atmos',
     schema: LEAF_SHED_PARAMS,
     fohKeys: ['amount', 'startsAboveMps', 'leafSize', 'twigShare', 'turbulence'],
+    // The design pictures: which leaves may drop on this map, drawn live at the card's own settings.
+    extra: () => [
+      buildLeafShedStrip({
+        getParams: () => leafShedReadout.params ?? {},
+        setParam: (key, value) => MapShine.setLeafShed({ [key]: value }),
+      }),
+    ],
     getReadout: () => leafShedReadout,
     setValue: (patch) => MapShine.setLeafShed(patch),
     status: (readout) =>

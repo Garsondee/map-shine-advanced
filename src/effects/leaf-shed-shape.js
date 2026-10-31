@@ -82,8 +82,17 @@ export const SHAPE_KNOB_DEFAULTS = Object.freeze({
  */
 let KNOBS = null;
 function knob(TSL, name) {
-  return KNOBS?.[name] ?? TSL.float(SHAPE_KNOB_DEFAULTS[name]);
+  return KNOBS?.[name] ?? TSL.float(SHAPE_KNOB_DEFAULTS[name] ?? 1);
 }
+
+/**
+ * WHICH BROAD-LEAF FORMS MAY DROP (the author, 2026-10-31: "select which leaves are allowed to drop"):
+ * one knob per form, 1 allowed / 0 not, in {@link BROAD_LEAF_FORM_NAMES} order. A leaf's dice pick among
+ * the allowed forms only. Not Studio params themselves — the runtime feeds them from the `drop…` toggles.
+ */
+export const BROAD_FORM_KNOBS = Object.freeze(['form0', 'form1', 'form2', 'form3', 'form4']);
+/** The broad-leaf forms, in the order the dice and the masks index them. */
+export const BROAD_LEAF_FORM_NAMES = Object.freeze(['palmate', 'trifoliate', 'cordate', 'hastate', 'serrated']);
 function withKnobs(knobs, build) {
   const prev = KNOBS;
   KNOBS = knobs ?? null;
@@ -248,9 +257,29 @@ export const BROAD_LEAF_FORMS = 5;
  * short stem. (The function keeps its old name: kind 1 used to be a torn-off clump.)
  */
 export function clumpDistance(TSL, u, v, rnd = null) {
-  const { select, floor, min } = TSL;
+  const { select, floor, min, float, max } = TSL;
   const r = dice(TSL, rnd);
-  const form = floor(reroll(TSL, r[1].add(r[2].mul(0.37)), 11.3).mul(BROAD_LEAF_FORMS));
+  const roll = reroll(TSL, r[1].add(r[2].mul(0.37)), 11.3);
+  // Pick among the ALLOWED forms only: count them, take the roll's share of that count, walk the masks.
+  const masks = BROAD_FORM_KNOBS.map((k) => knob(TSL, k));
+  const count = masks.reduce((a, m) => a.add(m), float(0));
+  const kth = floor(roll.mul(max(count, float(1))));
+  let cum = float(0);
+  let chosen = float(-1);
+  masks.forEach((m, i) => {
+    const next = cum.add(m);
+    chosen = select(chosen.lessThan(0).and(m.greaterThan(0.5)).and(kth.lessThan(next)), float(i), chosen);
+    cum = next;
+  });
+  // None allowed: the shedding side never makes a broad leaf then; keep a form so the shader stays defined.
+  const form = select(chosen.lessThan(0), floor(roll.mul(BROAD_LEAF_FORMS)), chosen);
+  const stem = segment(TSL, u, v, -1.04, 0, -0.55, 0, 0.032, 0.026).d;
+  // The CPU stand-in (`leaf-shed-shim.js`) knows the form outright: build only that one.
+  const known = TSL.constValue?.(form);
+  if (known !== undefined) {
+    const one = [palmateLeaf, trifoliateLeaf, cordateLeaf, hastateLeaf, serratedLeaf][Math.max(0, Math.min(4, known))];
+    return min(one(TSL, u, v, r), stem);
+  }
   const blade = select(
     form.lessThan(0.5),
     palmateLeaf(TSL, u, v, r),
@@ -264,7 +293,6 @@ export function clumpDistance(TSL, u, v, rnd = null) {
       )
     )
   );
-  const stem = segment(TSL, u, v, -1.04, 0, -0.55, 0, 0.032, 0.026).d;
   return min(blade, stem);
 }
 
@@ -382,6 +410,17 @@ export function shedBody(TSL, p, kind, flipCos, rnd = null) {
   const { select, float } = TSL;
   const u = p.x;
   const v = p.y.div(flipCos);
+  // The CPU stand-in knows the kind outright: build only that body (five times faster per preview pixel).
+  const knownKind = TSL.constValue?.(kind);
+  if (knownKind !== undefined) {
+    if (knownKind > 1.5) {
+      const t = twigShape(TSL, u, p.y, rnd);
+      return { d: t.d, rad: t.r, cut: t.cut };
+    }
+    const d =
+      knownKind < 0.5 ? leafDistance(TSL, u.mul(1.1), v.mul(1.1), rnd).div(1.1) : clumpDistance(TSL, u, v, rnd);
+    return { d: d.mul(flipCos), rad: float(1), cut: float(0) };
+  }
   // A twig is a round stick: turning over does not thin it the way it thins a flat leaf.
   const twig = twigShape(TSL, u, p.y, rnd);
   const isBroad = kind.lessThan(1.5);

@@ -18,6 +18,7 @@ export { createParticleEngine } from './particles/particle-engine.js';
 export { WIND_DIAGNOSTIC_PARTICLES } from './particles/wind-diagnostic-particles.js';
 export { createGustEngine } from './particles/particle-engine.js';
 export { createFireParticleEngine } from './particles/particle-engine.js';
+export { createLeafShedEngine } from './particles/particle-engine.js';
 export {
   createCritterEngine,
   allocateCritterBuffers,
@@ -460,6 +461,10 @@ export {
   windTrailsLook,
   windTrailsMeshSegments,
 } from './wind-trails.js';
+// LEAF SHED (2026-10-31) — leaves and twigs torn off `_Tree`/`_Bush` canopies by a strong wind,
+// in the canopies' own colours, drawn in the author's own leaf style (particles/leaf-shed-runtime.js).
+export { LEAF_SHED, LEAF_SHED_PARAMS, leafShedCapacity, resolveLeafShedParams } from './leaf-shed.js';
+export { createLeafShedSubsystem } from './leaf-shed-subsystem.js';
 // TEMPERATURE EFFECTS (2026-10-27) — the Temperature fader's icy / warm grade,
 // frost frame and outdoor heat ripple (folded into grade/grade-present.js).
 export { TEMPERATURE_EFFECTS, TEMPERATURE_EFFECTS_PARAMS } from './temperature/temperature.js';

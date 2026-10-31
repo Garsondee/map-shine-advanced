@@ -83,6 +83,13 @@
  * revived albedo pack. It shares this worker (not a third one) because it is the
  * same kind of work — fetch, decode, reduce, cache — and a worker that is already
  * warm costs nothing to reuse.
+ *
+ * THIRD JOB (2026-10-31): `{ id, src, mode:'colourGrid' }` answers `{ id, ok:true,
+ * mode:'colourGrid', width, height, gridW, gridH, rgba:ArrayBuffer, cached }` — the
+ * same resized decode as the alpha grid, but every channel kept (straight, not
+ * premultiplied), at <= COARSE_COLOUR_MAX_DIM a side. Leaf Shed reads the colour
+ * painted under each leaf it sheds; the fetch is the HTTP-cache hit the alpha grid
+ * already paid for, and the answer is cached in IndexedDB beside it.
  */
 import { encodeStriped, encodeStripedParallel, computeMipChainDims, classifyBcFormat } from './block-compress.js';
 import { createBcEncodePool, bcEncodePoolSize } from './bc-encode-pool.js';
@@ -94,7 +101,13 @@ import { resolveAgainstPage } from './worker-url.js';
 // own script folder. Only the fetch resolves; `src` stays the cache key as-is.
 let _pageBase = null;
 const pageFetch = (url, opts) => fetch(resolveAgainstPage(url, _pageBase), opts);
-import { coarseAlphaGridDims, extractAlphaGrid, createMinAlphaGrid, accumulateMinAlphaBand } from './coarse-alpha.js';
+import {
+  coarseAlphaGridDims,
+  extractAlphaGrid,
+  createMinAlphaGrid,
+  accumulateMinAlphaBand,
+  COARSE_COLOUR_MAX_DIM,
+} from './coarse-alpha.js';
 // The mip reducer (Lanczos-2, premultiplied, dilated, LINEARIZED). Replaced the
 // OffscreenCanvas `drawImage` resize this file used to rely on — see
 // mip-resample.js's header for the three author-reported defects that motivated
@@ -276,6 +289,8 @@ const CACHE_VERSION = 13;
  * COARSE_ALPHA_MAX_DIM`); a cached v2 grid would keep serving the coarse one.
  */
 const ALPHA_CACHE_VERSION = 3;
+/** Bump to invalidate every cached colour grid (`handleColourGrid`). */
+const COLOUR_CACHE_VERSION = 1;
 
 /**
  * A cheap HEAD request for `src`'s CURRENT identity on the server — whichever
@@ -521,6 +536,48 @@ async function handleAlphaGrid(src) {
   return { width, height, gridW, gridH, grid, cached: false };
 }
 
+/**
+ * The colour twin of {@link handleAlphaGrid}: the same reduced decode, all four
+ * channels kept. See this file's header (THIRD JOB).
+ * @param {string} src
+ * @returns {Promise<{width:number, height:number, gridW:number, gridH:number,
+ *   rgba:Uint8Array, cached:boolean}>}
+ */
+async function handleColourGrid(src) {
+  const key = `colour:v${COLOUR_CACHE_VERSION}:${src}`;
+  const cached = await cacheGet(key).catch(() => null);
+  if (cached && isSameResource(cached, await headSource(src))) {
+    return { ...cached, cached: true };
+  }
+  const resp = await pageFetch(src);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${src}`);
+  const etag = resp.headers.get('etag');
+  const lastModified = resp.headers.get('last-modified');
+  const contentLength = resp.headers.get('content-length');
+  const blob = await resp.blob();
+  const probe = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+  const width = probe.width;
+  const height = probe.height;
+  const { w: gridW, h: gridH } = coarseAlphaGridDims(width, height, COARSE_COLOUR_MAX_DIM);
+  probe.close();
+  const small = await createImageBitmap(blob, {
+    premultiplyAlpha: 'none',
+    colorSpaceConversion: 'none',
+    resizeWidth: gridW,
+    resizeHeight: gridH,
+    resizeQuality: 'high',
+  });
+  const canvas = new OffscreenCanvas(gridW, gridH);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.clearRect(0, 0, gridW, gridH);
+  ctx.drawImage(small, 0, 0);
+  small.close();
+  // vt/ decode-time readback (allowed; see no-gpu-readback) — 1 MB at the 512 cap.
+  const rgba = new Uint8Array(ctx.getImageData(0, 0, gridW, gridH).data.buffer);
+  await cachePut(key, { width, height, gridW, gridH, rgba, etag, lastModified, contentLength }).catch(() => {});
+  return { width, height, gridW, gridH, rgba, cached: false };
+}
+
 async function handle(src) {
   // BAKED FIRST (mythica-machina-press#439): if the module this asset ships
   // in was pre-compressed at build time, use that instead of ever decoding or
@@ -730,6 +787,24 @@ self.onmessage = async (e) => {
           cached: a.cached,
         },
         [a.grid.buffer]
+      );
+      return;
+    }
+    if (mode === 'colourGrid') {
+      const c = await handleColourGrid(src);
+      self.postMessage(
+        {
+          id,
+          ok: true,
+          mode: 'colourGrid',
+          width: c.width,
+          height: c.height,
+          gridW: c.gridW,
+          gridH: c.gridH,
+          rgba: c.rgba.buffer,
+          cached: c.cached,
+        },
+        [c.rgba.buffer]
       );
       return;
     }

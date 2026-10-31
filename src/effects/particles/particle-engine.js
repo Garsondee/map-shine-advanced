@@ -55,3 +55,7 @@ export { createFireParticleEngine } from './fire-particle-runtime.js';
 // kernels and materials over them. See critter-runtime.js's header for the whole account.
 export { createCritterEngine, allocateCritterBuffers, allocateWindCells } from './critter-runtime.js';
 export { createCritterZoneBuffer } from './critter-zone-buffer.js';
+// LEAF SHED — a FIFTH runtime under the same roof: leaves torn off the painted canopies, born where
+// the CPU says (under a canopy, in its colour) and flown by a kernel over the arena. See
+// leaf-shed-runtime.js's header for why a birth is decided on the CPU and everything after on the GPU.
+export { createLeafShedEngine } from './leaf-shed-runtime.js';

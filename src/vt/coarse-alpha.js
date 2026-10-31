@@ -63,6 +63,14 @@
 export const COARSE_ALPHA_MAX_DIM = 1024;
 
 /**
+ * The cap for a COLOUR grid (`requestCoarseColourGrid`, 2026-10-31): Leaf Shed reads the
+ * colour painted under each leaf it sheds. 512 keeps ~15 art px per texel on a 7,500 px
+ * canopy file — fine enough that a blob's fill and each leaf's hue survive, coarse enough
+ * that the grid is 1 MB and never a world-resolution buffer.
+ */
+export const COARSE_COLOUR_MAX_DIM = 512;
+
+/**
  * Size a coarse alpha grid for a source image, preserving aspect ratio and
  * never upscaling (a 64px icon stays 64px — resizing it UP would invent
  * coverage detail that does not exist).

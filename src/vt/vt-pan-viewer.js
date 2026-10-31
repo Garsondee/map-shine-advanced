@@ -92,6 +92,7 @@ import {
 import {
   requestCompressedTexture,
   requestCoarseAlphaGrid,
+  requestCoarseColourGrid,
   getCompressedTextureStats,
   dropQueuedJobs,
   PRIORITY_INTERACTIVE,
@@ -440,6 +441,9 @@ import {
   // WIND TRAILS (2026-10-27) — the ribbon engine's second costume.
   buildWindTrailsSystem,
   windTrailsLook,
+  // LEAF SHED (2026-10-31) — leaves and twigs torn off the canopies by a strong wind.
+  createLeafShedEngine,
+  createLeafShedSubsystem,
   // TABLE (2026-10-27) — the brass-rimmed velvet table round the scene.
   createTableSubsystem,
   TABLE_PARAMS,
@@ -1494,6 +1498,9 @@ async function startVtPanViewerUnserialized({
   getIridescenceRenderState,
   // WIND TRAILS (2026-10-27): `{ enabled, params: <WIND_TRAILS_PARAMS> }`.
   getWindTrailsRenderState,
+  // LEAF SHED (2026-10-31): `{ enabled, params: <LEAF_SHED_PARAMS>, profile, gridPx, pxPerFt,
+  // treeHeightFt, bushHeightFt, groundElevation }` — see effects/leaf-shed-subsystem.js.
+  getLeafShedRenderState,
   // TEMPERATURE EFFECTS (2026-10-27): `{ enabled, params: <TEMPERATURE_EFFECTS_PARAMS> }`.
   getTemperatureEffectsRenderState,
   // TABLE (2026-10-27): `{ enabled, params: <TABLE_PARAMS> }`.
@@ -1685,6 +1692,8 @@ async function startVtPanViewerUnserialized({
   getIridescenceMaskItems ??= () => [];
   // Unwired (a harness, a test page) ⇒ no trails — never a guess at a default-on.
   getWindTrailsRenderState ??= () => ({ enabled: false, params: null });
+  // Unwired ⇒ no leaves.
+  getLeafShedRenderState ??= () => ({ enabled: false, params: null });
   // Unwired ⇒ a temperate look: no grade shift, no frost, no ripple.
   getTemperatureEffectsRenderState ??= () => ({ enabled: false, params: null });
   // Unwired ⇒ no table: the padding stays the scene's plain background.
@@ -6797,6 +6806,7 @@ async function startVtPanViewerUnserialized({
       particleEngine?.updateWind(windHandle);
       gustEngine?.updateWind(windHandle);
       trailEngine?.updateWind(windHandle);
+      leafShed?.updateWind(windHandle);
       fireSubsystem?.updateWind(windHandle);
     }
 
@@ -7959,6 +7969,80 @@ async function startVtPanViewerUnserialized({
         trailLookParams = trailParams;
       }
     }
+
+    // ------------------------------------------------------------------
+    // LEAF SHED (effects/leaf-shed.js, 2026-10-31) — leaves, clumps and twigs
+    // torn off the painted canopies once the wind passes the card's
+    // threshold, in each canopy's own colours. The subsystem owns the
+    // decisions; the viewer hands it the canopies it is drawing, the wind,
+    // and the floor's depth. A calm scene costs it one comparison a frame.
+    // ------------------------------------------------------------------
+    /**
+     * Every canopy the viewer is drawing, as Leaf Shed sources: Case-2 overlays (a `_Tree`/`_Bush`
+     * file beside a background or tile) and Case-1 tiles (the tile's own image IS the canopy).
+     * `visible` is the canopy's own residency answer — on this floor and resident — so a hidden
+     * floor's trees shed nothing.
+     */
+    function listLeafShedCanopies() {
+      const out = [];
+      for (const state of itemStates.values()) {
+        if (!state.placement || !state.item) continue;
+        let corners = null;
+        const quad = () => (corners ??= computeQuadCorners(state.placement));
+        if (state.vegetationOverlays) {
+          for (const kind of VEGETATION_KINDS) {
+            const entry = state.vegetationOverlays[kind.id];
+            if (!entry || entry.status !== 'ready' || !entry.url) continue;
+            out.push({
+              key: `${state.item.id}/${kind.id}`,
+              url: entry.url,
+              kind: kind.id,
+              corners: quad(),
+              visible: !!entry.mesh?.visible,
+            });
+          }
+        }
+        if (state.wholeImage?.tiles?.length) {
+          const vegTiles = state.wholeImage.tiles.filter((t) => t.vegActive);
+          if (vegTiles.length) {
+            const kind = detectSelfVegetationKind(state.item.src, VEGETATION_KINDS);
+            if (kind) {
+              out.push({
+                key: `${state.item.id}/self`,
+                url: state.item.src,
+                kind: kind.id,
+                corners: quad(),
+                visible: vegTiles.some((t) => !!t.mesh?.visible),
+              });
+            }
+          }
+        }
+      }
+      return out;
+    }
+    const leafShed = createLeafShedSubsystem({
+      THREE,
+      createEngine: createLeafShedEngine,
+      getRenderState: () => getLeafShedRenderState(),
+      listCanopies: listLeafShedCanopies,
+      requestColourGrid: (url) => requestCoarseColourGrid(url, { owner: compressionOwner }),
+      // Getters: `windHandle` is rebuilt on every rebake.
+      getWindHandle: () => windHandle,
+      getWindSpeed01: () => uWindSpeed01.value,
+      // The floor's own ground, ranked exactly as the critters rank theirs: a leaf under a canopy is
+      // hidden by it (canopies are drawn into buf:scene.depth), and appears as it slides out.
+      resolveExpectedDepth: (elevation) => {
+        const safeElevation = Number.isFinite(elevation) ? elevation : 0;
+        const rank = depthAuthority.rankOfElevation(safeElevation);
+        return computeTieSafeExpectedDepth(rank, depthAuthority.maxRank);
+      },
+      engineDeps: {
+        illumTexNode: envLight.illumTexNode,
+        colorationTexNode: envLight.colorationTexNode,
+        depthTexNode: envLight.depthTexNode,
+        depthFlagsTexNode: envLight.depthFlagsTexNode,
+      },
+    });
 
     // ------------------------------------------------------------------
     // THE WIND FIELD DEBUG OVERLAY (diag/wind-field-overlay.js, Wind.md Tier
@@ -10148,6 +10232,14 @@ async function startVtPanViewerUnserialized({
       // the scene), then the fireflies' ADDITIVE glow on top, so the colony's HDR light feeds the
       // bloom pass that runs after this block. `sync()` already decided the frame's population; this
       // is a visibility check.
+      // LEAF SHED — under the maggots and flies (leaves are on, or falling to, the ground), lit and
+      // depth-gated the critters' way (critters/critter-surface.js).
+      if (leafShed.hasContent && leafShed.scene) {
+        const prevLeafAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(leafShed.scene, camera);
+        renderer.autoClearColor = prevLeafAutoClear;
+      }
       if (maggotsSubsystem.hasContent) {
         profiler?.begin(Z.lightDrawMaggots);
         const prevMaggotsAutoClear = renderer.autoClearColor;
@@ -19930,6 +20022,8 @@ async function startVtPanViewerUnserialized({
         // overlays loop.
         const entry = {
           status: 'loading',
+          // The canopy art itself — Leaf Shed reads its colours from this file (`listLeafShedCanopies`).
+          url,
           mesh: null,
           material: null,
           geometry: null,
@@ -21680,6 +21774,30 @@ async function startVtPanViewerUnserialized({
           activeTokenPoints,
           frameSceneEye
         );
+      }
+      // LEAF SHED — the same air as the wind trails, stepped on the same (sim) clock so the leaves tear
+      // off with the same gust fronts the overlay draws. Its shadows fall down-sun like every caster's
+      // (the per-px throw the layer eye uses below) and fade with the outdoor light.
+      if (view) {
+        const sunKey = skyHandle?.key;
+        const per = sunKey
+          ? projectShadowOffset({
+              azimuthDeg: sunKey.azimuthDeg,
+              elevationDeg: sunKey.elevationDeg,
+              heightPx: 100,
+              maxOffsetPx: 300,
+              offsetScale: 1,
+              softKnee: true,
+            })
+          : null;
+        leafShed.sync(renderer, {
+          dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
+          tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          viewRect: windSpawnRect,
+          sceneRect: sceneRectToMinMax(dimensions?.sceneRect),
+          shadowThrow: per ? { x: per.x / 100, y: per.y / 100 } : null,
+          daylight01: sceneLight01,
+        });
       }
       // PRECIPITATION — its compute step, in the same no-target-bound block as
       // fire and the two wind engines above, and for the same reason.
@@ -28027,6 +28145,8 @@ async function startVtPanViewerUnserialized({
        * forever.
        */
       getFireStatus: () => fireSubsystem.getStatus(),
+      /** Leaf Shed's own counts — canopy files decoded/pending/missing, emitters, births, the engine. */
+      getLeafShedStatus: () => leafShed.getStatus(),
       /**
        * THE CRITTERS' own per-frame counts — for each effect, the zone count, the field's size
        * and every engine's tier, head-count and how much of it the sky is showing.
@@ -31699,6 +31819,16 @@ export function sampleVtPanViewerSceneSettleNow() {
 export function getVtPanViewerFireStatus() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getFireStatus();
+}
+
+/**
+ * Leaf Shed's counts (`effects/leaf-shed-subsystem.js#getStatus`): are the canopies' colours in,
+ * how many emitters, how many leaves were born this frame, is the engine built.
+ * @returns {object} the status, or `{skipped:true}` when nothing is running.
+ */
+export function getVtPanViewerLeafShedStatus() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getLeafShedStatus();
 }
 
 /**

@@ -335,6 +335,7 @@ import {
   setVtPanViewerWindAmbient,
   setVtPanViewerWindGustiness,
   getVtPanViewerFireStatus,
+  getVtPanViewerLeafShedStatus,
   getVtPanViewerCritterStatus,
   setVtPanViewerSunHour,
   sweepVtPanViewerTimeOfDay,
@@ -562,6 +563,10 @@ import {
   // at its real speed (effects/wind-trails.js).
   WIND_TRAILS,
   WIND_TRAILS_PARAMS,
+  // LEAF SHED (2026-10-31) — leaves and twigs torn off the canopies by a strong wind
+  // (effects/leaf-shed.js).
+  LEAF_SHED,
+  LEAF_SHED_PARAMS,
   // TEMPERATURE EFFECTS (2026-10-27) — the Temperature fader's icy / warm
   // grade, frost frame and heat ripple (effects/temperature/).
   TEMPERATURE_EFFECTS,
@@ -2577,6 +2582,9 @@ function install() {
   // WIND TRAILS — `enabledFromProfile: 'low'`, so "not resolved yet" seeds ON;
   // the viewer still draws nothing until there is wind above the threshold.
   let windTrailsReadout = { enabled: true, params: null };
+  // LEAF SHED — `enabledFromProfile: 'low'`, so it seeds ON; nothing sheds until a strong wind
+  // meets a painted canopy.
+  let leafShedReadout = { enabled: true, params: null };
   // TEMPERATURE EFFECTS — `enabledFromProfile: 'low'`, so it seeds ON; a
   // temperate scene shows nothing either way.
   let temperatureEffectsReadout = { enabled: true, params: null };
@@ -2988,6 +2996,12 @@ function install() {
     windTrailsReadout = buildCascadeReadout(resolved);
   });
 
+  // LEAF SHED (2026-10-31) — reads the vegetation canopies the viewer already draws, so `apply`
+  // only refreshes the readout (getLeafShedRenderState below).
+  effectRegistry.register(LEAF_SHED, (resolved) => {
+    leafShedReadout = buildCascadeReadout(resolved);
+  });
+
   // TEMPERATURE EFFECTS (2026-10-27) — driven by the weather's own eased
   // `temperature01`, read by the viewer each frame; `apply` only refreshes the
   // readout (getTemperatureEffectsRenderState below).
@@ -3157,6 +3171,18 @@ function install() {
     const { params: sceneParams } = readSceneEffectParams('windTrails');
     layers.paramLayers = [sceneParams, windTrailsLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('windTrails', layers);
+  }
+
+  /** Transient, in-memory Leaf Shed tuning (MapShine.setLeafShed / the card). Mirrors
+   * `windTrailsLiveOverride` exactly. */
+  const leafShedLiveOverride = {};
+
+  /** Re-resolve Leaf Shed's cascade — mirrors `reapplyWindTrails` exactly. */
+  function reapplyLeafShed() {
+    const layers = deriveEffectLayers('leafShed', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('leafShed');
+    layers.paramLayers = [sceneParams, leafShedLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('leafShed', layers);
   }
 
   /** Transient, in-memory Temperature Effects tuning (MapShine.setTemperatureEffects
@@ -3398,6 +3424,7 @@ function install() {
     ['prism', () => reapplyPrism()],
     ['iridescence', () => reapplyIridescence()],
     ['wind trails', () => reapplyWindTrails()],
+    ['leaf shed', () => reapplyLeafShed()],
     ['temperature effects', () => reapplyTemperatureEffects()],
     ['table', () => reapplyTable()],
     ['parallax', () => reapplyParallax()],
@@ -5262,6 +5289,41 @@ function install() {
     return { ...windTrailsLiveOverride };
   };
 
+  // MapShine.setLeafShed — the console tuner AND the card's write path (mirrors
+  // MapShine.setWindTrails exactly):
+  //   MapShine.setLeafShed({ amount: 2, startsAboveMps: 9 })
+  MapShine.setLeafShed = (partial = {}) => {
+    const p = partial ?? {};
+    if (typeof p.enabled === 'boolean') {
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('leafShed', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyLeafShed())
+        .catch((err) => log.error('leaf shed enable write/reapply failed:', err));
+    }
+    let changed = false;
+    const scenePatch = {};
+    for (const k of Object.keys(LEAF_SHED_PARAMS)) {
+      if (k in p) {
+        leafShedLiveOverride[k] = p[k];
+        if (LEAF_SHED_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      Promise.resolve(writeSceneEffectParams('leafShed', scenePatch)).then(
+        (result) => {
+          if (!result.ok) log.warn(`leaf shed scene param write not persisted: ${result.reason}`);
+        },
+        (err) => log.error('leaf shed scene param write failed:', err)
+      );
+      try {
+        reapplyLeafShed();
+      } catch (err) {
+        log.error('leaf shed reapply (setLeafShed) failed:', err);
+      }
+    }
+    return { ...leafShedLiveOverride };
+  };
+
   // MapShine.setTemperatureEffects — the console tuner AND the card's write
   // path (mirrors MapShine.setWindTrails exactly):
   //   MapShine.setTemperatureEffects({ frostReach: 0.4, coldStrength: 1.5 })
@@ -5699,6 +5761,32 @@ function install() {
   const getIridescenceRenderState = () => projectCascadeRenderState(iridescenceReadout);
   // WIND TRAILS' render-state seam — same shape as iridescence's own, above.
   const getWindTrailsRenderState = () => projectCascadeRenderState(windTrailsReadout);
+  // LEAF SHED's render-state seam — the cascade, plus the facts the subsystem needs to size a
+  // canopy in the world: the grid (leaf size and outline match the painted leaves at the map's own
+  // scale), feet → px, the Vegetation card's tree/bush heights (where a leaf is born), the floor's
+  // ground (the depth gate), and the graphics profile (how many leaves can be in the air at once).
+  const getLeafShedRenderState = () => {
+    const state = projectCascadeRenderState(leafShedReadout);
+    const grid = canvas?.scene?.grid;
+    const gridPx = Number(grid?.size) > 0 ? Number(grid.size) : 100;
+    const feetPerSquare = Number(grid?.distance) > 0 ? Number(grid.distance) : 5;
+    let profile;
+    try {
+      profile = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile);
+    } catch {
+      profile = undefined; // registry not ready — standard capacity
+    }
+    const veg = vegetationReadout?.params ?? null;
+    return {
+      ...state,
+      profile,
+      gridPx,
+      pxPerFt: gridPx / feetPerSquare,
+      treeHeightFt: Number(veg?.treeHeightFt) || 0,
+      bushHeightFt: Number(veg?.bushHeightFt) || 0,
+      groundElevation: activeFloorContext?.band?.[0] ?? activeFloorContext?.elevation ?? 0,
+    };
+  };
   // TEMPERATURE EFFECTS' render-state seam — same shape again.
   const getTemperatureEffectsRenderState = () => projectCascadeRenderState(temperatureEffectsReadout);
   // TABLE'S render-state seam — same shape again.
@@ -9483,6 +9571,8 @@ function install() {
   // height gate). See `vt-pan-viewer.js#getFireStatus` for why guessing between
   // those without the number is the failure mode, not the shortcut.
   MapShine.getFireStatus = () => getVtPanViewerFireStatus();
+  // LEAF SHED's counts — canopy colours decoded, emitters, births per frame, the engine.
+  MapShine.getLeafShedStatus = () => getVtPanViewerLeafShedStatus();
 
   // THE CRITTERS' PER-FRAME COUNTS — `{smellyFlies, fireflies}`, each with the zone count, the zone
   // field's size, and every engine's tier, head-count and how much of the
@@ -13834,6 +13924,21 @@ function install() {
         : 'off',
   });
 
+  // LEAF SHED's card (2026-10-31) — beside Vegetation, whose canopies it sheds from.
+  registerSimpleEffectCard('leafShed', {
+    icon: 'wind',
+    title: 'Leaf Shed',
+    accVar: '--c-surface',
+    schema: LEAF_SHED_PARAMS,
+    fohKeys: ['amount', 'startsAboveMps', 'leafSize', 'bushShare', 'carry'],
+    getReadout: () => leafShedReadout,
+    setValue: (patch) => MapShine.setLeafShed(patch),
+    status: (readout) =>
+      readout.enabled
+        ? `on · sheds above ${readout.params?.startsAboveMps ?? LEAF_SHED_PARAMS.startsAboveMps.default} m/s`
+        : 'off',
+  });
+
   // TEMPERATURE EFFECTS' card (2026-10-27) — its own card, in Atmosphere
   // beside the weather it follows. The status line names the bands, so the
   // fader's 25% / 10% / 75% marks read straight off the card.
@@ -15891,6 +15996,7 @@ function install() {
         getIridescenceMaskItems,
         getIridescenceRenderState,
         getWindTrailsRenderState,
+        getLeafShedRenderState,
         getTemperatureEffectsRenderState,
         getTableRenderState,
         getParallaxRenderState,

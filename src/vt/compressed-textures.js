@@ -132,6 +132,11 @@ const _stats = {
   alphaRequests: 0,
   alphaOk: 0,
   alphaFailed: 0,
+  /** Coarse-COLOUR requests (Leaf Shed's canopy colours — see requestCoarseColourGrid),
+   * counted apart for the same reason as the alpha ones. */
+  colourRequests: 0,
+  colourOk: 0,
+  colourFailed: 0,
   /** The deepest the main-thread queue ever got this session. A cold mansion
    * load should show this well above zero — if it reads 0 on a cold load, the
    * priority lanes are not actually being exercised and any conclusion drawn
@@ -162,6 +167,13 @@ const _stats = {
   lastError: null,
 };
 
+/** One failure, counted against the job kind that failed. */
+function countFailure(mode) {
+  if (mode === 'alphaGrid') _stats.alphaFailed++;
+  else if (mode === 'colourGrid') _stats.colourFailed++;
+  else _stats.failed++;
+}
+
 function _queueDepth() {
   return _queue[PRIORITY_INTERACTIVE].length + _queue[PRIORITY_BACKGROUND].length;
 }
@@ -173,12 +185,16 @@ function _queueDepth() {
 function _resultFor(d, p) {
   const { ok, mode, format, levels, width, height, cached, alphaStats, alphaMinGrid, error } = d;
   if (!ok) {
-    if (p.mode === 'alphaGrid') _stats.alphaFailed++;
-    else _stats.failed++;
+    countFailure(p.mode);
     // `error` is bc-compress.worker.js's own `String((err && err.message) || err)`
     // from its one catch-all try/catch — the real reason, not just a tally.
     _stats.lastError = error ? String(error) : `worker replied ok:false with no error field (mode: ${p.mode})`;
     return null; // resolve (not reject): the caller's contract is "null ⇒ use raw"
+  }
+  if (mode === 'colourGrid') {
+    _stats.colourOk++;
+    if (cached) _stats.cached++;
+    return { width, height, gridW: d.gridW, gridH: d.gridH, rgba: new Uint8Array(d.rgba), cached: !!cached };
   }
   if (mode === 'alphaGrid') {
     _stats.alphaOk++;
@@ -212,8 +228,7 @@ function _pump() {
     if (!w) {
       // The worker died between accepting this job and dispatching it. Same
       // contract as every other failure path: resolve null, caller uses raw.
-      if (job.mode === 'alphaGrid') _stats.alphaFailed++;
-      else _stats.failed++;
+      countFailure(job.mode);
       _stats.lastError =
         'worker unavailable/cooling down before this job could be dispatched (see workerErrors/cooldownActive)';
       job.resolve(null);
@@ -225,8 +240,7 @@ function _pump() {
       _inFlight++;
     } catch (err) {
       _pending.delete(job.id);
-      if (job.mode === 'alphaGrid') _stats.alphaFailed++;
-      else _stats.failed++;
+      countFailure(job.mode);
       _stats.lastError = `postMessage threw (not cloneable / worker gone): ${String(err?.message || err)}`;
       job.resolve(null); // not cloneable / worker gone — fall back to raw
     }
@@ -382,6 +396,27 @@ export function requestCoarseAlphaGrid(src, { priority = PRIORITY_BACKGROUND, ow
     return Promise.resolve(null);
   }
   return _enqueue({ message: { src, mode: 'alphaGrid' }, mode: 'alphaGrid', priority, owner });
+}
+
+/**
+ * An item's art reduced to a small STRAIGHT RGBA grid (<= `COARSE_COLOUR_MAX_DIM` a
+ * side, row 0 = the image's top) — the colour painted where, for Leaf Shed's canopies.
+ * Same worker, cache and degradation contract as {@link requestCoarseAlphaGrid}: `null`
+ * means "no colour for this item", never a guessed one.
+ *
+ * @param {string} src
+ * @param {{priority?: string, owner?: unknown}} [opts]
+ * @returns {Promise<{width:number, height:number, gridW:number, gridH:number,
+ *   rgba:Uint8Array, cached:boolean} | null>}
+ */
+export function requestCoarseColourGrid(src, { priority = PRIORITY_BACKGROUND, owner } = {}) {
+  _stats.colourRequests++;
+  const w = ensureWorker();
+  if (!w) {
+    _stats.unavailable++;
+    return Promise.resolve(null);
+  }
+  return _enqueue({ message: { src, mode: 'colourGrid' }, mode: 'colourGrid', priority, owner });
 }
 
 /**

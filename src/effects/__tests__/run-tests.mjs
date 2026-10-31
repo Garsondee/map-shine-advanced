@@ -36,6 +36,7 @@ import { run as runLens } from './lens.test.mjs';
 import { run as runLensMotion } from './lens-motion.test.mjs';
 import { run as runLensRender } from './lens-render.test.mjs';
 import { run as runWindTrails } from './wind-trails.test.mjs';
+import { run as runLeafShed } from './leaf-shed.test.mjs';
 import { run as runCandleWindState } from './candle-wind-state.test.mjs';
 
 let passed = 0;
@@ -68,6 +69,7 @@ const t = {
 const suites = [
   ['effect-registration', runEffectRegistration],
   ['wind-trails', runWindTrails],
+  ['leaf-shed', runLeafShed],
   ['candle-wind-state', runCandleWindState],
   ['effect-tier', runEffectTier],
   ['effect-tier-consumption', runEffectTierConsumption],

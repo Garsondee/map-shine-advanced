@@ -55,6 +55,7 @@ export const EFFECT_GROUP = Object.freeze({
   iridescence: 'surfaces',
   prism: 'surfaces',
   vegetation: 'surfaces',
+  leafShed: 'surfaces',
 
   fire: 'living',
   dust: 'living',

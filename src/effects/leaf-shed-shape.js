@@ -53,6 +53,47 @@ const CUT_WOOD = [226 / 255, 170 / 255, 108 / 255];
 /** Dice for callers that have none (tests, the shadow's old look): a plain leaf. */
 const NO_DICE = [0.5, 0.5, 0.5, 0.5];
 
+/**
+ * THE DIALS (the author, 2026-10-31: "lots of controls so that I can fine tune the appearance"). The
+ * runtime hands its uniform nodes in through {@link buildShedLook} / {@link shedCoverage}; every builder
+ * below reads them with {@link knob}, so a Studio slider moves a uniform and never rebuilds a shader.
+ * Defaults reproduce the look the author approved before the dials existed.
+ */
+export const SHAPE_KNOB_DEFAULTS = Object.freeze({
+  leafWidth: 1,
+  leafVariety: 1,
+  saturation: 1,
+  brightness: 1,
+  shading: 0.55,
+  underside: 1,
+  veins: 0.45,
+  outlineDarkness: 1,
+  outlineNoise: 1,
+  outlineGrain: 1,
+  twigThickness: 1,
+  twigBranching: 1,
+  twigCurl: 1,
+  cutWood: 1,
+});
+/**
+ * The knobs in force while one material's nodes are being built. Node graphs are built synchronously, so
+ * this is set for the span of one {@link buildShedLook}/{@link shedCoverage} call and cleared after —
+ * cheaper to read than threading one more argument through every leaf form.
+ */
+let KNOBS = null;
+function knob(TSL, name) {
+  return KNOBS?.[name] ?? TSL.float(SHAPE_KNOB_DEFAULTS[name]);
+}
+function withKnobs(knobs, build) {
+  const prev = KNOBS;
+  KNOBS = knobs ?? null;
+  try {
+    return build();
+  } finally {
+    KNOBS = prev;
+  }
+}
+
 /** The four dice as nodes — `rnd` may be a vec4 node, an array of numbers, or null. */
 function dice(TSL, rnd) {
   const src = rnd ?? NO_DICE;
@@ -73,10 +114,11 @@ function reroll(TSL, r, k) {
 export function leafDistance(TSL, u, v, rnd = null) {
   const { float, clamp, sin, pow, max, abs, select } = TSL;
   const [r0, r1, r2, r3] = dice(TSL, rnd);
-  const widthK = float(0.8).add(r0.mul(0.42)); // 0.80 … 1.22
-  const bias = float(0.14).add(r1.mul(0.34)); // 0.14 … 0.48: where it is fullest
-  const bow = r2.sub(0.5).mul(0.24); // ± 0.12: a leaf is rarely straight
-  const lopsided = r3.sub(0.5).mul(0.36); // ± 0.18: one flank fuller
+  const variety = knob(TSL, 'leafVariety');
+  const widthK = float(1.01).add(r0.sub(0.5).mul(0.42).mul(variety)).mul(knob(TSL, 'leafWidth')); // 0.80 … 1.22 at 1
+  const bias = float(0.31).add(r1.sub(0.5).mul(0.34).mul(variety)); // 0.14 … 0.48: where it is fullest
+  const bow = r2.sub(0.5).mul(0.24).mul(variety); // ± 0.12: a leaf is rarely straight
+  const lopsided = r3.sub(0.5).mul(0.36).mul(variety); // ± 0.18: one flank fuller
   const tipPow = float(0.5).add(reroll(TSL, r0, 7.7).mul(0.22));
   const vb = v.add(bow.mul(u.mul(u).sub(1)));
   const t = clamp(u.add(1).mul(0.5), 0, 1);
@@ -145,8 +187,9 @@ function palmateLeaf(TSL, u, v, r) {
   ];
   let reach = float(0);
   LOBES.forEach(([a, len], k) => {
-    const ang = float(a).add(reroll(TSL, r[k % 4], 2.3 + k).sub(0.5).mul(0.22));
-    const l = float(len).mul(float(0.85).add(reroll(TSL, r[(k + 1) % 4], 5.1 + k).mul(0.3)));
+    const variety = knob(TSL, 'leafVariety');
+    const ang = float(a).add(reroll(TSL, r[k % 4], 2.3 + k).sub(0.5).mul(0.22).mul(variety));
+    const l = float(len).mul(float(1).add(reroll(TSL, r[(k + 1) % 4], 5.1 + k).sub(0.5).mul(0.3).mul(variety)));
     reach = max(reach, l.mul(pow(max(float(1).sub(abs(th.sub(ang)).div(0.42)), 0), 1.25)));
   });
   const tri = abs(fract(th.mul(4.4).add(r[2])).sub(0.5)).mul(2);
@@ -254,16 +297,18 @@ export function twigShape(TSL, u, vIn, rnd = null) {
   const N = 6;
   const L = float(1.85 / N).mul(float(0.88).add(die(0).mul(0.2)));
   const zig = select(die(2).greaterThan(0.5), float(1), float(-1));
-  const R0 = float(TWIG_BASE_R).mul(float(0.85).add(die(3).mul(0.35)));
+  const R0 = float(TWIG_BASE_R).mul(float(0.85).add(die(3).mul(0.35))).mul(knob(TSL, 'twigThickness'));
+  const curl = knob(TSL, 'twigCurl');
+  const branching = knob(TSL, 'twigBranching');
   const base = [-0.93, 0];
   let x = float(base[0]);
   let y = float(base[1]);
-  let th = die(1).sub(0.5).mul(0.5);
+  let th = die(1).sub(0.5).mul(0.5).mul(curl);
   let rad = R0;
   let acc = null;
   const FORKS = { 2: 1, 4: -1 };
   for (let i = 0; i < N; i++) {
-    th = th.add(die(10 + i).sub(0.5).mul(0.5)).add(zig.mul(i % 2 ? 0.17 : -0.17));
+    th = th.add(die(10 + i).sub(0.5).mul(0.5).mul(curl)).add(zig.mul(i % 2 ? 0.17 : -0.17).mul(curl));
     const nx = x.add(L.mul(cos(th)));
     const ny = y.add(L.mul(sin(th)));
     const radEnd = rad.mul(INTERNODE_TAPER);
@@ -284,9 +329,9 @@ export function twigShape(TSL, u, vIn, rnd = null) {
       const sideLens = [0.8, 0.62, 0.45];
       sideLens.forEach((k, j) => {
         // It curves back toward the parent's heading as it grows, with its own wander.
-        sth = sth.sub(sgn.mul(0.16)).add(die(30 + i * 3 + j).sub(0.5).mul(0.45));
-        const ex = sx.add(L.mul(k).mul(cos(sth)));
-        const ey = sy.add(L.mul(k).mul(sin(sth)));
+        sth = sth.sub(sgn.mul(0.16)).add(die(30 + i * 3 + j).sub(0.5).mul(0.45).mul(curl));
+        const ex = sx.add(L.mul(k).mul(branching).mul(cos(sth)));
+        const ey = sy.add(L.mul(k).mul(branching).mul(sin(sth)));
         const er = sr.mul(j === sideLens.length - 1 ? 0.35 : 0.72);
         acc = unionR(TSL, acc, segment(TSL, u, v, sx, sy, ex, ey, sr, er));
         // A tiny tertiary spur off the side shoot's first node, sometimes.
@@ -298,8 +343,8 @@ export function twigShape(TSL, u, vIn, rnd = null) {
             v,
             ex,
             ey,
-            ex.add(L.mul(0.38).mul(cos(spurTh))),
-            ey.add(L.mul(0.38).mul(sin(spurTh))),
+            ex.add(L.mul(0.38).mul(branching).mul(cos(spurTh))),
+            ey.add(L.mul(0.38).mul(branching).mul(sin(spurTh))),
             er.mul(0.6),
             er.mul(0.2)
           );
@@ -408,10 +453,22 @@ function brush(TSL, x, y, seed) {
  * @param {*} a.inkW - float, outline width in leaf units.
  * @param {*} a.lightSide - float ±1: which half of the leaf faces the light.
  * @param {*} [a.rnd] - the leaf's four dice (vec4 node).
+ * @param {object} [a.knobs] - the dials as nodes, keyed as {@link SHAPE_KNOB_DEFAULTS}; missing ones take the default.
  * @returns {{rgb:*, alpha:*, distance:*}}
  */
-export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rnd = null }) {
-  const { float, vec3, abs, cos, max, min, smoothstep, select, mix, dot } = TSL;
+export function buildShedLook(TSL, args) {
+  return withKnobs(args.knobs, () => buildShedLookNow(TSL, args));
+}
+
+function buildShedLookNow(TSL, { p, aa, kind, flip, rgb: rgbIn, inkW, lightSide, rnd = null }) {
+  const { float, vec3, abs, cos, max, min, smoothstep, select, mix, dot, clamp } = TSL;
+  // Saturation and brightness first: everything below (the shading, the line) is made from this colour.
+  const lum0 = dot(rgbIn, vec3(0.299, 0.587, 0.114));
+  const rgb = clamp(
+    mix(vec3(lum0, lum0, lum0), rgbIn, knob(TSL, 'saturation')).mul(knob(TSL, 'brightness')),
+    vec3(0, 0, 0),
+    vec3(1, 1, 1)
+  );
   const c = cos(flip);
   const flipCos = max(abs(c), MIN_FLIP);
   const body = shedBody(TSL, p, kind, flipCos, rnd);
@@ -426,8 +483,8 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
   const seed = dice4[0].add(dice4[3].mul(1.7));
   // A twig is ~1.7x the size of a leaf, so the same noise would read smoother on it: sample it finer and
   // swing it harder, so its edge is as ragged on screen as the tree's (the author: "sharper, less noisy than the tree").
-  const nk = select(isTwig, float(1.9), float(1));
-  const ampK = select(isTwig, float(1.25), float(1));
+  const nk = select(isTwig, float(1.9), float(1)).mul(knob(TSL, 'outlineGrain'));
+  const ampK = select(isTwig, float(1.25), float(1)).mul(knob(TSL, 'outlineNoise'));
   const outerWobble = brush(TSL, p.x.mul(nk), v.mul(nk), seed).mul(w).mul(0.42).mul(ampK).mul(flipCos);
   const innerWobble = brush(TSL, p.x.add(3.1).mul(nk), v.sub(1.7).mul(nk), seed.add(0.53))
     .mul(w)
@@ -438,9 +495,10 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
   const alpha = float(1).sub(smoothstep(aa.negate(), aa, d));
   // The underside: paler and a touch greyer, as a real leaf's is.
   const under = rgb.mul(0.82).add(vec3(0.06, 0.065, 0.045));
-  const base = select(c.greaterThanEqual(0), rgb, select(isTwig, rgb.mul(0.9), under));
+  const base = select(c.greaterThanEqual(0), rgb, select(isTwig, rgb.mul(0.9), mix(rgb, under, knob(TSL, 'underside'))));
   const hi = min(rgb.mul(1.18).add(0.03), vec3(1, 1, 1));
-  const litHalf = smoothstep(-0.05, 0.08, v.mul(lightSide)).mul(select(isTwig, float(0.35), float(0.55)));
+  const shading = knob(TSL, 'shading');
+  const litHalf = smoothstep(-0.05, 0.08, v.mul(lightSide)).mul(select(isTwig, shading.mul(0.35 / 0.55), shading));
   let col = mix(base, hi, litHalf);
   // The short interior stroke the art uses in place of a full midrib (dark fill, not the black line).
   const strokeInk = rgb.mul(0.3);
@@ -448,10 +506,10 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
   const stroke = float(1)
     .sub(smoothstep(aa.mul(0.5), aa.mul(1.4), abs(v).mul(flipCos)))
     .mul(strokeSpan)
-    .mul(0.45);
+    .mul(knob(TSL, 'veins'));
   col = mix(col, strokeInk, stroke);
   // The freshly broken end shows pale wood (her wood sheet): the twig's base, where it tore off. Its tips grew.
-  const endMask = body.cut;
+  const endMask = body.cut.mul(knob(TSL, 'cutWood'));
   col = mix(col, vec3(CUT_WOOD[0], CUT_WOOD[1], CUT_WOOD[2]), endMask);
   // The line. Leaves: a DEEP GREEN of their own colour, darker and a touch more saturated, never black (the
   // author, 2026-10-31: "no black outlines please, use an appropriate darker green"). Wood: a dark BROWN,
@@ -459,7 +517,7 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
   const lum = dot(rgb, vec3(0.299, 0.587, 0.114));
   const deep = max(vec3(lum, lum, lum).add(rgb.sub(lum).mul(1.35)), vec3(0, 0, 0)).mul(0.42);
   const brown = vec3(0.02, 0.012, 0.008).add(rgb.mul(0.2));
-  const ink = select(isTwig, brown, deep);
+  const ink = mix(rgb, select(isTwig, brown, deep), knob(TSL, 'outlineDarkness'));
   const dFill = d0.add(innerWobble);
   const fillMask = float(1).sub(smoothstep(w.negate().sub(aa), w.negate().add(aa), dFill));
   col = mix(ink, col, fillMask);
@@ -471,9 +529,11 @@ export function buildShedLook(TSL, { p, aa, kind, flip, rgb, inkW, lightSide, rn
  * @param {*} TSL @param {*} p @param {*} kind @param {*} flip @param {*} soft - edge softness, leaf units.
  * @param {*} [rnd] - the leaf's four dice (vec4 node).
  */
-export function shedCoverage(TSL, p, kind, flip, soft, rnd = null) {
-  const { float, abs, cos, max, smoothstep } = TSL;
-  const flipCos = max(abs(cos(flip)), MIN_FLIP);
-  const d = shedDistance(TSL, p, kind, flipCos, rnd);
-  return float(1).sub(smoothstep(soft.negate(), soft, d));
+export function shedCoverage(TSL, p, kind, flip, soft, rnd = null, knobs = null) {
+  return withKnobs(knobs, () => {
+    const { float, abs, cos, max, smoothstep } = TSL;
+    const flipCos = max(abs(cos(flip)), MIN_FLIP);
+    const d = shedDistance(TSL, p, kind, flipCos, rnd);
+    return float(1).sub(smoothstep(soft.negate(), soft, d));
+  });
 }

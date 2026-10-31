@@ -411,7 +411,14 @@ function makeBirth(e, p, leafPx, heightPx, ramp, random) {
       Math.min(255, Math.max(0, e.pool[s + 4] * v - warm * 0.5)),
     ];
   }
-  const kindSize = kind === SHED_KIND.twig ? 2.6 : kind === SHED_KIND.clump ? 1.45 : e.kind === 'bush' ? 0.95 : 1;
+  const kindSize =
+    kind === SHED_KIND.twig
+      ? 2.6 * (p.twigSize ?? 1)
+      : kind === SHED_KIND.clump
+        ? 1.45 * (p.broadLeafSize ?? 1)
+        : e.kind === 'bush'
+          ? 0.95
+          : 1;
   const sizePx = leafPx * kindSize * (0.8 + random() * 0.4);
   // Born in the lower part of the crown — under the painted leaves, not on top of them.
   const crown = e.kind === 'bush' ? heightPx.bush : heightPx.tree;

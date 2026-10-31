@@ -13924,13 +13924,15 @@ function install() {
         : 'off',
   });
 
-  // LEAF SHED's card (2026-10-31) — beside Vegetation, whose canopies it sheds from.
+  // FALLING LEAVES & TWIGS (Leaf Shed, 2026-10-31) — its own card in Weather and sky, beside the wind
+  // that drives it. The author asked for "lots of controls": every dial in LEAF_SHED_PARAMS shows in the
+  // card's expanded panel, grouped Shedding / Mix and size / Leaves / Outline / Twigs / Motion / Shadow.
   registerSimpleEffectCard('leafShed', {
     icon: 'wind',
-    title: 'Leaf Shed',
-    accVar: '--c-surface',
+    title: 'Falling Leaves & Twigs',
+    accVar: '--c-atmos',
     schema: LEAF_SHED_PARAMS,
-    fohKeys: ['amount', 'startsAboveMps', 'leafSize', 'bushShare', 'carry'],
+    fohKeys: ['amount', 'startsAboveMps', 'leafSize', 'twigShare', 'turbulence'],
     getReadout: () => leafShedReadout,
     setValue: (patch) => MapShine.setLeafShed(patch),
     status: (readout) =>

@@ -47,6 +47,7 @@ export const EFFECT_GROUP = Object.freeze({
   cloudTops: 'weather',
   wind: 'weather',
   windTrails: 'weather',
+  leafShed: 'weather',
   temperatureEffects: 'weather',
 
   water: 'surfaces',
@@ -55,7 +56,6 @@ export const EFFECT_GROUP = Object.freeze({
   iridescence: 'surfaces',
   prism: 'surfaces',
   vegetation: 'surfaces',
-  leafShed: 'surfaces',
 
   fire: 'living',
   dust: 'living',

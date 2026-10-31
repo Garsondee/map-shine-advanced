@@ -81,7 +81,7 @@ import {
   unpackBirthTagNodes,
   writeBirth,
 } from '../leaf-shed-birth.js';
-import { buildShedLook, shedCoverage } from '../leaf-shed-shape.js';
+import { buildShedLook, shedCoverage, SHAPE_KNOB_DEFAULTS } from '../leaf-shed-shape.js';
 import { OVER_PROPOSE } from '../leaf-shed-sources.js';
 import { litLinear, occlusionGate } from '../critters/critter-surface.js';
 
@@ -223,6 +223,12 @@ export function createLeafShedEngine({
   const uCarry = uniform(0.8);
   const uFlutter = uniform(1);
   const uTurb = uniform(1);
+  // Motion dials: fall speed, spin, ground grip (1 = the tuned look).
+  const uFall = uniform(1);
+  const uSpin = uniform(1);
+  const uGrip = uniform(1);
+  // The look dials, one uniform each (see `leaf-shed-shape.js#SHAPE_KNOB_DEFAULTS`).
+  const uKnobs = Object.fromEntries(Object.entries(SHAPE_KNOB_DEFAULTS).map(([k, v]) => [k, uniform(v)]));
   const uGroundSec = uniform(4);
   const uShadow = uniform(0.45);
   const uInkPx = uniform(2.4);
@@ -332,10 +338,11 @@ export function createLeafShedEngine({
         const stick = byKind(kind, KIND_GROUND_STICK_MPS);
         const groundPush = smoothstep(stick, stick.add(6), localMps)
           .mul(0.35)
-          .mul(byKind(kind, KIND_GROUND_MOBILITY));
+          .mul(byKind(kind, KIND_GROUND_MOBILITY))
+          .div(uGrip);
         const target = select(airborne, airPx.mul(carry), airPx.mul(carry).mul(groundPush));
         // Grounded, the relaxation time is the GRIP: small tau = it stops where it lands (the twigs' ice-skating fix).
-        const tau = select(airborne, byKind(kind, KIND_TAU_SEC), byKind(kind, KIND_GROUND_TAU_SEC));
+        const tau = select(airborne, byKind(kind, KIND_TAU_SEC), byKind(kind, KIND_GROUND_TAU_SEC).div(uGrip));
         const v1raw = vel.add(target.sub(vel).mul(float(1).sub(exp(dt.negate().div(tau)))));
         const speedRaw = v1raw.length();
         // The jink can throw a leaf as fast as it flies: the wall look-ahead must cover that too.
@@ -390,7 +397,7 @@ export function createLeafShedEngine({
         const next = pos.add(move.mul(dt));
         // Falling: a leaf glides in pulses (it sinks fastest on each swing's turn) and an updraft can
         // lift it back up — the lift term goes past zero, so a gust genuinely throws a leaf into the air.
-        const fallMps = byKind(kind, KIND_FALL_MPS).mul(float(0.8).add(r(6.1).mul(0.4)));
+        const fallMps = byKind(kind, KIND_FALL_MPS).mul(float(0.8).add(r(6.1).mul(0.4))).mul(uFall);
         const updraft = sin(a.mul(float(1.7).add(r(27).mul(1.5))).add(phase(28)))
           .mul(0.6)
           .add(sin(a.mul(float(4.1).add(r(29).mul(2))).add(phase(30))).mul(0.4));
@@ -411,10 +418,11 @@ export function createLeafShedEngine({
         const spin = spinSign
           .mul(float(1.5).add(r(9.1).mul(3.5)))
           .mul(spinBurst)
+          .mul(uSpin)
           .mul(select(kind.greaterThan(1.5), float(0.4), float(1)));
         const roll = clamp(speed.div(pixelsPerMetreNode.mul(2)), 0, 1).mul(0.3);
         const angle = c.y.add(spin.mul(dt).mul(select(airborne, float(1), roll)));
-        const flipRate = float(2).add(r(10.7).mul(5)).mul(flutterK).mul(spinBurst);
+        const flipRate = float(2).add(r(10.7).mul(5)).mul(flutterK).mul(spinBurst).mul(uSpin);
         const settled = floor(c.z.div(Math.PI).add(0.5)).mul(Math.PI);
         const flip = select(airborne, c.z.add(flipRate.mul(dt)), c.z.add(settled.sub(c.z).mul(min(dt.mul(6), 1))));
         const out = next.x
@@ -524,9 +532,10 @@ export function createLeafShedEngine({
     inkW: uInkPx.div(max(vCol.w, 0.5)),
     lightSide: vLight,
     rnd: vRnd,
+    knobs: uKnobs,
   });
   const ps = toLeaf(vS, vInfo.x);
-  const shadowA = shedCoverage(TSL, ps, vInfo.z, vInfo.y, max(aa.mul(1.5), vShadowSoft), vRnd)
+  const shadowA = shedCoverage(TSL, ps, vInfo.z, vInfo.y, max(aa.mul(1.5), vShadowSoft), vRnd, uKnobs)
     .mul(uShadow)
     .mul(uShadowDay);
   const leafA = look.alpha.mul(vInfo.w);
@@ -625,6 +634,10 @@ export function createLeafShedEngine({
       if (Number.isFinite(p.carry)) uCarry.value = p.carry;
       if (Number.isFinite(p.flutter)) uFlutter.value = p.flutter;
       if (Number.isFinite(p.turbulence)) uTurb.value = p.turbulence;
+      if (Number.isFinite(p.fallSpeed)) uFall.value = p.fallSpeed;
+      if (Number.isFinite(p.spin)) uSpin.value = p.spin;
+      if (Number.isFinite(p.groundGrip)) uGrip.value = Math.max(0.05, p.groundGrip);
+      for (const [k, u] of Object.entries(uKnobs)) if (Number.isFinite(p[k])) u.value = p[k];
       if (Number.isFinite(p.groundSec)) uGroundSec.value = p.groundSec;
       if (Number.isFinite(p.shadow)) uShadow.value = p.shadow;
       // The art's outline is a heavy ≈ 4–5 px band on a 150 px grid (0.021 grid squares), all of it inside the shape.

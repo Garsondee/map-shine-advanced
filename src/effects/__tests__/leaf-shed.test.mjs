@@ -115,6 +115,17 @@ export function run(t) {
     ok('⭐ outlines keep an interior: a leaf line is capped, a twig line is a share of its local stick radius', /MAX_INK_LEAF/.test(shape) && /body\.rad\.mul\(INK_OF_RADIUS\)/.test(shape));
     ok('⭐ twigs: freshly broken ends are pale wood from her sheet', /CUT_WOOD = \[226/.test(shape) && /endMask/.test(shape));
     ok('⭐ twigs taper: every segment narrows along its length and each internode is thinner', /mix\(n\(ra\), n\(rb\), h\)/.test(shape) && /INTERNODE_TAPER = 0\.[5-9]/.test(shape));
+    // The author, 2026-10-31: "give me lots of controls so that I can fine tune the appearance".
+    {
+      const keys = Object.keys(LEAF_SHED_PARAMS);
+      ok('⭐ dials: at least 30 controls, grouped into named sections', keys.length >= 30 && new Set(keys.map((k) => LEAF_SHED_PARAMS[k].category)).size >= 6);
+      const knobKeys = [...shape.matchAll(/^  (\w+): [\d.]+,$/gm)].map((m) => m[1]);
+      ok('⭐ dials: every shape knob is a Studio param with the same default (so the look is unchanged until moved)',
+        knobKeys.length >= 12 && knobKeys.every((k) => LEAF_SHED_PARAMS[k] && new RegExp(`  ${k}: ${LEAF_SHED_PARAMS[k].default},`).test(shape)));
+      ok('dials: the runtime turns every shape knob into a uniform and sets it from the params', /uKnobs = Object\.fromEntries\(Object\.entries\(SHAPE_KNOB_DEFAULTS\)/.test(runtime) && /for \(const \[k, u\] of Object\.entries\(uKnobs\)\)/.test(runtime));
+      ok('dials: fall speed, spin and ground grip reach the kernel', /\.mul\(uFall\)/.test(runtime) && /\.mul\(uSpin\)/.test(runtime) && /\.div\(uGrip\)/.test(runtime));
+      ok('card: titled "Falling Leaves & Twigs"', LEAF_SHED.title === 'Falling Leaves & Twigs');
+    }
     const tbl = (name) => {
       const m = new RegExp(String.raw`const ${name} = \[([^\]]+)\]`).exec(runtime);
       return m ? m[1].split(',').map(Number) : null;

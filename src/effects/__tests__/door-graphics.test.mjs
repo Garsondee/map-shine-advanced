@@ -56,7 +56,7 @@ export function run(t) {
   ok('the fog rung records what shipped, not just what is left', /landed 2026-08-27/i.test(fogRung?.note ?? ''));
   ok('the fog rung names the still-deferred close direction', /clos/i.test(fogRung?.note ?? ''));
   ok(
-    'the roof-occlusion limitation is recorded honestly',
-    (DOOR_GRAPHICS.deferredRungs ?? []).some((r) => r.name === 'roof-occlusion')
+    'the roof-occlusion rung is no longer deferred (doors sort under the foreground)',
+    !(DOOR_GRAPHICS.deferredRungs ?? []).some((r) => r.name === 'roof-occlusion')
   );
 }

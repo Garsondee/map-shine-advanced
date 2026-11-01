@@ -16,6 +16,7 @@ import {
   isInForeground,
   resolveElevationFloorIndex,
   maskHostFloorIndices,
+  doorRenderOrderUnderForeground,
 } from '../layer-order.js';
 
 /** Foundry's actual comparator, transcribed verbatim from the vendored v14 source. */
@@ -460,4 +461,25 @@ export function run(t) {
       String(maskHostFloorIndices({ levelId: '', levelsRestricted: false }, FLOORS)) === '0'
     );
   }
+  // --- door leaves sort just under the Level's foreground ---------------------
+  {
+    const mk = (name, elevation, sortLayer, zIndex = 0) => ({ name, key: makeLayerKey({ elevation, sortLayer, zIndex }) });
+    const list = sortByLayer([
+      mk('bg', 0, SORT_LAYERS.SCENE),
+      mk('rug', 3, SORT_LAYERS.TILES),
+      mk('token', 5, SORT_LAYERS.TOKENS),
+      mk('roofArt', 10, SORT_LAYERS.SCENE, 1),
+      mk('chimney', 10, SORT_LAYERS.TILES),
+      mk('upperBg', 10, SORT_LAYERS.SCENE, 0),
+    ]);
+    const by = Object.fromEntries(list.map((i) => [i.name, i.renderOrder]));
+    const before = JSON.stringify(by);
+    const d = doorRenderOrderUnderForeground(list, 10);
+    ok('door is above tokens and tiles beneath the foreground', d > by.token && d > by.rug && d > by.bg);
+    ok('door is below roof art and foreground tiles', d < by.roofArt && d < by.chimney);
+    ok('door slot is a half step (no ordinal moves)', d % 1 === 0.5 && JSON.stringify(by) === before);
+    ok('a top-most Level (null top) sits above every finite item', doorRenderOrderUnderForeground(list, null) > by.chimney);
+    ok('an empty list still yields a finite order', Number.isFinite(doorRenderOrderUnderForeground([], 10)));
+  }
+
 }

@@ -14,6 +14,7 @@ export {
   compareLayerKeys,
   sortByLayer,
   isInForeground,
+  doorRenderOrderUnderForeground,
   resolveElevationFloorIndex,
 } from './layer-order.js';
 export {

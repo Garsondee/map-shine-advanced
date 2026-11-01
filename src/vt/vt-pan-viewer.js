@@ -215,6 +215,7 @@ import {
   CASTER_HEIGHT_SCALE_PX,
   resolveElevationFloorIndex,
   compareLayerKeys,
+  doorRenderOrderUnderForeground,
   // A Tile's "Restrict Weather" box as a SKY OCCLUDER — pure compose of the
   // weather gate / drip cover from the derive stage's restrictor footprints +
   // live fades (scene/weather-restrict.js).
@@ -24581,6 +24582,14 @@ async function startVtPanViewerUnserialized({
       profiler?.begin(Z.depthAuthorityRebuild);
       const itemsWithVegetation = vegDepthItems.length ? depthAuthority.rebuild([...items, ...vegDepthItems]) : items;
       profiler?.end(Z.depthAuthorityRebuild);
+      // ROOF OCCLUSION for door leaves: slot them just under the viewed floor's
+      // foreground in the list just sorted (a half step, so no ordinal moves).
+      {
+        const doorFloor = vegFloors.find((f) => f.index === view.floorIndex);
+        if (doorFloor) {
+          doorGraphics.setLeafRenderOrder(doorRenderOrderUnderForeground(itemsWithVegetation, doorFloor.elevationTop));
+        }
+      }
       const wantedIds = new Set(items.map((i) => i.id));
       prefetchSkippedPacks = 0;
       lastUpdate.placementChanges = 0;

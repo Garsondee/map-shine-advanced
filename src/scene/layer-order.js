@@ -209,6 +209,42 @@ export function sortByLayer(items) {
 }
 
 /**
+ * The `renderOrder` a DOOR LEAF should paint at: just under a Level's
+ * Foreground, so overhead/roof art covers it. Foundry places its DoorMesh at
+ * "foreground.sort - 1" for the same reason.
+ *
+ * The door's key is (elevation = the Level's top, sortLayer = -1): below
+ * everything that sits AT the foreground elevation (the roof art, foreground
+ * tiles), above everything beneath it (rugs, tokens, the level's background).
+ * The result is the highest `renderOrder` among items sorting before that key,
+ * plus a half step — fractional on purpose, so no item's own ordinal moves and
+ * every consumer of the dense 0..N-1 ranks (depth authority, lights) is
+ * undisturbed. Three sorts by numeric `renderOrder`, so a half step slots in.
+ *
+ * @param {Array<{key: LayerKey, renderOrder?: number}>} sortedItems - the
+ *   stamped output of {@link sortByLayer}.
+ * @param {number|null|undefined} elevationTop - the viewed Level's
+ *   `elevation.top`; null/undefined read as Foundry's +Infinity.
+ * @returns {number}
+ */
+export function doorRenderOrderUnderForeground(sortedItems, elevationTop) {
+  const top = typeof elevationTop === 'number' && !Number.isNaN(elevationTop) ? elevationTop : Infinity;
+  const doorKey = makeLayerKey({
+    elevation: top,
+    sortLayer: -1,
+    sort: -Infinity,
+    zIndex: -Infinity,
+    tiebreak: -Infinity,
+  });
+  let below = -1;
+  for (const item of sortedItems) {
+    if (typeof item.renderOrder !== 'number') continue;
+    if (compareLayerKeys(item.key, doorKey) < 0 && item.renderOrder > below) below = item.renderOrder;
+  }
+  return below + 0.5;
+}
+
+/**
  * True when a drawable at `elevation` sits at or above a Level's Foreground
  * Elevation — i.e. it is what the Foundry UI calls "overhead in the Foreground"
  * (the Tile sheet's Overhead tab wording) and what older Foundry called an

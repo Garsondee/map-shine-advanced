@@ -25,12 +25,10 @@
  * — reconcile the set on change, animate open/close on the frame clock,
  * dispose cleanly.
  *
- * ORDERING CAVEAT (door-graphics.js's `roof-occlusion` rung): drawn after the
- * whole main scene, a door sits above tiles AND tokens (as Foundry's
- * foreground DoorMesh does) — but also above overhead ROOF art, which Foundry
- * hides it under. The common doorway has no separate roof over it, so this is
- * correct there; the fix is to sort the leaf into the main draw list by a real
- * LayerKey, deferred to that rung.
+ * ORDERING: leaves are slotted into the main draw list just under the viewed
+ * Level's foreground (`setLeafRenderOrder`, fed by layer-order.js#
+ * doorRenderOrderUnderForeground), so tiles and tokens below it draw under the
+ * door and overhead/roof art draws over it, as Foundry's DoorMesh does.
  *
  * FOG (door-graphics.js's HIGH-PRIORITY `fog-reveal-sync` rung): each leaf's
  * `progress` IS the eased openFactor (0 closed .. 1 open) the incoming V3 fog
@@ -84,6 +82,11 @@ const log = createLogger('DoorGraphics');
  */
 export const DOOR_LEAF_RENDER_ORDER = 1e9;
 
+/** Door leaves are normally ordered into the draw list just under the viewed
+ * Level's foreground (see `setLeafRenderOrder`); this is only the fallback
+ * for a scene whose levels are unknown, where "above everything" is the
+ * pre-roof-occlusion behaviour. */
+
 /**
  * @param {object} args
  * @param {*} args.THREE - injected, never imported (the bloom split's rule).
@@ -95,6 +98,8 @@ export const DOOR_LEAF_RENDER_ORDER = 1e9;
 export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderState }) {
   // A Group, not a Scene: it is parented into the viewer's world scene.
   const doorScene = new THREE.Group();
+  /** Current leaf renderOrder; updated by setLeafRenderOrder after each sort. */
+  let leafRenderOrder = DOOR_LEAF_RENDER_ORDER;
   /** url -> { texture, width, height } once loaded; 'pending'/'failed' while not. */
   const doorTextureCache = new Map();
   /** wallId -> Array<leaf state> (1 for a single door, 2 for a double). */
@@ -190,7 +195,7 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
       geometry.setIndex(Array.from(QUAD_INDICES));
       const mesh = new THREE.Mesh(geometry, mat.material);
       mesh.frustumCulled = false; // world-space, camera bounds vary per frame
-      mesh.renderOrder = DOOR_LEAF_RENDER_ORDER;
+      mesh.renderOrder = leafRenderOrder;
       doorScene.add(mesh);
       leaves.push({
         style,
@@ -366,6 +371,15 @@ export function createDoorGraphicsSubsystem({ THREE, dimensions, getDoorRenderSt
      * (see DOOR_LEAF_RENDER_ORDER), and hides it for any capture that must
      * exclude doors. */
     root: doorScene,
+    /** ROOF-OCCLUSION: slot every leaf into the main draw list's order (the
+     * value from layer-order.js#doorRenderOrderUnderForeground), so overhead
+     * art paints over it. Cheap and idempotent; call after each draw-list sort.
+     * @param {number} order */
+    setLeafRenderOrder(order) {
+      if (!Number.isFinite(order) || order === leafRenderOrder) return;
+      leafRenderOrder = order;
+      for (const leaves of doorLeaves.values()) for (const leaf of leaves) leaf.mesh.renderOrder = order;
+    },
     /** How many doors currently have built leaves — the viewer skips its draw
      * entirely at zero, so a scene with no doors costs nothing. A getter, not a
      * value: the count changes on every reconcile. */

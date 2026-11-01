@@ -90,10 +90,6 @@ export const DOOR_GRAPHICS = Object.freeze({
       note: "The OPEN-direction fog reveal sync landed 2026-08-27 (effects/vision/vision-mask-render.js's buildVisionFloorMaterial + syncFloor, driven by this file's own getTransitionSummary() — see door-graphics-render.js#computeTransitionSummary). Two things deliberately NOT covered: closing a door still snaps fog instantly (would need the mirror floor semantics — freeze the OPEN state instead of the closed one); and several doors transitioning at once share ONE frozen floor + the MINIMUM active progress across them (always conservative, never a leak, just imprecise — a transient re-darken of an already-fading-in door's sliver — if it ever visibly matters). Neither was asked for; both are straightforward follow-ons, not blocked on anything.",
     }),
     Object.freeze({
-      name: 'roof-occlusion',
-      note: "A door beneath overhead/foreground ROOF art should be hidden by it (Foundry places DoorMesh at foreground.sort-1, i.e. just UNDER the roof). V1 draws doors above the whole map stack (correct for the common no-separate-roof scene, and above tokens as Foundry does). Wire the door's LayerKey into the main draw-list sort (scene/layer-order.js) so overhead tiles occlude it.",
-    }),
-    Object.freeze({
       name: 'secret-door-visibility',
       note: 'A SECRET door (door type 2) should show its graphic only to the GM — Foundry renders secret doors as plain walls to players. V1 draws any textured door for everyone; gate on the viewer/GM role once player-vs-GM viewing is modelled.',
     }),

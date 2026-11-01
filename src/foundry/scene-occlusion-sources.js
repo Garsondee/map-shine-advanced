@@ -114,23 +114,152 @@ export function readGridSizePixels() {
 }
 
 /**
- * `Token#getLightRadius(units) + externalRadius`, replicated from real
- * DOCUMENT data — no PIXI Token object needed. Foundry's real `externalRadius`
- * is a PIXI Token instance property (roughly the token's own visual half-size);
- * this uses the ALREADY-CARRIED `footprint` as a documented stand-in
- * (`max(width, height) / 2`), since this project draws from documents, not
- * placeable objects (Keyhole.md §4.3).
+ * A token's RADIAL occlusion disc radius, replicated from Foundry's own
+ * `CanvasOcclusionMask#_updateOcclusionMask` (layers/masks/occlusion.mjs:209):
  *
+ *     Math.max(token.externalRadius, token.getLightRadius(occludable.radius))
+ *
+ * with `externalRadius = min(width, height) / 2` (`Token#externalRadius`) and
+ * `getLightRadius(u) = u === 0 ? 0 : (|u| * distancePixels + externalRadius) * sign(u)`.
+ *
+ * ⚠️ The `max` is the point: a token whose occlusion radius is the schema
+ * default 0 still reveals a disc the size of the token itself. This used to
+ * return 0 for that case, so no default token ever cut a RADIAL hole in any
+ * roof (live bug 2026-11-01, "tile occlusion is completely broken").
  * @param {object} args
- * @param {{width:number, height:number}} args.footprint - tokenFootprint()'s return.
- * @param {number} args.occludableRadius - token.occludable.radius, grid distance units. 0 = no disc.
+ * @param {{width:number, height:number}} args.footprint - the token's size in px.
+ * @param {number} args.occludableRadius - token.occludable.radius, grid distance units.
  * @param {number} args.distancePixels
- * @returns {number} radius in world/canvas pixels. Exactly 0 iff occludableRadius is 0.
+ * @returns {number} radius in world/canvas pixels, never below the token's own half-size.
  */
 export function computeTokenOcclusionRadiusPx({ footprint, occludableRadius, distancePixels }) {
-  if (!occludableRadius) return 0;
-  const externalRadius = Math.max(footprint?.width ?? 0, footprint?.height ?? 0) / 2;
-  return Math.abs(occludableRadius) * distancePixels + externalRadius;
+  const externalRadius = Math.min(footprint?.width ?? 0, footprint?.height ?? 0) / 2;
+  const units = Number.isFinite(occludableRadius) ? occludableRadius : 0;
+  const lightRadius = units === 0 ? 0 : (Math.abs(units) * distancePixels + externalRadius) * Math.sign(units);
+  return Math.max(externalRadius, lightRadius);
+}
+
+/**
+ * One occluding token, as the occlusion pass draws and tests it. Pure — the
+ * live reader below plucks the raw values off Foundry's Token placeable.
+ *
+ * @param {object} raw
+ * @param {string} raw.id
+ * @param {number} raw.elevation
+ * @param {{x:number,y:number}} raw.center
+ * @param {{width:number,height:number}} raw.size
+ * @param {number} raw.occludableRadius
+ * @param {boolean} raw.visionActive
+ * @param {{points?: number[], origin?: {x:number,y:number}}|null} raw.los - the token's vision polygon.
+ * @param {Array<{x:number,y:number}>|null} raw.testPoints - `TokenDocument#getOcclusionTestPoints()`.
+ * @param {number} distancePixels
+ * @returns {{id:string, elevation:number, centerX:number, centerY:number, radiusPx:number,
+ *   visionActive:boolean, los:{points:number[], originX:number, originY:number}|null,
+ *   testPoints:Array<{x:number,y:number}>, minX:number, minY:number, maxX:number, maxY:number}|null}
+ */
+export function deriveOccludableToken(raw, distancePixels) {
+  const cx = raw?.center?.x;
+  const cy = raw?.center?.y;
+  if (!raw?.id || !Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+  const elevation = Number.isFinite(raw.elevation) ? raw.elevation : 0;
+  const radiusPx = computeTokenOcclusionRadiusPx({
+    footprint: raw.size,
+    occludableRadius: raw.occludableRadius,
+    distancePixels,
+  });
+  // Foundry tests several dense, wall-constrained points per token; fall back
+  // to the centre only when they could not be read.
+  const testPoints = (Array.isArray(raw.testPoints) ? raw.testPoints : []).filter(
+    (p) => Number.isFinite(p?.x) && Number.isFinite(p?.y)
+  );
+  if (testPoints.length === 0) testPoints.push({ x: cx, y: cy });
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of testPoints) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const points = raw.visionActive ? raw.los?.points : null;
+  const los =
+    points && points.length >= 6
+      ? {
+          points,
+          originX: Number.isFinite(raw.los.origin?.x) ? raw.los.origin.x : cx,
+          originY: Number.isFinite(raw.los.origin?.y) ? raw.los.origin.y : cy,
+        }
+      : null;
+  return {
+    id: `token:${raw.id}`,
+    elevation,
+    centerX: cx,
+    centerY: cy,
+    radiusPx,
+    // A token whose vision is on but has no usable polygon yet reveals by its
+    // radial disc, exactly as Foundry treats a token with no vision.
+    visionActive: !!los,
+    los,
+    testPoints,
+    minX,
+    minY,
+    maxX,
+    maxY,
+  };
+}
+
+/**
+ * Live read of the tokens that occlude roofs RIGHT NOW: Foundry's own
+ * `TokenLayer#_getOccludableTokens()` (layers/tokens.mjs:555) — controlled,
+ * owned, hovered or highlighted per the world's token occlusion setting — never
+ * simply "every token on the map". The old every-token rule faded a roof for a
+ * GM with nothing selected, which Foundry never does.
+ *
+ * Reads the Token PLACEABLES on purpose, not just documents: which tokens
+ * occlude, where each one is mid-animation, and its vision polygon are all
+ * Foundry-owned runtime state (Foundry stays authoritative for vision,
+ * Keyhole.md §4.3). Never throws; an unreadable canvas reads as no occluders.
+ *
+ * @returns {{tokens: Array<NonNullable<ReturnType<typeof deriveOccludableToken>>>, reason: string|null}}
+ */
+export function readOccludableTokens() {
+  try {
+    const layer = typeof canvas !== 'undefined' ? (canvas?.tokens ?? null) : null;
+    if (!layer) return { tokens: [], reason: 'no token layer' };
+    const list =
+      typeof layer._getOccludableTokens === 'function' ? layer._getOccludableTokens() : (layer.controlled ?? []);
+    const distancePixels = readGridDistancePixels().distancePixels;
+    const tokens = [];
+    for (const token of list ?? []) {
+      const doc = token?.document;
+      let testPoints = null;
+      try {
+        testPoints = doc?.getOcclusionTestPoints?.() ?? null;
+      } catch (_) {
+        testPoints = null;
+      }
+      const size = doc?.getSize?.() ?? { width: token?.w ?? 0, height: token?.h ?? 0 };
+      const derived = deriveOccludableToken(
+        {
+          id: doc?.id ?? token?.id,
+          elevation: doc?.elevation,
+          center: token?.center,
+          size,
+          occludableRadius: doc?.occludable?.radius ?? 0,
+          visionActive: !!token?.vision?.active,
+          los: token?.vision?.los ?? null,
+          testPoints,
+        },
+        distancePixels
+      );
+      if (derived) tokens.push(derived);
+    }
+    return { tokens, reason: null };
+  } catch (err) {
+    return { tokens: [], reason: `reading occludable tokens threw: ${err?.message ?? err}` };
+  }
 }
 
 /**

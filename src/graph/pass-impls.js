@@ -97,10 +97,10 @@ export const PASS_IMPLS = Object.freeze({
     export: 'startVtPanViewer',
     separatelyInvocable: false,
     note:
-      'REAL as of 2026-07-18, RADIAL-only: runMaskOcclusionPass (a private closure inside ' +
-      'startVtPanViewer) renders token discs into a real screen-sized render target every frame, MIN-' +
-      "blended, and refreshes every drawn item's uOcclusionElevation uniform. FADE/VISION/SURFACE " +
-      "stay inert — see graph/passes.js's own note for the honest scope. Same invocability caveat as " +
+      'REAL as of 2026-07-18: runMaskOcclusionPass (a private closure inside startVtPanViewer) ' +
+      "renders Foundry's occludable tokens into a real screen-sized render target every frame, MIN-" +
+      'blended: RADIAL discs (G) and, since 2026-11-01, vision polygons (B), and refreshes every ' +
+      "drawn item's occlusion uniforms. SURFACE stays inert (no Regions). Same invocability caveat as " +
       'geometry.world/present.composite: the loop lives inside startVtPanViewer, driven by the SAME ' +
       'local passImpls/framePlan graph/run-frame.js walks, not yet externally callable alone.',
   },

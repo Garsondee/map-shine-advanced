@@ -601,6 +601,17 @@ export function resolveSceneDepthFloorIndex({ item, sceneDoc, viewedFloorIndex, 
  *   rebuildSceneDepthProxies`'s own caller for why this ALSO means such a
  *   material must never go through `depthProxyMaterialPool` (a shared
  *   material cannot carry one tile's own live value).
+ * @param {{maskTexture: *, elevation: *, weights: *}} [args.occlusionMaskGate] -
+ *   PER-PIXEL occlusion (2026-11-01). The live gate above is one number for
+ *   the whole tile — right for FADE, wrong for RADIAL and VISION, which open a
+ *   HOLE in a roof (a disc round a token, the token's line of sight). Left
+ *   alone, the proxy still wrote the roof as solid inside that hole, so the
+ *   floor beneath was culled by the colour pass's early reject and the hole
+ *   showed the clear colour instead of the room. Given the occlusion mask and
+ *   the tile's OWN live `uOcclusionElevation`/`uOcclusionWeights` uniforms
+ *   (the very nodes its colour material reads), the proxy discards wherever
+ *   the colour's `occlusionAlphaFactor` would start to fade — the same
+ *   sample, the same maths, so the two cannot disagree.
  * @returns {*} a `THREE.NodeMaterial`, with `.uLiveOcclusionAmount` set
  *   (a float uniform, initial value 0) when `liveOcclusionGate` is true.
  */
@@ -614,6 +625,7 @@ export function buildSceneDepthWriterMaterial({
   alwaysOpaque = false,
   colorWrite = true,
   liveOcclusionGate = false,
+  occlusionMaskGate = null,
   fluidMaskTex,
   fluidMaskUvOffset = [0, 0],
   fluidMaskUvScale = [1, 1],
@@ -673,6 +685,14 @@ export function buildSceneDepthWriterMaterial({
   const uLiveOcclusionAmount = liveOcclusionGate ? uniform(float(0)) : null;
   const discardIfFading = () => {
     if (uLiveOcclusionAmount) uLiveOcclusionAmount.greaterThan(float(0.05)).discard();
+    if (occlusionMaskGate) {
+      // Mirrors vt-pan-viewer.js#occlusionAlphaFactor's `amount` exactly.
+      const { step, screenUV } = THREE.TSL;
+      const maskSample = texture(occlusionMaskGate.maskTexture, screenUV);
+      const gate = float(1).sub(step(occlusionMaskGate.elevation, maskSample));
+      const amounts = gate.mul(occlusionMaskGate.weights);
+      amounts.x.max(amounts.y).max(amounts.z).max(amounts.w).greaterThan(float(0.05)).discard();
+    }
   };
   // EARLY-Z FAST PATH (PERF, 2026-08-09, §4.3 of the perf audit): a discard()
   // anywhere in a fragment shader forces the GPU to disable early-fragment-

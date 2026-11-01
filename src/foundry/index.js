@@ -429,6 +429,8 @@ export {
   readGridSizePixels,
   deriveGridSizePixels,
   computeTokenOcclusionRadiusPx,
+  deriveOccludableToken,
+  readOccludableTokens,
   readMouseHoverPoint,
   deriveMouseHoverPoint,
 } from './scene-occlusion-sources.js';

@@ -7,6 +7,7 @@ import {
   deriveDistancePixels,
   deriveGridSizePixels,
   computeTokenOcclusionRadiusPx,
+  deriveOccludableToken,
   deriveMouseHoverPoint,
 } from '../scene-occlusion-sources.js';
 
@@ -47,37 +48,70 @@ export function run(t) {
   ok('undefined (no canvas.grid) is rejected', deriveGridSizePixels(undefined).source === 'default');
   ok('the default is a documented positive constant, never 0', deriveGridSizePixels(undefined).gridSizePixels === 100);
 
-  // ---- computeTokenOcclusionRadiusPx ---------------------------------------
+  // ---- computeTokenOcclusionRadiusPx: Foundry's max(externalRadius, getLightRadius) ----
   {
-    // occludableRadius=0 => no disc, REGARDLESS of footprint or distancePixels —
-    // this is the exact flag the token draw-list comment relies on ("0 means
-    // this token contributes no disc").
+    // The schema default (radius 0) still reveals the token's own half-size —
+    // returning 0 here was why no default token ever cut a RADIAL hole.
     const r = computeTokenOcclusionRadiusPx({
       footprint: { width: 400, height: 400 },
       occludableRadius: 0,
       distancePixels: 20,
     });
-    ok('occludableRadius:0 => exactly 0, not just small', r === 0);
+    ok(`occludableRadius:0 => the token's own half-size (got ${r}, want 200)`, r === 200);
   }
   {
-    // 10 grid-distance-units at 20px/unit = 200px, plus half the larger
-    // footprint dimension (400/2=200) => 400.
+    // 10 units at 20px = 200px, plus externalRadius = min(400,200)/2 = 100 => 300.
     const r = computeTokenOcclusionRadiusPx({
       footprint: { width: 400, height: 200 },
       occludableRadius: 10,
       distancePixels: 20,
     });
-    ok(`radius = |units|*distancePixels + externalRadius (got ${r}, want 400)`, r === 400);
+    ok(`radius = |units|*distancePixels + min(w,h)/2 (got ${r}, want 300)`, r === 300);
   }
   ok(
-    'a negative occludableRadius still contributes a positive disc (Math.abs, matching Foundry)',
-    computeTokenOcclusionRadiusPx({ footprint: { width: 0, height: 0 }, occludableRadius: -5, distancePixels: 20 }) ===
+    'a negative occludableRadius falls back to the token half-size (getLightRadius < 0, max picks externalRadius)',
+    computeTokenOcclusionRadiusPx({
+      footprint: { width: 100, height: 100 },
+      occludableRadius: -5,
+      distancePixels: 20,
+    }) === 50
+  );
+
+  // ---- deriveOccludableToken ------------------------------------------------
+  {
+    const base = {
+      id: 'abc',
+      elevation: 0,
+      center: { x: 150, y: 150 },
+      size: { width: 100, height: 100 },
+      occludableRadius: 0,
+    };
+    const d = deriveOccludableToken({ ...base, visionActive: false, los: null, testPoints: null }, 100);
+    ok('id is the draw-list token id', d.id === 'token:abc');
+    ok('no test points => the centre is tested', d.testPoints.length === 1 && d.testPoints[0].x === 150);
+    ok('no vision => no polygon, radial only', d.visionActive === false && d.los === null);
+    ok('default radius => half the token', d.radiusPx === 50);
+    const v = deriveOccludableToken(
+      {
+        ...base,
+        visionActive: true,
+        los: { points: [0, 0, 300, 0, 300, 300], origin: { x: 150, y: 140 } },
+        testPoints: [
+          { x: 120, y: 130 },
+          { x: 180, y: 170 },
+        ],
+      },
       100
-  );
-  ok(
-    'a missing/malformed footprint does not throw — externalRadius degrades to 0',
-    computeTokenOcclusionRadiusPx({ footprint: null, occludableRadius: 5, distancePixels: 20 }) === 100
-  );
+    );
+    ok('vision with a polygon => vision active, origin kept', v.visionActive && v.los.originY === 140);
+    ok('test-point bounds span the dense points', v.minX === 120 && v.maxY === 170);
+    const empty = deriveOccludableToken(
+      { ...base, visionActive: true, los: { points: [1, 2] }, testPoints: null },
+      100
+    );
+    ok('vision on but no usable polygon => treated as no vision (radial reveals)', empty.visionActive === false);
+    ok('a token with no position is skipped', deriveOccludableToken({ id: 'x', center: null }, 100) === null);
+  }
 
   // ---- deriveMouseHoverPoint: mythica-machina-press#470's hover-fade hit
   // test needs Foundry's live canvas.mousePosition — same "could not read"

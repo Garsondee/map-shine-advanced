@@ -285,7 +285,8 @@ import {
   readActiveDarknessRegions,
   readGridDistancePixels,
   readGridSizePixels,
-  computeTokenOcclusionRadiusPx,
+  // Foundry's own occluder set + vision polygons (scene-occlusion-sources.js).
+  readOccludableTokens,
   // THE LIVE POINTER READ (mythica-machina-press#470) — the one place
   // canvas.mousePosition/.mousePositionVisible/.mousePositionExplored are
   // read; see scene-occlusion-sources.js's own header for why this reads
@@ -13182,7 +13183,10 @@ async function startVtPanViewerUnserialized({
     const occlusionMask = {
       rt: occlusionMaskRT,
       texture: occlusionMaskRT.texture,
-      visionActive: false, // stays false — vision half not built this cut
+      // True while any occluding token has an active vision polygon drawn into
+      // the B channel this frame (runMaskOcclusionPass) — Foundry's own
+      // `CanvasOcclusionMask#vision`. Drives VISION mode and where hover-fade rides.
+      visionActive: false,
       elevationTable: [-Infinity],
     };
 
@@ -13272,10 +13276,17 @@ async function startVtPanViewerUnserialized({
     function buildOcclusionDisc() {
       const { uniform, float, vec4 } = THREE.TSL;
       const uElevation = uniform(float(1));
+      // B channel: this token's elevation when it has NO active vision (so a
+      // VISION roof still opens a disc around it), else 1 = a no-op under MIN —
+      // its vision polygon (buildOcclusionLos) writes B instead.
+      const uVisionChannel = uniform(float(1));
       const material = new THREE.NodeMaterial();
       material.transparent = false;
       material.depthTest = false;
       material.depthWrite = false;
+      // Both faces: the world camera looks down a flipped Y, which turns the
+      // circle's front face away from it — single-sided, no disc ever drew.
+      material.side = THREE.DoubleSide;
       material.blending = THREE.CustomBlending;
       material.blendEquation = THREE.MinEquation;
       material.blendSrc = THREE.OneFactor;
@@ -13283,11 +13294,90 @@ async function startVtPanViewerUnserialized({
       material.blendEquationAlpha = THREE.MinEquation;
       material.blendSrcAlpha = THREE.OneFactor;
       material.blendDstAlpha = THREE.OneFactor;
-      material.fragmentNode = vec4(float(0), uElevation, float(1), float(1));
+      material.fragmentNode = vec4(float(0), uElevation, uVisionChannel, float(1));
       const mesh = new THREE.Mesh(occlusionDiscGeometry, material);
       mesh.frustumCulled = false;
       occlusionScene.add(mesh);
-      return { mesh, material, uElevation };
+      return { mesh, material, uElevation, uVisionChannel };
+    }
+
+    /** tokenItemId -> one token's vision-polygon writer (buildOcclusionLos). */
+    const occlusionLosMeshes = new Map();
+
+    /**
+     * VISION OCCLUSION (2026-11-01) — one occluding token's line-of-sight
+     * polygon, MIN-blended into the mask's B channel at its elevation index:
+     * Foundry's own `beginFill(0xFFFF00 | occlusionElevation).drawShape(vision.los)`
+     * (occlusion.mjs:204). R/G/A write 1, a no-op under MIN. A roof in VISION
+     * mode then clears exactly where its token can see — the "roof with
+     * windows" mode, never built before (VISION used to degrade to FADE forever).
+     *
+     * The polygon is drawn as a triangle FAN from the vision origin: a
+     * ClockwiseSweepPolygon is star-shaped about its own origin by construction
+     * (every vertex is where a ray from the origin stopped), so a fan covers it
+     * exactly with no triangulation. Positions are rewritten only when Foundry
+     * hands over a new polygon object (it rebuilds one on every vision refresh).
+     */
+    function buildOcclusionLos() {
+      const { uniform, float, vec4 } = THREE.TSL;
+      const uElevation = uniform(float(1));
+      const material = new THREE.NodeMaterial();
+      material.transparent = false;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.side = THREE.DoubleSide; // fan winding follows the polygon's own
+      material.blending = THREE.CustomBlending;
+      material.blendEquation = THREE.MinEquation;
+      material.blendSrc = THREE.OneFactor;
+      material.blendDst = THREE.OneFactor;
+      material.blendEquationAlpha = THREE.MinEquation;
+      material.blendSrcAlpha = THREE.OneFactor;
+      material.blendDstAlpha = THREE.OneFactor;
+      material.fragmentNode = vec4(float(1), float(1), uElevation, float(1));
+      const geometry = new THREE.BufferGeometry();
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.frustumCulled = false;
+      occlusionScene.add(mesh);
+      return { mesh, material, geometry, uElevation, attr: null, capacity: 0, lastPoints: null };
+    }
+
+    /** Rewrite one LOS entry's fan for `los` ({points, originX, originY}). */
+    function writeOcclusionLosFan(entry, los) {
+      const pts = los.points;
+      const n = pts.length >> 1;
+      if (entry.lastPoints === pts && entry.lastOriginX === los.originX && entry.lastOriginY === los.originY) return;
+      const need = n * 9;
+      if (entry.capacity < need) {
+        // Grow by half again so a token walking about does not reallocate on
+        // every new corner it sees; a fresh geometry, not a resized attribute.
+        const capacity = Math.ceil(need * 1.5);
+        entry.geometry.dispose();
+        entry.geometry = new THREE.BufferGeometry();
+        entry.attr = new THREE.BufferAttribute(new Float32Array(capacity), 3);
+        entry.attr.setUsage(THREE.DynamicDrawUsage);
+        entry.geometry.setAttribute('position', entry.attr);
+        entry.mesh.geometry = entry.geometry;
+        entry.capacity = capacity;
+      }
+      const a = entry.attr.array;
+      let k = 0;
+      for (let i = 0; i < n; i++) {
+        const j = i + 1 === n ? 0 : i + 1;
+        a[k++] = los.originX;
+        a[k++] = los.originY;
+        a[k++] = 0;
+        a[k++] = pts[i * 2];
+        a[k++] = pts[i * 2 + 1];
+        a[k++] = 0;
+        a[k++] = pts[j * 2];
+        a[k++] = pts[j * 2 + 1];
+        a[k++] = 0;
+      }
+      entry.attr.needsUpdate = true;
+      entry.geometry.setDrawRange(0, n * 3);
+      entry.lastPoints = pts;
+      entry.lastOriginX = los.originX;
+      entry.lastOriginY = los.originY;
     }
 
     /**
@@ -13476,9 +13566,11 @@ async function startVtPanViewerUnserialized({
         const hit = testTokenOcclusion({
           tokenElevation: tok.elevation,
           objectElevation,
-          testPoints: [{ x: tok.x, y: tok.y }],
+          // Foundry's own `TokenDocument#getOcclusionTestPoints()` — several
+          // dense, wall-constrained points, not just the centre.
+          testPoints: tok.testPoints,
           containsPoint: (p) => itemContainsWorldPoint(state, item, p.x, p.y),
-          boundsIntersect: () => tok.x >= b.minX && tok.x <= b.maxX && tok.y >= b.minY && tok.y <= b.maxY,
+          boundsIntersect: () => tok.maxX >= b.minX && tok.minX <= b.maxX && tok.maxY >= b.minY && tok.minY <= b.maxY,
         });
         if (hit) return true;
       }
@@ -13502,6 +13594,9 @@ async function startVtPanViewerUnserialized({
      * @param {number} elevationValue - from `mapElevation`.
      * @param {import('../scene/occlusion.js').OcclusionState|null} weights
      */
+    /** The weights of an item nothing may occlude — written explicitly, see the per-item loop. */
+    const NO_OCCLUSION_WEIGHTS = Object.freeze({ fade: 0, radial: 0, vision: 0, surface: 0 });
+
     function refreshItemOcclusionUniforms(appearance, elevationValue, weights) {
       if (!appearance) return;
       appearance.uOcclusionElevation.value = elevationValue;
@@ -13596,20 +13691,20 @@ async function startVtPanViewerUnserialized({
      */
     function runMaskOcclusionPass() {
       profiler?.begin(Z.masksSync);
-      const distancePixels = readGridDistancePixels().distancePixels;
+      // FOUNDRY'S OWN OCCLUDER SET (2026-11-01, live report "tile occlusion
+      // is completely broken"): `TokenLayer#_getOccludableTokens()` —
+      // controlled / owned / hovered per the world's token occlusion setting —
+      // read by `readOccludableTokens`. This used to take EVERY drawn token,
+      // so a roof faded for a GM with nothing selected (Foundry leaves it
+      // opaque), and only tokens with a non-default occlusion radius ever drew
+      // a RADIAL disc (the schema default 0 drew none — Foundry draws at least
+      // the token's own size). Every occluder now draws its disc, and its vision
+      // polygon when it has one.
+      const occludable = readOccludableTokens();
       let occluderCount = 0;
       let testTokenCount = 0;
-      for (const it of lastItems) {
-        if (it.kind !== 'token') continue;
-        // A drag GHOST is a picture of where the token MIGHT go, not a token: the
-        // real one is still standing at its origin and is what fades roofs.
-        if (it.dragPreview) continue;
-        if (it.hidden) continue; // dimmed-for-GM tokens still occlude in real Foundry; hidden ones do not
-
-        // FADE/VISION-fallback test point — EVERY non-hidden token, gathered
-        // in this SAME pass over lastItems rather than a second scan (see
-        // occlusionTestTokenScratch's own doc for why this is a separate
-        // list from the radius-gated one just below, not a reuse of it).
+      let anyVision = false;
+      for (const tok of occludable.tokens) {
         let tt;
         if (testTokenCount < occlusionTestTokenScratch.length) {
           tt = occlusionTestTokenScratch[testTokenCount];
@@ -13617,17 +13712,14 @@ async function startVtPanViewerUnserialized({
           tt = {};
           occlusionTestTokenScratch.push(tt);
         }
-        tt.elevation = it.key.elevation;
-        tt.x = it.footprint.centerX;
-        tt.y = it.footprint.centerY;
+        tt.elevation = tok.elevation;
+        tt.testPoints = tok.testPoints;
+        tt.minX = tok.minX;
+        tt.minY = tok.minY;
+        tt.maxX = tok.maxX;
+        tt.maxY = tok.maxY;
         testTokenCount++;
 
-        const radiusPx = computeTokenOcclusionRadiusPx({
-          footprint: it.footprint,
-          occludableRadius: it.occludableRadius ?? 0,
-          distancePixels,
-        });
-        if (radiusPx <= 0) continue;
         let o;
         if (occluderCount < maskOccluderScratch.length) {
           o = maskOccluderScratch[occluderCount];
@@ -13635,17 +13727,21 @@ async function startVtPanViewerUnserialized({
           o = {};
           maskOccluderScratch.push(o);
         }
-        o.id = it.id;
-        o.elevation = it.key.elevation;
-        o.centerX = it.footprint.centerX;
-        o.centerY = it.footprint.centerY;
-        o.radiusPx = radiusPx;
+        o.id = tok.id;
+        o.elevation = tok.elevation;
+        o.centerX = tok.centerX;
+        o.centerY = tok.centerY;
+        o.radiusPx = tok.radiusPx;
+        o.visionActive = tok.visionActive;
+        o.los = tok.los;
+        if (tok.visionActive) anyVision = true;
         maskOccluderElevationScratch[occluderCount] = o.elevation;
         occluderCount++;
       }
       maskOccluderScratch.length = occluderCount; // drop any slots left over from a larger previous frame
       maskOccluderElevationScratch.length = occluderCount;
       occlusionTestTokenScratch.length = testTokenCount;
+      occlusionMask.visionActive = anyVision;
       const occluders = maskOccluderScratch;
 
       occlusionMask.elevationTable = buildElevationTable(maskOccluderElevationScratch);
@@ -13667,8 +13763,24 @@ async function startVtPanViewerUnserialized({
         entry.mesh.scale.set(o.radiusPx, o.radiusPx, 1);
         entry.mesh.visible = true;
         entry.uElevation.value = mapElevation(occlusionMask.elevationTable, o.elevation);
+        entry.uVisionChannel.value = o.visionActive ? 1 : entry.uElevation.value;
+        let losEntry = occlusionLosMeshes.get(o.id);
+        if (o.los) {
+          if (!losEntry) {
+            losEntry = buildOcclusionLos();
+            occlusionLosMeshes.set(o.id, losEntry);
+          }
+          writeOcclusionLosFan(losEntry, o.los);
+          losEntry.uElevation.value = entry.uElevation.value;
+          losEntry.mesh.visible = true;
+        } else if (losEntry) {
+          losEntry.mesh.visible = false;
+        }
       }
       for (const [id, entry] of occlusionDiscs) {
+        if (!seen.has(id)) entry.mesh.visible = false;
+      }
+      for (const [id, entry] of occlusionLosMeshes) {
         if (!seen.has(id)) entry.mesh.visible = false;
       }
 
@@ -13791,7 +13903,15 @@ async function startVtPanViewerUnserialized({
           });
         }
 
-        refreshItemOcclusionUniforms(state.appearance, value, weights);
+        // An item that is NOT occludable gets explicit zero weights every
+        // frame, never "leave them": a tile switched from FADE to NONE while
+        // faded kept its fade weight forever (live 2026-11-01 — the roof
+        // vanished and the culled floor beneath showed the clear colour).
+        // `occlusion.alpha` is refreshed too: an author can change it live.
+        const liveWeights = weights ?? NO_OCCLUSION_WEIGHTS;
+        const occludedAlpha = Number.isFinite(item?.occlusion?.alpha) ? item.occlusion.alpha : 0;
+        refreshItemOcclusionUniforms(state.appearance, value, liveWeights);
+        if (state.appearance?.uOccludedAlpha) state.appearance.uOccludedAlpha.value = occludedAlpha;
         // The tile's own fade, whichever channel drove it (token proximity →
         // `weights.fade`, hover → `hoverFade.occlusion`). `radial`/`surface`
         // read a permanent 1 once configured, so they are deliberately not
@@ -13821,7 +13941,8 @@ async function startVtPanViewerUnserialized({
         }
         if (state.wholeImage) {
           for (const t of state.wholeImage.tiles) {
-            refreshItemOcclusionUniforms(t.appearance, value, weights);
+            refreshItemOcclusionUniforms(t.appearance, value, liveWeights);
+            if (t.appearance?.uOccludedAlpha) t.appearance.uOccludedAlpha.value = occludedAlpha;
             // THE LIVE DEPTH-AUTHORITY GATE (mythica-machina-press#480) —
             // `t.uDepthOcclusionAmount` only exists for a tile whose depth
             // proxy was built `occlusionResponsive` (rebuildSceneDepthProxies,
@@ -24450,7 +24571,20 @@ async function startVtPanViewerUnserialized({
             // path, which `earlyZInteriorVerdict` never grants an
             // occlusion-responsive tile in the first place — matches this
             // tile's pre-existing (skipped) prepass state exactly.
-            const liveMaterial = buildSceneDepthWriterMaterial({ ...writerArgs, liveOcclusionGate: true });
+            // Per-pixel too, not just whole-tile: a RADIAL/VISION hole must free
+            // the floor beneath it (see scene-depth.js's occlusionMaskGate).
+            const occlusionMaskGate = t.appearance
+              ? {
+                  maskTexture: occlusionMask.texture,
+                  elevation: t.appearance.uOcclusionElevation,
+                  weights: t.appearance.uOcclusionWeights,
+                }
+              : null;
+            const liveMaterial = buildSceneDepthWriterMaterial({
+              ...writerArgs,
+              liveOcclusionGate: true,
+              occlusionMaskGate,
+            });
             t.uDepthOcclusionAmount = liveMaterial.uLiveOcclusionAmount;
             const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material: liveMaterial, z });
             depthScene.add(mesh);
@@ -24674,10 +24808,10 @@ async function startVtPanViewerUnserialized({
       // ROOF OCCLUSION for door leaves: slot them just under the viewed floor's
       // foreground in the list just sorted (a half step, so no ordinal moves).
       {
-        const doorFloor = vegFloors.find((f) => f.index === view.floorIndex);
-        if (doorFloor) {
-          doorGraphics.setLeafRenderOrder(doorRenderOrderUnderForeground(itemsWithVegetation, doorFloor));
-        }
+        // No resolvable floor (a scene whose Levels carry no background art)
+        // reads as one unbounded floor — never left drawn above everything.
+        const doorFloor = vegFloors.find((f) => f.index === view.floorIndex) ?? {};
+        doorGraphics.setLeafRenderOrder(doorRenderOrderUnderForeground(itemsWithVegetation, doorFloor));
       }
       const wantedIds = new Set(items.map((i) => i.id));
       prefetchSkippedPacks = 0;

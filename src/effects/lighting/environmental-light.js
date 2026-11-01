@@ -58,6 +58,10 @@ import { liftedLookupNode, layerScaleDecodeNode } from '../../scene/index.js';
 // shape as `grade-present.js`'s own direct `../lighting/environmental-
 // light.js` import.
 import { FLUID_PRESENCE_EDGE0, FLUID_PRESENCE_EDGE1 } from '../fluid/fluid-render.js';
+// THE LIGHT LOOK (2026-11-01) — the Colour Grade's lighting-only ops; the maths
+// lives with the rest of the grade (effects/grade/grade-ops.js), applied here
+// because this composite is the one place light meets the painted art.
+import { buildLightLookNodes, IDENTITY_LIGHT_LOOK } from '../grade/grade-ops.js';
 
 /**
  * Linear-interpolate two rgb triples, clamping t to [0,1].
@@ -933,6 +937,15 @@ export function buildEnvironmentalLightMaterials({
   // ui-window-shadow.js's own default.
   const uUiShadowTint = uniform(vec3(0.251, 0.192, 0.165));
 
+  // THE LIGHT LOOK's uniforms (see the import note). Identity values make the
+  // composite exactly what it was: ×1, and a saturation mix to itself.
+  const uLightLook = {
+    lightLevel: uniform(float(IDENTITY_LIGHT_LOOK.lightLevel)),
+    lightSaturation: uniform(float(IDENTITY_LIGHT_LOOK.lightSaturation)),
+    lightTint: uniform(vec3(...IDENTITY_LIGHT_LOOK.lightTint)),
+    lightGlow: uniform(float(IDENTITY_LIGHT_LOOK.lightGlow)),
+  };
+
   // --- composite pass: lit = EOTF( OETF(albedo) × illum × uiShadowVis + coloration ) ------
   const albedoTexNode = texture(albedoTexture);
   const illumTexNode = texture(illumTexture);
@@ -941,11 +954,14 @@ export function buildEnvironmentalLightMaterials({
   const illumWithUiShadow = uiShadowVisNode
     ? illumTexNode.rgb.mul(mix(uUiShadowTint, vec3(1, 1, 1), uiShadowVisNode))
     : illumTexNode.rgb;
-  const litSrgb = mapSrgb.mul(illumWithUiShadow);
+  // The light look shapes the LIGHT before it meets the art: its level, how
+  // coloured it is (0 = white), a tint, and the strength of the coloured glow.
+  const shapedLight = buildLightLookNodes(THREE.TSL, illumWithUiShadow, colorationTexNode.rgb, uLightLook);
+  const litSrgb = mapSrgb.mul(shapedLight.illum);
   // (The sky "veil" that used to add a neutral desaturating term here is GONE,
   // 2026-07-23 — it was the wrong mechanism, a light cannot drain chroma. The
   // environmental GRADE does it correctly in the present pass; see Grade.md §2.)
-  const finalSrgb = litSrgb.add(colorationTexNode.rgb); // gamma-space ADD, Foundry parity (see essay above)
+  const finalSrgb = litSrgb.add(shapedLight.coloration); // gamma-space ADD, Foundry parity (see essay above)
 
   // ⚠️ THE VISION GATE IS DELIBERATELY *NOT* HERE — it lives in its own
   // `vision.gate` fullscreen pass (`effects/vision/vision-mask-render.js#
@@ -994,6 +1010,19 @@ export function buildEnvironmentalLightMaterials({
    */
   function setUiShadowTint(rgb) {
     uUiShadowTint.value.set(rgb[0], rgb[1], rgb[2]);
+  }
+
+  /**
+   * Push the light look (the Colour Grade's Light group). Missing fields are identity.
+   * @param {{lightLevel?: number, lightSaturation?: number, lightTint?: number[], lightGlow?: number}} [p]
+   */
+  function setLightLook(p = {}) {
+    const n = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+    uLightLook.lightLevel.value = Math.max(0, n(p.lightLevel, 1));
+    uLightLook.lightSaturation.value = Math.max(0, n(p.lightSaturation, 1));
+    uLightLook.lightGlow.value = Math.max(0, n(p.lightGlow, 1));
+    const t = Array.isArray(p.lightTint) ? p.lightTint : IDENTITY_LIGHT_LOOK.lightTint;
+    uLightLook.lightTint.value.set(n(t[0], 1), n(t[1], 1), n(t[2], 1));
   }
 
   /** The camera's world rect this frame — the screen→world half of the gate. */
@@ -1133,6 +1162,7 @@ export function buildEnvironmentalLightMaterials({
     setSky,
     setMoon,
     setUiShadowTint,
+    setLightLook,
     setViewRect,
     setWaterMask,
     setSkyCover,

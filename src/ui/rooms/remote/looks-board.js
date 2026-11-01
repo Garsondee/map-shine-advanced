@@ -14,7 +14,15 @@
  * @module ui/rooms/remote/looks-board
  */
 
-import { LOOK_FACETS, describeLook, lookSwatch, reconcileLook } from '../../../core/looks-schema.js';
+import {
+  LOOK_FACETS,
+  LOOK_PALETTE,
+  describeLook,
+  lookOptions,
+  lookSwatch,
+  optionPaletteId,
+  reconcileLook,
+} from '../../../core/looks-schema.js';
 import { WEATHER_ARCHETYPES } from '../../../world/index.js';
 import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { setTip } from '../../widgets/tooltip.js';
@@ -85,7 +93,20 @@ export function renderLooksBoard(container, ctx, env) {
   const title = el('span', 'msa-section-title');
   title.innerHTML = `${iconMarkup('layers')}<span>Looks</span>`;
   const fadeSlot = el('div', 'msa-fade-slot');
-  head.append(title, fadeSlot);
+  // "Scene start" — the old footer's Baseline: the weather as this scene loaded. A small
+  // button by the title rather than a tile, so the grid is exactly the Looks + Save.
+  if (ctx.baseline) {
+    const reset = el('button', 'hbtn msa-looks-reset');
+    reset.type = 'button';
+    reset.innerHTML = iconMarkup('reset');
+    reset.title = 'Scene start — fade the weather back to how this scene was when it loaded.';
+    reset.addEventListener('click', () => {
+      closeMenu();
+      ctx.baseline(env.getFadeOverMs());
+      env.onStatus('Fading back to how this scene loaded.');
+    });
+    head.append(title, reset, fadeSlot);
+  } else head.append(title, fadeSlot);
 
   const grid = el('div', 'msa-look-grid');
   grid.setAttribute('role', 'list');
@@ -137,8 +158,29 @@ export function renderLooksBoard(container, ctx, env) {
       warn.innerHTML = iconMarkup('warn');
       swatch.appendChild(warn);
     }
+    // One colour: a band of the kept colour across the grey sky.
+    if (sw.band) {
+      const band = el('span', 'msa-look-band');
+      band.style.background = sw.band;
+      swatch.appendChild(band);
+    }
     const name = el('span', 'msa-look-name', look.name);
     t.append(swatch, name);
+    // THE OPTION BUTTON (author 2026-11-01: "some Looks should have a button on them
+    // which allows the GM to select an alternative colour"): a dot of the current
+    // colour; it opens the palette. A span, like the corner menu button, because a
+    // tile is itself a button.
+    const options = lookOptions(look);
+    if (options.length > 0) {
+      const dot = el('span', 'msa-look-opt');
+      dot.style.background = optionColour(look, options[0].key);
+      dot.title = `${options[0].label}: pick another colour`;
+      dot.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openOptions(look);
+      });
+      t.appendChild(dot);
+    }
     const isActive = ctx.activeId() === look.id;
     t.setAttribute('aria-pressed', String(isActive));
     if (isActive && ctx.isFading()) t.dataset.fading = 'true';
@@ -166,27 +208,55 @@ export function renderLooksBoard(container, ctx, env) {
     return t;
   }
 
-  /** "Scene start" — the old footer's Baseline, as a tile: the weather as this scene
-   * loaded. Always first, never editable (it is not a stored Look). */
-  function baselineTile() {
-    const t = el('button', 'msa-look msa-look--baseline');
-    t.type = 'button';
-    t.setAttribute('role', 'listitem');
-    t.style.setProperty('--look-top', '#4a5468');
-    t.style.setProperty('--look-bottom', '#2a303e');
-    const swatch = el('span', 'msa-look-sky');
-    const glyphs = el('span', 'msa-look-facets');
-    glyphs.innerHTML = iconMarkup('reset');
-    swatch.appendChild(glyphs);
-    t.append(swatch, el('span', 'msa-look-name', 'Scene start'));
-    t.title = 'Fade the weather back to how this scene was when it loaded, over the Fade Time.';
-    t.setAttribute('aria-pressed', 'false');
-    t.addEventListener('click', () => {
-      closeMenu();
-      ctx.baseline?.(env.getFadeOverMs());
-      env.onStatus('');
-    });
-    return t;
+  /** The colour an option shows right now (a hue channel draws its hue). */
+  function optionColour(look, key) {
+    const value = look.values?.[key];
+    if (typeof value === 'string') return value;
+    return `hsl(${Math.round(Number(value) || 0)}, 80%, 48%)`;
+  }
+
+  /** The palette sheet for a Look's options — one row of swatches per option. */
+  function openOptions(look) {
+    closeMenu();
+    menuFor = look.id;
+    grid.querySelector(`[data-look-id="${CSS.escape(look.id)}"]`)?.setAttribute('data-menu', 'true');
+    const sheet = el('div', 'msa-look-menu');
+    const head = el('div', 'msa-look-menu-head', look.name);
+    const close = el('button', 'hbtn');
+    close.type = 'button';
+    close.innerHTML = iconMarkup('x');
+    close.title = 'Close';
+    close.addEventListener('click', closeMenu);
+    head.appendChild(close);
+    sheet.appendChild(head);
+    for (const option of lookOptions(look)) {
+      sheet.appendChild(el('div', 'msa-look-menu-sub', option.label));
+      const row = el('div', 'msa-swatches');
+      row.setAttribute('role', 'group');
+      row.setAttribute('aria-label', option.label);
+      const current = optionPaletteId(look, option.key);
+      for (const swatch of LOOK_PALETTE) {
+        const b = el('button', 'msa-swatch');
+        b.type = 'button';
+        b.style.setProperty('--swatch', swatch.hex);
+        b.title = swatch.label;
+        b.setAttribute('aria-label', swatch.label);
+        b.setAttribute('aria-pressed', String(swatch.id === current));
+        b.addEventListener('click', async () => {
+          const result = await ctx.setOption(look.id, option.key, swatch.id, env.getFadeOverMs());
+          if (result && result.ok === false) env.onStatus(result.reason ?? 'Not changed.');
+          else env.onStatus(`${look.name}: ${swatch.label}.`);
+          const fresh = ctx.list().find((l) => l.id === look.id);
+          if (fresh) openOptions(fresh);
+        });
+        row.appendChild(b);
+      }
+      sheet.appendChild(row);
+    }
+    sheet.appendChild(
+      el('div', 'msa-hint', 'Saved for every map. If this Look is playing, it fades to the new colour.')
+    );
+    menuHost.appendChild(sheet);
   }
 
   function addTile() {
@@ -353,7 +423,7 @@ export function renderLooksBoard(container, ctx, env) {
   }
 
   function paint() {
-    grid.replaceChildren(...(ctx.baseline ? [baselineTile()] : []), ...ctx.list().map(tile), addTile());
+    grid.replaceChildren(...ctx.list().map(tile), addTile());
     paintForm();
     if (menuFor && !ctx.list().some((l) => l.id === menuFor)) closeMenu();
     else if (menuFor) grid.querySelector(`[data-look-id="${CSS.escape(menuFor)}"]`)?.setAttribute('data-menu', 'true');

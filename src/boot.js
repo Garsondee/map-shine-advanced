@@ -255,6 +255,10 @@ import { wallClockMs } from './core/frame-clock.js';
 import { validateCue, validateCueStack, orderedCues, cueToFadePatch } from './core/cues-schema.js';
 import {
   STARTER_LOOKS,
+  STARTER_SET_VERSION,
+  setLookOption,
+  structuredCloneLook,
+  upgradeStarters,
   captureLook,
   looksFromCues,
   lookFacets,
@@ -2095,6 +2099,7 @@ function install() {
         rename: (id, name) => renameLook(id, name),
         remove: (id) => deleteLook(id),
         tidy: (id) => tidyLookById(id),
+        setOption: (id, key, paletteId, overMs) => setLookOptionById(id, key, paletteId, overMs),
         sequence: () => lookSequence,
         setSequence: (ids) => saveLookSequence(ids),
         nextIndex: () => lookSequenceNext,
@@ -13193,6 +13198,77 @@ function install() {
     },
   });
 
+  // THE COLOUR GRADE, FADEABLE (Looks, 2026-11-01). The Colour Grade's own fade
+  // source ('grade', from its Studio card) writes the scene flag on EVERY call —
+  // fine for a slider release, ruinous per frame. This one writes only the
+  // in-memory live override; pumpWeatherFades re-resolves the grade ONCE per
+  // frame when any of it moved (`gradeLiveDirty`), and the fade's completion
+  // persists the arrived values once through MapShine.setGrade (`__grade`).
+  const LOOK_GRADE_FIELDS = Object.freeze([
+    'exposure',
+    'contrast',
+    'saturation',
+    'temperature',
+    'vibrance',
+    'spotAmount',
+    'spotHue',
+    'spotWidth',
+    'colourise',
+    'colouriseColor',
+    'colouriseHold',
+    'colouriseKeepLamps',
+    'vignette',
+    'exposureInside',
+    'exposureOutside',
+    'toneMapping',
+    'shadows',
+    'lightLevel',
+    'lightSaturation',
+    'lightTint',
+    'lightGlow',
+  ]);
+  /** The 'lookGrade' fields that are colours (they fade as hex). */
+  const LOOK_GRADE_COLOURS = Object.freeze(['colouriseColor', 'lightTint', 'shadows']);
+  /** The 'lookGrade' fields that are choices (they switch when the fade lands). */
+  const LOOK_GRADE_CHOICES = Object.freeze(['toneMapping']);
+  const lookGradeType = (field) =>
+    LOOK_GRADE_COLOURS.includes(field) ? 'color' : LOOK_GRADE_CHOICES.includes(field) ? 'enum' : 'float';
+  let gradeLiveDirty = false;
+  fadeSourceRegistry.registerSource('lookGrade', {
+    keys: () => LOOK_GRADE_FIELDS,
+    typeOf: (field) => (LOOK_GRADE_FIELDS.includes(field) ? lookGradeType(field) : undefined),
+    readLive: (field) =>
+      liveFadeValue(`lookGrade.${field}`) ??
+      gradeLookLiveOverride[field] ??
+      gradeLookReadout.params?.[field] ??
+      GRADE_LOOK_PARAMS[field]?.default,
+    write: (field, value) => {
+      if (!LOOK_GRADE_FIELDS.includes(field)) return;
+      gradeLookLiveOverride[field] = value;
+      gradeLiveDirty = true;
+    },
+  });
+
+  // BLOOM, FADEABLE (Looks, 2026-11-01) — the same live-only shape as 'lookGrade'
+  // above: per-frame writes land in bloom's in-memory override, one re-resolve per
+  // frame, persisted once on arrival through MapShine.setBloom (`__bloom`).
+  const LOOK_BLOOM_FIELDS = Object.freeze(['threshold', 'strength', 'atmoStrength', 'atmoTint']);
+  let bloomLiveDirty = false;
+  fadeSourceRegistry.registerSource('lookBloom', {
+    keys: () => LOOK_BLOOM_FIELDS,
+    typeOf: (field) => (field === 'atmoTint' ? 'color' : LOOK_BLOOM_FIELDS.includes(field) ? 'float' : undefined),
+    readLive: (field) =>
+      liveFadeValue(`lookBloom.${field}`) ??
+      bloomLiveOverride[field] ??
+      bloomReadout.params?.[field] ??
+      BLOOM_PARAMS[field]?.default,
+    write: (field, value) => {
+      if (!LOOK_BLOOM_FIELDS.includes(field)) return;
+      bloomLiveOverride[field] = value;
+      bloomLiveDirty = true;
+    },
+  });
+
   /** The dial value of a wind fade IN FLIGHT, either shape, else null. */
   function liveWindFadeSpeed01() {
     const perceived = liveFadeValue('wind.perceived01');
@@ -13921,6 +13997,159 @@ function install() {
         s.darkness = v;
       },
     },
+    // THE COLOUR FACET — the artistic Colour Grade, through the 'lookGrade' source.
+    'grade.exposure': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.exposure'),
+      stage: (v, s) => {
+        s.grade.exposure = v;
+      },
+    },
+    'grade.exposureInside': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.exposureInside'),
+      stage: (v, s) => {
+        s.grade.exposureInside = v;
+      },
+    },
+    'grade.exposureOutside': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.exposureOutside'),
+      stage: (v, s) => {
+        s.grade.exposureOutside = v;
+      },
+    },
+    'grade.contrast': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.contrast'),
+      stage: (v, s) => {
+        s.grade.contrast = v;
+      },
+    },
+    'grade.saturation': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.saturation'),
+      stage: (v, s) => {
+        s.grade.saturation = v;
+      },
+    },
+    'grade.temperature': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.temperature'),
+      stage: (v, s) => {
+        s.grade.temperature = v;
+      },
+    },
+    'grade.toneMapping': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.toneMapping'),
+      stage: (v, s) => {
+        s.grade.toneMapping = v;
+      },
+    },
+    'grade.shadows': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.shadows'),
+      stage: (v, s) => {
+        s.grade.shadows = v;
+      },
+    },
+    'grade.vibrance': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.vibrance'),
+      stage: (v, s) => {
+        s.grade.vibrance = v;
+      },
+    },
+    'grade.spotAmount': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.spotAmount'),
+      stage: (v, s) => {
+        s.grade.spotAmount = v;
+      },
+    },
+    'grade.spotHue': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.spotHue'),
+      stage: (v, s) => {
+        s.grade.spotHue = v;
+      },
+    },
+    'grade.spotWidth': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.spotWidth'),
+      stage: (v, s) => {
+        s.grade.spotWidth = v;
+      },
+    },
+    'grade.colourise': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.colourise'),
+      stage: (v, s) => {
+        s.grade.colourise = v;
+      },
+    },
+    'grade.colouriseColor': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.colouriseColor'),
+      stage: (v, s) => {
+        s.grade.colouriseColor = v;
+      },
+    },
+    'grade.colouriseHold': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.colouriseHold'),
+      stage: (v, s) => {
+        s.grade.colouriseHold = v;
+      },
+    },
+    'grade.colouriseKeepLamps': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.colouriseKeepLamps'),
+      stage: (v, s) => {
+        s.grade.colouriseKeepLamps = v;
+      },
+    },
+    'grade.vignette': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.vignette'),
+      stage: (v, s) => {
+        s.grade.vignette = v;
+      },
+    },
+    // THE LIGHT LOOK — the grade's Light group (a separate CC for the lighting).
+    'grade.lightLevel': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.lightLevel'),
+      stage: (v, s) => {
+        s.grade.lightLevel = v;
+      },
+    },
+    'grade.lightSaturation': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.lightSaturation'),
+      stage: (v, s) => {
+        s.grade.lightSaturation = v;
+      },
+    },
+    'grade.lightTint': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.lightTint'),
+      stage: (v, s) => {
+        s.grade.lightTint = v;
+      },
+    },
+    'grade.lightGlow': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.lightGlow'),
+      stage: (v, s) => {
+        s.grade.lightGlow = v;
+      },
+    },
+    // BLOOM — through the 'lookBloom' source.
+    'bloom.threshold': {
+      read: () => fadeSourceRegistry.readLive('lookBloom.threshold'),
+      stage: (v, s) => {
+        s.bloom.threshold = v;
+      },
+    },
+    'bloom.strength': {
+      read: () => fadeSourceRegistry.readLive('lookBloom.strength'),
+      stage: (v, s) => {
+        s.bloom.strength = v;
+      },
+    },
+    'bloom.atmoStrength': {
+      read: () => fadeSourceRegistry.readLive('lookBloom.atmoStrength'),
+      stage: (v, s) => {
+        s.bloom.atmoStrength = v;
+      },
+    },
+    'bloom.atmoTint': {
+      read: () => fadeSourceRegistry.readLive('lookBloom.atmoTint'),
+      stage: (v, s) => {
+        s.bloom.atmoTint = v;
+      },
+    },
     // END LOOK_ADAPTERS
   };
 
@@ -13972,6 +14201,56 @@ function install() {
     void writeFadeState(fadeState);
   }
 
+  /**
+   * The Colour Grade, as one gesture: faded through 'lookGrade' (live only),
+   * persisted once on arrival through MapShine.setGrade. A style that is OFF right
+   * now (no one colour, no wash) takes its new hue / tint / width / hold at once
+   * instead of sweeping round the colour wheel on the way in.
+   * @param {Record<string, number|string>} patch @param {number} overMs @param {string} label
+   */
+  function fadeGradeTo(patch, overMs, label) {
+    const nowMs = wallClockMs();
+    const gestureId = `look-grade:${nowMs}`;
+    const live = (f) => fadeSourceRegistry.readLive(`lookGrade.${f}`);
+    const snap = new Set([
+      ...(Number(live('spotAmount')) > 0.01 ? [] : ['spotHue', 'spotWidth']),
+      ...(Number(live('colourise')) > 0.01 ? [] : ['colouriseColor', 'colouriseHold']),
+    ]);
+    const targets = {};
+    for (const [field, to] of Object.entries(patch)) {
+      targets[`lookGrade.${field}`] = {
+        to,
+        type: lookGradeType(field),
+        overMs,
+        curve: 'ease',
+        from: snap.has(field) ? to : live(field),
+      };
+    }
+    fadeState = mergeFadeState(fadeState, { id: gestureId, label, targets }, nowMs);
+    pendingSkyFadeCompletions.set(gestureId, { __grade: true, patch: { ...patch } });
+    void writeFadeState(fadeState);
+  }
+
+  /** Bloom, as one gesture: faded through 'lookBloom', persisted once on arrival.
+   * @param {Record<string, number|string>} patch @param {number} overMs @param {string} label */
+  function fadeBloomTo(patch, overMs, label) {
+    const nowMs = wallClockMs();
+    const gestureId = `look-bloom:${nowMs}`;
+    const targets = {};
+    for (const [field, to] of Object.entries(patch)) {
+      targets[`lookBloom.${field}`] = {
+        to,
+        type: field === 'atmoTint' ? 'color' : 'float',
+        overMs,
+        curve: 'ease',
+        from: fadeSourceRegistry.readLive(`lookBloom.${field}`),
+      };
+    }
+    fadeState = mergeFadeState(fadeState, { id: gestureId, label, targets }, nowMs);
+    pendingSkyFadeCompletions.set(gestureId, { __bloom: true, patch: { ...patch } });
+    void writeFadeState(fadeState);
+  }
+
   /** Night darkness, persisted to the scene's player-light flag on arrival.
    * @param {number} value @param {number} overMs */
   function fadeNightDarknessTo(value, overMs) {
@@ -14011,6 +14290,8 @@ function install() {
     if (Number.isFinite(s.windSpeed)) fadeWindSpeedTo(s.windSpeed, overMs);
     if (Number.isFinite(s.windDirectionDeg)) void MapShine.setWind({ directionDeg: s.windDirectionDeg });
     if (Object.keys(s.sky).length > 0) fadeSkyFieldsTo(s.sky, overMs, label);
+    if (Object.keys(s.grade).length > 0) fadeGradeTo(s.grade, overMs, label);
+    if (Object.keys(s.bloom).length > 0) fadeBloomTo(s.bloom, overMs, label);
     if (Number.isFinite(s.darkness)) fadeNightDarknessTo(s.darkness, overMs);
     MapShine.__remote?.refreshWeatherBoard();
   }
@@ -14029,7 +14310,7 @@ function install() {
       return { ok: false, reason: skipped[0]?.reason ?? 'this Look has nothing to play', skipped };
     }
     const ms = Math.max(0, Number(overMs) || 0);
-    const staged = { weatherAxes: {}, sky: {} };
+    const staged = { weatherAxes: {}, sky: {}, grade: {}, bloom: {} };
     for (const { key, value } of apply) LOOK_ADAPTERS[key]?.stage(value, staged);
     commitLookStage(staged, ms, look.name);
     const nowMs = wallClockMs();
@@ -14068,15 +14349,23 @@ function install() {
   function loadLooksLibrary() {
     const { raw, reason } = readLooksLibraryRaw();
     if (reason) log.warn(reason);
-    looksLibrary =
-      raw === '' ? STARTER_LOOKS.map((l) => ({ ...l, values: { ...l.values } })) : normalizeLibrary(raw).looks;
+    if (raw === '') {
+      looksLibrary = STARTER_LOOKS.map(structuredCloneLook);
+      return;
+    }
+    // A library saved under an older starter set gets the current starters, once
+    // (the old ones retired, every GM-made Look kept) — see upgradeStarters.
+    const { looks, starters } = normalizeLibrary(raw);
+    const up = upgradeStarters(looks, starters);
+    looksLibrary = up.looks;
+    if (up.changed && MapShine.debug?.isGM?.()) void saveLooksLibrary(up.looks);
   }
 
   /** @param {import('./core/looks-schema.js').Look[]} next */
   async function saveLooksLibrary(next) {
     looksLibrary = next;
     MapShine.__remote?.refreshLooks?.();
-    const result = await writeLooksLibraryRaw(serializeLibrary(next));
+    const result = await writeLooksLibraryRaw(serializeLibrary(next, STARTER_SET_VERSION));
     if (!result.ok) log.warn(result.reason);
     return result;
   }
@@ -14131,6 +14420,21 @@ function install() {
   function deleteLook(id) {
     if (activeLook?.id === id) activeLook = null;
     return saveLooksLibrary(looksLibrary.filter((l) => l.id !== id));
+  }
+
+  /**
+   * Re-pick one of a Look's options (its colour button) from the palette, save it
+   * for every map, and — if that Look is the one on screen — fade to the new colour.
+   * @param {string} id @param {string} key @param {string} paletteId @param {number} [overMs]
+   */
+  async function setLookOptionById(id, key, paletteId, overMs = 0) {
+    const look = looksLibrary.find((l) => l.id === id);
+    if (!look) return { ok: false, reason: `no Look with id '${id}'` };
+    const next = setLookOption(look, key, paletteId);
+    if (next === look) return { ok: false, reason: 'that Look has no such option' };
+    const result = await saveLooksLibrary(looksLibrary.map((l) => (l.id === id ? next : l)));
+    if (activeLook?.id === id) playLookById(id, overMs);
+    return result;
   }
 
   function tidyLookById(id) {
@@ -14201,6 +14505,7 @@ function install() {
     rename: (id, name) => renameLook(id, name),
     remove: (id) => deleteLook(id),
     tidy: (id) => tidyLookById(id),
+    setOption: (id, key, paletteId, overMs = 0) => setLookOptionById(id, key, paletteId, overMs),
     inspect: (id) => inspectLook(id),
     sequence: () => lookSequence.slice(),
     setSequence: (ids) => saveLookSequence(Array.isArray(ids) ? ids : []),
@@ -14280,6 +14585,15 @@ function install() {
         droppedBadKey = true;
       }
     }
+    // One grade re-resolve per frame, however many of its fields a Look is fading.
+    if (gradeLiveDirty) {
+      gradeLiveDirty = false;
+      reapplyGradeLook();
+    }
+    if (bloomLiveDirty) {
+      bloomLiveDirty = false;
+      reapplyBloom();
+    }
     if (droppedBadKey) void writeFadeState(fadeState);
     let anyCompleted = false;
     for (const [gestureId, completion] of pendingSkyFadeCompletions) {
@@ -14306,6 +14620,10 @@ function install() {
           // door (wind-persistence.js), not editSky (completion isn't a
           // sky patch here).
           void MapShine.setWind({ speed01: completion.speed01 });
+        } else if (completion.__grade) {
+          MapShine.setGrade(completion.patch);
+        } else if (completion.__bloom) {
+          MapShine.setBloom(completion.patch);
         } else if (completion.__night) {
           void writeScenePlayerLightPermissions({ darknessRealism01: completion.value }).then((result) => {
             if (!result.ok) log.warn(`night darkness not persisted: ${result.reason}`);

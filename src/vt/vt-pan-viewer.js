@@ -8442,6 +8442,8 @@ async function startVtPanViewerUnserialized({
         threshold: REVEAL_ILLUMINATION_THRESHOLD,
         extraRevealed: tableSubsystem.revealedOutsideScene,
       },
+      // The lamps' coloured glow, so a Look's colourise can keep lamplight white.
+      lampGlowTexture: sceneColoration.texture,
     });
     // INITIAL STATE (2026-08-27) — a fresh viewer's `internalScale` may
     // ALREADY be below 1.0 at this point (a player's persisted setting can
@@ -12850,6 +12852,16 @@ async function startVtPanViewerUnserialized({
      */
     function pushGradeLook() {
       const st = getGradeLookState();
+      // THE LIGHT LOOK (2026-11-01) — the grade's Light group shapes the lighting
+      // itself, in the lighting composite (effects/lighting/environmental-light.js).
+      // Tint is a multiplier on sRGB-magnitude light, so it is used as authored.
+      const lp = st?.enabled ? st.params || {} : {};
+      envLight.setLightLook({
+        lightLevel: lp.lightLevel,
+        lightSaturation: lp.lightSaturation,
+        lightTint: hexToRgb01(lp.lightTint ?? '#ffffff'),
+        lightGlow: lp.lightGlow,
+      });
       if (!st?.enabled) {
         // Temperature Effects still shift a disabled Colour Grade — it is its
         // own card; an identity grade plus the delta is the delta alone.
@@ -12889,6 +12901,19 @@ async function startVtPanViewerUnserialized({
             lift,
             gamma: [1, 1, 1],
             gain,
+            // THE STYLE OPS (2026-11-01, the Remote's Looks): keep one colour, a
+            // tinted monochrome, a vignette. The tint is authored as sRGB hex and
+            // the grade works in linear light, hence the decode.
+            spotAmount: p.spotAmount,
+            spotHue: p.spotHue,
+            spotWidth: p.spotWidth,
+            colourise: p.colourise,
+            colouriseColor: hexToRgb01(p.colouriseColor ?? '#b5864f').map((v) => Math.pow(v, 2.2)),
+            colouriseHold: p.colouriseHold,
+            colouriseKeepLamps: p.colouriseKeepLamps,
+            exposureInside: p.exposureInside,
+            exposureOutside: p.exposureOutside,
+            vignette: p.vignette,
           },
           temperatureGradeDelta,
           temperatureIndoorShare

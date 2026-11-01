@@ -84,6 +84,7 @@ export const REMOTE_PRESSABLES = Object.freeze([
   '.msa-run-btn', // a running-order row's up / down / remove
   '.msa-run-play', // a running-order row's name (plays it)
   '.msa-more-item', // a row of the header's more menu
+  '.msa-swatch', // a colour in a Look's option palette
 ]);
 
 /**
@@ -543,7 +544,8 @@ ${R} .msa-transport-mode{margin-left:2px; font-size:.62rem; color:var(--ink2); l
 
 /* the Looks grid — each tile its own little sky */
 ${R} .msa-looks{display:flex; flex-direction:column; gap:8px}
-${R} .msa-look-grid{display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; max-height:196px; overflow-y:auto;
+/* four rows of four, exactly (2026-11-01: 15 starter Looks + Save); more scrolls */
+${R} .msa-look-grid{display:grid; grid-template-columns:repeat(4, 1fr); grid-auto-rows:66px; gap:6px; max-height:282px; overflow-y:auto;
   padding:2px; scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent}
 ${R} .msa-look, ${R} .msa-look-add{position:relative; display:flex; flex-direction:column; min-width:0; padding:0;
   border-radius:10px; border:1px solid var(--line); background:var(--bg2); color:var(--ink0);
@@ -553,7 +555,7 @@ ${R} .msa-look, ${R} .msa-look-add{position:relative; display:flex; flex-directi
 ${R} .msa-look{align-items:stretch; justify-content:flex-start}
 ${R} .msa-menu-item, ${R} .msa-more-item, ${R} .msa-run-play{justify-content:flex-start}
 ${R} .msa-run-card{align-items:flex-start; justify-content:center}
-${R} .msa-look-sky{position:relative; display:block; height:38px;
+${R} .msa-look-sky{position:relative; display:block; height:30px; flex:none;
   background:linear-gradient(180deg, var(--look-top), var(--look-bottom))}
 ${R} .msa-look-facets{position:absolute; left:5px; bottom:4px; display:flex; gap:3px;
   color:rgba(255,255,255,.88); filter:drop-shadow(0 1px 1px rgba(0,0,0,.65))}
@@ -571,7 +573,18 @@ ${R} .msa-look-more{position:absolute; top:3px; right:3px; width:16px; height:16
   border-radius:5px; background:rgba(8,10,20,.5); color:#fff; opacity:0; transition:opacity 120ms var(--ease-out)}
 ${R} .msa-look-more .ico{width:10px; height:10px; transform:rotate(90deg)}
 ${R} .msa-look[data-menu="true"] .msa-look-more, ${R} .msa-look:focus-visible .msa-look-more{opacity:1}
-${R} .msa-look-add{align-items:center; justify-content:center; gap:4px; min-height:60px; border-style:dashed;
+/* the kept colour of a one-colour Look, a band across its grey sky */
+${R} .msa-look-band{position:absolute; left:0; right:0; top:11px; height:7px; opacity:.9}
+/* a Look's option: a dot of its current colour, top-right (it opens the palette) */
+${R} .msa-look-opt{position:absolute; top:4px; right:4px; width:13px; height:13px; border-radius:50%;
+  border:2px solid rgba(255,255,255,.85); box-shadow:0 1px 3px rgba(0,0,0,.6); cursor:pointer; z-index:1}
+${R} .msa-look:has(.msa-look-opt) .msa-look-more{right:21px}
+${R} .msa-swatches{display:grid; grid-template-columns:repeat(9, 1fr); gap:5px}
+${R} .msa-swatch{aspect-ratio:1; border-radius:50%; padding:0; border:2px solid transparent;
+  background:var(--swatch); box-shadow:inset 0 0 0 1px rgba(0,0,0,.35)}
+${R} .msa-swatch[aria-pressed="true"]{border-color:var(--ink0); box-shadow:0 0 0 2px var(--shine)}
+${R} .msa-looks-reset{width:22px; height:22px; margin-left:2px}
+${R} .msa-look-add{align-items:center; justify-content:center; gap:4px; min-height:0; border-style:dashed;
   color:var(--ink2); font-size:.66rem; font-weight:600}
 ${R} .msa-look-add .ico{width:14px; height:14px}
 ${R} .msa-look-add[aria-expanded="true"]{border-color:var(--shine); color:var(--shine)}
@@ -718,6 +731,8 @@ ${wxChipHoverCss(R)}
   ${R} .msa-more-item:not(.is-armed):hover{background:var(--bg3)}
   ${R} .msa-seg-row .msa-seg:not([aria-pressed="true"]):hover{color:var(--ink0)}
   ${R} .msa-btn--patreon:hover{filter:brightness(1.08)}
+  ${R} .msa-swatch:not([aria-pressed="true"]):hover{border-color:rgba(255,255,255,.6)}
+  ${R} .msa-look-opt:hover{transform:scale(1.15)}
 }
 `.trim();
 }

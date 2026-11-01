@@ -70,6 +70,12 @@ export const LOOK_FACETS = Object.freeze([
   { id: 'weather', label: 'Weather', icon: 'cloud', help: 'The sky type, cloud, rain or snow, and temperature.' },
   { id: 'wind', label: 'Wind', icon: 'wind', help: 'How hard the wind blows, and from where.' },
   { id: 'light', label: 'Light', icon: 'sun', help: 'Sky light, golden hour, moonlight and atmosphere.' },
+  {
+    id: 'colour',
+    label: 'Colour',
+    icon: 'palette',
+    help: 'The colour grade: exposure, contrast, saturation, warmth, and the styles — one colour, a tinted wash, a vignette.',
+  },
   { id: 'dark', label: 'Darkness', icon: 'moon', help: 'How black unlit ground gets at night.' },
 ]);
 
@@ -95,8 +101,56 @@ export const LOOK_CHANNELS = Object.freeze([
   { key: 'sky.goldenHour01', facet: 'light', label: 'Golden hour', kind: 'number', min: 0, max: 1 },
   { key: 'sky.moonlight01', facet: 'light', label: 'Moonlight', kind: 'number', min: 0, max: 1 },
   { key: 'sky.gradeEnvStrength', facet: 'light', label: 'Atmosphere', kind: 'number', min: 0, max: 1 },
+  // THE LIGHT LOOK (2026-11-01) — the Colour Grade's Light group: CC for the lighting itself.
+  { key: 'grade.lightLevel', facet: 'light', label: 'Light level', kind: 'number', min: 0, max: 2 },
+  { key: 'grade.lightSaturation', facet: 'light', label: 'Light colour', kind: 'number', min: 0, max: 2 },
+  { key: 'grade.lightTint', facet: 'light', label: 'Light tint', kind: 'color' },
+  { key: 'grade.lightGlow', facet: 'light', label: 'Lamp glow', kind: 'number', min: 0, max: 2 },
+  // BLOOM (2026-11-01, author: "the key thing is actually around Bloom which may need
+  // to be carefully changed per Look") — how bright a thing must be to glow, how hard
+  // it glows, the wide haze, and the haze's colour.
+  { key: 'bloom.threshold', facet: 'light', label: 'Glow from', kind: 'number', min: 0, max: 4 },
+  { key: 'bloom.strength', facet: 'light', label: 'Glow', kind: 'number', min: 0, max: 3 },
+  { key: 'bloom.atmoStrength', facet: 'light', label: 'Haze', kind: 'number', min: 0, max: 3 },
+  { key: 'bloom.atmoTint', facet: 'light', label: 'Haze colour', kind: 'color' },
+  // THE COLOUR FACET (2026-11-01) — the artistic Colour Grade (effects/grade), whole frame.
+  { key: 'grade.exposure', facet: 'colour', label: 'Exposure', kind: 'number', min: -3, max: 3 },
+  { key: 'grade.exposureInside', facet: 'colour', label: 'Exposure: interiors', kind: 'number', min: -2, max: 2 },
+  { key: 'grade.exposureOutside', facet: 'colour', label: 'Exposure: exteriors', kind: 'number', min: -2, max: 2 },
+  { key: 'grade.contrast', facet: 'colour', label: 'Contrast', kind: 'number', min: 0.5, max: 2 },
+  { key: 'grade.saturation', facet: 'colour', label: 'Saturation', kind: 'number', min: 0, max: 2 },
+  { key: 'grade.temperature', facet: 'colour', label: 'Warmth', kind: 'number', min: -1, max: 1 },
+  // Range control (author 2026-11-01: no crushed interiors, no blown-out whites):
+  // a soft highlight roll-off and a floor under the shadows.
+  {
+    key: 'grade.toneMapping',
+    facet: 'colour',
+    label: 'Film response',
+    kind: 'id',
+    values: ['none', 'agx', 'aces', 'neutral', 'reinhard', 'cineon'],
+  },
+  { key: 'grade.shadows', facet: 'colour', label: 'Shadow lift', kind: 'color' },
+  { key: 'grade.vibrance', facet: 'colour', label: 'Vibrance', kind: 'number', min: -1, max: 1 },
+  { key: 'grade.spotAmount', facet: 'colour', label: 'One colour', kind: 'number', min: 0, max: 1 },
+  { key: 'grade.spotHue', facet: 'colour', label: 'Colour kept', kind: 'number', min: 0, max: 360, wrap: true },
+  { key: 'grade.spotWidth', facet: 'colour', label: 'Colour kept: width', kind: 'number', min: 10, max: 120 },
+  { key: 'grade.colourise', facet: 'colour', label: 'Colourise', kind: 'number', min: 0, max: 1 },
+  { key: 'grade.colouriseColor', facet: 'colour', label: 'Colourise tint', kind: 'color' },
+  { key: 'grade.colouriseHold', facet: 'colour', label: 'Tint holds to', kind: 'number', min: 0.05, max: 1.5 },
+  {
+    key: 'grade.colouriseKeepLamps',
+    facet: 'colour',
+    label: 'Lamps keep their colour',
+    kind: 'number',
+    min: 0,
+    max: 1,
+  },
+  { key: 'grade.vignette', facet: 'colour', label: 'Vignette', kind: 'number', min: 0, max: 1 },
   { key: 'night.darkness01', facet: 'dark', label: 'Night darkness', kind: 'number', min: 0, max: 1 },
 ]);
+
+/** A colour channel's value: a 6-digit hex string. */
+const HEX_RE = /^#[0-9a-f]{6}$/i;
 
 const CHANNEL_BY_KEY = new Map(LOOK_CHANNELS.map((c) => [c.key, c]));
 
@@ -116,8 +170,19 @@ export const LOOK_KEY_RENAMES = Object.freeze({});
 const CUSTOM_ARCHETYPE = 'custom';
 
 /**
- * @typedef {{id: string, name: string, v: number, values: Record<string, number|string>}} Look
+ * @typedef {{key: string, label: string}} LookOption - a value on a Look the GM can
+ *   re-pick from {@link LOOK_PALETTE} with one click (the kept colour, the tint).
+ * @typedef {{id: string, name: string, v: number, values: Record<string, number|string>,
+ *   options?: LookOption[]}} Look
  */
+
+/** Keep only well-formed options. @param {unknown} raw @returns {LookOption[]} */
+function cleanOptions(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((o) => o && typeof o.key === 'string' && o.key.length > 0)
+    .map((o) => ({ key: o.key, label: typeof o.label === 'string' && o.label ? o.label : 'Colour' }));
+}
 
 /**
  * Bring a stored Look up to the current shape: rename old keys, stamp the
@@ -140,12 +205,14 @@ export function migrateLook(raw, renames = LOOK_KEY_RENAMES) {
   }
   const v = Number.isFinite(raw.v) ? raw.v : 0;
   if (v < LOOK_SCHEMA_VERSION) changed.push(`schema v${v} -> v${LOOK_SCHEMA_VERSION}`);
+  const options = cleanOptions(raw.options).map((o) => ({ ...o, key: renames[o.key] ?? o.key }));
   return {
     look: {
       id: typeof raw.id === 'string' ? raw.id : '',
       name: typeof raw.name === 'string' ? raw.name : '',
       v: LOOK_SCHEMA_VERSION,
       values,
+      ...(options.length > 0 ? { options } : {}),
     },
     changed,
   };
@@ -179,7 +246,13 @@ export function reconcileLook(look, { channels = LOOK_CHANNELS, isKnownArchetype
     if (channel.kind === 'id') {
       if (typeof value !== 'string' || value.length === 0) invalid.push(key);
       else if (key === 'weather.archetype' && isKnownArchetype && !isKnownArchetype(value)) invalid.push(key);
+      else if (Array.isArray(channel.values) && !channel.values.includes(value)) invalid.push(key);
       else playable[key] = value;
+      continue;
+    }
+    if (channel.kind === 'color') {
+      if (typeof value === 'string' && HEX_RE.test(value)) playable[key] = value.toLowerCase();
+      else invalid.push(key);
       continue;
     }
     if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -243,6 +316,8 @@ export function captureLook({ id, name, facets, read }) {
     }
     if (channel.kind === 'id') {
       if (typeof value === 'string' && value.length > 0) values[channel.key] = value;
+    } else if (channel.kind === 'color') {
+      if (typeof value === 'string' && HEX_RE.test(value)) values[channel.key] = value.toLowerCase();
     } else if (typeof value === 'number' && Number.isFinite(value)) {
       values[channel.key] = Math.round(value * 1000) / 1000;
     }
@@ -253,7 +328,18 @@ export function captureLook({ id, name, facets, read }) {
     delete values['weather.cloudCover01'];
     delete values['weather.precip01'];
   }
-  return { id, name: String(name ?? '').trim(), v: LOOK_SCHEMA_VERSION, values };
+  // A captured style keeps its one-click colour button: a GM who saved a
+  // one-colour or tinted look can re-pick the colour from the tile, like a starter.
+  const options = [];
+  if ((values['grade.spotAmount'] ?? 0) > 0.05) options.push({ key: 'grade.spotHue', label: 'Colour kept' });
+  if ((values['grade.colourise'] ?? 0) > 0.05) options.push({ key: 'grade.colouriseColor', label: 'Tint' });
+  return {
+    id,
+    name: String(name ?? '').trim(),
+    v: LOOK_SCHEMA_VERSION,
+    values,
+    ...(options.length > 0 ? { options } : {}),
+  };
 }
 
 /**
@@ -310,7 +396,8 @@ export function planLookApply(look, { worldClock = false, isKnownArchetype } = {
  * Accepts the JSON string, the parsed object, or a bare array (older drafts);
  * drops entries without an id, de-duplicates ids, and migrates every Look.
  * @param {unknown} raw
- * @returns {{looks: Look[], migrated: boolean}}
+ * @returns {{looks: Look[], migrated: boolean, starters: number}} `starters` — which
+ *   starter set this library was last brought up to (see {@link upgradeStarters}).
  */
 export function normalizeLibrary(raw) {
   let parsed = raw;
@@ -335,12 +422,83 @@ export function normalizeLibrary(raw) {
     seen.add(look.id);
     looks.push(look);
   }
-  return { looks, migrated };
+  const starters = Number.isFinite(parsed?.starters) ? parsed.starters : 1;
+  return { looks, migrated, starters };
 }
 
 /** The library as it is stored (a JSON string in a world setting). */
-export function serializeLibrary(looks) {
-  return JSON.stringify({ v: LOOK_SCHEMA_VERSION, looks });
+export function serializeLibrary(looks, starters = STARTER_SET_VERSION) {
+  return JSON.stringify({ v: LOOK_SCHEMA_VERSION, starters, looks });
+}
+
+// ---- options: a small, safe amount of GM configuration on a Look ----------------------
+
+/**
+ * The colours a Look's option button offers — hand-picked to read well as a kept
+ * colour, a tinted wash and a blood moon alike. `hue` is the hex's own hue on the
+ * same opponent axes the grade shader measures (see {@link hexHue}).
+ * @type {ReadonlyArray<{id: string, label: string, hex: string}>}
+ */
+export const LOOK_PALETTE = Object.freeze([
+  { id: 'blood', label: 'Blood', hex: '#d0101c' },
+  { id: 'ember', label: 'Ember', hex: '#f0921a' },
+  { id: 'gold', label: 'Gold', hex: '#e2b128' },
+  { id: 'venom', label: 'Venom', hex: '#47b83a' },
+  { id: 'spectral', label: 'Spectral', hex: '#22b8c9' },
+  { id: 'sapphire', label: 'Sapphire', hex: '#2f5fd6' },
+  { id: 'witchlight', label: 'Witchlight', hex: '#8e46d8' },
+  { id: 'rose', label: 'Rose', hex: '#d8408f' },
+  { id: 'sepia', label: 'Sepia', hex: '#b5864f' },
+]);
+
+/** A hex colour's hue in degrees, measured the way the grade shader measures a pixel
+ * (opponent axes, in linear light), so a picked swatch keeps exactly that colour. */
+export function hexHue(hexColor) {
+  const n = parseInt(String(hexColor).slice(1), 16);
+  const lin = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => Math.pow(v / 255, 2.2));
+  const a = lin[0] - 0.5 * (lin[1] + lin[2]);
+  const b = 0.8660254 * (lin[1] - lin[2]);
+  return Math.round((((Math.atan2(b, a) * 180) / Math.PI + 360) % 360) * 10) / 10;
+}
+
+/** The options a Look offers whose key is still a live channel. @param {Look} look */
+export function lookOptions(look) {
+  return cleanOptions(look?.options).filter((o) => CHANNEL_BY_KEY.has(o.key));
+}
+
+/**
+ * Which palette entry an option currently shows (the nearest one), or null.
+ * @param {Look} look @param {string} key @returns {string|null} a {@link LOOK_PALETTE} id
+ */
+export function optionPaletteId(look, key) {
+  const value = look?.values?.[key];
+  const channel = CHANNEL_BY_KEY.get(key);
+  if (value === undefined || !channel) return null;
+  if (channel.kind === 'color') return LOOK_PALETTE.find((p) => p.hex === String(value).toLowerCase())?.id ?? null;
+  let best = null;
+  let bestD = Infinity;
+  for (const p of LOOK_PALETTE) {
+    const d = Math.abs(((((hexHue(p.hex) - Number(value)) % 360) + 540) % 360) - 180);
+    if (d < bestD) {
+      bestD = d;
+      best = p.id;
+    }
+  }
+  return bestD <= 12 ? best : null;
+}
+
+/**
+ * Set one option of a Look to a palette colour: a hue channel takes the colour's
+ * hue, a colour channel its hex. Returns a NEW Look; an unknown option or colour
+ * returns the Look unchanged.
+ * @param {Look} look @param {string} key @param {string} paletteId @returns {Look}
+ */
+export function setLookOption(look, key, paletteId) {
+  const swatch = LOOK_PALETTE.find((p) => p.id === paletteId);
+  const channel = CHANNEL_BY_KEY.get(key);
+  if (!swatch || !channel || !lookOptions(look).some((o) => o.key === key)) return look;
+  const value = channel.kind === 'color' ? swatch.hex : hexHue(swatch.hex);
+  return { ...look, values: { ...look.values, [key]: value } };
 }
 
 // ---- presentation helpers (pure, so the preview harness and tests share them) ----
@@ -375,6 +533,10 @@ export function describeLook(look, archetypeLabel) {
   }
   if (Number.isFinite(playable['wind.speed01'])) parts.push(`wind ${pct(playable['wind.speed01'])}`);
   if (Number.isFinite(playable['night.darkness01'])) parts.push(`dark ${pct(playable['night.darkness01'])}`);
+  if ((playable['grade.spotAmount'] ?? 0) > 0.05) parts.push('one colour');
+  else if ((playable['grade.colourise'] ?? 0) > 0.05) parts.push('tinted');
+  else if (playable['grade.saturation'] !== undefined && playable['grade.saturation'] < 0.1)
+    parts.push('black & white');
   return parts.length > 0 ? parts.join(' · ') : 'Light only';
 }
 
@@ -447,59 +609,425 @@ export function lookSwatch(look, { cloudOf } = {}) {
   const dark = playable['night.darkness01'] ?? 0;
   top = mix(top, [4, 5, 10], dark * 0.45);
   bottom = mix(bottom, [2, 2, 6], dark * 0.6);
-  return { top: hex(top), bottom: hex(bottom) };
+  // The Colour facet shows on the tile too: black & white drains it, a tinted wash
+  // washes it, one colour keeps a band of that colour across the middle.
+  const lum = (c) => 0.3 * c[0] + 0.55 * c[1] + 0.15 * c[2];
+  const sat = playable['grade.saturation'];
+  if (sat !== undefined && sat < 1) {
+    top = mix([lum(top), lum(top), lum(top)], top, Math.max(0, sat));
+    bottom = mix([lum(bottom), lum(bottom), lum(bottom)], bottom, Math.max(0, sat));
+  }
+  const wash = playable['grade.colourise'] ?? 0;
+  if (wash > 0 && typeof playable['grade.colouriseColor'] === 'string') {
+    const n = parseInt(playable['grade.colouriseColor'].slice(1), 16);
+    const tc = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    const peak = Math.max(1, ...tc);
+    const tint = (c) => {
+      const v = Math.max(...c) * 1.2;
+      return tc.map((x) => (x / peak) * v);
+    };
+    top = mix(top, tint(top), wash);
+    bottom = mix(bottom, tint(bottom), wash);
+  }
+  let band = null;
+  if ((playable['grade.spotAmount'] ?? 0) > 0.05) {
+    top = [lum(top), lum(top), lum(top)];
+    bottom = [lum(bottom), lum(bottom), lum(bottom)];
+    const hue = Number(playable['grade.spotHue'] ?? 0);
+    band = `hsl(${Math.round(hue)}, 85%, 45%)`;
+  }
+  return { top: hex(top), bottom: hex(bottom), band };
 }
 
 /**
- * The Looks a new world starts with, so the grid is never empty on day one.
- * Every one is written in channel terms and must reconcile with zero stale keys
- * (looks-schema.test.mjs) — the drift guard for built-ins. They are copied into
- * the library on first use, so a GM can rename, re-capture or delete them.
+ * A full Colour facet: the grade at neutral with `o` on top (keys without the
+ * 'grade.' prefix). Every starter carries one, so moving from a styled Look
+ * (Noir, Blood fog) to a natural one always lifts the style off again.
+ * @param {Record<string, number|string>} [o]
+ */
+function colour(o = {}) {
+  // Every starter rolls its highlights off (neutral) and keeps a small floor under
+  // its shadows, so no Look blows lamps out or crushes interiors to black.
+  const base = {
+    exposure: 0,
+    contrast: 1,
+    saturation: 1,
+    temperature: 0,
+    vibrance: 0,
+    toneMapping: 'neutral',
+    shadows: '#262626',
+  };
+  const styles = { spotAmount: 0, colourise: 0, colouriseKeepLamps: 0, vignette: 0 };
+  // ...and the light look at rest, so white lamps or a tint never outlive their Look.
+  const light = { lightLevel: 1, lightSaturation: 1, lightTint: '#ffffff', lightGlow: 1 };
+  Object.assign(base, light, { exposureInside: 0, exposureOutside: 0 });
+  // Bloom keys are written `glow*` here (glowFrom/glow/haze/hazeTint) and land on the
+  // 'bloom.' channels; its at-rest values are the bloom effect's own shipped defaults.
+  const bloom = { threshold: 0.51, strength: 0.96, atmoStrength: 0.43, atmoTint: '#fff0dc' };
+  const glowKeys = { glowFrom: 'threshold', glow: 'strength', haze: 'atmoStrength', hazeTint: 'atmoTint' };
+  const out = {};
+  const rest = {};
+  for (const [k, v] of Object.entries(o)) {
+    if (glowKeys[k]) bloom[glowKeys[k]] = v;
+    else rest[k] = v;
+  }
+  for (const [k, v] of Object.entries({ ...base, ...styles, ...rest })) out[`grade.${k}`] = v;
+  for (const [k, v] of Object.entries(bloom)) out[`bloom.${k}`] = v;
+  return out;
+}
+
+/** One starter: id, name, values, optional options. */
+function starter(id, name, values, options) {
+  return Object.freeze({ id: `look-${id}`, name, v: LOOK_SCHEMA_VERSION, values, ...(options ? { options } : {}) });
+}
+
+/**
+ * THE STARTER SET (2026-11-01, round 2 — author: "double the number of looks ...
+ * accurate, interesting and covers the full spectrum of time, style and weather").
+ * Four rows of four on the Remote, the last cell being Save look:
+ *
+ *   the day       First light · Bright morning · High noon · Golden hour
+ *   the night     Blue hour · Moonlit night · Pitch black · Blood moon
+ *   the weather   Drizzle · Thunderstorm · Blizzard · Ashfall
+ *   the styles    Blood fog · Noir · One colour · [Save look]
+ *
+ * The weather and style rows carry no hour, so they play at whatever time the
+ * scene is at. Each starter is written in channel terms and must reconcile with
+ * zero stale keys and real weather types (looks-schema.test.mjs). Values follow the
+ * real thing: dawn is cool and misty with little wind; noon is hot, still and hard
+ * shadowed; golden hour is low warm sun under high wisps; blue hour is the cool
+ * glow after sunset; a blizzard is freezing, gale-driven and bright; ashfall is a
+ * hot, dim, ochre volcanic sky. Blood fog is the author's red-fog reference: dense
+ * fog, the frame washed blood red right up to the lights, which alone burn white.
  * @type {ReadonlyArray<Look>}
  */
 export const STARTER_LOOKS = Object.freeze([
-  {
-    id: 'starter-golden-afternoon',
-    name: 'Golden afternoon',
-    v: LOOK_SCHEMA_VERSION,
-    values: { 'time.hour': 16.5, 'weather.archetype': 'fair-cumulus', 'wind.speed01': 0.15, 'sky.goldenHour01': 1 },
-  },
-  {
-    id: 'starter-grey-morning',
-    name: 'Grey morning',
-    v: LOOK_SCHEMA_VERSION,
-    values: { 'time.hour': 8, 'weather.archetype': 'overcast', 'wind.speed01': 0.2 },
-  },
-  {
-    id: 'starter-fog-bank',
-    name: 'Fog bank',
-    v: LOOK_SCHEMA_VERSION,
-    values: { 'weather.archetype': 'fog', 'wind.speed01': 0.02 },
-  },
-  {
-    id: 'starter-storm',
-    name: 'Storm',
-    v: LOOK_SCHEMA_VERSION,
-    values: { 'weather.archetype': 'thunderstorm', 'wind.speed01': 0.75, 'night.darkness01': 0.35 },
-  },
-  {
-    id: 'starter-moonlit',
-    name: 'Moonlit night',
-    v: LOOK_SCHEMA_VERSION,
-    values: {
-      'time.hour': 23,
+  // ---- the day ----
+  starter('first-light', 'First light', {
+    'time.hour': 6.2,
+    'weather.archetype': 'fog',
+    'weather.temperature01': 0.35,
+    'wind.speed01': 0.03,
+    'sky.goldenHour01': 0.8,
+    ...colour({
+      exposureInside: 0.4,
+      haze: 0.35,
+      exposure: -0.1,
+      temperature: -0.18,
+      saturation: 0.85,
+      contrast: 0.94,
+      vignette: 0.1,
+      lightTint: '#e2e6ff',
+    }),
+    'night.darkness01': 0.15,
+  }),
+  starter('bright-morning', 'Bright morning', {
+    'time.hour': 9,
+    'weather.archetype': 'fair-cumulus',
+    'weather.temperature01': 0.5,
+    'wind.speed01': 0.2,
+    ...colour({
+      exposureInside: 0.55,
+      exposureOutside: -0.1,
+      glowFrom: 0.75,
+      glow: 0.7,
+      haze: 0.22,
+      exposure: 0,
+      contrast: 1.06,
+      saturation: 0.98,
+      temperature: -0.06,
+      vibrance: 0.12,
+    }),
+  }),
+  starter('high-noon', 'High noon', {
+    'time.hour': 12.75,
+    'weather.archetype': 'clear',
+    // hot, but under the Temperature effect's heat-shimmer cast (0.75): the lab showed
+    // 0.9 + a warm grade blowing the whole map out to yellow
+    'weather.temperature01': 0.66,
+    'wind.speed01': 0.04,
+    ...colour({
+      exposureInside: 0.5,
+      exposureOutside: -0.3,
+      glowFrom: 0.95,
+      glow: 0.55,
+      haze: 0.15,
+      hazeTint: '#fff6e8',
+      exposure: 0,
+      contrast: 1.1,
+      saturation: 0.95,
+      temperature: -0.04,
+    }),
+  }),
+  starter('golden-hour', 'Golden hour', {
+    'time.hour': 17.6,
+    'weather.archetype': 'streaks',
+    'weather.temperature01': 0.6,
+    'wind.speed01': 0.12,
+    'sky.goldenHour01': 1,
+    ...colour({
+      exposureInside: 0.45,
+      exposureOutside: -0.15,
+      glowFrom: 0.7,
+      glow: 0.8,
+      haze: 0.3,
+      hazeTint: '#ffd9ae',
+      contrast: 1.05,
+      exposure: -0.1,
+      saturation: 1.0,
+      temperature: 0.14,
+      vibrance: 0.1,
+      vignette: 0.15,
+      lightTint: '#ffe8c8',
+    }),
+  }),
+  // ---- the night ----
+  starter('blue-hour', 'Blue hour', {
+    'time.hour': 19.9,
+    'weather.archetype': 'clear',
+    'weather.temperature01': 0.42,
+    'wind.speed01': 0.05,
+    ...colour({
+      exposureInside: 0.3,
+      haze: 0.5,
+      hazeTint: '#c8d4ff',
+      shadows: '#283044',
+      temperature: -0.3,
+      saturation: 0.9,
+      vibrance: 0.1,
+      vignette: 0.15,
+    }),
+    'night.darkness01': 0.2,
+  }),
+  starter('moonlit-night', 'Moonlit night', {
+    'time.hour': 23.5,
+    'weather.archetype': 'clear',
+    'weather.temperature01': 0.35,
+    'wind.speed01': 0.08,
+    'sky.moonlight01': 0.9,
+    ...colour({
+      exposureInside: 0.3,
+      haze: 0.45,
+      hazeTint: '#c4d2ff',
+      shadows: '#2a3044',
+      exposure: 0.2,
+      temperature: -0.3,
+      saturation: 0.75,
+      contrast: 1.05,
+      vignette: 0.2,
+      lightTint: '#bcd0ff',
+      lightGlow: 0.8,
+    }),
+    // dark enough to need a torch, light enough to read the yard by moonlight
+    'night.darkness01': 0.15,
+  }),
+  starter('pitch-black', 'Pitch black', {
+    'time.hour': 2,
+    'weather.archetype': 'overcast',
+    'weather.temperature01': 0.3,
+    'wind.speed01': 0.06,
+    'sky.moonlight01': 0,
+    ...colour({
+      exposureInside: 0.6,
+      exposureOutside: 0.2,
+      glow: 1.1,
+      haze: 0.55,
+      shadows: '#3c3c4e',
+      saturation: 0.6,
+      contrast: 1.1,
+      vignette: 0.35,
+      lightLevel: 0.85,
+    }),
+    'night.darkness01': 0.35,
+  }),
+  starter(
+    'blood-moon',
+    'Blood moon',
+    {
+      'time.hour': 0.5,
       'weather.archetype': 'clear',
-      'sky.moonlight01': 0.8,
-      'night.darkness01': 0.45,
+      'wind.speed01': 0.04,
+      'sky.moonlight01': 0.9,
+      ...colour({
+        exposureInside: 0.6,
+        exposureOutside: 0.3,
+        haze: 0.6,
+        hazeTint: '#ff9a8a',
+        shadows: '#6c2028',
+        contrast: 1.15,
+        colourise: 0.75,
+        colouriseColor: '#d0101c',
+        colouriseHold: 0.5,
+        vignette: 0.3,
+        lightTint: '#ffb4aa',
+      }),
+      'night.darkness01': 0.2,
     },
-  },
-  {
-    id: 'starter-pitch-dark',
-    name: 'Pitch dark',
-    v: LOOK_SCHEMA_VERSION,
-    values: { 'time.hour': 1.5, 'weather.archetype': 'overcast', 'sky.moonlight01': 0, 'night.darkness01': 0.95 },
-  },
+    [{ key: 'grade.colouriseColor', label: 'Moon colour' }]
+  ),
+  // ---- the weather (no hour: they play at whatever time it is) ----
+  starter('drizzle', 'Drizzle', {
+    'weather.archetype': 'drizzle',
+    'weather.temperature01': 0.45,
+    'wind.speed01': 0.3,
+    ...colour({ exposureInside: 0.35, glowFrom: 0.7, haze: 0.3, saturation: 0.8, contrast: 0.95, temperature: -0.1 }),
+  }),
+  starter('thunderstorm', 'Thunderstorm', {
+    'weather.archetype': 'thunderstorm',
+    'weather.temperature01': 0.5,
+    'wind.speed01': 0.8,
+    ...colour({
+      exposureInside: 0.7,
+      glowFrom: 0.7,
+      haze: 0.3,
+      saturation: 0.7,
+      contrast: 1.08,
+      shadows: '#2e2e34',
+      temperature: -0.15,
+      vignette: 0.25,
+    }),
+    'night.darkness01': 0.2,
+  }),
+  starter('blizzard', 'Blizzard', {
+    'weather.archetype': 'snow',
+    'weather.temperature01': 0.03,
+    'wind.speed01': 0.9,
+    ...colour({
+      exposureInside: 0.3,
+      exposureOutside: -0.15,
+      glowFrom: 0.8,
+      haze: 0.35,
+      hazeTint: '#eef4ff',
+      exposure: 0.15,
+      contrast: 0.9,
+      saturation: 0.7,
+      temperature: -0.35,
+      lightTint: '#e6f0ff',
+    }),
+  }),
+  starter('ashfall', 'Ashfall', {
+    'weather.archetype': 'ashfall',
+    'weather.temperature01': 0.75,
+    'wind.speed01': 0.35,
+    ...colour({
+      exposureInside: 0.7,
+      haze: 0.45,
+      hazeTint: '#ffc890',
+      exposure: -0.2,
+      contrast: 1.1,
+      colourise: 0.45,
+      colouriseColor: '#c0843a',
+      colouriseHold: 0.6,
+      vignette: 0.35,
+      lightTint: '#ffc890',
+    }),
+    'night.darkness01': 0.15,
+  }),
+  // ---- the styles ----
+  starter(
+    'blood-fog',
+    'Blood fog',
+    {
+      // An afternoon hour: the reference is a BRIGHT red world, which needs daylight
+      // in the fog for the red to have anything to colour (at night it is just black).
+      'time.hour': 16,
+      'weather.archetype': 'fog',
+      'wind.speed01': 0.04,
+      ...colour({
+        exposureInside: 1.1,
+        haze: 0.7,
+        hazeTint: '#ff5050',
+        shadows: '#8e2a30',
+        exposure: 0.25,
+        contrast: 1.2,
+        colourise: 1,
+        colouriseColor: '#d0101c',
+        colouriseHold: 1.2,
+        colouriseKeepLamps: 0.4,
+        vignette: 0.3,
+        // the reference's one white lamp: every light burns clean white
+        lightSaturation: 0,
+        lightGlow: 0.4,
+        lightLevel: 1.1,
+      }),
+      'night.darkness01': 0.2,
+    },
+    [{ key: 'grade.colouriseColor', label: 'Fog colour' }]
+  ),
+  starter(
+    'noir',
+    'Noir',
+    colour({
+      exposureInside: 0.35,
+      exposureOutside: -0.15,
+      glowFrom: 0.7,
+      haze: 0.2,
+      toneMapping: 'aces',
+      shadows: '#4c4c4c',
+      saturation: 0,
+      contrast: 1.2,
+      exposure: -0.05,
+      vignette: 0.45,
+      lightSaturation: 0,
+      lightGlow: 0,
+    })
+  ),
+  starter(
+    'one-colour',
+    'One colour',
+    colour({
+      exposureInside: 0.35,
+      exposureOutside: -0.2,
+      glowFrom: 0.8,
+      haze: 0.2,
+      spotAmount: 1,
+      spotHue: hexHue('#d0101c'),
+      spotWidth: 24,
+      contrast: 1.05,
+      shadows: '#303030',
+      vignette: 0.2,
+    }),
+    [{ key: 'grade.spotHue', label: 'Colour kept' }]
+  ),
 ]);
+
+/** Bump when {@link STARTER_LOOKS} is replaced; {@link upgradeStarters} brings a stored library up once. */
+export const STARTER_SET_VERSION = 2;
+
+/** Starter ids of earlier sets, retired by {@link upgradeStarters}. */
+export const RETIRED_STARTER_IDS = Object.freeze([
+  'starter-golden-afternoon',
+  'starter-grey-morning',
+  'starter-fog-bank',
+  'starter-storm',
+  'starter-moonlit',
+  'starter-pitch-dark',
+]);
+
+/**
+ * Bring a stored library up to the current starter set, ONCE: drop the retired
+ * starters, put the current ones first (in their designed order), keep every Look
+ * the GM made. A library already at {@link STARTER_SET_VERSION} is returned as is,
+ * so a starter the GM deleted afterwards never comes back.
+ * @param {Look[]} looks @param {number} from @returns {{looks: Look[], changed: boolean}}
+ */
+export function upgradeStarters(looks, from) {
+  if (from >= STARTER_SET_VERSION) return { looks, changed: false };
+  const retired = new Set(RETIRED_STARTER_IDS);
+  const kept = looks.filter((l) => !retired.has(l.id));
+  const have = new Set(kept.map((l) => l.id));
+  const fresh = STARTER_LOOKS.filter((l) => !have.has(l.id)).map((l) => structuredCloneLook(l));
+  return { looks: [...fresh, ...kept], changed: true };
+}
+
+/** A mutable copy of a (frozen) Look. */
+export function structuredCloneLook(look) {
+  return {
+    ...look,
+    values: { ...look.values },
+    ...(look.options ? { options: look.options.map((o) => ({ ...o })) } : {}),
+  };
+}
 
 /**
  * Which of the library's Looks a running-order entry points at, in order; ids

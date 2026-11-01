@@ -44,6 +44,8 @@ export const CATEGORY_ORDER = Object.freeze([
   'Shedding',
   'Which leaves drop',
   'Look',
+  // The Colour Grade's stylised ops (2026-11-01): one colour, colourise, vignette.
+  'Style',
   'Detail',
   'Leaves',
   'Outline',

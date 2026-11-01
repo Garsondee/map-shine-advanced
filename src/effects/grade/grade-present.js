@@ -83,7 +83,21 @@ function makeGradeUniforms(TSL, withTail) {
     gamma: uniform(vec3(...IDENTITY_GRADE.gamma)),
     gain: uniform(vec3(...IDENTITY_GRADE.gain)),
   };
-  if (withTail) u.lutStrength = uniform(float(0));
+  if (withTail) {
+    u.lutStrength = uniform(float(0));
+    // THE STYLE OPS (2026-11-01) — artistic scope only, so the env grade's node is
+    // unchanged (buildGradeNode builds them only when these uniforms exist).
+    u.spotAmount = uniform(float(IDENTITY_GRADE.spotAmount));
+    u.spotHue = uniform(float(IDENTITY_GRADE.spotHue));
+    u.spotWidth = uniform(float(IDENTITY_GRADE.spotWidth));
+    u.colourise = uniform(float(IDENTITY_GRADE.colourise));
+    u.colouriseColor = uniform(vec3(...IDENTITY_GRADE.colouriseColor));
+    u.colouriseHold = uniform(float(IDENTITY_GRADE.colouriseHold));
+    u.colouriseKeepLamps = uniform(float(IDENTITY_GRADE.colouriseKeepLamps));
+    u.exposureInside = uniform(float(IDENTITY_GRADE.exposureInside));
+    u.exposureOutside = uniform(float(IDENTITY_GRADE.exposureOutside));
+    u.vignette = uniform(float(0));
+  }
   return u;
 }
 
@@ -102,6 +116,21 @@ function writeGradeUniforms(u, params) {
   u.lift.value.set(lift[0], lift[1], lift[2]);
   u.gamma.value.set(gamma[0], gamma[1], gamma[2]);
   u.gain.value.set(gain[0], gain[1], gain[2]);
+  if (u.spotAmount) {
+    const n01 = (v) => Math.min(1, Math.max(0, Number(v) || 0));
+    u.spotAmount.value = n01(p.spotAmount);
+    u.spotHue.value = Number(p.spotHue) || 0;
+    u.spotWidth.value = Number.isFinite(Number(p.spotWidth)) ? Number(p.spotWidth) : IDENTITY_GRADE.spotWidth;
+    u.colourise.value = n01(p.colourise);
+    const tc = p.colouriseColor || IDENTITY_GRADE.colouriseColor;
+    u.colouriseColor.value.set(tc[0], tc[1], tc[2]);
+    u.colouriseHold.value = Number(p.colouriseHold) > 0 ? Number(p.colouriseHold) : IDENTITY_GRADE.colouriseHold;
+    u.colouriseKeepLamps.value = n01(p.colouriseKeepLamps);
+    const stops = (v) => Math.min(3, Math.max(-3, Number(v) || 0));
+    u.exposureInside.value = stops(p.exposureInside);
+    u.exposureOutside.value = stops(p.exposureOutside);
+    u.vignette.value = n01(p.vignette);
+  }
 }
 
 /**
@@ -148,8 +177,12 @@ export function buildGradePresentMaterial({
   buildPostUpscaleSharpenNode,
   temperatureNoiseTexture,
   fogHold,
+  lampGlowTexture = null,
 }) {
   const TSL = THREE.TSL;
+  // THE LAMP GLOW (2026-11-01) — the coloration buffer (lamps' coloured light, 0 where
+  // none shines), so Colourise can keep lamplight out of its wash ("keep lamps").
+  const lampGlowTexNode = lampGlowTexture ? TSL.texture(lampGlowTexture) : null;
   const { texture, vec2, vec3, vec4, mix, uv, dot, uniform, float, max, min, select } = TSL;
 
   const presentTexNode = texture(litTexture);
@@ -308,11 +341,24 @@ export function buildGradePresentMaterial({
       const gradedEnv = buildGradeNode(TSL, sampledLit, uEnv);
       const afterEnv = outdoorsAt ? mix(sampledLit, gradedEnv, outdoorsAt) : sampledLit;
       // ARTISTIC grade + the whole-frame TAIL (tone map + LUT).
-      const gradedArt = buildGradeNode(TSL, afterEnv, uArt, {
+      const gradedLook = buildGradeNode(TSL, afterEnv, uArt, {
         toneMapping: currentToneMapping,
         lutTexture: lutTexNode,
         lutStrength: uArt.lutStrength,
+        lampGlow: lampGlowTexNode ? lampGlowTexNode.sample(sampleUv).rgb : null,
       });
+      // VIGNETTE (2026-11-01) — the artistic grade's one spatial op: the frame's
+      // corners darken by up to `vignette` (grade-ops.js#vignetteFactor mirrors it).
+      // A zero amount multiplies by exactly 1.
+      // ZONE EXPOSURE (2026-11-01) — interiors and exteriors exposed separately, across
+      // the same _Outdoors gate the environmental grade uses (grade-ops.js#zoneExposureMul).
+      // Both at 0 stops multiplies by exactly 1.
+      const zoneT = outdoorsAt ?? float(1);
+      const zoneStops = mix(uArt.exposureInside, uArt.exposureOutside, zoneT);
+      const zonedLook = gradedLook.mul(TSL.pow(float(2), zoneStops));
+      const vigD = sampleUv.sub(vec2(0.5, 0.5)).length().mul(Math.SQRT2);
+      const vigK = float(1).sub(uArt.vignette.mul(TSL.smoothstep(float(0.45), float(1.05), vigD)));
+      const gradedArt = zonedLook.mul(vigK);
       // STYLIZE remains before the personal viewing-device optics.
       const styled = buildStylizeNode(gradedArt, currentStyle);
       const shot = styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;

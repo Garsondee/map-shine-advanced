@@ -68,7 +68,141 @@ export const IDENTITY_GRADE = Object.freeze({
   lift: Object.freeze([0, 0, 0]), // black point, per channel (split-tone shadows)
   gamma: Object.freeze([1, 1, 1]), // mids power, per channel
   gain: Object.freeze([1, 1, 1]), // white point, per channel (split-tone highlights)
+  // THE STYLE OPS (2026-11-01, for the Remote's Looks — "removing everything but one
+  // colour", tinted monochromes). Each is a no-op at its default value.
+  spotAmount: 0, // 0..1 — how far every hue EXCEPT the kept one drains to grey
+  spotHue: 0, // degrees, the kept hue (0 red, 120 green, 240 blue)
+  spotWidth: 40, // degrees either side of spotHue that stay coloured
+  colourise: 0, // 0..1 — blend toward a tinted monochrome (sepia, cyanotype...)
+  colouriseColor: Object.freeze([0.55, 0.36, 0.17]), // the tint, linear RGB (a sepia brown)
+  colouriseHold: 0.18, // linear luminance the tint holds up to before easing to white (COLOURISE_PIVOT)
+  colouriseKeepLamps: 0, // 0..1 — where lamps shine, the wash steps back (lamplight stays its own colour)
+  exposureInside: 0, // stops, under roofs (where _Outdoors is black) — author, 2026-11-01
+  exposureOutside: 0, // stops, under the sky (where _Outdoors is white)
 });
+
+/**
+ * ZONE EXPOSURE (author, 2026-11-01: "individual exposure controls for interior and
+ * exterior"): the multiplier for a pixel that is `outdoors01` outdoors — interiors
+ * and exteriors exposed separately, blended across the mask's soft edge. The
+ * present pass samples the same _Outdoors gate the environmental grade uses; a
+ * scene with no mask is treated as all exterior.
+ * @param {number} outdoors01 @param {number} inside - stops @param {number} outside - stops
+ */
+export function zoneExposureMul(outdoors01, inside, outside) {
+  const t = Math.min(1, Math.max(0, Number(outdoors01)));
+  const stops = (Number(inside) || 0) * (1 - t) + (Number(outside) || 0) * t;
+  return Math.pow(2, stops);
+}
+
+/** Lamp glow (the coloration buffer, sRGB-magnitude) at which "keep lamps" starts / is full. */
+export const LAMP_GLOW_EDGES = Object.freeze([0.02, 0.2]);
+
+/** The kept-hue window's soft edge, as a share of `spotWidth` (inner part fully kept). */
+export const SPOT_EDGE_INNER = 0.5;
+/** Linear mid-grey the colourise duotone pivots on: below it the tint darkens to black,
+ * above it the tint fades toward white, so brightness is kept and highlights never clip. */
+export const COLOURISE_PIVOT = 0.18;
+
+/**
+ * The hue of a linear-RGB colour, in degrees [0, 360), on the opponent axes
+ * (red 0, green ~120, blue ~240) — the SAME formula `buildGradeNode` uses, so the
+ * CPU mirror and the shader keep the same hue for the same pixel.
+ * @param {readonly number[]} c @returns {{hue: number, chroma: number}}
+ */
+export function opponentHue(c) {
+  const a = c[0] - 0.5 * (c[1] + c[2]);
+  const b = 0.8660254 * (c[1] - c[2]);
+  const hue = ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360;
+  return { hue, chroma: Math.hypot(a, b) };
+}
+
+/** smoothstep, scalar. */
+function smooth(e0, e1, x) {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0 || 1e-6)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * How much of the kept hue a pixel of hue `hue` keeps (1 = fully coloured, 0 = drained).
+ * @param {number} hue @param {number} keepHue @param {number} width - degrees
+ */
+export function spotKeep(hue, keepHue, width) {
+  const d = Math.abs(((((hue - keepHue) % 360) + 540) % 360) - 180); // 0..180
+  const w = Math.max(1, Number(width) || 1);
+  return 1 - smooth(w * SPOT_EDGE_INNER, w, d);
+}
+
+// ===========================================================================
+// THE LIGHT LOOK — a separate CC for the LIGHTING (author, 2026-11-01: "an
+// improvement to the lighting system which allows that to be changed too as
+// part of the Looks system. Basically a separate set of CC for lighting").
+// ===========================================================================
+//
+// The artistic grade colours the FINISHED frame — painted art and light alike.
+// These four act on the LIGHT alone, where the lighting composite multiplies it
+// into the art (effects/lighting/environmental-light.js:
+// `lit = OETF(albedo) × illum + coloration`), so the art keeps its own colours
+// while the light that falls on it changes: every lamp burning white in a red
+// world, a scene lit by sickly green light, lights dimmed to embers. Still ONE
+// grade: the knobs live in the Colour Grade's schema and the maths lives here,
+// next to the rest of it (the grade/one-stack rule).
+
+/** The light look at rest: every op a no-op. */
+export const IDENTITY_LIGHT_LOOK = Object.freeze({
+  lightLevel: 1, // × the light's strength
+  lightSaturation: 1, // 0 = every light white, 1 = as authored, 2 = richer
+  lightTint: Object.freeze([1, 1, 1]), // × the light's colour, linear RGB
+  lightGlow: 1, // × the point lights' coloured glow (the coloration layer)
+});
+
+/**
+ * Apply the light look to one illumination value and one coloration value (the
+ * CPU mirror of {@link buildLightLookNodes}).
+ * @param {readonly number[]} illum - the light falling on a pixel (sRGB-magnitude multiplier)
+ * @param {readonly number[]} coloration - the point lights' added glow there
+ * @param {object} [params] - a partial light look; missing fields are identity
+ * @returns {{illum: number[], coloration: number[]}}
+ */
+export function applyLightLook(illum, coloration, params) {
+  const p = { ...IDENTITY_LIGHT_LOOK, ...(params || {}) };
+  const level = Number.isFinite(Number(p.lightLevel)) ? Number(p.lightLevel) : 1;
+  const sat = Number.isFinite(Number(p.lightSaturation)) ? Number(p.lightSaturation) : 1;
+  const glow = Number.isFinite(Number(p.lightGlow)) ? Number(p.lightGlow) : 1;
+  const tint = p.lightTint || IDENTITY_LIGHT_LOOK.lightTint;
+  const shape = (c, k) => {
+    const L = luminance(c);
+    return [0, 1, 2].map((i) => (L + (c[i] - L) * sat) * tint[i] * k);
+  };
+  return { illum: shape(illum, level), coloration: shape(coloration, glow) };
+}
+
+/**
+ * The light look as nodes. `u` = uniform nodes `{lightLevel, lightSaturation,
+ * lightTint(vec3), lightGlow}`; identity values make both outputs exactly their
+ * inputs (×1, mix to itself), so a scene with no light look is unchanged.
+ * @param {*} TSL @param {*} illumNode - vec3 @param {*} colorationNode - vec3 @param {object} u
+ * @returns {{illum: *, coloration: *}}
+ */
+export function buildLightLookNodes(TSL, illumNode, colorationNode, u) {
+  const { vec3, mix, dot } = TSL;
+  const shape = (c, k) => {
+    const L = dot(c, vec3(LUMA[0], LUMA[1], LUMA[2]));
+    return mix(vec3(L), c, u.lightSaturation).mul(u.lightTint).mul(k);
+  };
+  return { illum: shape(illumNode, u.lightLevel), coloration: shape(colorationNode, u.lightGlow) };
+}
+
+/**
+ * The vignette's darkening at a screen uv (0..1 each axis): 1 in the middle,
+ * falling to `1 - amount` in the corners. Spatial, so it lives in the present
+ * pass (grade-present.js) — this is its CPU mirror for previews and tests.
+ * @param {number} u @param {number} v @param {number} amount @returns {number}
+ */
+export function vignetteFactor(u, v, amount) {
+  const d = Math.hypot(u - 0.5, v - 0.5) * Math.SQRT2; // 0 centre .. 1 corner
+  return 1 - Math.min(1, Math.max(0, Number(amount) || 0)) * smooth(0.45, 1.05, d);
+}
 
 /**
  * The selectable tone-mapping curves — the HDR→display response. All are
@@ -171,6 +305,51 @@ export function applyGrade(rgb, params) {
     r = L + (r - L) * boost;
     g = L + (g - L) * boost;
     b = L + (b - L) * boost;
+  }
+
+  // SPOT COLOUR — every hue but one drains to grey (luminance-preserving, like
+  // saturation). The kept hue gets a little extra chroma so it reads as THE colour.
+  const spot = Math.min(1, Math.max(0, Number(p.spotAmount) || 0));
+  if (spot > 0) {
+    const { hue } = opponentHue([r, g, b]);
+    const keep = spotKeep(hue, Number(p.spotHue) || 0, p.spotWidth ?? IDENTITY_GRADE.spotWidth);
+    const s = 1 - spot * (1 - keep) + 0.25 * spot * keep;
+    r = L + (r - L) * s;
+    g = L + (g - L) * s;
+    b = L + (b - L) * s;
+  }
+
+  // COLOURISE — blend toward a tinted monochrome of the same luminance: the tint
+  // at mid-grey, darkening to black below, easing toward white above (so a bright
+  // pixel never clips to a saturated blob). See COLOURISE_PIVOT.
+  // KEEP LAMPS — where a lamp's glow lands (`p.lampGlow`, the coloration buffer at
+  // this pixel; the shader samples it), the wash steps back, so lamplight keeps
+  // its own colour in a tinted world (the author's red-fog reference: one lamp
+  // burning white). Absent glow = no effect.
+  const glow = Array.isArray(p.lampGlow) ? Math.max(...p.lampGlow) : 0;
+  const keepLamps =
+    Math.min(1, Math.max(0, Number(p.colouriseKeepLamps) || 0)) * smooth(LAMP_GLOW_EDGES[0], LAMP_GLOW_EDGES[1], glow);
+  const col = Math.min(1, Math.max(0, Number(p.colourise) || 0)) * (1 - keepLamps);
+  if (col > 0) {
+    const tc = p.colouriseColor || IDENTITY_GRADE.colouriseColor;
+    // VALUE-preserving, not luminance-preserving: the tint's brightest channel takes
+    // the pixel's own brightness. A luminance match would push a pure red far past 1
+    // and flatten every mid-tone to the same clipped red; this keeps the ramp from
+    // black through deep red to bright red that the author's red-fog reference has.
+    const peak = Math.max(1e-4, tc[0], tc[1], tc[2]);
+    // HOLD — where the tint stops and white takes over. Low (0.18) is a print-like
+    // sepia; high (~0.8) keeps a whole foggy frame blood red and lets only real
+    // light sources (HDR, above 1) burn white (author's red-fog reference, 2026-11-01).
+    const hold = Math.max(0.02, Number(p.colouriseHold) || COLOURISE_PIVOT);
+    const Lp = Math.max(0, L);
+    const toWhite = Math.min(1, Math.max(0, 1 - hold / Math.max(Lp, 1e-4)));
+    const mono = [0, 1, 2].map((i) => {
+      const tinted = (tc[i] / peak) * Lp;
+      return tinted + (Lp - tinted) * toWhite;
+    });
+    r = r + (mono[0] - r) * col;
+    g = g + (mono[1] - g) * col;
+    b = b + (mono[2] - b) * col;
   }
   return [r, g, b];
 }
@@ -481,6 +660,50 @@ export function buildGradeNode(TSL, colorNode, u, tail) {
     c = mix(vec3(L), c, boost);
   }
 
+  // SPOT COLOUR + COLOURISE — mirrors applyGrade's JS op for op. Only the artistic
+  // scope builds these uniforms (grade-present.js), so the env grade's node is
+  // byte-identical without them.
+  if (u.spotAmount) {
+    const { atan, abs, smoothstep, sin, cos } = TSL;
+    L = dot(c, vec3(LUMA[0], LUMA[1], LUMA[2]));
+    const oa = c.x.sub(c.y.add(c.z).mul(0.5));
+    const ob = c.y.sub(c.z).mul(0.8660254);
+    const hueRad = atan(ob, oa);
+    const keepRad = u.spotHue.mul(Math.PI / 180);
+    const diff = abs(atan(sin(hueRad.sub(keepRad)), cos(hueRad.sub(keepRad)))).mul(180 / Math.PI);
+    const width = max(u.spotWidth, float(1));
+    const keep = float(1).sub(smoothstep(width.mul(SPOT_EDGE_INNER), width, diff));
+    const s = float(1)
+      .sub(u.spotAmount.mul(float(1).sub(keep)))
+      .add(u.spotAmount.mul(keep).mul(0.25));
+    c = mix(vec3(L), c, s);
+  }
+  if (u.colourise) {
+    L = dot(c, vec3(LUMA[0], LUMA[1], LUMA[2]));
+    const tc = u.colouriseColor;
+    const peak = max(max(tc.x, tc.y), max(tc.z, float(1e-4)));
+    const hold = max(u.colouriseHold, float(0.02));
+    const Lp = max(L, float(0));
+    const toWhite = float(1)
+      .sub(hold.div(max(Lp, float(1e-4))))
+      .clamp(0, 1);
+    const tinted = tc.div(peak).mul(Lp);
+    const mono = mix(tinted, vec3(Lp), toWhite);
+    // KEEP LAMPS — see applyGrade. `tail.lampGlow` is the coloration buffer sampled
+    // at this pixel (grade-present.js); without it the wash is everywhere.
+    let wash = u.colourise;
+    if (tail?.lampGlow && u.colouriseKeepLamps) {
+      const g = tail.lampGlow;
+      const gMax = max(max(g.x, g.y), g.z);
+      wash = wash.mul(
+        float(1).sub(
+          u.colouriseKeepLamps.mul(TSL.smoothstep(float(LAMP_GLOW_EDGES[0]), float(LAMP_GLOW_EDGES[1]), gMax))
+        )
+      );
+    }
+    c = mix(c, mono, wash);
+  }
+
   // --- THE TAIL: tone map → 3D LUT (Look scope only) ----------------------
   if (tail) {
     const fnName = TONE_MAP_FNS[tail.toneMapping];
@@ -526,6 +749,8 @@ export const GRADE_PRESETS = Object.freeze({
   none: {},
   cinematic: { contrast: 1.12, saturation: 1.05, lift: [0.0, 0.008, 0.02], gain: [1.04, 1.0, 0.96] },
   noir: { saturation: 0.0, contrast: 1.3 },
+  spotRed: { spotAmount: 1, spotHue: 0, spotWidth: 40, contrast: 1.15 },
+  sepia: { colourise: 0.85, colouriseColor: [0.55, 0.36, 0.17], contrast: 1.05 },
   warmCozy: { temperature: 0.35, saturation: 1.08, gain: [1.05, 1.0, 0.95] },
   coldHorror: { temperature: -0.4, saturation: 0.7, contrast: 1.1, lift: [0.0, 0.01, 0.03] },
   goldenGlow: { temperature: 0.25, saturation: 1.12, gain: [1.06, 1.02, 0.94], lift: [0.02, 0.01, 0.0] },

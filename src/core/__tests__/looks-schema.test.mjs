@@ -28,7 +28,16 @@ import {
   tidyLook,
   validateLook,
   withFacets,
+  LOOK_PALETTE,
+  RETIRED_STARTER_IDS,
+  STARTER_SET_VERSION,
+  hexHue,
+  lookOptions,
+  optionPaletteId,
+  setLookOption,
+  upgradeStarters,
 } from '../looks-schema.js';
+import { applyGrade } from '../../effects/grade/grade-ops.js';
 import { WEATHER_ARCHETYPES } from '../../world/index.js';
 
 const BOOT_PATH = fileURLToPath(new URL('../../boot.js', import.meta.url));
@@ -47,6 +56,31 @@ const LIVE = {
   'sky.moonlight01': 0,
   'sky.gradeEnvStrength': 0.5,
   'night.darkness01': 0.2,
+  'grade.exposure': 0,
+  'grade.contrast': 1.1,
+  'grade.saturation': 0.9,
+  'grade.temperature': 0.1,
+  'grade.vibrance': 0,
+  'grade.exposureInside': 0,
+  'grade.exposureOutside': 0,
+  'bloom.threshold': 0.5,
+  'bloom.strength': 1,
+  'bloom.atmoStrength': 0.4,
+  'bloom.atmoTint': '#fff0dc',
+  'grade.toneMapping': 'neutral',
+  'grade.shadows': '#262626',
+  'grade.spotAmount': 0,
+  'grade.spotHue': 0,
+  'grade.spotWidth': 40,
+  'grade.colourise': 0,
+  'grade.colouriseColor': '#B5864F',
+  'grade.colouriseHold': 0.18,
+  'grade.colouriseKeepLamps': 0,
+  'grade.vignette': 0.2,
+  'grade.lightLevel': 1,
+  'grade.lightSaturation': 1,
+  'grade.lightTint': '#ffffff',
+  'grade.lightGlow': 1,
 };
 const read = (key) => LIVE[key];
 
@@ -278,12 +312,148 @@ export function run(t) {
     t.ok('formatHour: 23.999 rounds to 00:00', formatHour(23.999) === '00:00');
     t.ok(
       'describeLook names the sky type through the supplied label',
-      describeLook(STARTER_LOOKS[3], () => 'Thunderstorm').includes('Thunderstorm')
+      describeLook(
+        STARTER_LOOKS.find((l) => l.name === 'Thunderstorm'),
+        () => 'Thunderstorm'
+      ).includes('Thunderstorm')
     );
     const night = lookSwatch({ id: 'n', name: 'n', v: 1, values: { 'time.hour': 0, 'night.darkness01': 1 } });
     const noon = lookSwatch({ id: 'd', name: 'd', v: 1, values: { 'time.hour': 13 } });
     const lum = (h) => parseInt(h.slice(1, 3), 16) + parseInt(h.slice(3, 5), 16) + parseInt(h.slice(5, 7), 16);
     t.ok('a dark midnight swatch is darker than a noon one', lum(night.top) < lum(noon.top));
     t.ok('swatches are hex colours', /^#[0-9a-f]{6}$/.test(noon.top) && /^#[0-9a-f]{6}$/.test(noon.bottom));
+    const noir = lookSwatch(STARTER_LOOKS.find((l) => l.name === 'Noir'));
+    const grey = (h) => h.slice(1, 3) === h.slice(3, 5) && h.slice(3, 5) === h.slice(5, 7);
+    t.ok('a black & white Look draws a grey tile', grey(noir.top) && grey(noir.bottom));
+    t.ok(
+      'a one-colour Look draws a band of its colour',
+      typeof lookSwatch(STARTER_LOOKS.find((l) => l.name === 'One colour')).band === 'string'
+    );
+  }
+
+  // ---- the round-2 starter set (author 2026-11-01: four rows, the full spectrum) -----
+  {
+    t.ok('fifteen starters + the Save tile fill exactly four rows of four', STARTER_LOOKS.length === 15);
+    const facetsOf = (name) => reconcileLook(STARTER_LOOKS.find((l) => l.name === name)).facets;
+    const hours = STARTER_LOOKS.map((l) => l.values['time.hour']).filter((h) => Number.isFinite(h));
+    t.ok(
+      'the starters span the whole day (before 6, around noon, evening, after midnight)',
+      hours.some((h) => h < 6.5) &&
+        hours.some((h) => h > 11 && h < 14) &&
+        hours.some((h) => h > 18 && h < 20.5) &&
+        hours.some((h) => h < 3)
+    );
+    const skies = new Set(STARTER_LOOKS.map((l) => l.values['weather.archetype']).filter(Boolean));
+    t.ok('at least eight different weather types are used', skies.size >= 8);
+    t.ok(
+      'the weather row is time-agnostic',
+      ['Drizzle', 'Thunderstorm', 'Blizzard', 'Ashfall'].every((n) => !facetsOf(n).includes('time'))
+    );
+    t.ok(
+      'every starter carries the Colour facet, so a style always lifts off',
+      STARTER_LOOKS.every((l) => reconcileLook(l).facets.includes('colour'))
+    );
+    t.ok('Noir is black and white', STARTER_LOOKS.find((l) => l.name === 'Noir').values['grade.saturation'] === 0);
+    t.ok(
+      'ids are new, never a retired one',
+      STARTER_LOOKS.every((l) => !RETIRED_STARTER_IDS.includes(l.id))
+    );
+    t.ok(
+      'every option on a starter points at a live channel',
+      STARTER_LOOKS.every((l) => lookOptions(l).length === (l.options ?? []).length)
+    );
+    t.ok(
+      'at least three starters offer a colour option',
+      STARTER_LOOKS.filter((l) => lookOptions(l).length > 0).length >= 3
+    );
+  }
+
+  // ---- Blood fog: the author's red-fog reference, through the real grade maths ----------
+  {
+    const fog = STARTER_LOOKS.find((l) => l.name === 'Blood fog').values;
+    const tc = parseInt(fog['grade.colouriseColor'].slice(1), 16);
+    const grade = {
+      colourise: fog['grade.colourise'],
+      colouriseColor: [(tc >> 16) & 255, (tc >> 8) & 255, tc & 255].map((v) => Math.pow(v / 255, 2.2)),
+      colouriseHold: fog['grade.colouriseHold'],
+    };
+    const mid = applyGrade([0.4, 0.4, 0.4], grade);
+    const lamp = applyGrade([3, 3, 3], grade);
+    t.ok(
+      'Blood fog: a mid-tone becomes a strong red (green and blue near zero)',
+      mid[0] > 0.3 && mid[1] < 0.05 && mid[2] < 0.05
+    );
+    t.ok('Blood fog: a lamp (HDR) burns toward white', lamp[1] > 1 && lamp[2] > 1);
+    const dark = applyGrade([0.04, 0.04, 0.04], grade);
+    t.ok('Blood fog: shadows stay a deep red, not black-grey', dark[0] > dark[1] * 5);
+  }
+
+  // ---- options -------------------------------------------------------------------------
+  {
+    const one = STARTER_LOOKS.find((l) => l.name === 'One colour');
+    const green = setLookOption(one, 'grade.spotHue', 'venom');
+    t.ok(
+      'picking a palette colour sets the kept hue to that colour',
+      green.values['grade.spotHue'] === hexHue('#47b83a')
+    );
+    t.ok('...and the option reads back as that colour', optionPaletteId(green, 'grade.spotHue') === 'venom');
+    t.ok('the original (frozen) starter is untouched', optionPaletteId(one, 'grade.spotHue') === 'blood');
+    const fog = STARTER_LOOKS.find((l) => l.name === 'Blood fog');
+    const blue = setLookOption(fog, 'grade.colouriseColor', 'sapphire');
+    t.ok('a colour option takes the hex', blue.values['grade.colouriseColor'] === '#2f5fd6');
+    t.ok('an option the Look does not offer changes nothing', setLookOption(fog, 'grade.spotHue', 'venom') === fog);
+    t.ok('an unknown colour changes nothing', setLookOption(fog, 'grade.colouriseColor', 'nope') === fog);
+    t.ok(
+      'palette hues are distinct (no two within 10°)',
+      LOOK_PALETTE.every((a, i) =>
+        LOOK_PALETTE.every(
+          (b, j) => i === j || Math.abs(((((hexHue(a.hex) - hexHue(b.hex)) % 360) + 540) % 360) - 180) >= 6
+        )
+      )
+    );
+    const cap = captureLook({
+      id: 'c',
+      name: 'Mine',
+      facets: ['colour'],
+      read: (k) => ({ 'grade.spotAmount': 1, 'grade.spotHue': 120 })[k],
+    });
+    t.ok(
+      'a captured one-colour look gets its colour button automatically',
+      lookOptions(cap).some((o) => o.key === 'grade.spotHue')
+    );
+    t.ok(
+      'a colour channel rejects a non-hex value',
+      reconcileLook({ id: 'x', name: 'x', v: 1, values: { 'grade.colouriseColor': 'red' } }).invalid.length === 1
+    );
+    t.ok('options survive a migrate', migrateLook(fog).look.options?.length === 1);
+  }
+
+  // ---- the starter-set upgrade (the old six are replaced once, GM looks kept) -----------
+  {
+    const stored = [
+      { id: 'starter-storm', name: 'Storm', v: 1, values: { 'wind.speed01': 0.7 } },
+      { id: 'mine', name: 'My look', v: 1, values: { 'time.hour': 4 } },
+    ];
+    const up = upgradeStarters(stored, 1);
+    t.ok('the upgrade drops the retired starters', !up.looks.some((l) => l.id === 'starter-storm'));
+    t.ok(
+      '...keeps the GM’s own Looks',
+      up.looks.some((l) => l.id === 'mine')
+    );
+    t.ok('...puts the new starters first, in order', up.looks[0].id === STARTER_LOOKS[0].id && up.looks.length === 16);
+    t.ok('...and says it changed something', up.changed === true);
+    const again = upgradeStarters(up.looks.slice(1), STARTER_SET_VERSION);
+    t.ok(
+      'an up-to-date library is left alone (a deleted starter stays deleted)',
+      again.changed === false && again.looks.length === 15
+    );
+    t.ok(
+      'the stored library records its starter set',
+      normalizeLibrary(serializeLibrary([])).starters === STARTER_SET_VERSION
+    );
+    t.ok(
+      'a library from before starter sets reads as set 1',
+      normalizeLibrary(JSON.stringify({ v: 1, looks: [] })).starters === 1
+    );
   }
 }

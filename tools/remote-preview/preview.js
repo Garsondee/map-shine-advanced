@@ -39,6 +39,8 @@ import {
 import { validateCue, orderedCues, cueToFadePatch } from '../../src/core/cues-schema.js';
 import {
   STARTER_LOOKS,
+  setLookOption,
+  structuredCloneLook,
   captureLook,
   lookFacets,
   planLookApply,
@@ -337,11 +339,11 @@ const IMPULSES = [
 // fakeSky, so the Play tab's grid, Save look, the tile menu, GO and Prep's library all
 // work here. Applying is instant except the weather, which rides the same fake fade the
 // mood chips use. `?looks=stale` adds a Look holding a removed setting, to show Tidy.
-const looksLib = STARTER_LOOKS.map((l) => ({ ...l, values: { ...l.values } }));
+const looksLib = STARTER_LOOKS.map(structuredCloneLook);
 if (new URLSearchParams(location.search).get('looks') === 'stale') {
   looksLib.push({ id: 'old-one', name: 'Old campaign look', v: 1, values: { 'time.hour': 9, 'removed.slider': 0.4 } });
 }
-let lookSeq = ['starter-golden-afternoon', 'starter-grey-morning', 'starter-storm'];
+let lookSeq = ['look-first-light', 'look-golden-hour', 'look-blood-fog'];
 let lookNext = 0;
 let activeLookFake = null; // {id, startedAtMs, untilMs}
 const lookRead = (key) =>
@@ -425,6 +427,12 @@ const fakeLooks = {
       1
     );
     remote.refreshLooks();
+  },
+  setOption: async (id, key, paletteId) => {
+    const i = looksLib.findIndex((l) => l.id === id);
+    if (i !== -1) looksLib[i] = setLookOption(looksLib[i], key, paletteId);
+    remote.refreshLooks();
+    return { ok: true };
   },
   tidy: async (id) => {
     const i = looksLib.findIndex((l) => l.id === id);

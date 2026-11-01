@@ -85,6 +85,7 @@ export const REMOTE_PRESSABLES = Object.freeze([
   '.msa-run-play', // a running-order row's name (plays it)
   '.msa-more-item', // a row of the header's more menu
   '.msa-swatch', // a colour in a Look's option palette
+  '.msa-group', // a Look group chip (Day, Night, Dread...)
 ]);
 
 /**
@@ -544,7 +545,14 @@ ${R} .msa-transport-mode{margin-left:2px; font-size:.62rem; color:var(--ink2); l
 
 /* the Looks grid — each tile its own little sky */
 ${R} .msa-looks{display:flex; flex-direction:column; gap:8px}
-/* four rows of four, exactly (2026-11-01: 15 starter Looks + Save); more scrolls */
+/* the group chips (round 3): one themed group of Looks at a time */
+${R} .msa-groups{display:flex; flex-wrap:wrap; gap:4px}
+${R} .msa-group{display:inline-flex; align-items:center; gap:4px; padding:3px 8px; border-radius:999px;
+  border:1px solid var(--line); background:var(--bg2); color:var(--ink2); font-size:.66rem; font-weight:600}
+${R} .msa-group .ico{width:11px; height:11px}
+${R} .msa-group[aria-selected="true"]{border-color:var(--shine); color:var(--shine); background:var(--shine-soft)}
+${R} .msa-group[data-count]::after{content:attr(data-count); font-size:.56rem; color:var(--ink2); margin-left:1px}
+/* a group's Looks + Save: two rows of four fit every starter group; more scrolls */
 ${R} .msa-look-grid{display:grid; grid-template-columns:repeat(4, 1fr); grid-auto-rows:66px; gap:6px; max-height:282px; overflow-y:auto;
   padding:2px; scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent}
 ${R} .msa-look, ${R} .msa-look-add{position:relative; display:flex; flex-direction:column; min-width:0; padding:0;
@@ -732,6 +740,7 @@ ${wxChipHoverCss(R)}
   ${R} .msa-seg-row .msa-seg:not([aria-pressed="true"]):hover{color:var(--ink0)}
   ${R} .msa-btn--patreon:hover{filter:brightness(1.08)}
   ${R} .msa-swatch:not([aria-pressed="true"]):hover{border-color:rgba(255,255,255,.6)}
+  ${R} .msa-group:not([aria-selected="true"]):hover{color:var(--ink0); border-color:var(--line-strong)}
   ${R} .msa-look-opt:hover{transform:scale(1.15)}
 }
 `.trim();

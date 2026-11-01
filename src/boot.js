@@ -13222,13 +13222,17 @@ function install() {
     'exposureOutside',
     'toneMapping',
     'shadows',
+    'highlights',
+    'tint',
     'lightLevel',
     'lightSaturation',
     'lightTint',
     'lightGlow',
+    'lightSoftness',
+    'lightGlowDay',
   ]);
   /** The 'lookGrade' fields that are colours (they fade as hex). */
-  const LOOK_GRADE_COLOURS = Object.freeze(['colouriseColor', 'lightTint', 'shadows']);
+  const LOOK_GRADE_COLOURS = Object.freeze(['colouriseColor', 'lightTint', 'shadows', 'highlights']);
   /** The 'lookGrade' fields that are choices (they switch when the fade lands). */
   const LOOK_GRADE_CHOICES = Object.freeze(['toneMapping']);
   const lookGradeType = (field) =>
@@ -13252,7 +13256,7 @@ function install() {
   // BLOOM, FADEABLE (Looks, 2026-11-01) — the same live-only shape as 'lookGrade'
   // above: per-frame writes land in bloom's in-memory override, one re-resolve per
   // frame, persisted once on arrival through MapShine.setBloom (`__bloom`).
-  const LOOK_BLOOM_FIELDS = Object.freeze(['threshold', 'strength', 'atmoStrength', 'atmoTint']);
+  const LOOK_BLOOM_FIELDS = Object.freeze(['threshold', 'dayThreshold', 'strength', 'atmoStrength', 'atmoTint']);
   let bloomLiveDirty = false;
   fadeSourceRegistry.registerSource('lookBloom', {
     keys: () => LOOK_BLOOM_FIELDS,
@@ -13267,6 +13271,70 @@ function install() {
       bloomLiveOverride[field] = value;
       bloomLiveDirty = true;
     },
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // LIVE LOOK SOURCES (Looks round 3, 2026-11-01) — the ONE way to bring an
+  // effect into Looks (author: "If you need to change the appearance of any
+  // other effect ... bring that effect into this system so that it can be faded
+  // into and out of easily"). The grade and bloom were wired by hand first
+  // (above); every effect after them registers here. Each source fades through
+  // the effect's in-memory live override only (re-resolved once per frame when
+  // any of its fields moved), and the arrived values are persisted ONCE through
+  // the effect's own setter — never a scene-flag write per frame.
+  // ══════════════════════════════════════════════════════════════════════
+  /** @type {Map<string, {dirty: boolean, reapply: () => void, persist: (patch: object) => void,
+   *   fadeTo: (patch: object, overMs: number, label: string) => void}>} */
+  const liveLookSources = new Map();
+
+  /**
+   * @param {string} ns - the fade namespace ('lookLens', ...)
+   * @param {{fields: string[], params: Record<string, {type: string, default?: unknown}>,
+   *   override: Record<string, unknown>, readout: () => ({params?: object}|null),
+   *   reapply: () => void, persist: (patch: object) => void}} spec
+   */
+  function registerLiveLookSource(ns, { fields, params, override, readout, reapply, persist }) {
+    const typeOf = (f) => (params[f]?.type === 'color' ? 'color' : params[f]?.type === 'bool' ? 'bool' : 'float');
+    const entry = { dirty: false, reapply, persist, fadeTo: null };
+    fadeSourceRegistry.registerSource(ns, {
+      keys: () => fields,
+      typeOf: (f) => (fields.includes(f) ? typeOf(f) : undefined),
+      readLive: (f) => liveFadeValue(`${ns}.${f}`) ?? override[f] ?? readout()?.params?.[f] ?? params[f]?.default,
+      write: (f, v) => {
+        if (!fields.includes(f)) return;
+        override[f] = v;
+        entry.dirty = true;
+      },
+    });
+    entry.fadeTo = (patch, overMs, label) => {
+      const nowMs = wallClockMs();
+      const gestureId = `look-${ns}:${nowMs}`;
+      const targets = {};
+      for (const [field, to] of Object.entries(patch)) {
+        targets[`${ns}.${field}`] = {
+          to,
+          type: typeOf(field),
+          overMs,
+          curve: 'ease',
+          from: fadeSourceRegistry.readLive(`${ns}.${field}`),
+        };
+      }
+      fadeState = mergeFadeState(fadeState, { id: gestureId, label, targets }, nowMs);
+      pendingSkyFadeCompletions.set(gestureId, { __live: ns, patch: { ...patch } });
+      void writeFadeState(fadeState);
+    };
+    liveLookSources.set(ns, entry);
+    return entry;
+  }
+
+  // THE LENS (round 3) — vignette, grain, colour fringing, curvature, per Look.
+  registerLiveLookSource('lookLens', {
+    fields: ['vignetteIntensity', 'vignetteSoftness', 'grainAmount', 'chromaticAmountPx', 'distortion'],
+    params: LENS_PARAMS,
+    override: lensLiveOverride,
+    readout: () => lensReadout,
+    reapply: () => reapplyLens(),
+    persist: (patch) => MapShine.setLens(patch),
   });
 
   /** The dial value of a wind fade IN FLIGHT, either shape, else null. */
@@ -13924,6 +13992,11 @@ function install() {
    * the two disagree, so a channel cannot be added on one side and forgotten on
    * the other.
    */
+  /** Stage one field of a live look source (registerLiveLookSource). */
+  const stageLive = (s, ns, field, v) => {
+    (s.live[ns] ??= {})[field] = v;
+  };
+
   const LOOK_ADAPTERS = {
     'time.hour': {
       read: () => getVtPanViewerTodHour(),
@@ -14046,6 +14119,18 @@ function install() {
         s.grade.shadows = v;
       },
     },
+    'grade.highlights': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.highlights'),
+      stage: (v, s) => {
+        s.grade.highlights = v;
+      },
+    },
+    'grade.tint': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.tint'),
+      stage: (v, s) => {
+        s.grade.tint = v;
+      },
+    },
     'grade.vibrance': {
       read: () => fadeSourceRegistry.readLive('lookGrade.vibrance'),
       stage: (v, s) => {
@@ -14125,6 +14210,18 @@ function install() {
         s.grade.lightGlow = v;
       },
     },
+    'grade.lightGlowDay': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.lightGlowDay'),
+      stage: (v, s) => {
+        s.grade.lightGlowDay = v;
+      },
+    },
+    'grade.lightSoftness': {
+      read: () => fadeSourceRegistry.readLive('lookGrade.lightSoftness'),
+      stage: (v, s) => {
+        s.grade.lightSoftness = v;
+      },
+    },
     // BLOOM — through the 'lookBloom' source.
     'bloom.threshold': {
       read: () => fadeSourceRegistry.readLive('lookBloom.threshold'),
@@ -14149,6 +14246,33 @@ function install() {
       stage: (v, s) => {
         s.bloom.atmoTint = v;
       },
+    },
+    'bloom.dayThreshold': {
+      read: () => fadeSourceRegistry.readLive('lookBloom.dayThreshold'),
+      stage: (v, s) => {
+        s.bloom.dayThreshold = v;
+      },
+    },
+    // THE LENS — through the 'lookLens' live source (registerLiveLookSource).
+    'lens.vignetteIntensity': {
+      read: () => fadeSourceRegistry.readLive('lookLens.vignetteIntensity'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'vignetteIntensity', v),
+    },
+    'lens.vignetteSoftness': {
+      read: () => fadeSourceRegistry.readLive('lookLens.vignetteSoftness'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'vignetteSoftness', v),
+    },
+    'lens.grainAmount': {
+      read: () => fadeSourceRegistry.readLive('lookLens.grainAmount'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'grainAmount', v),
+    },
+    'lens.chromaticAmountPx': {
+      read: () => fadeSourceRegistry.readLive('lookLens.chromaticAmountPx'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'chromaticAmountPx', v),
+    },
+    'lens.distortion': {
+      read: () => fadeSourceRegistry.readLive('lookLens.distortion'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'distortion', v),
     },
     // END LOOK_ADAPTERS
   };
@@ -14292,6 +14416,7 @@ function install() {
     if (Object.keys(s.sky).length > 0) fadeSkyFieldsTo(s.sky, overMs, label);
     if (Object.keys(s.grade).length > 0) fadeGradeTo(s.grade, overMs, label);
     if (Object.keys(s.bloom).length > 0) fadeBloomTo(s.bloom, overMs, label);
+    for (const [ns, patch] of Object.entries(s.live)) liveLookSources.get(ns)?.fadeTo(patch, overMs, label);
     if (Number.isFinite(s.darkness)) fadeNightDarknessTo(s.darkness, overMs);
     MapShine.__remote?.refreshWeatherBoard();
   }
@@ -14310,7 +14435,7 @@ function install() {
       return { ok: false, reason: skipped[0]?.reason ?? 'this Look has nothing to play', skipped };
     }
     const ms = Math.max(0, Number(overMs) || 0);
-    const staged = { weatherAxes: {}, sky: {}, grade: {}, bloom: {} };
+    const staged = { weatherAxes: {}, sky: {}, grade: {}, bloom: {}, live: {} };
     for (const { key, value } of apply) LOOK_ADAPTERS[key]?.stage(value, staged);
     commitLookStage(staged, ms, look.name);
     const nowMs = wallClockMs();
@@ -14594,6 +14719,11 @@ function install() {
       bloomLiveDirty = false;
       reapplyBloom();
     }
+    for (const source of liveLookSources.values()) {
+      if (!source.dirty) continue;
+      source.dirty = false;
+      source.reapply();
+    }
     if (droppedBadKey) void writeFadeState(fadeState);
     let anyCompleted = false;
     for (const [gestureId, completion] of pendingSkyFadeCompletions) {
@@ -14624,6 +14754,8 @@ function install() {
           MapShine.setGrade(completion.patch);
         } else if (completion.__bloom) {
           MapShine.setBloom(completion.patch);
+        } else if (completion.__live) {
+          liveLookSources.get(completion.__live)?.persist(completion.patch);
         } else if (completion.__night) {
           void writeScenePlayerLightPermissions({ darknessRealism01: completion.value }).then((result) => {
             if (!result.ok) log.warn(`night darkness not persisted: ${result.reason}`);

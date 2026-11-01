@@ -19,6 +19,8 @@ import {
   LOOK_PALETTE,
   describeLook,
   lookOptions,
+  LOOK_GROUPS,
+  lookGroup,
   lookSwatch,
   optionPaletteId,
   reconcileLook,
@@ -108,11 +110,51 @@ export function renderLooksBoard(container, ctx, env) {
     head.append(title, reset, fadeSlot);
   } else head.append(title, fadeSlot);
 
+  // THE GROUP CHIPS (round 3): one themed group at a time, so thirty-odd Looks stay
+  // findable at a glance. The choice is remembered per browser.
+  const GROUP_KEY = 'msa-remote-look-group';
+  let group = 'day';
+  try {
+    group = window.localStorage?.getItem(GROUP_KEY) || 'day';
+  } catch (_) {
+    group = 'day';
+  }
+  if (!LOOK_GROUPS.some((g) => g.id === group)) group = 'day';
+  const groupRow = el('div', 'msa-groups');
+  groupRow.setAttribute('role', 'tablist');
+  groupRow.setAttribute('aria-label', 'Look groups');
+  function setGroup(id) {
+    group = id;
+    try {
+      window.localStorage?.setItem(GROUP_KEY, id);
+    } catch (_) {
+      // storage blocked — the group simply resets next load
+    }
+    closeMenu();
+    paint();
+  }
+  function paintGroups() {
+    const counts = new Map();
+    for (const l of ctx.list()) counts.set(lookGroup(l), (counts.get(lookGroup(l)) ?? 0) + 1);
+    groupRow.replaceChildren(
+      ...LOOK_GROUPS.map((g) => {
+        const b = el('button', 'msa-group');
+        b.type = 'button';
+        b.setAttribute('role', 'tab');
+        b.setAttribute('aria-selected', String(g.id === group));
+        b.title = `${g.label} — ${g.help}`;
+        b.innerHTML = `${iconMarkup(g.icon)}<span>${g.label}</span>`;
+        if (counts.get(g.id)) b.dataset.count = String(counts.get(g.id));
+        b.addEventListener('click', () => setGroup(g.id));
+        return b;
+      })
+    );
+  }
   const grid = el('div', 'msa-look-grid');
   grid.setAttribute('role', 'list');
   const formHost = el('div', 'msa-look-form-host');
   const menuHost = el('div', 'msa-look-menu-host');
-  wrap.append(head, grid, formHost, menuHost);
+  wrap.append(head, groupRow, grid, formHost, menuHost);
   container.appendChild(wrap);
 
   /** Which tile's menu is open (by id), or null. */
@@ -316,7 +358,8 @@ export function renderLooksBoard(container, ctx, env) {
         env.onStatus(`Not saved: ${result?.reason ?? 'unknown reason'}`);
         return;
       }
-      env.onStatus(`Saved "${name}".`);
+      env.onStatus(`Saved "${name}" — it is under Mine, on every map.`);
+      group = 'mine';
       formOpen = false;
       paint();
     });
@@ -423,7 +466,14 @@ export function renderLooksBoard(container, ctx, env) {
   }
 
   function paint() {
-    grid.replaceChildren(...ctx.list().map(tile), addTile());
+    paintGroups();
+    grid.replaceChildren(
+      ...ctx
+        .list()
+        .filter((l) => lookGroup(l) === group)
+        .map(tile),
+      addTile()
+    );
     paintForm();
     if (menuFor && !ctx.list().some((l) => l.id === menuFor)) closeMenu();
     else if (menuFor) grid.querySelector(`[data-look-id="${CSS.escape(menuFor)}"]`)?.setAttribute('data-menu', 'true');

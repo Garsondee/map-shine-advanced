@@ -265,6 +265,31 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
     label: 'Lamp glow',
     help: 'How strongly lamps and fires wash their colour onto the ground around them. 0 keeps only their light, not their colour.',
   },
+  // DAYLIGHT LAMP GLOW (2026-11-01, measured): at noon a lamp's coloured glow was still adding
+  // +0.17 red onto sunlit cobbles on Docklands — a real lamp is invisible next to the sun.
+  // Scales the glow by how much of full daylight the ambient is (grade-ops.js#daylightWeight).
+  lightGlowDay: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.25,
+    category: 'Light',
+    // grade-ops.js#DEFAULT_LIGHT_GLOW_DAY — kept equal by a test.
+    label: 'Lamp glow in daylight',
+    help: 'How much of their coloured glow lamps keep in full daylight. Real lamps are lost in sunlight; 1 keeps them as strong as at night. Fades in smoothly as the light falls.',
+  },
+  // THE LIGHT SHAPE (2026-11-01) — point-light-illumination.js#NATURAL_FALLOFF_K.
+  lightSoftness: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 1, // 2026-11-01: natural, measured on the light bench (see point-light-illumination.js)
+    category: 'Light',
+    label: 'Light shape',
+    help: "How a lamp's light falls away. 0 is Foundry's own: an even disc of light with a soft rim. 1 is natural: a bright core that fades smoothly with distance, like a real lamp.",
+  },
 
   // ── Technical (behind Advanced) ──────────────────────────────────────────
   tint: {

@@ -944,6 +944,7 @@ export function buildEnvironmentalLightMaterials({
     lightSaturation: uniform(float(IDENTITY_LIGHT_LOOK.lightSaturation)),
     lightTint: uniform(vec3(...IDENTITY_LIGHT_LOOK.lightTint)),
     lightGlow: uniform(float(IDENTITY_LIGHT_LOOK.lightGlow)),
+    lightGlowDay: uniform(float(IDENTITY_LIGHT_LOOK.lightGlowDay)),
   };
 
   // --- composite pass: lit = EOTF( OETF(albedo) × illum × uiShadowVis + coloration ) ------
@@ -956,7 +957,14 @@ export function buildEnvironmentalLightMaterials({
     : illumTexNode.rgb;
   // The light look shapes the LIGHT before it meets the art: its level, how
   // coloured it is (0 = white), a tint, and the strength of the coloured glow.
-  const shapedLight = buildLightLookNodes(THREE.TSL, illumWithUiShadow, colorationTexNode.rgb, uLightLook);
+  const shapedLight = buildLightLookNodes(
+    THREE.TSL,
+    illumWithUiShadow,
+    colorationTexNode.rgb,
+    uLightLook,
+    uBackgroundSrgb,
+    outdoorsAt()
+  );
   const litSrgb = mapSrgb.mul(shapedLight.illum);
   // (The sky "veil" that used to add a neutral desaturating term here is GONE,
   // 2026-07-23 — it was the wrong mechanism, a light cannot drain chroma. The
@@ -1021,6 +1029,7 @@ export function buildEnvironmentalLightMaterials({
     uLightLook.lightLevel.value = Math.max(0, n(p.lightLevel, 1));
     uLightLook.lightSaturation.value = Math.max(0, n(p.lightSaturation, 1));
     uLightLook.lightGlow.value = Math.max(0, n(p.lightGlow, 1));
+    uLightLook.lightGlowDay.value = Math.max(0, n(p.lightGlowDay, 1));
     const t = Array.isArray(p.lightTint) ? p.lightTint : IDENTITY_LIGHT_LOOK.lightTint;
     uLightLook.lightTint.value.set(n(t[0], 1), n(t[1], 1), n(t[2], 1));
   }

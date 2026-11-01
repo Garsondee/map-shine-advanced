@@ -479,6 +479,9 @@ import {
   // left with the vegetation-shadow code in extraction step 2 — this file has
   // no remaining caller for any of them.)
   createPointLightPool,
+  setPointLightSoftness,
+  DEFAULT_POINT_LIGHT_SOFTNESS,
+  DEFAULT_LIGHT_GLOW_DAY,
   describePointLightMergedMrt,
   buildPointLightMergedRendererMrtStructs,
   buildPointLightMergedZeroQuadMaterial,
@@ -526,6 +529,7 @@ import {
   lightGoldenTint,
   buildGradePresentMaterial,
   buildBloomMaterials,
+  bloomEffectiveThreshold,
   // LENS (mythica-machina-press#57) — see effects/lens-render.js's own
   // header for the two materials' shapes and effects/lens-motion.js's own
   // header for why the autofocus/motion/light-burn MATHS is imported
@@ -6254,6 +6258,8 @@ async function startVtPanViewerUnserialized({
     /** The last-computed global-illumination floor (null = not active this
      * frame) — same "report what was actually used" reasoning. */
     let lastGlobalLightFloor = null;
+    /** The frame's raised ambient background (sRGB) — bloom's daylight floor reads it. */
+    let lastRaisedBackground = null;
     /**
      * How lit the outdoors is right now, 0..1 (environmental-light.js#sceneLightLevel
      * of the SAME ceiling the windows read). Rain, wind ribbons, dust and fog draw
@@ -9211,6 +9217,7 @@ async function startVtPanViewerUnserialized({
       const raisedBackground = maxRgb(background, lastGlobalLightFloor);
 
       envLight.setAmbient(raisedBackground);
+      lastRaisedBackground = raisedBackground;
       uVisionMemoryLight.value.set(raisedBackground[0], raisedBackground[1], raisedBackground[2]);
       profiler?.end(Z.lightAmbient);
 
@@ -11317,7 +11324,12 @@ async function startVtPanViewerUnserialized({
       // Push resolved params into the build-once uniforms.
       profiler?.begin(Z.bloomUniforms);
       const u = bloom.uniforms;
-      u.threshold.value = bloomNum(p.threshold, 1.0);
+      // The daylight floor (bloom.js#bloomEffectiveThreshold): at noon, sunlit ground no longer glows.
+      u.threshold.value = bloomEffectiveThreshold(
+        bloomNum(p.threshold, 1.0),
+        bloomNum(p.dayThreshold, 0),
+        lastRaisedBackground
+      );
       u.knee.value = bloomNum(p.knee, 0.5);
       u.strength.value = bloomNum(p.strength, 1.0);
       u.coreStrength.value = bloomNum(p.coreStrength, 1.0);
@@ -12861,7 +12873,13 @@ async function startVtPanViewerUnserialized({
         lightSaturation: lp.lightSaturation,
         lightTint: hexToRgb01(lp.lightTint ?? '#ffffff'),
         lightGlow: lp.lightGlow,
+        // A lighting-model value, not a grade: it holds with the Colour Grade switched off.
+        lightGlowDay: Number.isFinite(Number(lp.lightGlowDay)) ? Number(lp.lightGlowDay) : DEFAULT_LIGHT_GLOW_DAY,
       });
+      // THE LIGHT SHAPE — every plain point light's falloff, one shared uniform.
+      setPointLightSoftness(
+        Number.isFinite(Number(lp.lightSoftness)) ? Number(lp.lightSoftness) : DEFAULT_POINT_LIGHT_SOFTNESS
+      );
       if (!st?.enabled) {
         // Temperature Effects still shift a disabled Colour Grade — it is its
         // own card; an identity grade plus the delta is the delta alone.

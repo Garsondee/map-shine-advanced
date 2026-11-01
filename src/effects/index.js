@@ -76,6 +76,7 @@ export { SUN_SHADOW_DEBUG_VIEWS, sunShadowDebugPaints, sunShadowDebugView } from
 // VT-Pan-Viewer-Extraction.md. The mesh pool, its four dedicated scenes, the
 // candle wall-clip cache, and the per-frame reconcile.
 export { createPointLightPool, resolveAnchorElevationRank } from './lighting/point-light-pool.js';
+export { setPointLightSoftness, DEFAULT_POINT_LIGHT_SOFTNESS } from './lighting/point-light-illumination.js';
 // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — the pure descriptor
 // builder feeding `createPointLightPool`'s own `getPlayerCarriedLightSources`
 // injection seam, same "connection between [X] and a point light we
@@ -680,6 +681,7 @@ export {
   buildGradeNode,
   TONE_MAP_FNS,
   TONE_MAP_NAMES,
+  DEFAULT_LIGHT_GLOW_DAY,
 } from './grade/grade-ops.js';
 export { buildGradePresentMaterial } from './grade/grade-present.js';
 export { parseCubeLut, identityCubeLut } from './grade/lut-cube.js';
@@ -693,7 +695,7 @@ export { STYLIZE, STYLIZE_PARAMS, STYLIZE_LOOK_NAMES } from './stylize.js';
 // BLOOM (docs/planning/Bloom.md) — the first `post` stage effect. The declaration
 // (schema + manifest + presets) and the TSL pyramid builders, imported through
 // this door exactly as grade/candle are.
-export { BLOOM, BLOOM_PARAMS, BLOOM_PRESETS, bloomPreset } from './bloom.js';
+export { BLOOM, BLOOM_PARAMS, BLOOM_PRESETS, bloomPreset, bloomEffectiveThreshold } from './bloom.js';
 // LENS (mythica-machina-press#57) — the THIRD `post` stage effect: the
 // camera's own glass, grain and shutter, ported from V2's own real
 // LensEffectV2.js/lens-shader.js (recovered from git history — see

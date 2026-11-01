@@ -378,6 +378,61 @@ export const INVERSE_SQUARE_STEEPNESS = 8;
 export const FIRE_INVERSE_SQUARE_STEEPNESS = 12;
 
 /**
+ * THE LIGHT SHAPE (2026-11-01, Phase 1 of the neutral-look pass; author: "Make all
+ * dropoff/falloffs soft and more exponential", and "this might help fix the dropoff/falloff
+ * of light issue we've had"). Foundry's own corona — `smoothstep(1, 1-attenuation, dist)` —
+ * is a flat plateau out to ~73% of the radius (at the default attenuation) and then a short
+ * fade: a lit DISC with a rim. The natural shape is a windowed inverse-square falloff with a
+ * slightly hot core: `PEAK × (1 - d⁴)² / (1 + K d²)`. At K=1, PEAK=1.1 it carries ~62% of the
+ * Foundry disc's light: 1.03 at a quarter of the radius, 0.77 at half, 0.33 at three quarters,
+ * then eases to exactly 0 at the edge — a pool, not a disc. The core runs a little above 1 (a
+ * lamp is brighter than the floor it lights). Measured on the bench and on Docklands at night:
+ * the first cut (K=2, PEAK=1.6) blew lamp pools out to pink-white disks (channel clipping
+ * 3.7% → 18.6% on the south docks), so the core was brought down.
+ *
+ * Applied to the plain ('foundry') falloff model only: candles, fire, lightning and beams
+ * keep their own tuned curves. ONE shared uniform blends the two (0 = Foundry's disc, 1 =
+ * natural), so it fades with a Look and costs no rebuild. Set through the Colour Grade's
+ * Light group (`grade.js#lightSoftness`) → `setPointLightSoftness`.
+ */
+/** The shipped Light shape — kept equal to `grade.js#lightSoftness`'s default (a test pins it). */
+export const DEFAULT_POINT_LIGHT_SOFTNESS = 1;
+export const NATURAL_FALLOFF_K = 1;
+export const NATURAL_FALLOFF_PEAK = 1.1;
+
+/** The natural falloff at local distance `d` (0 centre .. 1 the dim radius). JS twin of the node. */
+export function naturalFalloff(d) {
+  const x = Math.min(1, Math.max(0, Number(d) || 0));
+  const w = (1 - x ** 4) ** 2;
+  return (NATURAL_FALLOFF_PEAK * w) / (1 + NATURAL_FALLOFF_K * x * x);
+}
+
+/** TSL twin of {@link naturalFalloff}. */
+export function buildNaturalFalloffNode(TSL, d) {
+  const { float } = TSL;
+  const x = d.clamp(0, 1);
+  const x2 = x.mul(x);
+  const w = float(1).sub(x2.mul(x2));
+  return float(NATURAL_FALLOFF_PEAK)
+    .mul(w.mul(w))
+    .div(float(1).add(x2.mul(NATURAL_FALLOFF_K)));
+}
+
+/** The one shared softness uniform (created on first build; every point-light material reads it). */
+let pointLightSoftnessUniform = null;
+let pointLightSoftnessValue = DEFAULT_POINT_LIGHT_SOFTNESS;
+function getPointLightSoftnessUniform(TSL) {
+  if (!pointLightSoftnessUniform) pointLightSoftnessUniform = TSL.uniform(pointLightSoftnessValue);
+  return pointLightSoftnessUniform;
+}
+/** 0 = Foundry's disc, 1 = the natural pool. Safe before any light is built. @param {number} v */
+export function setPointLightSoftness(v) {
+  const n = Number(v);
+  pointLightSoftnessValue = Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+  if (pointLightSoftnessUniform) pointLightSoftnessUniform.value = pointLightSoftnessValue;
+}
+
+/**
  * `smoothstep(edge0, edge1, x)` over plain JS numbers — the private, per-file
  * copy every falloff-shaped helper in this codebase carries (fire-geometry.js,
  * aperture-gobo.js, specular-material.js, etc. all have their own; see this
@@ -1403,7 +1458,13 @@ export function buildPointLightSharedTerms({
     falloff = buildBeamFalloffNode(THREE.TSL, { localUnitXY: beamXY, beamDirection, ...beamShape });
   } else {
     const attenForFalloff = attenuationEased.max(float(0.0001));
-    falloff = smoothstep(float(1), float(1).sub(attenForFalloff), falloffDist);
+    const foundryFalloff = smoothstep(float(1), float(1).sub(attenForFalloff), falloffDist);
+    // THE LIGHT SHAPE (see NATURAL_FALLOFF_K): Foundry's disc blended toward the natural pool.
+    falloff = mix(
+      foundryFalloff,
+      buildNaturalFalloffNode(THREE.TSL, falloffDist),
+      getPointLightSoftnessUniform(THREE.TSL)
+    );
   }
 
   // PROJECTED FLASHLIGHT COOKIE — part of this light's falloff, not a
@@ -1665,7 +1726,19 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     const attenuationStrength = uAttenuationEased.mul(float(0.7));
     const lowerEdge = ratio.mul(float(0.99).sub(attenuationStrength));
     const upperEdge = clamp(ratio.mul(float(1.01).add(attenuationStrength)), float(0.0001), float(1.0));
-    const t = smoothstep(lowerEdge, upperEdge, dist);
+    let lo = lowerEdge;
+    let hi = upperEdge;
+    if (falloffModel === 'foundry') {
+      // THE LIGHT SHAPE, part 2 (measured on the light bench, 2026-11-01): the visible
+      // "rim" on a lamp pool is THIS step — bright held flat to the bright radius, then a
+      // smoothstep only ±20% wide down to the dim light (1.0 → 0.39 at night). Softness
+      // widens it so the core eases into the dim light across most of the radius: at a
+      // ratio of 0.5 the band runs 0.125 → 1.0. A light with no bright radius stays dim.
+      const soft = getPointLightSoftnessUniform(THREE.TSL);
+      lo = mix(lowerEdge, ratio.mul(float(0.25)), soft);
+      hi = mix(upperEdge, clamp(ratio.mul(float(2.2)), upperEdge, float(1.0)), soft);
+    }
+    const t = smoothstep(lo, hi, dist);
     return mix(uBrightColor, uDimColor, t);
   };
   const defaultSeed = computeSwitchColorBand(uRatio);

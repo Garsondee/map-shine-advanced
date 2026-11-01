@@ -35,6 +35,7 @@ import { run as runLightPolygonRepair } from './light-polygon-repair.test.mjs';
 import { run as runPlayerLightGeometry } from './player-light-geometry.test.mjs';
 import { run as runWeatherShade } from './weather-shade.test.mjs';
 import { run as runCanopyLight } from './canopy-light.test.mjs';
+import { run as runLightShape } from './light-shape.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -65,6 +66,7 @@ const t = {
 
 const suites = [
   ['environmental-light', runEnvironmentalLight],
+  ['light-shape', runLightShape],
   ['illum-clear-sky', runIllumClearSky],
   ['point-light-illumination', runPointLightIllumination],
   ['point-light-coloration', runPointLightColoration],

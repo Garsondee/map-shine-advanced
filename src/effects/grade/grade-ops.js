@@ -154,7 +154,31 @@ export const IDENTITY_LIGHT_LOOK = Object.freeze({
   lightSaturation: 1, // 0 = every light white, 1 = as authored, 2 = richer
   lightTint: Object.freeze([1, 1, 1]), // × the light's colour, linear RGB
   lightGlow: 1, // × the point lights' coloured glow (the coloration layer)
+  lightGlowDay: 1, // × that glow again in full daylight (a lamp is invisible next to the sun)
 });
+
+/**
+ * The SHIPPED lamp glow in daylight (2026-11-01, measured: Docklands' south docks at noon,
+ * channel clipping 8.8% → 0.2% and the cobbles back to the art's own grey-beige stone).
+ * `IDENTITY_LIGHT_LOOK.lightGlowDay` stays 1 — identity is "no light look at all".
+ */
+export const DEFAULT_LIGHT_GLOW_DAY = 0.25;
+
+/** Sunlit white in scene.lit at noon (EOTF of the 0.93 noon ambient) — full daylight. */
+const DAYLIGHT_WHITE = 0.85;
+
+/**
+ * How much of full daylight the ambient is, 0..1 — EOTF(ambient) luminance over noon's.
+ * @param {readonly number[]} ambientSrgb
+ */
+export function daylightWeight(ambientSrgb) {
+  const lin = (v) => {
+    const x = Math.max(0, Number(v) || 0);
+    return x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+  };
+  const L = luminance([lin(ambientSrgb[0]), lin(ambientSrgb[1]), lin(ambientSrgb[2])]);
+  return Math.min(1, Math.max(0, L / DAYLIGHT_WHITE));
+}
 
 /**
  * Apply the light look to one illumination value and one coloration value (the
@@ -164,15 +188,17 @@ export const IDENTITY_LIGHT_LOOK = Object.freeze({
  * @param {object} [params] - a partial light look; missing fields are identity
  * @returns {{illum: number[], coloration: number[]}}
  */
-export function applyLightLook(illum, coloration, params) {
+export function applyLightLook(illum, coloration, params, dayWeight = 0) {
   const p = { ...IDENTITY_LIGHT_LOOK, ...(params || {}) };
   const level = Number.isFinite(Number(p.lightLevel)) ? Number(p.lightLevel) : 1;
   const sat = Number.isFinite(Number(p.lightSaturation)) ? Number(p.lightSaturation) : 1;
-  const glow = Number.isFinite(Number(p.lightGlow)) ? Number(p.lightGlow) : 1;
+  const glowDay = Number.isFinite(Number(p.lightGlowDay)) ? Number(p.lightGlowDay) : 1;
+  const dw = Math.min(1, Math.max(0, Number(dayWeight) || 0));
+  const glow = (Number.isFinite(Number(p.lightGlow)) ? Number(p.lightGlow) : 1) * (1 + (glowDay - 1) * dw);
   const tint = p.lightTint || IDENTITY_LIGHT_LOOK.lightTint;
   const shape = (c, k) => {
     const L = luminance(c);
-    return [0, 1, 2].map((i) => (L + (c[i] - L) * sat) * tint[i] * k);
+    return [0, 1, 2].map((i) => Math.max(0, (L + (c[i] - L) * sat) * tint[i] * k));
   };
   return { illum: shape(illum, level), coloration: shape(coloration, glow) };
 }
@@ -184,13 +210,28 @@ export function applyLightLook(illum, coloration, params) {
  * @param {*} TSL @param {*} illumNode - vec3 @param {*} colorationNode - vec3 @param {object} u
  * @returns {{illum: *, coloration: *}}
  */
-export function buildLightLookNodes(TSL, illumNode, colorationNode, u) {
-  const { vec3, mix, dot } = TSL;
+export function buildLightLookNodes(TSL, illumNode, colorationNode, u, ambientSrgbNode = null, outdoorsNode = null) {
+  const { vec3, mix, dot, float, max } = TSL;
   const shape = (c, k) => {
     const L = dot(c, vec3(LUMA[0], LUMA[1], LUMA[2]));
-    return mix(vec3(L), c, u.lightSaturation).mul(u.lightTint).mul(k);
+    // max(0): light saturation above 1 pushes channels past grey into NEGATIVE light, and a
+    // negative illum/coloration came out of the composite as a hard black block over whole
+    // rooms (round 3 lab, 2026-11-01: Storybook at lightSaturation 1.3, 100% black).
+    return max(mix(vec3(L), c, u.lightSaturation).mul(u.lightTint).mul(k), vec3(0));
   };
-  return { illum: shape(illumNode, u.lightLevel), coloration: shape(colorationNode, u.lightGlow) };
+  // DAYLIGHT LAMP GLOW — only when the caller hands in the ambient (the composite does).
+  let glow = u.lightGlow;
+  if (ambientSrgbNode && u.lightGlowDay) {
+    const amb = TSL.sRGBTransferEOTF(ambientSrgbNode.max(vec3(0)));
+    let dw = dot(amb, vec3(LUMA[0], LUMA[1], LUMA[2]))
+      .div(DAYLIGHT_WHITE)
+      .clamp(0, 1);
+    // OUTDOORS ONLY (measured: on Snowbound the noon fade also dimmed the lamp-lit chamber
+    // indoors, mean 70 → 44). Indoors at noon a lamp is still the light that matters.
+    if (outdoorsNode) dw = dw.mul(outdoorsNode);
+    glow = glow.mul(mix(float(1), u.lightGlowDay, dw));
+  }
+  return { illum: shape(illumNode, u.lightLevel), coloration: shape(colorationNode, glow) };
 }
 
 /**
@@ -224,7 +265,57 @@ export const TONE_MAP_FNS = Object.freeze({
   neutral: 'neutralToneMapping',
   reinhard: 'reinhardToneMapping',
   cineon: 'cineonToneMapping',
+  // Not a stock three curve: the hue-preserving highlight roll-off below
+  // (`highlightRolloff` / `buildHighlightRolloffNode`), built in this file.
+  rolloff: 'highlightRolloff',
 });
+
+/**
+ * THE HIGHLIGHT ROLL-OFF (2026-11-01) — the present pass's long-planned "hue-preserving
+ * highlight rolloff, not global ACES" (vt-pan-viewer.js, present.composite note 2), built.
+ * Everything whose brightest channel sits below `HIGHLIGHT_KNEE` is untouched, so midtones
+ * and the art's own colours stay exactly as they were. Above the knee the brightest channel
+ * eases toward 1 on an exponential shoulder and the other channels scale WITH it, so a hot
+ * orange lamp core stays orange instead of clipping to yellow-white; only a pixel driven far
+ * past white (`HIGHLIGHT_WHITEN`) burns out the way film does — each channel through the same
+ * shoulder on its own, so hot orange goes yellow then white. (Burning toward flat white
+ * instead was tried first: it pushed blue up as fast as green and turned orange lamplight
+ * salmon-pink at night, measured on Wizards Lair's great hall.)
+ */
+export const HIGHLIGHT_KNEE = 0.8;
+/** How fast an over-white highlight burns toward white: 0 = never, 0.25 = 20% at 2x white. */
+export const HIGHLIGHT_WHITEN = 0.25;
+
+/**
+ * @param {readonly number[]} rgb - linear RGB, may exceed 1.
+ * @param {number} [knee] @param {number} [whiten]
+ * @returns {[number,number,number]}
+ */
+export function highlightRolloff(rgb, knee = HIGHLIGHT_KNEE, whiten = HIGHLIGHT_WHITEN) {
+  const c = [Math.max(0, rgb[0]), Math.max(0, rgb[1]), Math.max(0, rgb[2])];
+  const m = Math.max(c[0], c[1], c[2]);
+  if (m <= knee) return c;
+  const w = 1 - knee;
+  const shoulder = (v) => (v <= knee ? v : knee + w * (1 - Math.exp(-(v - knee) / w)));
+  const k = shoulder(m) / m;
+  const s = 1 - 1 / (1 + whiten * Math.max(0, m - 1));
+  return c.map((v) => v * k + (shoulder(v) - v * k) * s);
+}
+
+/** TSL twin of {@link highlightRolloff} (same constants, same order). @param {*} TSL @param {*} c vec3 */
+export function buildHighlightRolloffNode(TSL, c, knee = HIGHLIGHT_KNEE, whiten = HIGHLIGHT_WHITEN) {
+  const { float, max, exp, vec3, mix, select } = TSL;
+  const cc = max(c, vec3(0));
+  const m = max(max(cc.x, cc.y), max(cc.z, float(1e-6)));
+  const w = float(1 - knee);
+  const shoulder = (v) =>
+    select(v.greaterThan(float(knee)), float(knee).add(w.mul(float(1).sub(exp(v.sub(knee).div(w).negate())))), v);
+  const scaled = cc.mul(shoulder(m).div(m));
+  const perChannel = vec3(shoulder(cc.x), shoulder(cc.y), shoulder(cc.z));
+  const s = float(1).sub(float(1).div(float(1).add(float(whiten).mul(max(m.sub(1), float(0))))));
+  const rolled = mix(scaled, perChannel, s);
+  return select(m.greaterThan(float(knee)), rolled, cc);
+}
 
 /** The tone-map option keys, for an `enum` param's choices. */
 export const TONE_MAP_NAMES = Object.freeze(Object.keys(TONE_MAP_FNS));
@@ -282,7 +373,8 @@ export function applyGrade(rgb, params) {
     // lift/gain = black/white point (slope+offset), then gamma on the mids.
     x = x * (Number(gain[i]) || 1) + (Number(lift[i]) || 0) * (1 - x);
     x = Math.pow(Math.max(0, x), 1 / (Number(gamma[i]) || 1));
-    x = (x - CONTRAST_PIVOT) * con + CONTRAST_PIVOT; // contrast around pivot
+    // contrast around the pivot — PHOTOGRAPHIC (log-space) above 1, see buildGradeNode
+    x = con > 1 ? CONTRAST_PIVOT * Math.pow(x / CONTRAST_PIVOT, con) : (x - CONTRAST_PIVOT) * con + CONTRAST_PIVOT;
     c[i] = x;
   }
 
@@ -351,7 +443,8 @@ export function applyGrade(rgb, params) {
     g = g + (mono[1] - g) * col;
     b = b + (mono[2] - b) * col;
   }
-  return [r, g, b];
+  // no negative light (see buildGradeNode's matching clamp)
+  return [Math.max(0, r), Math.max(0, g), Math.max(0, b)];
 }
 
 /** Blend a grade toward identity by `strength` (0 = no-op, 1 = full). Used by
@@ -641,9 +734,17 @@ export function buildGradeNode(TSL, colorNode, u, tail) {
   c = c.mul(u.gain).add(u.lift.mul(vec3(1).sub(c)));
   c = pow(max(c, vec3(0)), vec3(1).div(u.gamma));
 
-  // contrast around the linear pivot.
+  // contrast around the linear pivot. ABOVE 1 it is photographic — log-space, `pivot ×
+  // (c/pivot)^contrast` — so black stays black and the darks scale in proportion (round 3 lab,
+  // 2026-11-01: the linear form subtracted a fixed amount from every dark value, and 1.12
+  // swallowed a dim manor interior whole — a 0.03 floor fell ~60%, log-space ~20%). Below 1
+  // it stays linear: the weather's overcast flattening was tuned on that form.
   const pivot = float(CONTRAST_PIVOT);
-  c = c.sub(pivot).mul(u.contrast).add(pivot);
+  const linearContrast = c.sub(pivot).mul(u.contrast).add(pivot);
+  const logContrast = pivot.mul(pow(c.div(pivot), vec3(u.contrast)));
+  // branch-free: 1 above contrast 1, 0 at or below it
+  const above = u.contrast.sub(float(1)).mul(float(1e4)).clamp(0, 1);
+  c = mix(linearContrast, logContrast, above);
 
   // saturation, luminance-preserving.
   let L = dot(c, vec3(LUMA[0], LUMA[1], LUMA[2]));
@@ -704,10 +805,18 @@ export function buildGradeNode(TSL, colorNode, u, tail) {
     c = mix(c, mono, wash);
   }
 
+  // NO NEGATIVE LIGHT past the primary ops (round 3 lab, 2026-11-01): contrast above 1 and
+  // saturation above 1 push dark or vivid pixels below zero, and a later screen pass turned
+  // those into a hard black block over whole rooms (contrast 1.12 alone blacked 64% of a dim
+  // interior). Applied here, in the TSL path; `applyGrade`'s JS twin clamps its output too.
+  c = max(c, vec3(0));
+
   // --- THE TAIL: tone map → 3D LUT (Look scope only) ----------------------
   if (tail) {
     const fnName = TONE_MAP_FNS[tail.toneMapping];
-    if (fnName && typeof TSL[fnName] === 'function') {
+    if (fnName === 'highlightRolloff') {
+      c = buildHighlightRolloffNode(TSL, c);
+    } else if (fnName && typeof TSL[fnName] === 'function') {
       // Three's tone-map Fns take (color, exposure); the grade already spent its
       // own exposure above, so tone-map exposure is 1. Output is display-referred.
       c = TSL[fnName](c, float(1));

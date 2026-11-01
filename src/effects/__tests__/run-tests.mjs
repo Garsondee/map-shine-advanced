@@ -11,6 +11,7 @@ import { run as runEffectTier } from './effect-tier.test.mjs';
 import { run as runEffectTierConsumption } from './effect-tier-consumption.test.mjs';
 import { run as runDepthOfFieldBlur } from './depth-of-field-blur.test.mjs';
 import { run as runBloomDofRender } from './bloom-dof-render.test.mjs';
+import { run as runBloomThreshold } from './bloom-threshold.test.mjs';
 import { run as runDebugChannelSelect } from './debug-channel-select.test.mjs';
 import { run as runCandleFlame } from './candle-flame.test.mjs';
 import { run as runCandleFlameGeometry } from './candle-flame-geometry.test.mjs';
@@ -75,6 +76,7 @@ const suites = [
   ['effect-tier-consumption', runEffectTierConsumption],
   ['depth-of-field-blur', runDepthOfFieldBlur],
   ['bloom-dof-render', runBloomDofRender],
+  ['bloom-threshold', runBloomThreshold],
   ['debug-channel-select', runDebugChannelSelect],
   ['candle-flame', runCandleFlame],
   ['candle-flame-geometry', runCandleFlameGeometry],

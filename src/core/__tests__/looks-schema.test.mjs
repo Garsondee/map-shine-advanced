@@ -36,6 +36,8 @@ import {
   optionPaletteId,
   setLookOption,
   upgradeStarters,
+  LOOK_GROUPS,
+  lookGroup,
 } from '../looks-schema.js';
 import { applyGrade } from '../../effects/grade/grade-ops.js';
 import { WEATHER_ARCHETYPES } from '../../world/index.js';
@@ -61,6 +63,11 @@ const LIVE = {
   'grade.saturation': 0.9,
   'grade.temperature': 0.1,
   'grade.vibrance': 0,
+  'lens.vignetteIntensity': 1,
+  'lens.vignetteSoftness': 0.02,
+  'lens.grainAmount': 0.003,
+  'lens.chromaticAmountPx': 1.2,
+  'lens.distortion': -0.1,
   'grade.exposureInside': 0,
   'grade.exposureOutside': 0,
   'bloom.threshold': 0.5,
@@ -83,6 +90,8 @@ const LIVE = {
   'grade.lightGlow': 1,
 };
 const read = (key) => LIVE[key];
+
+const structuredLook = (l) => ({ ...l, values: { ...l.values } });
 
 export function run(t) {
   // ---- the table itself -----------------------------------------------------
@@ -333,7 +342,16 @@ export function run(t) {
 
   // ---- the round-2 starter set (author 2026-11-01: four rows, the full spectrum) -----
   {
-    t.ok('fifteen starters + the Save tile fill exactly four rows of four', STARTER_LOOKS.length === 15);
+    t.ok('thirty starters (round 3: the catalogue doubled again)', STARTER_LOOKS.length === 30);
+    t.ok(
+      'every starter sits in a real group, never Mine',
+      STARTER_LOOKS.every((l) => lookGroup(l) === l.group && l.group !== 'mine')
+    );
+    t.ok(
+      'every group but Mine has at least four Looks',
+      LOOK_GROUPS.filter((g) => g.id !== 'mine').every((g) => STARTER_LOOKS.filter((l) => l.group === g.id).length >= 4)
+    );
+    t.ok('a Look naming no known group is Mine', lookGroup({ id: 'x', name: 'x', v: 1, values: {} }) === 'mine');
     const facetsOf = (name) => reconcileLook(STARTER_LOOKS.find((l) => l.name === name)).facets;
     const hours = STARTER_LOOKS.map((l) => l.values['time.hour']).filter((h) => Number.isFinite(h));
     t.ok(
@@ -440,12 +458,15 @@ export function run(t) {
       '...keeps the GM’s own Looks',
       up.looks.some((l) => l.id === 'mine')
     );
-    t.ok('...puts the new starters first, in order', up.looks[0].id === STARTER_LOOKS[0].id && up.looks.length === 16);
+    t.ok(
+      '...puts the current starters first, in order',
+      up.looks[0].id === STARTER_LOOKS[0].id && up.looks.length === STARTER_LOOKS.length + 1
+    );
     t.ok('...and says it changed something', up.changed === true);
     const again = upgradeStarters(up.looks.slice(1), STARTER_SET_VERSION);
     t.ok(
       'an up-to-date library is left alone (a deleted starter stays deleted)',
-      again.changed === false && again.looks.length === 15
+      again.changed === false && again.looks.length === STARTER_LOOKS.length
     );
     t.ok(
       'the stored library records its starter set',

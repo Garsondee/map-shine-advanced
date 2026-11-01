@@ -76,8 +76,35 @@ export const LOOK_FACETS = Object.freeze([
     icon: 'palette',
     help: 'The colour grade: exposure, contrast, saturation, warmth, and the styles — one colour, a tinted wash, a vignette.',
   },
+  {
+    id: 'lens',
+    label: 'Lens',
+    icon: 'camera',
+    help: 'The camera: vignette, film grain, colour fringing and lens curvature.',
+  },
   { id: 'dark', label: 'Darkness', icon: 'moon', help: 'How black unlit ground gets at night.' },
 ]);
+
+/**
+ * THE GROUPS (round 3, author: "display the buttons in groups that theme well together
+ * or which make it easier for GMs to find a look quickly"). The Remote shows one group
+ * at a time under a row of group chips. 'mine' is every Look a GM saved themselves.
+ * @type {ReadonlyArray<{id: string, label: string, icon: string, help: string}>}
+ */
+export const LOOK_GROUPS = Object.freeze([
+  { id: 'day', label: 'Day', icon: 'sun', help: 'Dawn to dusk, clear and bright.' },
+  { id: 'night', label: 'Night', icon: 'moon', help: 'Twilight to the dead of night.' },
+  { id: 'weather', label: 'Weather', icon: 'cloud', help: 'Rain, storm, snow, sand and ash, at any hour.' },
+  { id: 'dread', label: 'Dread', icon: 'warn', help: 'Horror and menace: fog, plague, the eldritch, the infernal.' },
+  { id: 'wonder', label: 'Wonder', icon: 'gem', help: 'Magic and the uncanny: fey, arcane, divine, dreams.' },
+  { id: 'style', label: 'Style', icon: 'palette', help: 'Film styles: noir, one colour, an old photograph.' },
+  { id: 'mine', label: 'Mine', icon: 'user', help: 'Looks you saved yourself.' },
+]);
+
+/** The group a Look belongs to ('mine' when it names none we know). @param {Look} look */
+export function lookGroup(look) {
+  return LOOK_GROUPS.some((g) => g.id === look?.group) ? look.group : 'mine';
+}
 
 /** Facet ids, for quick membership checks. */
 export const LOOK_FACET_IDS = Object.freeze(LOOK_FACETS.map((f) => f.id));
@@ -106,10 +133,13 @@ export const LOOK_CHANNELS = Object.freeze([
   { key: 'grade.lightSaturation', facet: 'light', label: 'Light colour', kind: 'number', min: 0, max: 2 },
   { key: 'grade.lightTint', facet: 'light', label: 'Light tint', kind: 'color' },
   { key: 'grade.lightGlow', facet: 'light', label: 'Lamp glow', kind: 'number', min: 0, max: 2 },
+  { key: 'grade.lightGlowDay', facet: 'light', label: 'Lamp glow in daylight', kind: 'number', min: 0, max: 1 },
+  { key: 'grade.lightSoftness', facet: 'light', label: 'Light shape', kind: 'number', min: 0, max: 1 },
   // BLOOM (2026-11-01, author: "the key thing is actually around Bloom which may need
   // to be carefully changed per Look") — how bright a thing must be to glow, how hard
   // it glows, the wide haze, and the haze's colour.
   { key: 'bloom.threshold', facet: 'light', label: 'Glow from', kind: 'number', min: 0, max: 4 },
+  { key: 'bloom.dayThreshold', facet: 'light', label: 'Glow from, in daylight', kind: 'number', min: 0, max: 3 },
   { key: 'bloom.strength', facet: 'light', label: 'Glow', kind: 'number', min: 0, max: 3 },
   { key: 'bloom.atmoStrength', facet: 'light', label: 'Haze', kind: 'number', min: 0, max: 3 },
   { key: 'bloom.atmoTint', facet: 'light', label: 'Haze colour', kind: 'color' },
@@ -127,9 +157,11 @@ export const LOOK_CHANNELS = Object.freeze([
     facet: 'colour',
     label: 'Film response',
     kind: 'id',
-    values: ['none', 'agx', 'aces', 'neutral', 'reinhard', 'cineon'],
+    values: ['none', 'agx', 'aces', 'neutral', 'reinhard', 'cineon', 'rolloff'],
   },
   { key: 'grade.shadows', facet: 'colour', label: 'Shadow lift', kind: 'color' },
+  { key: 'grade.highlights', facet: 'colour', label: 'Highlight tint', kind: 'color' },
+  { key: 'grade.tint', facet: 'colour', label: 'Green / magenta', kind: 'number', min: -1, max: 1 },
   { key: 'grade.vibrance', facet: 'colour', label: 'Vibrance', kind: 'number', min: -1, max: 1 },
   { key: 'grade.spotAmount', facet: 'colour', label: 'One colour', kind: 'number', min: 0, max: 1 },
   { key: 'grade.spotHue', facet: 'colour', label: 'Colour kept', kind: 'number', min: 0, max: 360, wrap: true },
@@ -146,6 +178,12 @@ export const LOOK_CHANNELS = Object.freeze([
     max: 1,
   },
   { key: 'grade.vignette', facet: 'colour', label: 'Vignette', kind: 'number', min: 0, max: 1 },
+  // THE LENS (round 3) — the Lens effect's camera character, per Look.
+  { key: 'lens.vignetteIntensity', facet: 'lens', label: 'Lens vignette', kind: 'number', min: 0, max: 1 },
+  { key: 'lens.vignetteSoftness', facet: 'lens', label: 'Vignette softness', kind: 'number', min: 0.02, max: 0.9 },
+  { key: 'lens.grainAmount', facet: 'lens', label: 'Film grain', kind: 'number', min: 0, max: 0.15 },
+  { key: 'lens.chromaticAmountPx', facet: 'lens', label: 'Colour fringing', kind: 'number', min: 0, max: 12 },
+  { key: 'lens.distortion', facet: 'lens', label: 'Lens curvature', kind: 'number', min: -0.3, max: 0.3 },
   { key: 'night.darkness01', facet: 'dark', label: 'Night darkness', kind: 'number', min: 0, max: 1 },
 ]);
 
@@ -213,6 +251,7 @@ export function migrateLook(raw, renames = LOOK_KEY_RENAMES) {
       v: LOOK_SCHEMA_VERSION,
       values,
       ...(options.length > 0 ? { options } : {}),
+      ...(typeof raw.group === 'string' ? { group: raw.group } : {}),
     },
     changed,
   };
@@ -303,7 +342,7 @@ export function validateLook(look) {
  * @param {{id: string, name: string, facets: string[], read: (key: string) => unknown}} args
  * @returns {Look}
  */
-export function captureLook({ id, name, facets, read }) {
+export function captureLook({ id, name, facets, read, group = 'mine' }) {
   const wanted = new Set(facets ?? LOOK_FACET_IDS);
   const values = {};
   for (const channel of LOOK_CHANNELS) {
@@ -339,6 +378,7 @@ export function captureLook({ id, name, facets, read }) {
     v: LOOK_SCHEMA_VERSION,
     values,
     ...(options.length > 0 ? { options } : {}),
+    group,
   };
 }
 
@@ -639,6 +679,10 @@ export function lookSwatch(look, { cloudOf } = {}) {
   return { top: hex(top), bottom: hex(bottom), band };
 }
 
+/** The light model's shipped values, which every starter returns to (tests pin them to the params). */
+export const LOOK_REST_GLOW_DAY = 0.25;
+export const LOOK_REST_SOFTNESS = 1;
+
 /**
  * A full Colour facet: the grade at neutral with `o` on top (keys without the
  * 'grade.' prefix). Every starter carries one, so moving from a styled Look
@@ -654,17 +698,36 @@ function colour(o = {}) {
     saturation: 1,
     temperature: 0,
     vibrance: 0,
-    toneMapping: 'neutral',
+    // round 3 (2026-11-01): the highlight roll-off, not the Khronos neutral curve — neutral
+    // bleached hot orange lamp cores to pink-white under the soft light shape; roll-off keeps
+    // their colour and burns them toward yellow-white the way film does
+    toneMapping: 'rolloff',
     shadows: '#262626',
+    highlights: '#ffffff',
+    tint: 0,
   };
   const styles = { spotAmount: 0, colourise: 0, colouriseKeepLamps: 0, vignette: 0 };
   // ...and the light look at rest, so white lamps or a tint never outlive their Look.
-  const light = { lightLevel: 1, lightSaturation: 1, lightTint: '#ffffff', lightGlow: 1 };
+  // (lightGlowDay / lightSoftness at their shipped defaults: grade.js, point-light-illumination.js)
+  const light = {
+    lightLevel: 1,
+    lightSaturation: 1,
+    lightTint: '#ffffff',
+    lightGlow: 1,
+    lightGlowDay: LOOK_REST_GLOW_DAY,
+    lightSoftness: LOOK_REST_SOFTNESS,
+  };
   Object.assign(base, light, { exposureInside: 0, exposureOutside: 0 });
   // Bloom keys are written `glow*` here (glowFrom/glow/haze/hazeTint) and land on the
   // 'bloom.' channels; its at-rest values are the bloom effect's own shipped defaults.
-  const bloom = { threshold: 0.51, strength: 0.96, atmoStrength: 0.43, atmoTint: '#fff0dc' };
-  const glowKeys = { glowFrom: 'threshold', glow: 'strength', haze: 'atmoStrength', hazeTint: 'atmoTint' };
+  const bloom = { threshold: 0.51, dayThreshold: 1.1, strength: 0.96, atmoStrength: 0.43, atmoTint: '#fff0dc' };
+  const glowKeys = {
+    glowFrom: 'threshold',
+    glowDay: 'dayThreshold',
+    glow: 'strength',
+    haze: 'atmoStrength',
+    hazeTint: 'atmoTint',
+  };
   const out = {};
   const rest = {};
   for (const [k, v] of Object.entries(o)) {
@@ -673,12 +736,71 @@ function colour(o = {}) {
   }
   for (const [k, v] of Object.entries({ ...base, ...styles, ...rest })) out[`grade.${k}`] = v;
   for (const [k, v] of Object.entries(bloom)) out[`bloom.${k}`] = v;
+  // The lens at its shipped defaults unless the Look says otherwise (keys lens*).
+  const lens = {
+    vignetteIntensity: 1,
+    vignetteSoftness: 0.02,
+    grainAmount: 0.003,
+    chromaticAmountPx: 1.2,
+    distortion: -0.1,
+  };
+  const lensKeys = {
+    lensVignette: 'vignetteIntensity',
+    lensSoftness: 'vignetteSoftness',
+    grain: 'grainAmount',
+    fringe: 'chromaticAmountPx',
+    curve: 'distortion',
+  };
+  for (const [k, v] of Object.entries(o)) if (lensKeys[k]) lens[lensKeys[k]] = v;
+  for (const k of Object.keys(lensKeys)) delete out[`grade.${k}`];
+  for (const [k, v] of Object.entries(lens)) out[`lens.${k}`] = v;
   return out;
 }
 
+/** Which group each starter shows under (see LOOK_GROUPS). */
+const STARTER_GROUPS = Object.freeze({
+  'first-light': 'day',
+  'bright-morning': 'day',
+  'high-noon': 'day',
+  'golden-hour': 'day',
+  celestial: 'wonder',
+  feywild: 'wonder',
+  'blue-hour': 'night',
+  'moonlit-night': 'night',
+  'pitch-black': 'night',
+  'blood-moon': 'night',
+  drizzle: 'weather',
+  thunderstorm: 'weather',
+  blizzard: 'weather',
+  ashfall: 'weather',
+  sandstorm: 'weather',
+  frozen: 'weather',
+  'blood-fog': 'dread',
+  haunted: 'dread',
+  plague: 'dread',
+  eldritch: 'dread',
+  crypt: 'dread',
+  ashen: 'dread',
+  infernal: 'dread',
+  arcane: 'wonder',
+  underdark: 'wonder',
+  dreamlike: 'wonder',
+  noir: 'style',
+  'one-colour': 'style',
+  'old-photograph': 'style',
+  vivid: 'style',
+});
+
 /** One starter: id, name, values, optional options. */
 function starter(id, name, values, options) {
-  return Object.freeze({ id: `look-${id}`, name, v: LOOK_SCHEMA_VERSION, values, ...(options ? { options } : {}) });
+  return Object.freeze({
+    id: `look-${id}`,
+    name,
+    v: LOOK_SCHEMA_VERSION,
+    values,
+    group: STARTER_GROUPS[id] ?? 'mine',
+    ...(options ? { options } : {}),
+  });
 }
 
 /**
@@ -727,7 +849,7 @@ export const STARTER_LOOKS = Object.freeze([
     'weather.temperature01': 0.5,
     'wind.speed01': 0.2,
     ...colour({
-      exposureInside: 0.55,
+      exposureInside: 0.3,
       exposureOutside: -0.1,
       glowFrom: 0.75,
       glow: 0.7,
@@ -747,7 +869,7 @@ export const STARTER_LOOKS = Object.freeze([
     'weather.temperature01': 0.66,
     'wind.speed01': 0.04,
     ...colour({
-      exposureInside: 0.5,
+      exposureInside: 0.25,
       exposureOutside: -0.3,
       glowFrom: 0.95,
       glow: 0.55,
@@ -789,6 +911,7 @@ export const STARTER_LOOKS = Object.freeze([
     'wind.speed01': 0.05,
     ...colour({
       exposureInside: 0.3,
+      lightLevel: 0.8,
       haze: 0.5,
       hazeTint: '#c8d4ff',
       shadows: '#283044',
@@ -828,15 +951,17 @@ export const STARTER_LOOKS = Object.freeze([
     'wind.speed01': 0.06,
     'sky.moonlight01': 0,
     ...colour({
+      // round 3 lab: under the soft light shape the street lamps pooled peach-white and the
+      // docks read brighter than a pitch-black night should (mean 111) — dimmer lamps
       exposureInside: 0.6,
-      exposureOutside: 0.2,
+      exposureOutside: 0,
       glow: 1.1,
       haze: 0.55,
       shadows: '#3c3c4e',
       saturation: 0.6,
       contrast: 1.1,
       vignette: 0.35,
-      lightLevel: 0.85,
+      lightLevel: 0.65,
     }),
     'night.darkness01': 0.35,
   }),
@@ -849,12 +974,14 @@ export const STARTER_LOOKS = Object.freeze([
       'wind.speed01': 0.04,
       'sky.moonlight01': 0.9,
       ...colour({
-        exposureInside: 0.6,
+        // round 3 lab: interiors 51-78% near-black under the soft light shape — lift them
+        exposureInside: 1.4,
         exposureOutside: 0.3,
+        lightLevel: 0.85,
         haze: 0.6,
         hazeTint: '#ff9a8a',
-        shadows: '#6c2028',
-        contrast: 1.15,
+        shadows: '#7c2830',
+        contrast: 1.1,
         colourise: 0.75,
         colouriseColor: '#d0101c',
         colouriseHold: 0.5,
@@ -934,12 +1061,13 @@ export const STARTER_LOOKS = Object.freeze([
       'weather.archetype': 'fog',
       'wind.speed01': 0.04,
       ...colour({
-        exposureInside: 1.1,
+        // round 3 lab: interiors 22-32% near-black on Docklands / Snowbound — deep red, not black
+        exposureInside: 1.4,
         haze: 0.7,
         hazeTint: '#ff5050',
-        shadows: '#8e2a30',
+        shadows: '#9a3036',
         exposure: 0.25,
-        contrast: 1.2,
+        contrast: 1.12,
         colourise: 1,
         colouriseColor: '#d0101c',
         colouriseHold: 1.2,
@@ -989,10 +1117,372 @@ export const STARTER_LOOKS = Object.freeze([
     }),
     [{ key: 'grade.spotHue', label: 'Colour kept' }]
   ),
+  // ==== ROUND 3 (2026-11-01, author: "double the number of looks ... a wonderful wide
+  // range of possible moods and themes", shown in groups). First drafts; every one is
+  // refined in the Look lab across four maps, three spots each. ====
+  // ---- weather, more ----
+  starter('sandstorm', 'Sandstorm', {
+    'weather.archetype': 'gale',
+    'weather.temperature01': 0.72,
+    'wind.speed01': 0.9,
+    ...colour({
+      colourise: 0.4,
+      colouriseColor: '#d8a050',
+      colouriseHold: 0.7,
+      saturation: 0.75,
+      exposure: 0.1,
+      contrast: 0.92,
+      shadows: '#3a2a18',
+      exposureInside: 0.4,
+      glowFrom: 0.5,
+      haze: 1,
+      hazeTint: '#e8b070',
+      grain: 0.04,
+      fringe: 2,
+    }),
+  }),
+  starter('frozen', 'Frozen', {
+    'time.hour': 10,
+    'weather.archetype': 'clear',
+    'weather.temperature01': 0.02,
+    'wind.speed01': 0.15,
+    ...colour({
+      temperature: -0.45,
+      saturation: 0.8,
+      exposure: 0,
+      highlights: '#e8f4ff',
+      shadows: '#1a2a40',
+      contrast: 1.05,
+      exposureInside: 0.4,
+      exposureOutside: -0.1,
+      lightTint: '#d8ecff',
+      glowFrom: 0.6,
+      haze: 0.6,
+      hazeTint: '#cfe6ff',
+    }),
+  }),
+  // ---- dread ----
+  starter('haunted', 'Haunted', {
+    'time.hour': 21.5,
+    'weather.archetype': 'fog',
+    'wind.speed01': 0.05,
+    ...colour({
+      saturation: 0.45,
+      temperature: -0.35,
+      tint: -0.15,
+      shadows: '#1e3a3a',
+      highlights: '#d8f0ec',
+      contrast: 1.1,
+      exposureInside: 0.5,
+      lightSaturation: 0.4,
+      lightTint: '#bfe8e0',
+      lightLevel: 0.9,
+      glow: 1.1,
+      haze: 0.6,
+      hazeTint: '#a8e0d8',
+      lensSoftness: 0.45,
+      grain: 0.03,
+      fringe: 2.5,
+    }),
+    'night.darkness01': 0.25,
+  }),
+  starter(
+    'plague',
+    'Plague',
+    {
+      'weather.archetype': 'overcast',
+      'wind.speed01': 0.1,
+      ...colour({
+        colourise: 0.35,
+        colouriseColor: '#9aa03a',
+        colouriseHold: 0.5,
+        saturation: 0.6,
+        tint: -0.3,
+        temperature: 0.15,
+        contrast: 1.05,
+        shadows: '#2a2c14',
+        exposureInside: 0.45,
+        lightTint: '#d8e0a0',
+        haze: 0.5,
+        hazeTint: '#c8d080',
+        grain: 0.04,
+        fringe: 2,
+      }),
+      'night.darkness01': 0.2,
+    },
+    [{ key: 'grade.colouriseColor', label: 'Sickness colour' }]
+  ),
+  starter('eldritch', 'Eldritch', {
+    'time.hour': 23,
+    'weather.archetype': 'overcast',
+    'wind.speed01': 0.2,
+    'sky.moonlight01': 0.5,
+    ...colour({
+      shadows: '#2a1438',
+      highlights: '#a0ffe8',
+      saturation: 0.8,
+      contrast: 1.15,
+      temperature: -0.2,
+      // round 3 lab: interiors unreadable (mean 28) — white the lamps before the tint, lift
+      exposure: 0.1,
+      exposureInside: 0.6,
+      exposureOutside: 0.3,
+      lightTint: '#c0a8ff',
+      lightSaturation: 0.35,
+      lightGlow: 1,
+      glow: 0.9,
+      haze: 0.5,
+      hazeTint: '#7a50ff',
+      fringe: 5,
+      curve: -0.2,
+      grain: 0.02,
+      lensSoftness: 0.4,
+    }),
+    'night.darkness01': 0.3,
+  }),
+  starter('crypt', 'Crypt', {
+    ...colour({
+      saturation: 0.5,
+      temperature: -0.4,
+      contrast: 1.15,
+      exposureInside: 0.35,
+      shadows: '#1a2230',
+      vignette: 0.4,
+      lightLevel: 0.8,
+      lightTint: '#d0dcff',
+      lightSaturation: 0.6,
+      haze: 0.3,
+      grain: 0.025,
+      lensSoftness: 0.35,
+    }),
+    'night.darkness01': 0.4,
+  }),
+  starter('ashen', 'Ashen', {
+    'weather.archetype': 'ashfall',
+    'weather.temperature01': 0.3,
+    'wind.speed01': 0.08,
+    ...colour({
+      saturation: 0.15,
+      contrast: 0.9,
+      exposure: 0.2,
+      shadows: '#3a3a3a',
+      temperature: -0.05,
+      colourise: 0.2,
+      colouriseColor: '#bbb2a0',
+      colouriseHold: 0.8,
+      exposureInside: 0.4,
+      lightSaturation: 0.2,
+      glowFrom: 0.4,
+      haze: 0.9,
+      hazeTint: '#e0dcd4',
+      grain: 0.05,
+      lensSoftness: 0.6,
+    }),
+    'night.darkness01': 0.1,
+  }),
+  starter(
+    'infernal',
+    'Infernal',
+    {
+      'weather.archetype': 'ashfall',
+      'weather.temperature01': 0.95,
+      'wind.speed01': 0.3,
+      ...colour({
+        colourise: 0.55,
+        colouriseColor: '#ff4a12',
+        colouriseHold: 0.6,
+        contrast: 1.2,
+        // round 3 lab: Snowbound's fortress interior 45-58% near-black — lift it
+        shadows: '#4a1608',
+        exposureInside: 0.9,
+        lightTint: '#ffb070',
+        lightGlow: 1.4,
+        glowFrom: 0.4,
+        glow: 1.4,
+        haze: 1,
+        hazeTint: '#ff6a20',
+        fringe: 3,
+        grain: 0.02,
+      }),
+      'night.darkness01': 0.15,
+    },
+    [{ key: 'grade.colouriseColor', label: 'Fire colour' }]
+  ),
+  // ---- wonder ----
+  starter('feywild', 'Feywild', {
+    'time.hour': 16.8,
+    'weather.archetype': 'fair-cumulus',
+    'weather.temperature01': 0.62,
+    'wind.speed01': 0.12,
+    'sky.goldenHour01': 1,
+    ...colour({
+      saturation: 1.35,
+      vibrance: 0.45,
+      tint: 0.15,
+      temperature: 0.05,
+      shadows: '#2a1a40',
+      highlights: '#ffe8ff',
+      contrast: 1.05,
+      exposureInside: 0.45,
+      lightSaturation: 1.5,
+      lightTint: '#ffd8ff',
+      glowFrom: 0.45,
+      glow: 1.4,
+      haze: 0.9,
+      hazeTint: '#ffb0f0',
+      fringe: 2.5,
+      lensSoftness: 0.5,
+      lensVignette: 0.8,
+    }),
+  }),
+  starter(
+    'arcane',
+    'Arcane',
+    {
+      'time.hour': 21,
+      'weather.archetype': 'clear',
+      'sky.moonlight01': 0.6,
+      ...colour({
+        saturation: 0.9,
+        temperature: -0.15,
+        shadows: '#1a1040',
+        highlights: '#d8c8ff',
+        contrast: 1.1,
+        // round 3 lab (2026-11-01): a violet tint over saturated orange lamps multiplied them
+        // to black (Docklands 99.8% near-black) — white the lamps first, then tint them
+        exposure: 0.3,
+        exposureInside: 0.8,
+        exposureOutside: 0.5,
+        lightTint: '#c0aaff',
+        lightSaturation: 0.25,
+        lightGlow: 1.1,
+        glowFrom: 0.4,
+        glow: 1,
+        haze: 0.6,
+        hazeTint: '#8a6aff',
+        fringe: 4,
+      }),
+      'night.darkness01': 0.25,
+    },
+    [{ key: 'grade.lightTint', label: 'Magic colour' }]
+  ),
+  starter('celestial', 'Celestial', {
+    'time.hour': 11.5,
+    'weather.archetype': 'high-veil',
+    'weather.temperature01': 0.55,
+    'sky.goldenHour01': 0.6,
+    ...colour({
+      exposure: 0,
+      saturation: 1.05,
+      temperature: 0.15,
+      highlights: '#fff4d0',
+      shadows: '#2a2420',
+      contrast: 0.95,
+      exposureInside: 0.2,
+      lightTint: '#fff0c8',
+      lightLevel: 1.15,
+      glowFrom: 0.5,
+      glow: 1.6,
+      haze: 1.2,
+      hazeTint: '#fff0b0',
+      lensSoftness: 0.7,
+      lensVignette: 0.6,
+      fringe: 1.5,
+    }),
+  }),
+  starter('underdark', 'Underdark', {
+    'time.hour': 1,
+    'weather.archetype': 'overcast',
+    'sky.moonlight01': 0,
+    ...colour({
+      saturation: 1.2,
+      temperature: -0.3,
+      tint: -0.1,
+      shadows: '#081820',
+      exposureInside: 0.5,
+      contrast: 1.1,
+      // round 3 lab: teal over orange lamps went to a flat teal void (mean 28) — white the
+      // lamps, then tint; lift the floor so caverns read
+      lightTint: '#80ffe0',
+      lightSaturation: 0.25,
+      lightGlow: 1.1,
+      lightLevel: 0.95,
+      exposure: 0.15,
+      exposureOutside: 0.75,
+      glowFrom: 0.35,
+      glow: 1.6,
+      haze: 1.1,
+      hazeTint: '#40e0c0',
+      fringe: 3,
+    }),
+    'night.darkness01': 0.3,
+  }),
+  starter('dreamlike', 'Dreamlike', {
+    'weather.archetype': 'high-veil',
+    ...colour({
+      exposure: 0.05,
+      contrast: 0.82,
+      saturation: 0.85,
+      vibrance: 0.15,
+      temperature: 0.05,
+      shadows: '#3a3048',
+      highlights: '#fff0f8',
+      exposureInside: 0.15,
+      lightSaturation: 0.8,
+      glowFrom: 0.35,
+      glow: 1.5,
+      haze: 1.4,
+      hazeTint: '#ffe0f0',
+      lensSoftness: 0.8,
+      lensVignette: 0.7,
+      fringe: 3.5,
+      curve: -0.15,
+    }),
+  }),
+  // ---- style ----
+  starter(
+    'old-photograph',
+    'Old photograph',
+    colour({
+      colourise: 0.9,
+      colouriseColor: '#b5864f',
+      colouriseHold: 0.6,
+      contrast: 1.15,
+      exposure: 0.05,
+      vignette: 0.3,
+      shadows: '#2a2018',
+      exposureInside: 0.15,
+      lightSaturation: 0,
+      glow: 0.6,
+      haze: 0.3,
+      hazeTint: '#e0c8a0',
+      grain: 0.09,
+      lensSoftness: 0.35,
+      curve: -0.15,
+      fringe: 0.5,
+    }),
+    [{ key: 'grade.colouriseColor', label: 'Print tone' }]
+  ),
+  starter(
+    'vivid',
+    'Storybook',
+    colour({
+      saturation: 1.35,
+      vibrance: 0.4,
+      contrast: 1.12,
+      exposure: 0.05,
+      exposureInside: 0.35,
+      lightSaturation: 1.3,
+      grain: 0,
+      fringe: 0,
+      lensSoftness: 0.3,
+      lensVignette: 0.5,
+    })
+  ),
 ]);
 
 /** Bump when {@link STARTER_LOOKS} is replaced; {@link upgradeStarters} brings a stored library up once. */
-export const STARTER_SET_VERSION = 2;
+export const STARTER_SET_VERSION = 3;
 
 /** Starter ids of earlier sets, retired by {@link upgradeStarters}. */
 export const RETIRED_STARTER_IDS = Object.freeze([
@@ -1014,10 +1504,20 @@ export const RETIRED_STARTER_IDS = Object.freeze([
 export function upgradeStarters(looks, from) {
   if (from >= STARTER_SET_VERSION) return { looks, changed: false };
   const retired = new Set(RETIRED_STARTER_IDS);
-  const kept = looks.filter((l) => !retired.has(l.id));
-  const have = new Set(kept.map((l) => l.id));
-  const fresh = STARTER_LOOKS.filter((l) => !have.has(l.id)).map((l) => structuredCloneLook(l));
-  return { looks: [...fresh, ...kept], changed: true };
+  const stored = new Map(looks.map((l) => [l.id, l]));
+  const starterIds = new Set(STARTER_LOOKS.map((l) => l.id));
+  // Every current starter, in its designed order, as the code has it now (a starter
+  // carries the lab's latest tuning) — but a colour the GM picked on its option
+  // button is kept: that choice was theirs.
+  const fresh = STARTER_LOOKS.map((l) => {
+    const copy = structuredCloneLook(l);
+    const old = stored.get(l.id);
+    if (old)
+      for (const o of lookOptions(copy)) if (old.values?.[o.key] !== undefined) copy.values[o.key] = old.values[o.key];
+    return copy;
+  });
+  const mine = looks.filter((l) => !retired.has(l.id) && !starterIds.has(l.id));
+  return { looks: [...fresh, ...mine], changed: true };
 }
 
 /** A mutable copy of a (frozen) Look. */

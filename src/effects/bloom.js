@@ -60,6 +60,23 @@ export const BLOOM_PARAMS = Object.freeze({
     label: 'Threshold',
     help: 'How bright a pixel must be before it starts to glow. The scene is HDR (light and coloration push values above 1), so ~1.0 means "only real highlights bloom"; lower it to make more of the image glow.',
   },
+  // THE DAYLIGHT FLOOR (2026-11-01, measured): the threshold above was tuned on night scenes,
+  // where only lamps cross it. At noon a sunlit cobble alone reads ~0.65 in scene.lit, so a
+  // 0.51 threshold blooms the WHOLE exterior — the attribution probe put bloom at +1.5 on top
+  // of a 0.65 surface on Docklands' south docks (the "blown-out mess" the author named). This
+  // floor scales with the ambient light: at night it is near 0 and the threshold rules; in
+  // daylight only what is brighter than sunlit white glows (lamps, glints, fire), like a
+  // camera exposed for the day. See `bloomEffectiveThreshold`.
+  dayThreshold: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 1.1,
+    category: 'Look',
+    label: 'Daylight threshold',
+    help: 'In daylight, how much brighter than sunlit white a pixel must be to glow (1 = sunlit white itself). Keeps ordinary sunlit ground from blooming into haze at noon; at night the Threshold above rules. 0 = off.',
+  },
   knee: {
     type: 'float',
     min: 0,
@@ -246,6 +263,27 @@ export function bloomPreset(name) {
  *
  * @type {import('./effect-manifest.js').EffectManifest}
  */
+/** sRGB transfer → linear, one channel. */
+const srgbToLinear = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+
+/**
+ * The threshold the bright pass actually uses: the authored threshold, raised in daylight to
+ * `dayThreshold` × the brightness a WHITE surface reaches under the current ambient light.
+ * The composite is `EOTF(OETF(albedo) × illum)`, so white under an sRGB ambient `bg` reads
+ * EOTF(bg) — 0.85 at noon (bg 0.93), ~0 at night.
+ * @param {number} threshold @param {number} dayThreshold
+ * @param {readonly number[]|null} ambientSrgb - the frame's raised ambient background (sRGB)
+ * @returns {number}
+ */
+export function bloomEffectiveThreshold(threshold, dayThreshold, ambientSrgb) {
+  const t = Number.isFinite(threshold) ? threshold : 1;
+  const d = Number.isFinite(dayThreshold) ? Math.max(0, dayThreshold) : 0;
+  if (!d || !ambientSrgb) return t;
+  const lin = ambientSrgb.map((v) => srgbToLinear(Math.max(0, Number(v) || 0)));
+  const white = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+  return Math.max(t, d * white);
+}
+
 export const BLOOM = Object.freeze({
   id: 'bloom',
   title: 'Bloom',

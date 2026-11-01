@@ -19,7 +19,13 @@ import {
   GRADE_PRESETS,
   TONE_MAP_FNS,
   TONE_MAP_NAMES,
+  highlightRolloff,
+  HIGHLIGHT_KNEE,
+  applyLightLook,
+  daylightWeight,
+  DEFAULT_LIGHT_GLOW_DAY,
 } from '../grade-ops.js';
+import { GRADE_LOOK_PARAMS } from '../grade.js';
 
 export function run(t) {
   const close = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
@@ -89,6 +95,10 @@ export function run(t) {
     t.ok('contrast pushes a bright value further from the pivot', contrasty[0] > 0.8);
     const flat = applyGrade([0.8, 0.8, 0.8], { contrast: 0.5 });
     t.ok('low contrast pulls it toward the pivot', flat[0] < 0.8 && flat[0] > 0.18);
+    // photographic contrast above 1: darks scale in proportion instead of being cut to black
+    const dim = applyGrade([0.03, 0.03, 0.03], { contrast: 1.12 })[0];
+    t.ok('contrast 1.12 keeps a dim interior (0.03) above 0.02, not crushed', dim > 0.02 && dim < 0.03);
+    t.ok('black stays black under contrast', applyGrade([0, 0, 0], { contrast: 1.5 })[0] === 0);
 
     // Split-toning: per-channel gain tints highlights, per-channel lift tints shadows.
     const splitHi = applyGrade([0.9, 0.9, 0.9], { gain: [1.1, 1.0, 0.9] });
@@ -262,6 +272,46 @@ export function run(t) {
       TONE_MAP_NAMES.every((n) => n in TONE_MAP_FNS)
     );
     t.ok('none is first (the safe default in an enum list)', TONE_MAP_NAMES[0] === 'none');
+  }
+
+  // ---- daylight lamp glow: lamps fade into the sun, untouched at night ------
+  {
+    t.ok('noon ambient is full daylight', daylightWeight([0.93, 0.93, 0.93]) > 0.98);
+    t.ok('night ambient is ~no daylight', daylightWeight([0.06, 0.06, 0.08]) < 0.01);
+    const col = [0.4, 0.2, 0.05];
+    const noon = applyLightLook([1, 1, 1], col, { lightGlowDay: 0.25 }, 1).coloration;
+    const night = applyLightLook([1, 1, 1], col, { lightGlowDay: 0.25 }, 0).coloration;
+    t.ok('at noon the glow keeps lightGlowDay of itself', rgbClose(noon, [0.1, 0.05, 0.0125]));
+    t.ok('at night the glow is untouched', rgbClose(night, col));
+    t.ok('identity by default', rgbClose(applyLightLook([1, 1, 1], col, {}, 1).coloration, col));
+    t.ok(
+      'the shipped default matches the Colour Grade param',
+      GRADE_LOOK_PARAMS.lightGlowDay.default === DEFAULT_LIGHT_GLOW_DAY
+    );
+  }
+
+  // ---- the highlight roll-off: identity below the knee, hue kept above it ---
+  {
+    t.ok("'rolloff' is the built-in roll-off", TONE_MAP_FNS.rolloff === 'highlightRolloff');
+    for (const c of [
+      [0.5, 0.5, 0.5],
+      [0.79, 0.2, 0.05],
+      [0, 0, 0],
+      [0.1, 0.6, 0.3],
+    ])
+      t.ok(`below the knee ${c} is untouched`, rgbClose(highlightRolloff(c), c));
+    const hot = highlightRolloff([1.6, 0.8, 0.2]);
+    t.ok('an over-white pixel lands at or under 1', Math.max(...hot) <= 1 + 1e-12);
+    t.ok('the brightest channel stays the brightest', hot[0] > hot[1] && hot[1] > hot[2]);
+    const r0 = 0.8 / 1.6;
+    t.ok('a mild over-white keeps its channel ratios closely', Math.abs(hot[1] / hot[0] - r0) < 0.12);
+    t.ok('the curve is monotonic', highlightRolloff([0.9, 0, 0])[0] < highlightRolloff([1.2, 0, 0])[0]);
+    t.ok(
+      'continuous at the knee',
+      Math.abs(highlightRolloff([HIGHLIGHT_KNEE + 1e-6, 0, 0])[0] - HIGHLIGHT_KNEE) < 1e-5
+    );
+    const burn = highlightRolloff([8, 2, 0.5]);
+    t.ok('a lamp driven far past white burns toward white', burn[2] / burn[0] > 0.5 / 8);
   }
 
   // ---- presets are data -----------------------------------------------------

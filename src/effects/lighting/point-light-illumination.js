@@ -647,25 +647,71 @@ export function inverseSquareFalloff(TSL, dist, steepness = INVERSE_SQUARE_STEEP
 }
 
 /**
- * SOFT EDGE ENVELOPE (2026-10-27) — a 1 → 0 fade over the outer {@link SOFT_EDGE_WIDTH}
- * of a light's radius, applied to the light's WHOLE illumination output.
+ * SOFT EDGE — THE FLOOR FADES, THE LIGHT RUNS OUT (2026-10-27, reworked 2026-11-01 for mmp-3kb).
  *
- * ⚠️ WHY: illumination is `mix(backgroundFloor, litColor, falloff)`, so as `falloff`
- * reaches 0 at the rim the output reaches `backgroundFloor` — the light's own ambient
- * floor — NOT black. Wherever the true local ambient is darker than that floor
- * (outdoors at night, beyond a doorway), the whole wall-clipped polygon shows as a pale
- * fan with a hard edge. Fading the output to black (= "adds nothing" under the MAX
- * blend) over the outer band turns that hard rim into a soft, smoothstep-eased one.
- * Same trick `window-reach.js` already plays for light that crossed a window.
- * @param {*} TSL @param {*} dist - normalized radial distance, 0 centre, 1 rim.
- * @returns {*} float node in [0,1].
+ * Illumination is `floor + (lit - floor) × falloff`, MAX-blended over the ambient fill. Two
+ * parts with two different jobs:
+ *
+ *  - the FLOOR (`backgroundFloor`, the light's own copy of the ambient) — where the real
+ *    ambient at a pixel is darker than that copy (an indoor lamp's untinted floor spilling
+ *    onto golden-hour grass, a darkness Region), the floor shows as a pale fan cut off at the
+ *    polygon. It fades to black (= "adds nothing" under MAX) over the outer
+ *    {@link LIGHT_FLOOR_FADE_WIDTH} of the radius. Same trick `window-reach.js` plays.
+ *  - the EXCESS (`(lit - floor) × falloff`, the light itself) — its falloff reads a distance
+ *    stretched in the tail ({@link stretchToReach01}), so it has eased to exactly 0 (zero slope)
+ *    at {@link LIGHT_EXCESS_REACH}, where the floor fade starts. The inner half is within ~1%.
+ *
+ * ⚠️ WHY NOT ONE ENVELOPE OVER THE WHOLE OUTPUT (the 2026-10-27 version, 0.45 wide): it pulled
+ * the light's own brightness down with the floor. Where the floor matches the ambient (most
+ * pixels), the output then dropped BELOW the ambient while the light still had a third of its
+ * glow left, and MAX switched to the ambient there with a slope break: measured on the light
+ * bench at night, a lamp whose dim light sits at 0.39 over a 0.19 ambient hit the ambient at
+ * ~0.7 of its radius and stopped in a visible ring (mmp-3kb). Split, the light meets the
+ * ambient tangentially at 0.94 of its radius and the floor fade beyond it is invisible
+ * (it only ever takes away floor the real ambient was already covering).
  */
-export const SOFT_EDGE_WIDTH = 0.45;
-export function softEdgeEnvelope(TSL, dist) {
+export const LIGHT_FLOOR_FADE_WIDTH = 0.06;
+export const LIGHT_EXCESS_REACH = 1 - LIGHT_FLOOR_FADE_WIDTH;
+
+/**
+ * The distance the excess's falloff reads: `d × (1 + k d⁴)`, with `k` putting `reach` at 1. Not a plain
+ * `d / reach` — that squeezed the whole curve and took ~17% off an attenuation-1 lamp at half its
+ * radius (measured on the bench). The d⁴ term leaves the inner half within ~1% and does its
+ * squeezing in the tail, where the light was fading anyway. The price is a steeper last stretch:
+ * an authored crisp corona (low attenuation) ends ~1.3× steeper at this reach — why the floor rim is
+ * kept to 6% (at 10% it was ~2×).
+ */
+const reachStretchK = (reach) => (1 / reach - 1) / reach ** 4;
+export function stretchToReach01(d, reach = LIGHT_EXCESS_REACH) {
+  return d * (1 + reachStretchK(reach) * d ** 4);
+}
+function stretchToReachNode(TSL, d, reach) {
+  const d2 = d.mul(d);
+  return d.mul(TSL.float(1).add(d2.mul(d2).mul(reachStretchK(reach))));
+}
+
+/** JS twin of {@link lightFloorFade}: 1 inside, eased to 0 over the outer band. */
+export function lightFloorFade01(dist) {
+  const x = Math.min(1, Math.max(0, (1 - dist) / LIGHT_FLOOR_FADE_WIDTH));
+  const s = x * x * (3 - 2 * x);
+  return s * s;
+}
+
+/** @param {*} TSL @param {*} dist - normalized radial distance, 0 centre, 1 rim. @returns {*} float node in [0,1]. */
+export function lightFloorFade(TSL, dist) {
   const { float, clamp } = TSL;
-  const x = clamp(float(1).sub(dist).div(float(SOFT_EDGE_WIDTH)), float(0), float(1));
+  const x = clamp(float(1).sub(dist).div(float(LIGHT_FLOOR_FADE_WIDTH)), float(0), float(1));
   const s = x.mul(x).mul(float(3).sub(x.mul(float(2)))); // smoothstep(0,1,x)
-  return s.mul(s); // squared: an eased, exponential-feeling tail rather than a linear ramp
+  return s.mul(s); // squared: starts with zero slope, so the floor leaves no crease either
+}
+
+/**
+ * The illumination output, before presence / window reach: `floor × floorFade + (lit - floor) ×
+ * falloff`, where `falloff` is the reach-stretched one (`buildPointLightSharedTerms`' `illumFalloff*`).
+ * Shared by the per-light core and the merged channel so the two cannot drift.
+ */
+export function shapeIlluminationOutput(TSL, { backgroundFloor, litColor, falloff, dist }) {
+  return backgroundFloor.mul(lightFloorFade(TSL, dist)).add(litColor.sub(backgroundFloor).mul(falloff));
 }
 
 /**
@@ -1371,14 +1417,17 @@ function makeSdPolygonEdgeDistance(TSL) {
  *   {@link buildBeamFalloffNode} takes, forwarded verbatim.
  * @param {*} [args.cookieTexture] - optional 2D gobo/cookie sampled in this
  *   light's local unit-circle space, so wall/depth gates still apply to it.
- * @returns {{dist: *, falloff: *, falloffGoboed: *, depthHere: *,
- *   depthFlagsHere: *, uApLampHeight: (*|null), apApertures: (Array|null)}}
+ * @param {number} [args.illumReach=1] - where the ILLUMINATION copy of the curve
+ *   (`illumFalloff*`) reaches 0, as a fraction of the radius — the illumination
+ *   channel passes {@link LIGHT_EXCESS_REACH} (see `lightFloorFade`). JS-time.
+ * @returns {{dist: *, falloff: *, falloffGoboed: *, illumFalloff: *, illumFalloffGoboed: *,
+ *   depthHere: *, depthFlagsHere: *, uApLampHeight: (*|null), apApertures: (Array|null)}}
  *   `falloff` is height-gated but NOT gobo-multiplied (illumination's own
  *   `combinedFalloff` return field is exactly this value); `falloffGoboed`
  *   additionally has the aperture-gobo term folded in (coloration's own
- *   single `falloff` variable, and illumination's `combinedFalloffGoboed`,
- *   are exactly this value — identical to `falloff` when `apertureCount` is
- *   0). `depthHere`/`depthFlagsHere` are returned too so a caller needing
+ *   single `falloff` variable is exactly this value — identical to `falloff`
+ *   when `apertureCount` is 0). `illumFalloff`/`illumFalloffGoboed` are the same
+ *   two, run out by `illumReach` (the same node when it is 1). `depthHere`/`depthFlagsHere` are returned too so a caller needing
  *   them for something else (illumination's own sun-shadow floor
  *   attribution) can reuse this exact sample rather than resampling
  *   `buf:scene.depth` a second time.
@@ -1399,6 +1448,7 @@ export function buildPointLightSharedTerms({
   beamDirection = null,
   beamShape = null,
   cookieTexture = null,
+  illumReach = 1,
 }) {
   const { float, screenUV, smoothstep, length, positionWorld, mix } = THREE.TSL;
 
@@ -1449,32 +1499,32 @@ export function buildPointLightSharedTerms({
   // constant at fire's scale" account). The attenuation slider does not
   // apply to either inverse-square model (their steepness is the module
   // constant, not the slider).
-  let falloff;
-  if (falloffModel === 'inverseSquare') {
-    falloff = inverseSquareFalloff(THREE.TSL, falloffDist);
-  } else if (falloffModel === 'candle') {
-    falloff = candleFalloff(THREE.TSL, falloffDist);
-  } else if (falloffModel === 'inverseSquareWide') {
-    falloff = inverseSquareFalloff(THREE.TSL, falloffDist, FIRE_INVERSE_SQUARE_STEEPNESS);
-  } else if (falloffModel === 'beam' && beamDirection && beamShape) {
-    // FLASHLIGHT BEAM (mythica-machina-press#579/#77 Stage 2a) — see
-    // buildBeamFalloffNode's own header for the full shape account. The beam
-    // reads a position, not a distance: on a canopy the same direction,
-    // pushed out to the lifted distance.
-    const beamXY = canopy
-      ? THREE.TSL.select(canopy.under.greaterThan(float(0.5)), localUnitXY.mul(canopy.liftScale), localUnitXY)
-      : localUnitXY;
-    falloff = buildBeamFalloffNode(THREE.TSL, { localUnitXY: beamXY, beamDirection, ...beamShape });
-  } else {
+  // `reach` < 1 runs the curve out at `reach` instead of the rim (see stretchToReach01).
+  const radialFalloff = (reach) => {
+    const d = reach === 1 ? falloffDist : stretchToReachNode(THREE.TSL, falloffDist, reach);
+    if (falloffModel === 'inverseSquare') return inverseSquareFalloff(THREE.TSL, d);
+    if (falloffModel === 'candle') return candleFalloff(THREE.TSL, d);
+    if (falloffModel === 'inverseSquareWide') return inverseSquareFalloff(THREE.TSL, d, FIRE_INVERSE_SQUARE_STEEPNESS);
+    if (falloffModel === 'beam' && beamDirection && beamShape) {
+      // FLASHLIGHT BEAM (mythica-machina-press#579/#77 Stage 2a) — see
+      // buildBeamFalloffNode's own header for the full shape account. The beam
+      // reads a position, not a distance: on a canopy the same direction,
+      // pushed out to the lifted distance.
+      let beamXY = canopy
+        ? THREE.TSL.select(canopy.under.greaterThan(float(0.5)), localUnitXY.mul(canopy.liftScale), localUnitXY)
+        : localUnitXY;
+      if (reach !== 1) beamXY = beamXY.mul(stretchToReachNode(THREE.TSL, length(beamXY), reach).div(length(beamXY).max(1e-6)));
+      return buildBeamFalloffNode(THREE.TSL, { localUnitXY: beamXY, beamDirection, ...beamShape });
+    }
     const attenForFalloff = attenuationEased.max(float(0.0001));
-    const foundryFalloff = smoothstep(float(1), float(1).sub(attenForFalloff), falloffDist);
+    const foundryFalloff = smoothstep(float(1), float(1).sub(attenForFalloff), d);
     // THE LIGHT SHAPE (see NATURAL_FALLOFF_K): Foundry's disc blended toward the natural pool.
-    falloff = mix(
-      foundryFalloff,
-      buildNaturalFalloffNode(THREE.TSL, falloffDist),
-      getPointLightSoftnessUniform(THREE.TSL)
-    );
-  }
+    return mix(foundryFalloff, buildNaturalFalloffNode(THREE.TSL, d), getPointLightSoftnessUniform(THREE.TSL));
+  };
+  let falloff = radialFalloff(1);
+  // The illumination channel's own copy, run out by LIGHT_EXCESS_REACH (see `lightFloorFade`).
+  // Coloration keeps the full-radius curve: it adds, so it has no floor to fade.
+  let illumFalloff = illumReach === 1 ? falloff : radialFalloff(illumReach);
 
   // PROJECTED FLASHLIGHT COOKIE — part of this light's falloff, not a
   // post-composite sprite, so its pattern inherits the light's own wall clip,
@@ -1483,6 +1533,7 @@ export function buildPointLightSharedTerms({
     const cookieUv = localUnitXY.mul(float(0.5)).add(THREE.TSL.vec2(0.5, 0.5));
     const cookie = THREE.TSL.texture(cookieTexture).sample(cookieUv).r.clamp(0, 1);
     falloff = falloff.mul(cookie);
+    illumFalloff = illumFalloff.mul(cookie);
   }
 
   if (depthHere) {
@@ -1495,6 +1546,7 @@ export function buildPointLightSharedTerms({
     // `transmit`. Off a canopy `transmit` is 0 and the gate stands.
     if (canopy) gate = gate.max(canopy.transmit);
     falloff = falloff.mul(gate);
+    illumFalloff = illumFalloff.mul(gate);
   }
 
   // Graph-BUILD-TIME gate (`apertureCount` is a JS integer, part of the
@@ -1502,6 +1554,7 @@ export function buildPointLightSharedTerms({
   // with no apertures compiles NONE of this, byte-identical to before
   // `apertureCount` existed as a param.
   let falloffGoboed = falloff;
+  let illumFalloffGoboed = illumFalloff;
   let uApLampHeight = null;
   let apApertures = null;
   if (apertureCount > 0) {
@@ -1526,6 +1579,7 @@ export function buildPointLightSharedTerms({
       // all), matching the schema's own documented meaning.
       const strengthedGobo = mix(float(1), goboResult.node, apertureGoboShared.uStrength);
       falloffGoboed = falloff.mul(strengthedGobo);
+      illumFalloffGoboed = illumFalloff.mul(strengthedGobo);
       uApLampHeight = goboResult.uLampHeight;
       apApertures = goboResult.apertures;
     }
@@ -1560,6 +1614,8 @@ export function buildPointLightSharedTerms({
     dist,
     falloff,
     falloffGoboed,
+    illumFalloff,
+    illumFalloffGoboed,
     windowReachNode,
     depthHere,
     depthFlagsHere,
@@ -1705,7 +1761,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   const {
     dist,
     falloff: combinedFalloff,
-    falloffGoboed: combinedFalloffGoboed,
+    illumFalloffGoboed,
     windowReachNode,
     depthFlagsHere,
     uApLampHeight,
@@ -1726,6 +1782,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     beamDirection,
     beamShape,
     cookieTexture,
+    illumReach: LIGHT_EXCESS_REACH,
   });
 
   // switchColor(bright, dim, dist) — TRANSITION, audit §5c. Exposed as a
@@ -2038,13 +2095,17 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   // `apertureCount`, same `uStrength` mix, byte-identical to the inline
   // version this replaced.
 
-  // FRAGMENT_END (illumination), audit §5c: mix(background, finalColor, depth).
-  const litColor = mix(backgroundFloor, finalColorExposed, combinedFalloffGoboed);
+  // FRAGMENT_END (illumination), audit §5c: mix(background, finalColor, depth) — written as floor + excess so
+  // the floor alone takes the soft edge and the light runs out before it (see `lightFloorFade`, mmp-3kb).
   // WINDOW REACH (`window-reach.js`): scales the whole output, down to black = "this light adds nothing here" under
   // the MAX blend, so the true ambient shows through. 1.0 everywhere the light has not crossed a window.
-  // SOFT EDGE + SNUFFED FLAME (2026-10-27): fade to black over the rim, and to black entirely when the flame is out,
-  // so neither leaves the light's ambient floor painted across its polygon (see `softEdgeEnvelope`).
-  let shaped = litColor.mul(softEdgeEnvelope(THREE.TSL, dist));
+  // SNUFFED FLAME (2026-10-27): to black entirely when the flame is out, so it leaves no floor painted either.
+  let shaped = shapeIlluminationOutput(THREE.TSL, {
+    backgroundFloor,
+    litColor: finalColorExposed,
+    falloff: illumFalloffGoboed,
+    dist,
+  });
   if (presence01) shaped = shaped.mul(presence01);
   const outputColor = windowReachNode ? shaped.mul(windowReachNode) : shaped;
 

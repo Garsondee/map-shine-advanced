@@ -36,6 +36,7 @@ import { run as runPlayerLightGeometry } from './player-light-geometry.test.mjs'
 import { run as runWeatherShade } from './weather-shade.test.mjs';
 import { run as runCanopyLight } from './canopy-light.test.mjs';
 import { run as runLightShape } from './light-shape.test.mjs';
+import { run as runLightEdge } from './light-edge.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -67,6 +68,7 @@ const t = {
 const suites = [
   ['environmental-light', runEnvironmentalLight],
   ['light-shape', runLightShape],
+  ['light-edge', runLightEdge],
   ['illum-clear-sky', runIllumClearSky],
   ['point-light-illumination', runPointLightIllumination],
   ['point-light-coloration', runPointLightColoration],

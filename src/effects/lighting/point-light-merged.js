@@ -47,7 +47,7 @@
  */
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
 import { getSafeProfile } from '../../core/safe-mode.js';
-import { buildPointLightSharedTerms, softEdgeEnvelope } from './point-light-illumination.js';
+import { buildPointLightSharedTerms, shapeIlluminationOutput, LIGHT_EXCESS_REACH } from './point-light-illumination.js';
 import { buildSunAndCloudVisNode } from './light-visibility.js';
 
 /**
@@ -139,6 +139,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
   const {
     dist,
     falloff: combinedFalloff,
+    illumFalloff,
     depthFlagsHere,
   } = buildPointLightSharedTerms({
     THREE,
@@ -149,6 +150,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     depthTexNode,
     depthFlagsTexNode,
     apertureCount: 0,
+    illumReach: LIGHT_EXCESS_REACH,
   });
 
   // ============================================================================
@@ -279,8 +281,13 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
       : backgroundFloor.mul(cloudVis);
   }
 
-  // Soft rim + snuffed flame fade to black — see point-light-illumination.js#softEdgeEnvelope.
-  let illumFinal = mix(backgroundFloor, illumFinalColorExposed, combinedFalloff).mul(softEdgeEnvelope(THREE.TSL, dist));
+  // Floor fades at the rim, the light runs out before it; snuffed flame to black — see point-light-illumination.js#lightFloorFade.
+  let illumFinal = shapeIlluminationOutput(THREE.TSL, {
+    backgroundFloor,
+    litColor: illumFinalColorExposed,
+    falloff: illumFalloff,
+    dist,
+  });
   if (presence01) illumFinal = illumFinal.mul(presence01);
   const illumAlpha = float(1);
 

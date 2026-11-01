@@ -88,12 +88,12 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 // Was LOWERED 3 → 1 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither. Was RAISED 1 → 3 = WINDOW_PARAMS.strength's own max
 // (2026-09-09) before this round.
-export const WINDOW_DEFAULT_STRENGTH = 1; // 2026-10-27 author's Studio export (was 1.5)
+export const WINDOW_DEFAULT_STRENGTH = 3; // 2026-11-01 author's export
 // RAISED 0.69 → 1 (2026-09-21) — new live-tuned default, back to neutral;
 // see `WINDOW_PARAMS.contrast`'s own header (window.js). Was LOWERED 1 →
 // 0.69 (2026-09-08, recovered from a stash that missed both this file's own
 // commit and the 0.6.4 release; applied 2026-09-18) before this round.
-export const WINDOW_DEFAULT_CONTRAST = 1; // 2026-10-27 author's Studio export (was 1.72)
+export const WINDOW_DEFAULT_CONTRAST = 1.61; // 2026-11-01 author's export
 
 /**
  * THE OVERCAST MOOD — author, 2026-09-10: *"overcast days should blur the
@@ -144,13 +144,13 @@ export const WINDOW_DEPTH_FLAG_IS_TOKEN_MIRROR = 64;
 /** The glass defaults, mirroring `WINDOW_PARAMS`'s own `Glass` category. */
 // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither.
-export const WINDOW_DEFAULT_GLASS_WARP_PX = 10; // 2026-10-27 author's Studio export (WINDOW_PARAMS had 28, this mirror had drifted at 3.5)
+export const WINDOW_DEFAULT_GLASS_WARP_PX = 3.5; // 2026-11-01 author's export
 export const WINDOW_DEFAULT_GLASS_DISPERSION = 1;
-export const WINDOW_DEFAULT_GLASS_SCALE = 181; // 2026-10-27 author's Studio export (was 249)
+export const WINDOW_DEFAULT_GLASS_SCALE = 249; // 2026-11-01 author's export
 export const WINDOW_DEFAULT_GLASS_DETAIL = 1;
 export const WINDOW_DEFAULT_GLASS_STRIATION = 0;
 export const WINDOW_DEFAULT_GLASS_STRIATION_ANGLE = 0;
-export const WINDOW_DEFAULT_GLASS_CAUSTIC_STRENGTH = 0.25; // 2026-10-27 author's Studio export (was 2)
+export const WINDOW_DEFAULT_GLASS_CAUSTIC_STRENGTH = 2; // 2026-11-01 author's export
 export const WINDOW_DEFAULT_GLASS_CAUSTIC_SHARPNESS = 6;
 
 /**
@@ -827,7 +827,9 @@ export function buildWindowSurfaceMaterial({
       const beam = [];
       for (let k = 0; k < WINDOW_ROOM_TAPS; k++) {
         const uvK = maskUv.sub(room.offsetAt(k).mul(uUvPerWorldPx)).toVar(`winRoomUv${k}`);
-        const tap = sampleCookieAt(warpUv ? uvK.add(warpUv) : uvK, `winRoomTap${k}`);
+        // The smear blurs as it goes: the cookie is read a little off the line (the room gate and the file test stay on it).
+        const uvBlur = uvK.add(room.blurAt(k).mul(uUvPerWorldPx));
+        const tap = sampleCookieAt(warpUv ? uvBlur.add(warpUv) : uvBlur, `winRoomTap${k}`);
         beam.push(tap.cookie.mul(tap.presence).mul(inFile(uvK)));
       }
       const folded = roomLight.combine(room, beam, cookie, positionWorld.xy);

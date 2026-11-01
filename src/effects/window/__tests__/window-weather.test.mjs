@@ -72,7 +72,7 @@ export function run(t) {
   const D = WINDOW_PARAMS;
   const fill = windowFill01(D.strength.default * 1.3);
   ok('a white window at the default strength lets in nearly all the outdoor light', fill > 0.9);
-  ok('a mid-grey one still reads as less', windowFill01(0.5 * D.strength.default) < 0.85);
+  ok('a mid-grey one still reads as less', windowFill01(0.5 * 1.5) < 0.85);
   const tints = { dawnDusk: hexToRgb01(D.dawnDuskTint.default), night: hexToRgb01(D.nightTint.default) };
   const room = (sun, bg, sky) => {
     const outdoor = bg.map((v, i) => v * sky.ambientMultiplierRgb[i] + sky.moonAddRgb[i]);

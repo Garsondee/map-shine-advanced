@@ -15,6 +15,9 @@ import {
   createWindowRoomLight,
   roomTapT,
   roomTapJitter,
+  roomTapRamp,
+  roomRampNorm,
+  roomTapBlur,
   windowSunFacing,
   WINDOW_ROOM_TAPS,
   WINDOW_ROOM_GAP_SAMPLES,
@@ -58,12 +61,17 @@ const box = (x0, x1, y0, y1) => (x, y) => (x > x0 && x < x1 && y > y0 && y < y1 
 
 export function run(t) {
   const { ok } = t;
-  const look = resolveRoomLook({});
+  const defaults = resolveRoomLook({});
+  // The geometry fixtures below were written against the first look (a 360 px drift, a 0.65 smear, no blur): they pin
+  // it, so a change of the shipped defaults never moves a wall test.
+  const look = resolveRoomLook({ sunMaxDriftPx: 360, sunSmear: 0.65, sunSmearKeep: 0.55, sunSmearBlurPx: 0 });
 
   // ── the dials ────────────────────────────────────────────────────────────
   ok(
     'defaults resolve from an empty params object',
-    look.drift === WINDOW_ROOM_DEFAULTS.drift && look.smear === WINDOW_ROOM_DEFAULTS.smear
+    defaults.drift === WINDOW_ROOM_DEFAULTS.drift &&
+      defaults.smear === WINDOW_ROOM_DEFAULTS.smear &&
+      defaults.smearBlurPx === WINDOW_ROOM_DEFAULTS.smearBlurPx
   );
   const paramDefaults = {
     sunDrift: 'drift',
@@ -71,6 +79,7 @@ export function run(t) {
     sunMaxDriftPx: 'maxDriftPx',
     sunSmear: 'smear',
     sunSmearKeep: 'smearKeep',
+    sunSmearBlurPx: 'smearBlurPx',
     roomWallFadePx: 'wallFadePx',
     roomWallFadeStrength: 'wallFadeStrength',
     sunSideBoost: 'sideBoost',
@@ -178,7 +187,10 @@ export function run(t) {
     'a low western sun streams the west window east across the room',
     px(800, 700, westCookie).rgb[0] > 0.3 && px(800, 700, westCookie, still).rgb[0] === 0
   );
-  ok('…brighter than it was painted (sunny side)', px(800, 700, westCookie).rgb[0] > 1);
+  ok(
+    '…and glows on the sunny side (the low-sun boost)',
+    px(650, 700, westCookie).rgb[0] > 1.3 * px(650, 700, westCookie, westFrame, room, { ...look, sideBoost: 0 }).rgb[0]
+  );
   ok('…and the painted spot itself empties', px(450, 700, westCookie).rgb[0] < 0.2);
 
   // WINDOW BY WINDOW: the north window in the same room faces away from a western sun — it stays and dims.
@@ -263,6 +275,65 @@ export function run(t) {
   ok(
     `the stub's shadow edge is a ramp, not a step (${ramp} px from 10% to 90%, largest 4 px step ${(jump * 100).toFixed(0)}% of full)`,
     ramp >= 16 && jump < 0.25
+  );
+
+  // THE SMEAR FADES OUT (author, 2026-11-01): brightest where it is painted, dimmer all along, nothing at the far end.
+  ok(
+    'tap weights fall from the painted end to nothing at the far end of a full smear',
+    roomTapRamp(0, 1) > 0.9 &&
+      roomTapRamp(WINDOW_ROOM_TAPS - 1, 1) < 0.07 &&
+      roomTapRamp(WINDOW_ROOM_TAPS - 1, 1, 0.5) === 0 &&
+      Array.from({ length: WINDOW_ROOM_TAPS - 1 }, (_, k) => roomTapRamp(k, 1) > roomTapRamp(k + 1, 1)).every(Boolean)
+  );
+  ok(
+    'with no smear every tap counts the same, and the norm is the nominal weight total',
+    roomTapRamp(0, 0) === 1 &&
+      roomTapRamp(WINDOW_ROOM_TAPS - 1, 0) === 1 &&
+      roomRampNorm(0) === WINDOW_ROOM_TAPS &&
+      Math.abs(roomRampNorm(1) - WINDOW_ROOM_TAPS / 2) < 1e-12 &&
+      Math.abs(
+        roomRampNorm(0.6) -
+          Array.from({ length: WINDOW_ROOM_TAPS }, (_, k) => roomTapRamp(k, 0.6)).reduce((a, b) => a + b, 0)
+      ) < 1e-12
+  );
+  const fadeLook = { ...look, smear: 1, smearKeep: 0, smearBlurPx: 0, sideBoost: 0 };
+  const fadeFrame = { ...westFrame, throwX: 300, throwY: 0, throwLenPx: 300, lowSun01: 0 };
+  const sliver = box(410, 470, 600, 800);
+  const streak = (xc) => {
+    let s = 0;
+    let n = 0;
+    for (let y = 650; y <= 750; y += 10) {
+      for (let dx = -8; dx <= 8; dx += 2) {
+        s += px(xc + dx, y, sliver, fadeFrame, room, fadeLook).rgb[0];
+        n++;
+      }
+    }
+    return s / n;
+  };
+  const s0 = streak(480);
+  const s1 = streak(570);
+  const s2 = streak(650);
+  const s3 = streak(730);
+  const s4 = streak(800);
+  ok(
+    `the streak is brightest at the painted end and dims steadily along the drift (${[s0, s1, s2, s3].map((v) => v.toFixed(2)).join(' > ')})`,
+    s0 > s1 && s1 > s2 && s2 > s3 && s3 > 0
+  );
+  ok(`…and is gone at the extreme end of the smear (${s4.toFixed(3)})`, s4 < 0.02 && s4 < 0.05 * s0);
+  ok(
+    'a patch wider than the smear keeps its painted brightness (nothing is lost to the fade)',
+    [700, 750, 800].every(
+      (x) => Math.abs(px(x, 700, box(410, 900, 600, 800), fadeFrame, room, fadeLook).rgb[0] - 1) < 0.25
+    )
+  );
+  ok(
+    'the blur grows from nothing at the painted end to the dial at the far end, and 0 = none',
+    Math.hypot(...roomTapBlur(0, 1, 24, 0)) < Math.hypot(...roomTapBlur(WINDOW_ROOM_TAPS - 1, 1, 24, 0)) &&
+      Math.abs(
+        Math.hypot(...roomTapBlur(WINDOW_ROOM_TAPS - 1, 1, 24, 1)) - 24 * ((WINDOW_ROOM_TAPS - 0.5) / WINDOW_ROOM_TAPS)
+      ) < 1e-9 &&
+      Math.hypot(...roomTapBlur(5, 1, 0, 0.3)) === 0 &&
+      Math.hypot(...roomTapBlur(5, 0, 24, 0.3)) === 0
   );
 
   // SHADED ROOM: the north-east room's east window faces away from a western sun — dimmed, not moved.

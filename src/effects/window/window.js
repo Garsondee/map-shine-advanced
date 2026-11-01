@@ -46,7 +46,7 @@ export const WINDOW_PARAMS = Object.freeze({
     // own max back toward neutral; the author's own dialled-in scene,
     // recorded exactly. Was RAISED 1 → 3 (2026-09-09) before this round.
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
-    default: 1, // 2026-10-27 author's Studio export (was 1.5)
+    default: 3, // 2026-11-01 author's export
     category: 'Look',
     label: 'Window light',
     help: 'How much of the outdoor light the painted cookie lets in — higher saturates the painted falloff toward full sunlight sooner. Turn it to 0 to see the map with no window light at all.',
@@ -74,7 +74,7 @@ export const WINDOW_PARAMS = Object.freeze({
     // header (window-render.js). Was LOWERED 1 → 0.69 (2026-09-08, recovered
     // from a stash that missed both this file's own commit and the 0.6.4
     // release; applied 2026-09-18) before this round.
-    default: 1.5, // 2026-10-27 author's Studio export (was 1)
+    default: 1.61, // 2026-11-01 author's export
     category: 'Look',
     label: 'Patch contrast',
     help: 'Gamma on the painted falloff. Above 1 sharpens the cookie toward a hard-edged patch; below 1 softens it toward a broad glow. 1 = exactly what you painted.',
@@ -298,7 +298,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1200,
     step: 5,
-    default: 360,
+    default: 150,
     category: 'Sun & rooms',
     label: 'Longest drift (px)',
     help: 'The furthest the light can slide, in map pixels, however low the sun gets.',
@@ -308,20 +308,30 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.65,
+    default: 1,
     category: 'Sun & rooms',
     label: 'Smear',
-    help: 'How much the light stretches out along its drift instead of sliding as one patch. 0 = the whole patch moves; 1 = a long streak from where it is painted to where it has drifted.',
+    help: 'How much the light stretches out along its drift instead of sliding as one patch. 0 = the whole patch moves; 1 = a long streak from where it is painted, brightest there, fading to nothing where it has drifted to.',
   },
   sunSmearKeep: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.55,
+    default: 0.18,
     category: 'Sun & rooms',
     label: 'Smear brightness',
     help: 'How bright the stretched light stays. 0 = a longer patch is a dimmer one (the same light spread wider); 1 = the streak keeps the full brightness of the painted light.',
+  },
+  sunSmearBlurPx: {
+    type: 'float',
+    min: 0,
+    max: 120,
+    step: 1,
+    default: 24,
+    category: 'Sun & rooms',
+    label: 'Smear blur (px)',
+    help: 'How soft the far end of the smear gets, in map pixels. The streak is sharp where it is painted and grows hazier along its drift; 0 = no extra blur.',
   },
   roomWallFadePx: {
     type: 'float',
@@ -396,7 +406,7 @@ export const WINDOW_PARAMS = Object.freeze({
     step: 0.5,
     // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; the author's
     // own dialled-in scene, recorded exactly.
-    default: 12.5, // 2026-10-27 author's Studio export (was 10)
+    default: 3.5, // 2026-11-01 author's export
     category: 'Glass',
     label: 'Glass thickness',
     help: 'How much the uneven pane bends the light, as a maximum shift in world pixels. 0 = perfectly flat modern glass: no distortion, no prism, no caustics. Raise it for thick, wavy, hand-blown panes.',
@@ -406,7 +416,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.59, // 2026-10-27 author's Studio export (was 1)
+    default: 1, // 2026-11-01 author's export
     category: 'Glass',
     label: 'Prism split',
     help: 'How far apart the red and blue ends of the light are pulled as they refract. 0 = the light distorts but keeps its colour; 1 = a strong rainbow fringe along every edge. Needs some Glass thickness to have anything to split.',
@@ -416,7 +426,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 8,
     max: 400,
     step: 1,
-    default: 400, // 2026-10-27 author's Studio export (was 181)
+    default: 249, // 2026-11-01 author's export
     category: 'Glass',
     label: 'Blob size',
     help: 'The size of the lumps in the glass, in world pixels. Small = a fine rippled or seeded pane; large = a few broad rolling waves, like a big crown-glass round.',
@@ -499,7 +509,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0.75,
     max: 8,
     step: 0.05,
-    default: 5.45, // 2026-10-27 author's Studio export (was 3)
+    default: 3.2, // 2026-11-01 author's export
     category: 'Rain',
     label: 'Drop size',
     help: 'The radius of a bead of water, in map pixels. Beads are all close to this size with a little variation, and each has a ragged edge. Drops too small to see at the current zoom fade away.',
@@ -539,7 +549,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.1, // 2026-10-27 author's Studio export (was 0.46)
+    default: 0.37, // 2026-11-01 author's export
     category: 'Rain',
     label: 'Drop shadow',
     help: 'How dark the edge of each bead and each wet streak is. This is the small, varying dimming the light gets under rain.',
@@ -559,7 +569,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.01,
-    default: 3, // 2026-10-27 author's Studio export (was 2.12)
+    default: 0.17, // 2026-11-01 author's export
     category: 'Rain',
     label: 'Run speed',
     help: 'How fast the running drops slide, as a multiple of the storm pace (a storm runs at about 200 px per second). They stick, then slip, then stick again; the harder it rains the less they stick, and the wind carries them sideways.',
@@ -639,7 +649,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 100,
     step: 1,
-    default: 50, // 2026-10-27 author's Studio export (was 80)
+    default: 75, // 2026-11-01 author's export
     category: 'Rain',
     label: 'Rain only in the brightest (%)',
     help: 'Shows the raindrops only in the brightest part of the window light. 100 = drops everywhere the window light is (the normal look). 30 = drops only in the brightest 30% of the light, fading out smoothly where it is dimmer. 0 = only the very brightest spots.',

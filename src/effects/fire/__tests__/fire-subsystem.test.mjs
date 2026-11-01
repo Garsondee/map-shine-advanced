@@ -34,7 +34,8 @@
  * actually reaches every engine's `setParams`, ember and smoke included, not
  * just that the source param is textually referenced somewhere.
  */
-import { createFireSubsystem } from '../fire-subsystem.js';
+import { createFireSubsystem, smokeSunShadow } from '../fire-subsystem.js';
+import { createShadowHandle, SHADOW_NOON_REFERENCE_DEPTH } from '../../shadow-access.js';
 import {
   fireTierPlan,
   fireScaleChain,
@@ -72,6 +73,20 @@ class FakeScene {
 }
 
 export function run(t) {
+  // ---- the smoke's ground shadow follows the shared sun (2026-11-01, the shadow consistency pass) ----
+  {
+    const noon = smokeSunShadow(createShadowHandle({ sun: { elevationDeg: 60, azimuthDeg: 180 } }));
+    const evening = smokeSunShadow(createShadowHandle({ sun: { elevationDeg: 4, azimuthDeg: 265, golden01: 0.9 } }));
+    const night = smokeSunShadow(createShadowHandle({ sun: { elevationDeg: -20, azimuthDeg: 300 } }));
+    t.ok('smoke shadow: no handle, no override (the old fixed look stays)', smokeSunShadow(null) === null);
+    t.ok('smoke shadow: at noon it falls north, away from a southern sun', Math.abs(noon[0]) < 1e-9 && noon[1] < -0.99);
+    t.ok('smoke shadow: in the evening it falls east, away from a western sun', evening[0] > 0.9);
+    t.ok('smoke shadow: clear noon keeps the author’s own darkness exactly', Math.abs(noon[3] - 1) < 1e-9);
+    t.ok('smoke shadow: golden hour is darker than noon, as every shadow is', evening[3] > noon[3]);
+    t.ok('smoke shadow: none at night', night[3] === 0);
+    t.ok('smoke shadow: a low sun fills the box’s shadow room, a high one leaves part of it', evening[2] === 1 && noon[2] < 1 && noon[2] >= 0.35);
+    t.ok('smoke shadow: the darkness is the shared one, relative to clear noon', Math.abs(evening[3] - createShadowHandle({ sun: { elevationDeg: 4, azimuthDeg: 265, golden01: 0.9 } }).depth01 / SHADOW_NOON_REFERENCE_DEPTH) < 1e-12);
+  }
   const engineInstances = [];
   const makeFakeEngine = (kind, archetype, renderOrder, extra = {}) => {
     const e = {

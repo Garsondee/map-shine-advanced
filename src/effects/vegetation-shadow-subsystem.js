@@ -69,7 +69,7 @@
  * @module effects/vegetation-shadow-subsystem
  */
 
-import { BASE_SOFTNESS_PX, maxThrowForHeightPx } from './shadow-access.js';
+import { BASE_SOFTNESS_PX, DEFAULT_SHADOW_LOOK, shadowMaxThrowPerPx } from './shadow-access.js';
 import { shadowPenumbraPx } from './lighting/light-visibility.js';
 import { edgeRamp01 } from './lighting/sun-occlusion.js';
 
@@ -131,10 +131,16 @@ export const VEG_SHADOW_SMEAR_TAPS = 6;
  * How much the far TIP of a swept shadow fades, at its most raking. A shadow's
  * tip dissolves into penumbra long before its foot does; without this a dawn
  * streak ends in a square edge at full strength, which reads as a rectangle of
- * paint. Scaled by `1 - sin(elevation)` at sync time, so noon (a compact
- * shadow with no streak to taper) applies none of it.
+ * paint.
+ *
+ * ⚠️ 1, AT EVERY HOUR, SINCE 2026-11-01 (the shadow consistency pass): the BUILDING
+ * shadow's own falloff — `(1 − t)^1`, strongest against its caster and gone at its
+ * throw (`sun-shadow-subsystem.js#SUN_SHADOW_FALLOFF_EXP`, the author's live-tuned 1).
+ * Was 0.55 × (1 − sin elevation): a tree's shadow held nearly full strength to its tip
+ * while a wall's beside it faded out, so on the shadow bench the tree's half-darkness
+ * point sat at ~0.8 of its throw and the wall's at ~0.5.
  */
-const VEG_SHADOW_SMEAR_TAPER_MAX = 0.55;
+const VEG_SHADOW_SMEAR_TAPER_MAX = 1;
 
 /** Blur allowance in the shadow quad's pad, as a multiple of the base
  * feather — see {@link vegetationShadowPadPx} for why this is NOT the
@@ -148,6 +154,28 @@ const VEG_SHADOW_MAX_PAD_PX = 320;
 /** Ceiling on the smear's mip level. Past ~5 the sample is a featureless blob
  * anyway, and reading beyond a texture's real chain is undefined. */
 const VEG_SHADOW_MAX_SMEAR_LOD = 5;
+
+/**
+ * THE SIDE EDGES (2026-11-01, author: "These two side edges of the vegetation shadows need
+ * to start more blurred and become even more blurred with distance"). A station at `t`
+ * along the streak is read at a blur of `START × penumbra + GROW × t × throw` world px —
+ * the building bake's own rule, blur growing with distance from the caster
+ * (`layer-smear-render.js`: `PENUMBRA_PER_PX × TIP_BLUR_MUL` ≈ 0.105 per px), a little
+ * stronger here as asked. At noon a tree's edge is ~8 px soft; at the golden peak its
+ * edge starts ~17 px soft beside the canopy and is ~65 px soft at the tip.
+ */
+export const VEG_SHADOW_SIDE_BLUR_START = 0.35;
+export const VEG_SHADOW_SIDE_BLUR_GROW = 0.12;
+
+/**
+ * THE CANOPY'S LIFT (2026-11-01, author: "the shadow under the tree never moves, so we've
+ * got two shadows but they aren't in sync"). The share of the throw a kind's shadow starts
+ * at: a tree's canopy is held up on its trunk (the crown spans roughly the top 60% of its
+ * height), so the shadow lands from 0.4 of the throw onward and moves with the sun; a bush
+ * is a mass on the ground, so it touches its own foot. Until this the sweep always began
+ * at 0 with a SHARP read — a dark copy of the canopy that sat under the tree all day.
+ */
+export const VEG_SHADOW_SMEAR_START = Object.freeze({ tree: 0.4, bush: 0 });
 
 /**
  * GOLDEN HOUR EXAGGERATION (2026-10-27, author: "Tree and vegetation shadows at
@@ -164,9 +192,10 @@ const VEG_SHADOW_MAX_SMEAR_LOD = 5;
  * turned out to be the candle memory ladder, `src/GPU-SAFETY.md`), and the
  * author asked that this one keep the shader as it was.
  */
-const VEG_SHADOW_GOLDEN_STRENGTH_GAIN = 0.45;
-const VEG_SHADOW_GOLDEN_STRENGTH_CEIL = 0.97;
-const VEG_SHADOW_GOLDEN_LENGTH_GAIN = 1;
+// ⚠️ 2026-11-01 (the shadow consistency pass): these three now live ONCE, in
+// `shadow-access.js#GOLDEN_SHADOW_*`, and arrive already applied through
+// `forCaster` — its darkness (`shadowDepth01`) and its length (`shadowThrowPerPx`)
+// are the building bake's own. Applying them here as well doubled the golden hour.
 
 /**
  * The longest a vegetation shadow of this kind ever gets: the shared
@@ -176,7 +205,9 @@ const VEG_SHADOW_GOLDEN_LENGTH_GAIN = 1;
  * @returns {number} px
  */
 export function vegetationShadowMaxThrowPx(kind) {
-  return maxThrowForHeightPx(kind?.shadowHeightPx ?? 0) * (1 + VEG_SHADOW_GOLDEN_LENGTH_GAIN);
+  // The shared golden-hour cap at the Sun Shadows card's DEFAULT dawn/dusk length (8×
+  // height). Build-time, so a raised slider is clamped by `vegetationShadowReachPx`.
+  return (kind?.shadowHeightPx ?? 0) * shadowMaxThrowPerPx(DEFAULT_SHADOW_LOOK);
 }
 
 /** The penumbra allowance on every side of the quad — see vegetationShadowPadPx. */
@@ -464,21 +495,15 @@ export function createVegetationShadowSubsystem({
     const cx = placement?.x ?? 0;
     const cy = placement?.y ?? 0;
     const ramp = edgeRamp01({ x: cx, y: cy, rect: dimensions.sceneRect, bandPx: params?.edgeFadeWidthPx ?? 0 });
-    // GOLDEN HOUR — longer by up to ×2 and darker, by the same bell the
-    // building shadows use. Length is clamped to what this kind's quad holds.
-    const golden01 = Math.max(0, Math.min(1, shadowHandle.atmosphere?.golden01 ?? 0));
-    const throwPx = cast.offsetPx * (1 + VEG_SHADOW_GOLDEN_LENGTH_GAIN * golden01);
+    // GOLDEN HOUR is already in `cast` (the shared length and darkness — see the
+    // note where this file's own golden constants used to be). Length is clamped to
+    // what this kind's quad holds.
+    const throwPx = cast.offsetPx;
     const reachPx = vegetationShadowReachPx(kind);
     const lengthMul = cast.offsetPx > 0 ? Math.min(throwPx, reachPx) / cast.offsetPx : 1;
     const offX = cast.offsetX * lengthMul * ramp;
     const offY = cast.offsetY * lengthMul * ramp;
-    const strength01 =
-      cast.strength01 > 0
-        ? Math.min(
-            Math.max(cast.strength01, VEG_SHADOW_GOLDEN_STRENGTH_CEIL),
-            cast.strength01 * (1 + VEG_SHADOW_GOLDEN_STRENGTH_GAIN * golden01)
-          )
-        : 0;
+    const strength01 = cast.strength01;
 
     // THE SWEEP VECTOR, in this tile's UV space: the full throw. The fragment
     // sweeps art-UV from 0 to this, so t=0 is the plant's own footprint (the
@@ -493,12 +518,8 @@ export function createVegetationShadowSubsystem({
       uniforms.uShadowShiftUv.value.set(shift.uvX, shift.uvY);
       uniforms.uShadowShiftWorld.value.set(shift.worldX, shift.worldY);
     }
-    // Smear taper rises as the sun lowers — a noon shadow is a compact blob
-    // with nothing to taper, a dusk shadow is a long streak that must fade
-    // out at its tip. `dayFactor01` is NOT the right driver here (it tracks
-    // day/night, not sun height); elevation is.
-    const elev = Math.max(0, Math.min(90, shadowHandle.atmosphere.elevationDeg));
-    uniforms.uShadowSmearTaper.value = VEG_SHADOW_SMEAR_TAPER_MAX * (1 - Math.sin((elev * Math.PI) / 180));
+    // The building shadow's own linear falloff, at every hour (see VEG_SHADOW_SMEAR_TAPER_MAX).
+    uniforms.uShadowSmearTaper.value = VEG_SHADOW_SMEAR_TAPER_MAX;
 
     uniforms.uShadowPenumbraUv.value.set(cast.penumbraPx / w, cast.penumbraPx / h);
     uniforms.uShadowStrength.value = strength01;
@@ -523,6 +544,22 @@ export function createVegetationShadowSubsystem({
     const taps = uniforms.smearTaps ?? VEG_SHADOW_SMEAR_TAPS;
     const gapTexels = ((cast.offsetPx * lengthMul) / taps) * artTexelsPerWorldPx;
     uniforms.uShadowSmearLod.value = Math.max(0, Math.min(VEG_SHADOW_MAX_SMEAR_LOD, Math.log2(Math.max(1, gapTexels))));
+    if (uniforms.uShadowSmearStart) uniforms.uShadowSmearStart.value = VEG_SHADOW_SMEAR_START[kind?.id] ?? 0;
+    // The side edges (see VEG_SHADOW_SIDE_BLUR_START): blur at the plant, and added by the tip.
+    if (uniforms.uShadowSideBlur) {
+      const sweepPx = Math.hypot(offX, offY);
+      uniforms.uShadowSideBlur.value.set(
+        VEG_SHADOW_SIDE_BLUR_START * cast.penumbraPx * artTexelsPerWorldPx,
+        VEG_SHADOW_SIDE_BLUR_GROW * sweepPx * artTexelsPerWorldPx
+      );
+    }
+    // The penumbra taps' own mip (2026-11-01): a texel half the penumbra wide, so the
+    // cross's four offset taps blur into one edge (see `uShadowPenumbraLod`'s doc).
+    // Optional only so a uniform bag built before it existed still syncs.
+    if (uniforms.uShadowPenumbraLod) {
+      const penTexels = (cast.penumbraPx * artTexelsPerWorldPx) / 2;
+      uniforms.uShadowPenumbraLod.value = Math.max(0, Math.min(VEG_SHADOW_MAX_SMEAR_LOD, Math.log2(Math.max(1, penTexels))));
+    }
 
     return strength01 > 0;
   }

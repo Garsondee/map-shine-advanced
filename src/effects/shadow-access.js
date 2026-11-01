@@ -90,7 +90,8 @@
  * @module effects/shadow-access
  */
 
-import { projectShadowOffset, shadowPenumbraPx, shadowOffsetDirection, clamp01 } from './lighting/light-visibility.js';
+import { shadowPenumbraPx, shadowOffsetDirection, clamp01 } from './lighting/light-visibility.js';
+import { layerThrowPx } from './lighting/layer-smear.js';
 
 /**
  * How much overcast softens a shadow's edge. At full cloud the penumbra is
@@ -110,12 +111,137 @@ export const CLOUD_SOFTEN = 3.0;
 export const CLOUD_SURVIVING_STRENGTH = 0.15;
 
 /**
- * The faint floor a shadow fades to at full night. Moonlight/skyglow still
- * casts SOMETHING under an open sky, and snapping shadows off at the horizon
- * would read as a bug (the same reasoning `world/sun.js`'s own eased
- * `dayFactor01` uses instead of a hard `aboveHorizon` branch).
+ * The floor a SUN shadow fades to at full night: none.
+ *
+ * ⚠️ WAS 0.12 UNTIL 2026-11-01 (the shadow consistency pass, author: "the goal is
+ * consistency of visual appearance between all shadow producers"). The residual
+ * was meant as moonlight/skyglow, but it was a SUN shadow — thrown at full
+ * dawn/dusk length along the azimuth of a sun already below the horizon — while
+ * the cloud shadow (which keys off the sky's own key light) went to exactly 0, so
+ * buildings and trees still cast a faint sunset-direction shadow all night and the
+ * clouds did not. Measured on the shadow bench: 11–16% at 18:06, after sunset.
+ * The fade still never snaps: `shadowAtmosphere`'s disc ramp eases across 3° of
+ * elevation. Moonlight is added AFTER every sun shadow (`environmental-light.js`'s
+ * `uMoonAdd`), so a moon shadow, if one is ever wanted, is its own light's term.
  */
-export const NIGHT_SURVIVING_STRENGTH = 0.12;
+export const NIGHT_SURVIVING_STRENGTH = 0;
+
+/**
+ * ============================================================================
+ * THE SHARED SHADOW LOOK (2026-11-01, the shadow consistency pass)
+ * ============================================================================
+ *
+ * Every producer — buildings, overhead tiles and storeys above (the sun bake),
+ * clouds, trees, bushes, ropes, flies, falling leaves, smoke — takes its
+ * DARKNESS and its LENGTH from here, so one shadow never disagrees with the next
+ * about how strong the sun is or how far it throws.
+ *
+ * THE REFERENCE IS THE BUILDING SHADOW. Every one of its look numbers is the
+ * author's own live-tuned value: core 0.665 ("make the shadow 30% less strong",
+ * 2026-10-16), strength 0.85 (2026-08-02, River Town Bridge), length ×0.5 ("make
+ * the shadows a lot shorter, 1/2 of what it is"), the dawn/dusk cap 4 ("the number
+ * one most important" control, 2026-07-24), and the golden-hour gains ("very strong
+ * and very long at the golden hour", 2026-10-27). Before this pass the other
+ * producers each had their own: trees cast at strength 1.0 (measured 0.97 —
+ * black — at noon against the building's 0.34), with a softer throw cap (2.5×
+ * height, soft knee) and their OWN copy of the golden gains; ropes 0.6, flies
+ * 0.15, leaves 0.2 of the ambient level, smoke a fixed down-right offset.
+ *
+ * So the building's Sun Shadows card IS the shadow look: its sliders arrive here
+ * as `look` (`createShadowHandle`'s spec), and a producer contributes only its own
+ * HEIGHT (how far it throws) and OPACITY (how much of the sun it blocks — a tree
+ * canopy and a wall both 1, a thin rope or a fly less).
+ */
+export const SHADOW_CORE_STRENGTH = 0.665;
+/** Golden hour: up to ×1.6 darker at the bell's peak, capped at the ceiling below.
+ * (Moved here from the building bake and the vegetation subsystem, which each carried
+ * the same three.) 0.45 → 0.6 on 2026-11-01: the bake's layers now UNION instead of
+ * each applying the darkness again (`layer-smear.js#layerSmearVisibility`), which on its
+ * own would have lightened golden-hour buildings from the 0.87–0.90 the author has been
+ * looking at to ~0.72; at 0.6 every producer reaches ~0.82 at the golden peak — the
+ * author's "very strong and very long at the golden hour", for trees as well as walls. */
+export const GOLDEN_SHADOW_STRENGTH_GAIN = 0.6;
+export const GOLDEN_SHADOW_STRENGTH_CEIL = 0.97;
+/** Golden hour: up to ×2 longer at the bell's peak — on the length scale AND the cap. */
+export const GOLDEN_SHADOW_LENGTH_GAIN = 1;
+
+/** The Sun Shadows card's own defaults (`effects/sun-shadows.js`), for a handle built without one. */
+export const DEFAULT_SHADOW_LOOK = Object.freeze({ strength01: 0.85, lengthScale: 0.5, dawnDuskLength: 4, softnessBias: 0.25 });
+
+/**
+ * The look with every value made finite (a missing or junk slider falls back to its default).
+ * @param {object} [look]
+ * @returns {Readonly<{strength01:number, lengthScale:number, dawnDuskLength:number, softnessBias:number}>}
+ */
+export function resolveShadowLook(look) {
+  const pick = (k, lo, hi) => {
+    const v = Number(look?.[k]);
+    return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : DEFAULT_SHADOW_LOOK[k];
+  };
+  return Object.freeze({
+    strength01: pick('strength01', 0, 1),
+    lengthScale: pick('lengthScale', 0.05, 4),
+    dawnDuskLength: pick('dawnDuskLength', 0.5, 12),
+    softnessBias: pick('softnessBias', 0.05, 4),
+  });
+}
+
+/** An opaque caster's core strength before the slider and the sky: 0.665, darker at golden hour. */
+export function shadowCoreStrength(golden01) {
+  return Math.min(GOLDEN_SHADOW_STRENGTH_CEIL, SHADOW_CORE_STRENGTH * (1 + GOLDEN_SHADOW_STRENGTH_GAIN * clamp01(golden01 ?? 0)));
+}
+
+/**
+ * THE DARKNESS: how much light an OPAQUE caster's shadow core removes, 0..1.
+ * Core × the slider × the sky (`strengthMul`: disc above the horizon, cloud).
+ * Every producer's own darkness is this × its opacity.
+ * @param {object} atmosphere - {@link shadowAtmosphere}'s result.
+ * @param {object} [look]
+ */
+export function shadowDepth01(atmosphere, look) {
+  const l = resolveShadowLook(look);
+  return clamp01(shadowCoreStrength(atmosphere?.golden01) * l.strength01 * (atmosphere?.strengthMul ?? 1));
+}
+
+/**
+ * THE LENGTH: world px of throw per px of caster height — the building bake's own
+ * `layerThrowPx` (`h × min(L / tan e, cap)`), with the golden-hour gain on both L and
+ * the cap. Multiply by a caster's height for its throw. Below the horizon this is the
+ * cap (the elevation clamps at 0) — harmless, because the darkness is 0 there.
+ * @param {object} atmosphere
+ * @param {object} [look]
+ */
+export function shadowThrowPerPx(atmosphere, look) {
+  const l = resolveShadowLook(look);
+  const lengthGain = 1 + GOLDEN_SHADOW_LENGTH_GAIN * clamp01(atmosphere?.golden01 ?? 0);
+  return layerThrowPx({
+    heightPx: 1,
+    elevationDeg: atmosphere?.elevationDeg ?? 90,
+    lengthScale: l.lengthScale * lengthGain,
+    maxLengthMul: l.dawnDuskLength * lengthGain,
+  });
+}
+
+/** The darkness an opaque caster has at clear noon under the card's DEFAULT look (0.565). */
+export const SHADOW_NOON_REFERENCE_DEPTH = SHADOW_CORE_STRENGTH * DEFAULT_SHADOW_LOOK.strength01;
+
+/**
+ * The opacity that reproduces a darkness the author tuned AT NOON (a fly's 0.15, a leaf's
+ * 0.2, smoke's 0.26) — so that look is kept exactly at clear noon, and from there follows
+ * the shared sky like every other producer: darker and longer at golden hour, none at night.
+ * @param {number} noonStrength01
+ * @returns {number} 0..1
+ */
+export function opacityForNoonStrength(noonStrength01) {
+  const s = Number(noonStrength01);
+  return Number.isFinite(s) && s > 0 ? Math.min(1, s / SHADOW_NOON_REFERENCE_DEPTH) : 0;
+}
+
+/** The longest throw per px of height this look can ever produce (the golden-hour cap) —
+ * for consumers that size GEOMETRY around a shadow at build time. */
+export function shadowMaxThrowPerPx(look) {
+  return resolveShadowLook(look).dawnDuskLength * (1 + GOLDEN_SHADOW_LENGTH_GAIN);
+}
 
 /**
  * How much softer a night shadow is than the same shadow at noon. Night light
@@ -211,7 +337,15 @@ export function shadowAtmosphere(sun, weather) {
     ? ((t) => t * t * (3 - 2 * t))(clamp01((elevationDeg + 0.5) / 3))
     : clamp01(sun?.dayFactor01 ?? 1);
   const golden01 = clamp01(sun?.golden01 ?? 0);
-  const cloudCover01 = clamp01(weather?.cloudCover01 ?? 0);
+  // THE COVER SHADOWS SEE (2026-11-01): `shadowCloudCover01` when the owner supplies
+  // it — the cover capped at the cloud field's own visual cap, the SAME number the
+  // cloud shadow's depth already reads (vt-pan-viewer.js, `cloudSkyHandle`: past
+  // the cap the silhouette stops changing, and a depth that kept draining would hide
+  // the very clouds the author raised cover to see). Before this pass buildings and
+  // trees faded with the RAW cover (0.15× at full overcast) while the cloud patches
+  // over them stayed deep. Under partial cover the cloud FIELD does the overcast
+  // work spatially (patches darken, gaps keep full sun, producers min-combine).
+  const cloudCover01 = clamp01(weather?.shadowCloudCover01 ?? weather?.cloudCover01 ?? 0);
 
   // CLOUD — softens and fades, independently. A diffuse sky both blurs the edge
   // and lifts the shadow's floor toward the ambient level.
@@ -255,8 +389,12 @@ export function shadowAtmosphere(sun, weather) {
  * @param {number} [spec.maxOffsetPx] - cap on any caster's throw (world px).
  * @returns {Readonly<object>}
  */
-export function createShadowHandle({ version = 0, sun = null, weather = null, maxOffsetPx = 4096 } = {}) {
+export function createShadowHandle({ version = 0, sun = null, weather = null, maxOffsetPx = 4096, look = null } = {}) {
   const atmosphere = shadowAtmosphere(sun, weather);
+  // THE SHARED LOOK (see SHADOW_CORE_STRENGTH): resolved once per sky, read by every caster.
+  const shadowLook = resolveShadowLook(look);
+  const depth01 = shadowDepth01(atmosphere, shadowLook);
+  const throwPerPx = shadowThrowPerPx(atmosphere, shadowLook);
 
   /**
    * Everything one caster needs, in world px. Plain JS (not TSL nodes) — a
@@ -269,8 +407,8 @@ export function createShadowHandle({ version = 0, sun = null, weather = null, ma
    *   The ONE physical property that drives both throw and softness.
    * @param {number} [args.offsetScale=1] - cosmetic throw multiplier; does NOT
    *   affect softness (see this module's own header).
-   * @param {number} [args.strength01=1] - the caster's own darkness, before
-   *   atmospheric fading.
+   * @param {number} [args.strength01=1] - the caster's own OPACITY: how much of the sun
+   *   it blocks (a canopy or a wall 1). Its darkness is this × the shared `depth01`.
    * @param {number} [args.baseSoftnessPx]
    * @returns {{offsetX:number, offsetY:number, offsetPx:number, penumbraPx:number,
    *   strength01:number, directionX:number, directionY:number}}
@@ -281,18 +419,15 @@ export function createShadowHandle({ version = 0, sun = null, weather = null, ma
     // projection maths. Sun angle, and therefore dawn/dusk elongation, is fully
     // handled in here; see this module's own header for why no elongation term
     // is (or should be) added on top.
-    const offset = projectShadowOffset({
-      azimuthDeg: atmosphere.azimuthDeg,
-      elevationDeg: atmosphere.elevationDeg,
-      heightPx: h,
-      // HEIGHT-RELATIVE and SOFT (2026-07-24) — see MAX_THROW_HEIGHT_RATIO.
-      // The old behaviour here was a hard clamp at the handle's absolute
-      // `maxOffsetPx` (4096 px by default), which is to say: no bound at all in
-      // practice, so a tree at dawn threw its shadow most of a map away.
-      maxOffsetPx: maxThrowForHeightPx(h, maxOffsetPx),
-      offsetScale,
-      softKnee: true,
-    });
+    // THE SHARED LENGTH (2026-11-01): the building bake's own throw per px of
+    // height, so a tree and a wall of the same height throw the same distance at
+    // every hour. Was `projectShadowOffset` with its own soft knee at 2.5× height
+    // (and a separate golden ×2 in the vegetation subsystem): measured on the bench,
+    // trees threw 2.2× further than buildings, relative to height, at noon.
+    const scale = Number.isFinite(offsetScale) && offsetScale > 0 ? offsetScale : 1;
+    const length = Math.min(Number.isFinite(maxOffsetPx) && maxOffsetPx > 0 ? maxOffsetPx : 4096, h * throwPerPx * scale);
+    const dir0 = shadowOffsetDirection(atmosphere.azimuthDeg);
+    const offset = { x: dir0.x * length, y: dir0.y * length, length };
     const rawPenumbra = shadowPenumbraPx({
       heightPx: h,
       elevationDeg: atmosphere.elevationDeg,
@@ -306,11 +441,12 @@ export function createShadowHandle({ version = 0, sun = null, weather = null, ma
       // The atmospheric layer, applied last — the ONLY place cloud/night touch
       // a caster, so every caster receives the identical sky treatment.
       penumbraPx: rawPenumbra * atmosphere.softnessMul,
-      strength01: clamp01(strength01) * atmosphere.strengthMul,
+      // THE SHARED DARKNESS × this caster's opacity (2026-11-01; was × strengthMul alone).
+      strength01: clamp01(strength01) * depth01,
       directionX: dir.x,
       directionY: dir.y,
     };
   }
 
-  return Object.freeze({ version, atmosphere, forCaster });
+  return Object.freeze({ version, atmosphere, look: shadowLook, depth01, throwPerPx, forCaster });
 }

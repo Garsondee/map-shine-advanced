@@ -288,6 +288,11 @@ export function createBillowRenderer({
     tint: uniform(vec3(1, 1, 1)),
     ambient: uniform(vec3(1, 1, 1)),
     expectedDepth: uniform(float(0)),
+    // THE SUN'S SHADOW (2026-11-01, the shadow consistency pass): xy = the shadow's unit
+    // direction on the map (away from the sun), z = its length as a share of the box's
+    // shadow room, w = the shared darkness relative to clear noon (0 at night). The
+    // default is the old fixed "light up-left" look, so the lab draws as it did.
+    sunShadow: uniform(vec4(0.482, 0.876, 1, 1)),
   };
 
   // ── 1. THE SPLATS ───────────────────────────────────────────────────────────────────────────────
@@ -666,11 +671,15 @@ export function createBillowRenderer({
       .mul(clamp(U.smokeLineA.mul(float(1).add(bright.mul(1.2))), float(0), float(0.9)))
       .mul(smoothstep(float(0.0), float(0.6), U.smokeLinePx));
     sRgb = mix(sRgb, smokeInk, lineA);
-    // the shadow on the ground: the same field, sampled up-left, falls down-right (the light is up-left)
-    const shOff = vec2(vLook.y.mul(0.55), dirY(vLook.y)).div(U.rectSize);
+    // the shadow on the ground: the same field, offset AWAY FROM THE SUN (2026-11-01 — it was
+    // fixed down-right whatever the hour), as long as the shared length allows inside the box's
+    // own shadow room (`vLook.y`), and as dark as every other shadow relative to clear noon
+    const shLen = vLook.y.mul(U.sunShadow.z);
+    const shOff = vec2(shLen.mul(U.sunShadow.x), dirY(shLen.mul(U.sunShadow.y))).div(U.rectSize);
     const shadowA = smoothstep(float(0.1), float(0.55), smokeNode.sample(p.sub(shOff)).x)
       .mul(U.smokeShadow)
-      .mul(float(1).add(bright.mul(0.9)));
+      .mul(float(1).add(bright.mul(0.9)))
+      .mul(U.sunShadow.w);
     let smokeLinear;
     if (illum) {
       const coloration = lighting.colorationTexNode ? lighting.colorationTexNode.sample(screenUV).rgb : vec3(0, 0, 0);

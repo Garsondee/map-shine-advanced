@@ -163,6 +163,7 @@ import { buildApertureGoboTerm } from './aperture-gobo-render.js';
 import { buildWindowReachTerm } from './window-reach.js';
 import { repairLightPolygonFolds } from './light-polygon-repair.js';
 import { buildCanopyLightTerm } from './canopy-light.js';
+import { buildSunAndCloudVisNode } from './light-visibility.js';
 
 /** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
  * rather than a wind-inert light — see candle-flame-render.js's own identical
@@ -1617,6 +1618,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     buildCloudGroundVis,
     cloudOffsetNode,
     cloudFillShareNode,
+    shadowDepthNode,
     cloudStreakSpread,
     cloudStrengthNode,
     cloudBlurNode,
@@ -1932,6 +1934,8 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   // slots supplied the lookup is absent from the compiled shader entirely and
   // this material is byte-identical to what it was before cast shadows existed.
   let backgroundFloor = uBackgroundColor;
+  // Kept for the shared sun+cloud rule below (`light-visibility.js#buildSunAndCloudVisNode`).
+  let sunVisHere = null;
   if (sunShadowSlotNodes && sunShadowSlotNodes.length > 0) {
     // Clamped, never wrapped — a light overhanging a field's edge reads the
     // nearest edge value rather than a caster from the far side of the map.
@@ -1957,6 +1961,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
         : // No floor buffer (or no injected blend fn) to gate by — fall back to
           // slot 0 alone, the pre-multi-floor behaviour.
           sampleSlot(sunShadowSlotNodes[0]);
+    sunVisHere = sunVis;
     backgroundFloor = uBackgroundColor.mul(sunVis);
   }
 
@@ -1981,7 +1986,13 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
       blurFieldUnits: cloudBlurNode,
       varTag: 'specular',
     });
-    backgroundFloor = backgroundFloor.mul(cloudVis);
+    // THE SAME RULE AS THE AMBIENT FILL (2026-11-01): the shared darkness, and min with the
+    // building field — so this light's dim edge fades into exactly the floor the fill drew.
+    backgroundFloor = shadowDepthNode
+      ? uBackgroundColor.mul(
+          buildSunAndCloudVisNode(THREE.TSL, { sunVis: sunVisHere, cloudVisRaw: cloudVis, fillShare: cloudFillShareNode ?? float(1), depth: shadowDepthNode })
+        )
+      : backgroundFloor.mul(cloudVis);
   }
 
   // THE GOBO IS PART OF THIS LIGHT'S OWN FALLOFF (round 10, 2026-08-04) —
@@ -2328,6 +2339,7 @@ export function buildPointLightIlluminationMaterial({
   buildCloudGroundVis,
   cloudOffsetNode,
   cloudFillShareNode,
+  shadowDepthNode = null,
   cloudStreakSpread,
   cloudStrengthNode,
   cloudBlurNode,
@@ -2424,6 +2436,7 @@ export function buildPointLightIlluminationMaterial({
         buildCloudGroundVis,
         cloudOffsetNode,
         cloudFillShareNode,
+        shadowDepthNode,
         cloudStreakSpread,
         cloudStrengthNode,
         cloudBlurNode,

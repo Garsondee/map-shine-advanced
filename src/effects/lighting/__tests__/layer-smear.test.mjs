@@ -756,9 +756,13 @@ export function run(t) {
       both > 0 && both < 0.2
     );
 
-    // The bands are ONE occluder; walls and overhead are DIFFERENT occluders in
-    // series and must still compound. Proving one without the other would let a
-    // change that turned the whole model into a `max` pass go unnoticed.
+    // 2026-11-01 (the shadow consistency pass): the layers UNION and the darkness is
+    // applied ONCE — a ray an opaque storey already blocks cannot lose the sun again
+    // to a wall. So a wall beside an OPAQUE stack is exactly as dark as the stack, and
+    // a wall beside a PARTIAL one (a soft band edge, a semi-covered texel) still darkens
+    // it: partial occluders compound, nothing double-applies the sun's share. (Was "a
+    // wall AND a stack above still compound": each layer's darkness multiplied, which
+    // measured 0.87–0.90 for a bench building at golden hour against 0.69 for a tree.)
     //
     // ⚠️ THE WALL MUST BE LOCAL AND THE RECEIVER MUST STAND OUTSIDE IT. A first
     // version of this case put the wall EVERYWHERE (like the bands) and read
@@ -794,9 +798,30 @@ export function run(t) {
       steps: 32,
     });
     t.ok(
-      `a wall AND a stack above still compound — different occluders in series ` +
-        `(${bandAndWall.toFixed(4)} < ${bandOnlySeries.toFixed(4)})`,
-      bandAndWall < bandOnlySeries
+      `a wall beside an OPAQUE stack is exactly as dark as the stack — the sun is blocked once ` +
+        `(${bandAndWall.toFixed(4)} vs ${bandOnlySeries.toFixed(4)})`,
+      near(bandAndWall, bandOnlySeries, 1e-9)
+    );
+    const halfBands = () => {
+      const a = new Array(SHADOW_LAYER_COUNT).fill(0);
+      for (const i of SHADOW_BAND_LAYER_INDICES) a[i] = 0.5;
+      return a;
+    };
+    const halfBandsWallHere = (x, y) => {
+      const a = halfBands();
+      if (Math.hypot(x, y) <= WALL_RADIUS) a[LAYER_WALLS] = 1;
+      return a;
+    };
+    const partialAndWall = layerSmearVisibility({ ...at, sampleLayers: halfBandsWallHere, resolved: seriesResolved, strengths, steps: 32 });
+    const partialOnly = layerSmearVisibility({ ...at, sampleLayers: halfBands, resolved: seriesResolved, strengths, steps: 32 });
+    t.ok(
+      `a wall beside a PARTIAL stack still darkens it — partial occluders compound ` +
+        `(${partialAndWall.toFixed(4)} < ${partialOnly.toFixed(4)})`,
+      partialAndWall < partialOnly
+    );
+    t.ok(
+      `and never past one application of the darkness (${partialAndWall.toFixed(4)} >= ${(1 - 0.95).toFixed(4)})`,
+      partialAndWall >= 1 - 0.95 - 1e-9
     );
 
     // A layer with strength 0 must contribute nothing, INCLUDING through the

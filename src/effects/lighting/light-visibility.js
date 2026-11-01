@@ -105,6 +105,44 @@ function degToRad(deg) {
 }
 
 /**
+ * THE SUN'S SHADOW ON THE GROUND, ONE RULE FOR EVERY PASS THAT LIGHTS IT (2026-11-01,
+ * the shadow consistency pass). TSL. The ambient fill (`environmental-light.js`) and every
+ * point light's own dim-edge floor (`point-light-illumination.js`, `point-light-merged.js`)
+ * must agree to the texel, or a lamp under a cloud shows a ring where its edge meets the fill.
+ *
+ * - The CLOUD at the shared darkness: `cloudVisRaw` (`1 − strength × (1 − fillShare) ×
+ *   thickness`, clamped at 0) gives back the cloud's OPACITY exactly — `min(1, strength ×
+ *   thickness)`, and 1 wherever it clamped, which only happens past that — and `depth`
+ *   (`effects/shadow-access.js#shadowDepth01`, the building bake's own darkness) is
+ *   applied to it: a solid cloud's core removes the same light as a wall's.
+ * - OVERLAP by `min` ({@link combineVisibility}'s doctrine): the sun cannot be blocked
+ *   twice. A building's shadow under a cloud's was their product (0.435 × 0.215 ≈ 0.09).
+ *
+ * With no `depth` (a caller that predates the pass) the old product is kept, unchanged.
+ *
+ * @param {object} TSL
+ * @param {object} args
+ * @param {*} [args.sunVis] - the baked building/overhead/storey field, 0..1.
+ * @param {*} [args.cloudVisRaw] - `world/cloud-field.js#buildCloudGroundVisNode`'s result.
+ * @param {*} [args.fillShare] - the node that cloud shadow was built with.
+ * @param {*} [args.depth] - the shared darkness node.
+ * @param {*} [args.cloudGate] - where the cloud may shade (outdoors, open to the sky).
+ * @returns {*|null} the visibility to multiply the ambient by, or null for "no term".
+ */
+export function buildSunAndCloudVisNode(TSL, { sunVis = null, cloudVisRaw = null, fillShare = null, depth = null, cloudGate = null }) {
+  const { float, mix, min } = TSL;
+  const shared = !!(cloudVisRaw && fillShare && depth);
+  let cloud = cloudVisRaw;
+  if (shared) {
+    const opacity = float(1).sub(cloudVisRaw).div(float(1).sub(fillShare).max(float(1e-3))).clamp(0, 1);
+    cloud = float(1).sub(depth.mul(opacity));
+  }
+  if (cloud && cloudGate) cloud = mix(float(1), cloud, cloudGate);
+  if (sunVis && cloud) return shared ? min(sunVis, cloud) : sunVis.mul(cloud);
+  return sunVis ?? cloud ?? null;
+}
+
+/**
  * Min-combine a set of visibility producers into one sun-visibility value.
  *
  * Producers share ONE semantic (this pixel's visibility of the sun/sky), so

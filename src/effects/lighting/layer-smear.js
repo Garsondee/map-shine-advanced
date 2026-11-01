@@ -519,6 +519,9 @@ export function layerSmearVisibility({
   const n = Math.max(1, Math.floor(steps));
   const throws = resolved.throwPx;
   const occ = new Array(SHADOW_LAYER_COUNT).fill(0);
+  // The walls the receiver's OWN coverage cannot explain, per station (see the self block below).
+  const selfWallsHere = clamp01(sampleLayers(x, y)?.[LAYER_WALLS] ?? 0);
+  let wallsBeyondSelf = 0;
 
   for (let j = 0; j <= n; j++) {
     for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
@@ -563,8 +566,13 @@ export function layerSmearVisibility({
       // STATION, and stations reach into the caster.
       const sharp = clamp01(at?.[i] ?? 0);
       const coverage = r > 0 ? isotropicDepthTerm(sampleLayers, sx, sy, i, r) * sharp : sharp;
-      const term = coverage * smearFalloff01(d / L, falloffExp);
+      const fall = smearFalloff01(d / L, falloffExp);
+      const term = coverage * fall;
       if (term > occ[i]) occ[i] = term;
+      if (i === LAYER_WALLS) {
+        const beyond = Math.min(1, Math.max(0, coverage - selfWallsHere) / Math.max(1e-4, 1 - selfWallsHere)) * fall;
+        if (beyond > wallsBeyondSelf) wallsBeyondSelf = beyond;
+      }
     }
   }
 
@@ -604,18 +612,32 @@ export function layerSmearVisibility({
   // *is this texel outdoors at all* vs. *does this texel's own mass shadow
   // itself* — and a partially-covered boundary texel is exactly the point
   // where only one of the two was ever being asked.
-  const selfCoverageWalls = clamp01(sampleLayers(x, y)?.[LAYER_WALLS] ?? 0);
-  occ[LAYER_WALLS] *= 1 - selfCoverageWalls;
+  // Only the occlusion the receiver's own coverage cannot explain is discounted (2026-11-01) —
+  // measured PER STATION on raw coverage; the TSL twin's note has the measurements and cases.
+  occ[LAYER_WALLS] = Math.max(occ[LAYER_WALLS] * (1 - selfWallsHere), wallsBeyondSelf);
   const selfCoverage = clamp01(sampleLayers(x, y)?.[LAYER_OVERHEAD] ?? 0);
   occ[LAYER_OVERHEAD] *= 1 - selfCoverage;
 
-  // Transmittances multiply. `strength · gate` scales each factor rather than
-  // the product, so a strength of 0 returns exactly 1 no matter how many layers
-  // are stacked.
+  // ⚠️ THE LAYERS UNION, THEN THE DARKNESS IS APPLIED ONCE (2026-11-01, the shadow
+  // consistency pass). Until then each layer's FACTOR `1 − occ·strength·global`
+  // multiplied: "different occluders in series". But `strength` is not a layer's
+  // transmittance — it is how much of the light the SUN is (`shadow-access.js#
+  // SHADOW_CORE_STRENGTH`), and a ray the wall has already blocked cannot lose the sun
+  // a second time to the roof. Measured on the shadow bench, a building whose walls
+  // and storey band both cast went to 0.87–0.90 at golden hour against 0.69 for a
+  // tree beside it at the same darkness. So: the GEOMETRY unions (`1 − Π(1 − occ)`,
+  // each layer weighted by its strength relative to the strongest so the debug
+  // isolation views that zero a strength still drop that layer), and the darkness is
+  // applied once — an opaque wall and an opaque roof together are exactly as dark as
+  // either alone, and partial occluders still compound (a second layer never lightens).
   const global = clamp01(strength) * gate;
-  let transmittance = 1;
-  transmittance *= 1 - occ[LAYER_WALLS] * clamp01(strengths[LAYER_WALLS] ?? 1) * global;
-  transmittance *= 1 - occ[LAYER_OVERHEAD] * clamp01(strengths[LAYER_OVERHEAD] ?? 1) * global;
+  // Every layer, with a missing strength meaning 1 (the same default the per-layer reads use).
+  let sMax = 0;
+  for (let i = 0; i < occ.length; i++) sMax = Math.max(sMax, clamp01(strengths[i] ?? 1));
+  const weight = (i) => (sMax > 0 ? clamp01(strengths[i] ?? 1) / sMax : 0);
+  let open = 1;
+  open *= 1 - occ[LAYER_WALLS] * weight(LAYER_WALLS);
+  open *= 1 - occ[LAYER_OVERHEAD] * weight(LAYER_OVERHEAD);
 
   // ⚠️ THE BANDS COMBINE BY `max`, NOT BY `×` (2026-08-05, the shadow cascade).
   // Everything else in this model multiplies, and the header's argument for
@@ -643,9 +665,9 @@ export function layerSmearVisibility({
   // stacks without touching the picture on short ones.
   let bandOcc = 0;
   for (const i of SHADOW_BAND_LAYER_INDICES) {
-    const scaled = occ[i] * clamp01(strengths[i] ?? 1);
+    const scaled = occ[i] * weight(i);
     if (scaled > bandOcc) bandOcc = scaled;
   }
-  transmittance *= 1 - bandOcc * global;
-  return clamp01(transmittance);
+  open *= 1 - bandOcc;
+  return clamp01(1 - (1 - open) * sMax * global);
 }

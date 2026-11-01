@@ -474,6 +474,7 @@ import {
   buildVegetationSpringMaterials,
   VEG_SPRING_MAX_DT_SEC,
   createShadowHandle,
+  SHADOW_NOON_REFERENCE_DEPTH,
   createSunShadowSubsystem,
   // (maxThrowForHeightPx / shadowPenumbraPx / BASE_SOFTNESS_PX / edgeRamp01
   // left with the vegetation-shadow code in extraction step 2 — this file has
@@ -3591,6 +3592,9 @@ async function startVtPanViewerUnserialized({
      * derived from the sky, never authored, so it is automatically shallow
      * at dawn and absent at night. */
     const uCloudFillShare = THREE.TSL.uniform(THREE.TSL.float(0.3));
+    /** THE SHARED SHADOW DARKNESS (2026-11-01, `shadow-access.js#shadowDepth01`) — written
+     * with every new shadow handle; the cloud shadow on the ground reads it. */
+    const uShadowDepth01 = THREE.TSL.uniform(THREE.TSL.float(0));
     // ═══════════════════════════════════════════════════════════════════
     // AUTHORING CONTROLS — live-test round 2 (author, 2026-09-10): "Every
     // effect needs a very wide selection of controls to author the look of
@@ -4427,6 +4431,7 @@ async function startVtPanViewerUnserialized({
       buildCloudGroundVis: cachedCloudGroundVis,
       cloudOffsetNode: uCloudOffset,
       cloudFillShareNode: uCloudFillShare,
+      shadowDepthNode: uShadowDepth01,
       cloudStreakSpread: CLOUD_SHADOW_STREAK_SPREAD,
       // SAME strength/blur uniforms `buildWindowCloudFactorNode` reads —
       // see that function's own doc for why the two consumers share one pair
@@ -5282,6 +5287,9 @@ async function startVtPanViewerUnserialized({
       // (3.2, 2.1, 0.3)). The flame paints the inverse of that (`fire-billow-bloom.js`), so it needs the live params. A
       // getter, because the cascade re-resolves them and nothing here may cache one.
       getBloomState: () => getBloomRenderState(),
+      // THE SHARED SHADOW (2026-11-01): the smoke's ground shadow follows the sun. A getter —
+      // `shadowHandle` is declared further down and reassigned whenever the sky changes.
+      getShadowHandle: () => shadowHandle,
       // ⚠️ MISNAMED, AND KNOWINGLY LEFT THAT WAY FOR NOW (2026-09-04,
       // mythica-machina-press#498). `distancePixels` is pixels per DISTANCE
       // UNIT (per foot on a feet-authored scene), not per metre — verified
@@ -12000,15 +12008,24 @@ async function startVtPanViewerUnserialized({
       // THE SHADOW HANDLE — rebuilt only when the sky actually MOVED, not every
       // frame: it is an immutable value object, and churning a new one per
       // frame would defeat the version-compare its own consumers rely on.
-      const skyKey = `${env.sun.elevationDeg.toFixed(3)}|${env.sun.azimuthDeg.toFixed(3)}|${env.sun.dayFactor01.toFixed(4)}|${env.weather.cloudCover01.toFixed(4)}|${skyRealism01.toFixed(4)}|${skyGoldenHour01.toFixed(3)}|${skyMoonlight01.toFixed(3)}|${(env.sun.golden01 ?? 0).toFixed(3)}`;
+      // THE SHARED SHADOW LOOK (2026-11-01, the shadow consistency pass —
+      // `shadow-access.js#SHADOW_CORE_STRENGTH`): the Sun Shadows card's own sliders
+      // are the look EVERY shadow producer reads, so they ride the same rebuild key.
+      const shadowLookParams = getSunShadowRenderState().params ?? {};
+      const shadowLookKey = `${shadowLookParams.strength01}|${shadowLookParams.lengthScale}|${shadowLookParams.dawnDuskLength}|${shadowLookParams.softnessBias}|${cloudVisualCoverMax}`;
+      const skyKey = `${env.sun.elevationDeg.toFixed(3)}|${env.sun.azimuthDeg.toFixed(3)}|${env.sun.dayFactor01.toFixed(4)}|${env.weather.cloudCover01.toFixed(4)}|${skyRealism01.toFixed(4)}|${skyGoldenHour01.toFixed(3)}|${skyMoonlight01.toFixed(3)}|${(env.sun.golden01 ?? 0).toFixed(3)}|${shadowLookKey}`;
       if (skyKey !== lastSkyKey) {
         lastSkyKey = skyKey;
         shadowHandleVersion += 1;
         shadowHandle = createShadowHandle({
           version: shadowHandleVersion,
           sun: env.sun,
-          weather: env.weather,
+          // `shadowCloudCover01`: the cover capped at the cloud field's visual cap —
+          // the SAME number the cloud shadow's own depth reads (`cloudSkyHandle` below).
+          weather: { ...env.weather, shadowCloudCover01: Math.min(env.weather.cloudCover01, cloudVisualCoverMax) },
+          look: shadowLookParams,
         });
+        uShadowDepth01.value = shadowHandle.depth01;
         // THE SKY HANDLE rides the SAME rebuild guard as the shadow handle, and
         // deliberately so: they are two descriptions of one afternoon, and a
         // frame where the shadows had moved on but the light had not would be
@@ -17250,6 +17267,25 @@ async function startVtPanViewerUnserialized({
        * toward it) — sized so a station's texel footprint covers the gap to the
        * next one. See `alphaAt`'s own doc for the ladder this removes. */
       const uShadowSmearLod = uniform(float(0));
+      /** Mip level for the PENUMBRA taps (2026-11-01, the shadow consistency pass) — a texel
+       * as wide as half the penumbra, so the four offset taps of `crossAt` are each already
+       * blurred and merge into one soft edge instead of four hard copies of the canopy (the
+       * concentric "rings" measured on the shadow bench). Written by
+       * `vegetation-shadow-subsystem.js#syncUniforms`; 0 = the old sharp taps. */
+      const uShadowPenumbraLod = uniform(float(0));
+      /** THE SIDE EDGES (2026-11-01, author: "These two side edges of the vegetation shadows
+       * need to start more blurred and become even more blurred with distance") — x = the
+       * blur at the plant, y = the blur added by the tip, both in the art's own texels. A
+       * station at `t` reads the mip as wide as `x + y·t`: the building bake's own rule
+       * (station blur grows with distance, `layer-smear-render.js`). Written by
+       * `vegetation-shadow-subsystem.js#syncUniforms`; zero = the old sharp stations. */
+      const uShadowSideBlur = uniform(vec2(0, 0));
+      /** THE CANOPY'S LIFT (2026-11-01, author: "the shadow under the tree never moves, so
+       * we've got two shadows but they aren't in sync") — the share of the throw at which
+       * the sweep STARTS. A canopy is held up on a trunk, so its shadow is already thrown
+       * part of the way before any of it lands; a bush sits on the ground and starts at 0.
+       * Written by `vegetation-shadow-subsystem.js#syncUniforms` per kind. */
+      const uShadowSmearStart = uniform(float(0));
       /** THE SHIFTED QUAD (2026-10-27) — the quad moves by half the throw onto
        * the streak (`uShadowShiftWorld`, vertex) and the fragment adds the same
        * step back in UV (`uShadowShiftUv`), so the picture stays put while the
@@ -17542,13 +17578,20 @@ async function startVtPanViewerUnserialized({
           /** The feathered 5-tap cross — the penumbra, applied only at the two
            * ENDS of the sweep. The interior of a streak has no edge to feather,
            * so paying 5 fetches per station there would buy nothing. */
-          const crossAt = (at, lod) =>
-            alphaAt(at, lod)
-              .add(alphaAt(at.add(vec2(p.x.negate(), float(0))), lod))
-              .add(alphaAt(at.add(vec2(p.x, float(0))), lod))
-              .add(alphaAt(at.add(vec2(float(0), p.y.negate())), lod))
-              .add(alphaAt(at.add(vec2(float(0), p.y)), lod))
+          // `ringLod`/`spread` (2026-11-01): the four offset taps read a mip as wide as
+          // the penumbra, and the FOOT spreads them only `spread` of the way — contact
+          // hardening, the building shadow's own rule (sharp where it meets its caster,
+          // soft at the tip). A full-penumbra foot painted a halo round the canopy on
+          // its SUN side too, where no shadow can fall.
+          const crossAt = (at, lod, ringLod = lod, spread = 1) => {
+            const q = spread === 1 ? p : p.mul(float(spread));
+            return alphaAt(at, lod)
+              .add(alphaAt(at.add(vec2(q.x.negate(), float(0))), ringLod))
+              .add(alphaAt(at.add(vec2(q.x, float(0))), ringLod))
+              .add(alphaAt(at.add(vec2(float(0), q.y.negate())), ringLod))
+              .add(alphaAt(at.add(vec2(float(0), q.y)), ringLod))
               .div(float(5));
+          };
 
           // t = 0 — the ground contact, always solid AND sharp (lod 0): this is
           // what stops the shadow ever fully detaching from the plant, and the
@@ -17558,19 +17601,52 @@ async function startVtPanViewerUnserialized({
           // of node-graph fetches, which is what makes the performance-tier
           // gate on this real (Effects.md Law 4). See buildVegetationMaterial's
           // own opts doc for where `smearTaps` comes from.
-          let smeared = crossAt(base);
+          // The first station: where the sweep STARTS (the canopy's lift), read at the side
+          // blur's own start — no longer a sharp copy of the plant pinned under it.
+          // …and nearly as wide as the gap to the next station (`uShadowSmearLod` − 1), so its
+          // trailing edge is still dark where the next one takes over (2026-11-01, author:
+          // "There is a brighter penumbra edge between the long shadow and the round one").
+          const footLod = max(THREE.TSL.log2(max(uShadowSideBlur.x, float(1))), uShadowSmearLod.sub(float(1))).clamp(0, 6);
+          const startAt = base.sub(uShadowSmearUv.mul(uShadowSmearStart));
+          let smeared = crossAt(startAt, footLod, max(uShadowPenumbraLod.sub(float(2.5)), footLod), 0.15);
+          // ⚠️ THE STATIONS ARE JITTERED PER PIXEL (2026-11-01, author, after the same fix on
+          // the building bake: "Building shadows now look amazing. Can you do the same for
+          // other shadows that elongate?"). Each station's taper is `1 − t` AT that station
+          // and the darkest wins, so a long dawn/dusk streak could only take `smearTaps + 1`
+          // values — flat bands, one per station. Every station but the tip (which carries
+          // the penumbra cross) is shifted by this pixel's own fraction of a step
+          // (interleaved gradient noise on the world position — a fixed pattern, never
+          // time-varying), so neighbouring pixels land on different values and the
+          // staircase becomes a fine dither the station blur absorbs. No extra fetches.
+          const ditherWorld = THREE.TSL.positionWorld.xy;
+          const smearDither = THREE.TSL.fract(
+            float(52.9829189).mul(THREE.TSL.fract(ditherWorld.x.mul(0.06711056).add(ditherWorld.y.mul(0.00583715))))
+          );
+          const sideLodAt = (t) =>
+            THREE.TSL.log2(max(uShadowSideBlur.x.add(uShadowSideBlur.y.mul(t)), float(1))).clamp(0, 6);
           for (let s = 1; s <= smearTaps; s++) {
-            const t = s / smearTaps;
-            const at = base.sub(uShadowSmearUv.mul(float(t)));
+            const t = s === smearTaps ? float(1) : smearDither.add(s - 0.5).div(smearTaps).clamp(0, 1);
+            // `t` runs 0..1 over the part of the throw that lands; `tt` is where on the throw.
+            const tt = uShadowSmearStart.add(float(1).sub(uShadowSmearStart).mul(t));
+            const at = base.sub(uShadowSmearUv.mul(tt));
             // Blur grows along the sweep: the foot stays sharp, the tip
             // dissolves — the same contact-hardening the sun march does, and
             // what makes the stations merge instead of laddering.
-            const tapLod = uShadowSmearLod.mul(float(t));
-            const tapAlpha = s === smearTaps ? crossAt(at, tapLod) : alphaAt(at, tapLod);
+            // EVERY station covers the gap to its neighbour (the full `uShadowSmearLod`, not
+            // `× t`): with the darkest station winning, a gap narrower than the blur leaves a
+            // lighter seam between two copies — the bake's own STATION_BLUR_OVERLAP rule.
+            const tapLod = max(uShadowSmearLod, sideLodAt(t));
+            const tapAlpha = s === smearTaps ? crossAt(at, tapLod, max(tapLod, uShadowPenumbraLod)) : alphaAt(at, tapLod);
             // Taper the TIP (t→1), never the foot. A shadow fades out at its far
             // end as the penumbra swallows it; it does not fade where it meets
             // the thing casting it.
-            const faded = tapAlpha.mul(float(1).sub(uShadowSmearTaper.mul(float(t))));
+            // The fade HOLDS at full for the first station gap (2026-11-01, author: "a brighter
+            // penumbra edge between the long shadow and the round one"): the round shadow is
+            // the start station at full weight, and its nearest neighbour sat a whole gap down
+            // the fade (~0.83), so the darkness stepped down exactly at the disc's edge. Held
+            // across that gap, the shadow carries on past the disc and then fades to the tip.
+            const fadeT = t.sub(float(1 / smearTaps)).max(float(0)).div(float(1 - 1 / smearTaps));
+            const faded = tapAlpha.mul(float(1).sub(uShadowSmearTaper.mul(fadeT)));
             smeared = max(smeared, faded);
           }
           // THE PADDING RULE (2026-10-27, `buildInsideRectNode`): this quad is
@@ -17767,6 +17843,9 @@ async function startVtPanViewerUnserialized({
               uShadowSmearUv,
               uShadowSmearTaper,
               uShadowSmearLod,
+              uShadowPenumbraLod,
+              uShadowSideBlur,
+              uShadowSmearStart,
               uShadowShiftUv,
               uShadowShiftWorld,
             }
@@ -21826,24 +21905,21 @@ async function startVtPanViewerUnserialized({
       // off with the same gust fronts the overlay draws. Its shadows fall down-sun like every caster's
       // (the per-px throw the layer eye uses below) and fade with the outdoor light.
       if (view) {
-        const sunKey = skyHandle?.key;
-        const per = sunKey
-          ? projectShadowOffset({
-              azimuthDeg: sunKey.azimuthDeg,
-              elevationDeg: sunKey.elevationDeg,
-              heightPx: 100,
-              maxOffsetPx: 300,
-              offsetScale: 1,
-              softKnee: true,
-            })
-          : null;
+        // THE SHARED SHADOW (2026-11-01, the shadow consistency pass): a falling leaf's
+        // throw per px of height and its darkness are every other producer's — the
+        // shadow handle's `forCaster` (the building bake's own length and golden hour).
+        // Was its own `projectShadowOffset` (a 3× ceiling against everyone else's) and
+        // the ambient light level for darkness (no cloud fade, a moonlit floor).
+        const per = shadowHandle.forCaster({ heightPx: 100 });
         leafShed.sync(renderer, {
           dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           viewRect: windSpawnRect,
           sceneRect: sceneRectToMinMax(dimensions?.sceneRect),
-          shadowThrow: per ? { x: per.x / 100, y: per.y / 100 } : null,
-          daylight01: sceneLight01,
+          shadowThrow: { x: per.offsetX / 100, y: per.offsetY / 100 },
+          // The leaf's `shadow` param is the author's NOON darkness: scaled by the shared
+          // darkness relative to clear noon (darker at golden hour, none at night).
+          daylight01: shadowHandle.depth01 / SHADOW_NOON_REFERENCE_DEPTH,
         });
       }
       // PRECIPITATION — its compute step, in the same no-target-bound block as

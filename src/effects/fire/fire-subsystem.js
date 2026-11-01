@@ -39,6 +39,7 @@ import {
 } from './fire-geometry.js';
 import { applyCohesion, dropIndoorSpawnPoints, SPAWN_POINT_STRIDE } from './fire-spawn-points.js';
 import { createBillowEngine } from './fire-billow-engine.js';
+import { SHADOW_NOON_REFERENCE_DEPTH } from '../shadow-access.js';
 
 /**
  * Map-wide capacity of the spiralling-ember engine (the one GPU particle engine left).
@@ -188,6 +189,24 @@ function buildFireLightSamples(cloud, fires, windHandle) {
  * @returns {{scene:*, sync:Function, takeFieldJobs:Function, lightSources:()=>Array<object>,
  *   hasContent:boolean, getStatus:()=>object, dispose:()=>void}}
  */
+/**
+ * THE SMOKE'S GROUND SHADOW, from the shared shadow handle (2026-11-01, the shadow consistency
+ * pass): [dirX, dirY, length, darkness]. Direction = away from the sun, as every producer's.
+ * Length = the share of the smoke box's own shadow room (`billowSmokeScale().shadowOffWorld`)
+ * the shared throw fills: smoke hangs ~2 box-rooms up, so twice the throw per px of height,
+ * clamped to [0.35, 1] (a noon shadow still clears the column; a dawn one fills the room).
+ * Darkness = the shared darkness relative to clear noon, so the author's `smokeShadow` is kept
+ * at noon and fades to 0 at night like every other shadow.
+ * @param {object|null} handle - `effects/shadow-access.js#createShadowHandle`'s result.
+ * @returns {number[]|null}
+ */
+export function smokeSunShadow(handle) {
+  if (!handle || typeof handle.forCaster !== 'function') return null;
+  const cast = handle.forCaster({ heightPx: 1 });
+  const len = Math.min(1, Math.max(0.35, 2 * (handle.throwPerPx ?? 0)));
+  return [cast.directionX, cast.directionY, len, (handle.depth01 ?? 0) / SHADOW_NOON_REFERENCE_DEPTH];
+}
+
 export function createFireSubsystem({
   THREE,
   getFireRenderState,
@@ -195,6 +214,7 @@ export function createFireSubsystem({
   getPxPerMeter = null,
   getPrecip01 = null,
   getBloomState = null,
+  getShadowHandle = null,
   createEngine = null,
   createTarget = null,
   disposeTarget = null,
@@ -429,6 +449,7 @@ export function createFireSubsystem({
         quality: firePlan.spriteCountScale,
         expectedDepth,
         eye,
+        sunShadow: smokeSunShadow(getShadowHandle?.() ?? null),
       });
       lifeByFire = res.lifeByFire;
     }

@@ -48,6 +48,7 @@
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
 import { getSafeProfile } from '../../core/safe-mode.js';
 import { buildPointLightSharedTerms, softEdgeEnvelope } from './point-light-illumination.js';
+import { buildSunAndCloudVisNode } from './light-visibility.js';
 
 /**
  * @param {object} args
@@ -107,6 +108,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     buildCloudGroundVis,
     cloudOffsetNode,
     cloudFillShareNode,
+    shadowDepthNode = null,
     cloudStreakSpread,
     cloudStrengthNode,
     cloudBlurNode,
@@ -231,6 +233,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
 
   // SUN-SHADOW ATTENUATION — identical to buildIlluminationShadingCore's own.
   let backgroundFloor = uBackgroundColor;
+  let sunVisHere = null; // for the shared sun+cloud rule (light-visibility.js#buildSunAndCloudVisNode)
   if (sunShadowSlotNodes && sunShadowSlotNodes.length > 0) {
     const sampleSlot = (slot) => {
       const u = positionWorld.x.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
@@ -246,6 +249,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
             slots: sunShadowSlotNodes.map((slot) => ({ sunVis: sampleSlot(slot), floorIndex01: slot.uFloorIndex01 })),
           })
         : sampleSlot(sunShadowSlotNodes[0]);
+    sunVisHere = sunVis;
     backgroundFloor = uBackgroundColor.mul(sunVis);
   }
 
@@ -267,7 +271,12 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
       blurFieldUnits: cloudBlurNode,
       varTag: 'specular_merged',
     });
-    backgroundFloor = backgroundFloor.mul(cloudVis);
+    // The ambient fill's own rule (2026-11-01) — see point-light-illumination.js's copy.
+    backgroundFloor = shadowDepthNode
+      ? uBackgroundColor.mul(
+          buildSunAndCloudVisNode(THREE.TSL, { sunVis: sunVisHere, cloudVisRaw: cloudVis, fillShare: cloudFillShareNode ?? float(1), depth: shadowDepthNode })
+        )
+      : backgroundFloor.mul(cloudVis);
   }
 
   // Soft rim + snuffed flame fade to black — see point-light-illumination.js#softEdgeEnvelope.

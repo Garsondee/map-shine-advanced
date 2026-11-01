@@ -62,6 +62,8 @@ import { FLUID_PRESENCE_EDGE0, FLUID_PRESENCE_EDGE1 } from '../fluid/fluid-rende
 // lives with the rest of the grade (effects/grade/grade-ops.js), applied here
 // because this composite is the one place light meets the painted art.
 import { buildLightLookNodes, IDENTITY_LIGHT_LOOK } from '../grade/grade-ops.js';
+import { buildSunAndCloudVisNode } from './light-visibility.js';
+import { GATE_SHARPEN_LOW, GATE_SHARPEN_HIGH } from './sun-occlusion.js';
 
 /**
  * Linear-interpolate two rgb triples, clamping t to [0,1].
@@ -430,6 +432,10 @@ export function buildEnvironmentalLightMaterials({
   buildCloudGroundVis = null,
   cloudOffsetNode = null,
   cloudFillShareNode = null,
+  // THE SHARED SHADOW DARKNESS (2026-11-01, `effects/shadow-access.js#shadowDepth01`):
+  // how much light an opaque caster's shadow core removes — the building bake's own
+  // number. A float uniform node; `null` keeps the cloud shadow's pre-pass depth.
+  shadowDepthNode = null,
   // `world/cloud-field.js#CLOUD_SHADOW_STREAK_SPREAD` — a plain number, not
   // injected as a function, because it is DATA the caller already imports
   // (Law 8 only forbids importing world/'s CODE from here); 0 is the safe
@@ -464,7 +470,7 @@ export function buildEnvironmentalLightMaterials({
   // floor with no mask of its own reads as wholly outdoors. `null` = no term.
   skyCoverPlaceholder = null,
 }) {
-  const { uniform, texture, uv, vec2, vec3, vec4, float, mix, smoothstep, step, sRGBTransferEOTF, sRGBTransferOETF } =
+  const { uniform, texture, uv, vec2, vec3, vec4, float, mix, smoothstep, step, sRGBTransferEOTF, sRGBTransferOETF, min } =
     THREE.TSL;
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -700,7 +706,17 @@ export function buildEnvironmentalLightMaterials({
    */
   const buildIllumFragment = (diag = {}) => {
     let compiledClouds = false;
-    const outdoors = outdoorsAt();
+    // ⚠️ SHARPENED AT THE WALL (2026-11-01, author: "The grey building is blurred instead of
+    // sharp, I think it's brightening the shadow near the building itself"). The `_Outdoors`
+    // grid is soft for ~40 world px past the real wall (0.31 outdoors AT the wall on the
+    // shadow bench), so the brighter indoor light bled out of every building and lit the
+    // ground beside it — inside another building's shadow it read as a bright line hugging
+    // the wall (measured: 0.86 → 0.95 over the last 20 px). The sun-shadow receiver gate's
+    // own curve (`sun-occlusion.js#GATE_SHARPEN_*`), so the indoor light stops where the
+    // shadows already treat the ground as outdoors. Only this fill's blend: every other
+    // `_Outdoors` consumer reads the shared gate unchanged.
+    const outdoorsRaw = outdoorsAt();
+    const outdoors = outdoorsRaw ? smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), outdoorsRaw) : null;
     // `mix(1, skyMultiplier, outdoors)` — indoors keeps the untouched Foundry
     // ambient, outdoors gets the sky's hue. At `realism01 = 0` the multiplier
     // IS `[1,1,1]`, so this is a provable no-op and the pixel-identical-to-
@@ -790,6 +806,7 @@ export function buildEnvironmentalLightMaterials({
     // sun; the cloud must not darken an interior floor a second time) —
     // `mix(1, cloudVisRaw, outdoors)`, the identical idiom `skyTint` uses.
     let cloudVis = null;
+    let cloudShadowVis = null;
     if (outdoors && cloudsOn) {
       // Water's own gentler strength where the viewed floor has water — see
       // `waterShadowStrengthNode`. Hard-gated to the mask's own rect (a clamped
@@ -840,6 +857,23 @@ export function buildEnvironmentalLightMaterials({
         : null;
       const cloudGate = coverAbove ? outdoors.mul(float(1).sub(coverAbove)) : outdoors;
       cloudVis = mix(float(1), cloudVisRaw, cloudGate).toVar('envCloudVis');
+      // THE CLOUD SHADOW AT THE SHARED DARKNESS (2026-11-01, the shadow consistency
+      // pass). `cloudVisRaw` is `1 − strength × (1 − fillShare) × thickness` (clamped
+      // at 0), its depth from the sky's own key/fill split — a different darkness from
+      // every other producer's, and one that kept casting until −6° (the slow ambient
+      // ramp) after building shadows had gone. The cloud's OPACITY is recovered exactly
+      // from it — `u = min(1, strength × thickness)`, and 1 wherever it clamped, which
+      // can only happen past `strength × thickness ≥ 1` — and the shared darkness is
+      // applied to that, so a solid cloud's core removes the same light as a wall's.
+      // `cloudVis` above is kept for the moon gate (moonlight shows only in the gaps).
+      if (shadowDepthNode && cloudFillShareNode) {
+        cloudShadowVis = buildSunAndCloudVisNode(THREE.TSL, {
+          cloudVisRaw,
+          fillShare: cloudFillShareNode,
+          depth: shadowDepthNode,
+          cloudGate,
+        }).toVar('envCloudShadowVis');
+      }
       compiledClouds = true;
     }
 
@@ -878,8 +912,20 @@ export function buildEnvironmentalLightMaterials({
       contribution = contribution.clamp(0, 1);
       fluidTintAdd = ambient.mul(contribution).mul(float(FLUID_SHADOW_TINT_STRENGTH)).mul(float(1).sub(sunVis));
     }
-    const ambientLitSun = sunVis ? ambient.mul(sunVis) : ambient;
-    const ambientLitCloud = cloudVis ? ambientLitSun.mul(cloudVis) : ambientLitSun;
+    // OVERLAP: producers of the SUN's shadow MIN-combine (2026-11-01 — the doctrine in
+    // `lighting-pass.js` and `light-visibility.js#combineVisibility`, never applied
+    // here until now). A building's shadow under a cloud's was 0.435 × 0.215 ≈ 0.09:
+    // the sun cannot be blocked twice. With the shared darkness both cores are the
+    // same depth, so the min is simply "in shadow" wherever either one says so.
+    const cloudForSun = cloudShadowVis ?? cloudVis;
+    const ambientLitCloud =
+      sunVis && cloudShadowVis
+        ? ambient.mul(min(sunVis, cloudShadowVis))
+        : cloudForSun
+          ? (sunVis ? ambient.mul(sunVis) : ambient).mul(cloudForSun)
+          : sunVis
+            ? ambient.mul(sunVis)
+            : ambient;
     // THE MOON — an ADDED cool light, outdoors only, killed where cloud shades
     // the ground: `cloudVis` is 1 in a gap and falls toward 0 under cloud, so
     // moonlight appears only in the gaps and drifts with them. `uMoonAdd` is
@@ -1266,6 +1312,7 @@ export function buildEnvironmentalLightMaterials({
     buildCloudGroundVis,
     cloudOffsetNode,
     cloudFillShareNode,
+    shadowDepthNode,
     cloudStreakSpread,
     cloudStrengthNode,
     cloudBlurNode,

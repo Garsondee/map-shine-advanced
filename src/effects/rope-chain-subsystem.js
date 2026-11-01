@@ -227,7 +227,10 @@ const ROPE_CHAIN_POINTS_PER_SPAN = 32;
  * author wants per-span control; until then every instance shares this one
  * constant.
  */
-const ROPE_CHAIN_SHADOW_STRENGTH_DEFAULT = 0.6;
+// 2026-11-01 (the shadow consistency pass): this is the rope's OPACITY — its darkness is this ×
+// the shared `depth01` every producer reads. A rope or chain is solid, so 1: a wall and a
+// rope block the same sun; the ribbon's own edge feather keeps a thin line from reading as paint.
+const ROPE_CHAIN_SHADOW_STRENGTH_DEFAULT = 1;
 
 /**
  * PHASE 3 — how far the shadow mesh's `renderOrder` sits BELOW its own rope's,
@@ -423,7 +426,9 @@ export function createRopeChainSubsystem({
    */
   function applyShadowUniforms(rec) {
     const cast = getShadowHandle().forCaster({
-      heightPx: rec.source.elevation,
+      // World px above its own floor (boot.js#getRopeChainAnchors) — NOT `elevation`,
+      // which is in distance units (2026-11-01; see the note there).
+      heightPx: rec.source.heightPx ?? 0,
       strength01: ROPE_CHAIN_SHADOW_STRENGTH_DEFAULT,
     });
     rec.shadowUniforms.uCastOffsetPx.value.set(cast.offsetX, cast.offsetY);

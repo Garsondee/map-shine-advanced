@@ -653,6 +653,15 @@ export {
   BASE_SOFTNESS_PX,
   CLOUD_SOFTEN,
   NIGHT_SOFTEN,
+  // THE SHARED SHADOW LOOK (2026-11-01, the shadow consistency pass).
+  SHADOW_CORE_STRENGTH,
+  SHADOW_NOON_REFERENCE_DEPTH,
+  DEFAULT_SHADOW_LOOK,
+  resolveShadowLook,
+  shadowDepth01,
+  shadowThrowPerPx,
+  shadowMaxThrowPerPx,
+  opacityForNoonStrength,
 } from './shadow-access.js';
 
 // THE SKY HANDLE (effects/sky-access.js's header is the map; docs/planning/Sky.md

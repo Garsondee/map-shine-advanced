@@ -135,7 +135,7 @@ export const GATE_AA_LOD = 0;
  * }}
  */
 export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTexture = null, steps = 32 }) {
-  const { uniform, texture, uv, vec2, vec4, float, max, min, mix, select, log2, smoothstep, pow, Fn } = THREE.TSL;
+  const { uniform, texture, uv, vec2, vec4, float, max, min, mix, select, log2, smoothstep, pow, Fn, fract } = THREE.TSL;
 
   const STEPS = Number.isFinite(steps) ? Math.max(4, Math.floor(steps)) : 32;
 
@@ -293,6 +293,24 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // of which varies per station.
     const layerDiffusionPx = layerHeight.map((h) => h.mul(float(DIFFUSION_PER_HEIGHT_PX)).mul(softnessMul));
 
+    // ⚠️ THE STATIONS ARE JITTERED PER TEXEL (2026-11-01, author: "Is there any way to
+    // defeat this 'stepping' effect on long shadows?"). Each station's falloff is
+    // `(1 − t)` AT THAT STATION, and the darkest station wins — so a long shadow could
+    // only ever take `STEPS + 1` distinct values, one flat band per station, the bands
+    // widening toward the tip where the `u²` stations thin out (her golden-hour
+    // screenshot: ~20 visible stripes). Shifting every station but the contact one (j = 0
+    // stays on the caster's own edge, where the shadow must be darkest) by this texel's
+    // own fraction of a step — interleaved gradient noise, a fixed pattern, not
+    // time-varying — makes neighbouring texels land on different falloff values, so the
+    // staircase becomes a fine dither the field's own blur and bilinear read smooth away.
+    // No extra fetches. The CPU twin (`layer-smear.js`) keeps the un-dithered stations —
+    // it is the reference the dither averages to.
+    const ditherPx = world.div(max(texelWorldPx, float(1e-3)));
+    const stationDither = fract(float(52.9829189).mul(fract(ditherPx.x.mul(0.06711056).add(ditherPx.y.mul(0.00583715)))));
+    // The walls the receiver's OWN coverage cannot explain, gathered per station (see the
+    // self block after the loop for why it must be per station, not from the final max).
+    const selfWallsHere = channelOf(here, LAYER_WALLS);
+    const wallsBeyondSelf = float(0).toVar();
     for (let j = 0; j <= STEPS; j++) {
       // ⚠️ EVERY LAYER WALKS ITS OWN THROW, NOT THE TALLEST LAYER'S (2026-10-28,
       // author: at the dawn/dusk extremes "building shadows leave a gap between
@@ -309,7 +327,7 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
       // fetch per layer per station was already being paid), and THE LAW still
       // holds — it only needs each layer's own falloff to decrease along its own
       // walk (`layer-smear.js#layerSmearVisibility` is the CPU twin).
-      const u = j / STEPS;
+      const u = j === 0 ? float(0) : stationDither.add(j - 0.5).div(STEPS).clamp(0, 1);
       for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
         const L = layerThrow[i];
         const r = depthRadii[i];
@@ -318,9 +336,9 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
         // header spells out why no sample may be narrower than its neighbour
         // gap). A layer that casts nothing (`L <= 0`) has d = 0 and no blur
         // floor; its contribution is zeroed below.
-        const d = L.mul(float(u * u));
+        const d = L.mul(u.mul(u));
         const stationUv = sampleUvAt(world.add(toSun.mul(d)));
-        const spacing = L.mul(float((2 * u) / STEPS));
+        const spacing = L.mul(u.mul(2 / STEPS));
         const stationBlurPx = max(
           basePx.add(d.mul(float(PENUMBRA_PER_PX)).mul(uBlur.x)).mul(softnessMul),
           max(spacing.mul(float(STATION_BLUR_OVERLAP)), texelWorldPx)
@@ -392,6 +410,15 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
         // old accident of `d` overshooting a zero throw.
         const fall = pow(float(1).sub(t), falloffExp).mul(select(L.greaterThan(float(1e-3)), float(1), float(0)));
         occ[i].assign(max(occ[i], coverage.mul(fall)));
+        if (i === LAYER_WALLS) {
+          const beyond = coverage
+            .sub(selfWallsHere)
+            .max(float(0))
+            .div(float(1).sub(selfWallsHere).max(float(1e-4)))
+            .min(float(1))
+            .mul(fall);
+          wallsBeyondSelf.assign(max(wallsBeyondSelf, beyond));
+        }
       }
     }
 
@@ -409,8 +436,27 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // so this costs no extra fetch (memory:
     // feedback_composite_only_terms_miss_shared_buffers — reuse the node a
     // consumer already reads, never re-sample it).
-    const selfCoverageWalls = channelOf(here, LAYER_WALLS);
-    occ[LAYER_WALLS].assign(occ[LAYER_WALLS].mul(float(1).sub(selfCoverageWalls)));
+    // ⚠️ ONLY THE OCCLUSION THE RECEIVER'S OWN COVERAGE CANNOT EXPLAIN IS DISCOUNTED
+    // (2026-11-01, author: "The grey building is blurred instead of sharp, I think it's
+    // brightening the shadow near the building itself"). The walls channel is the derived
+    // `_Outdoors` grid, soft for ~40 world px past the real wall (shadow bench: 0.69 AT the
+    // wall, 0.30 thirty px outside, 0 only at 40). `occ × (1 − self)` alone — the roof-ridge
+    // fix — told every receiver in that spill it was partly its own caster and cut its shadow
+    // 30–70% exactly where it should be darkest: a bright ring round every building on the
+    // side its shadow leans (0.51 → 0.26 over 40 px, measured). The occlusion a receiver's own
+    // coverage can account for is `self`; anything a station found BEYOND it (the wall's solid
+    // interior, reached by stepping toward the sun) is someone else's mass, rescaled to the
+    // open part of this texel. The larger answer wins, so the ridge (uniform 51%: excess 0)
+    // keeps its proportional discount and the receiver beside a wall (excess ≈ 1) keeps its
+    // full shadow. A fully covered self-read still discharges to 0.
+    // ⚠️ PER STATION, NOT FROM THE FINAL MAX (2026-11-01, author, the second report: "look at the
+    // opposite side, where a shadow from another building darkens it you find a brighter area
+    // around the building"). Taking the excess from the faded final max (`occ − self`) let a
+    // receiver in its own building's soft spill (self ≈ 0.5) discount most of ANOTHER building's
+    // shadow too (≈ 0.6 after its fade): a bright line on the far side. Gathered per station on
+    // raw coverage, any station that sees more mass than the receiver's own coverage — another
+    // building, or this building's solid interior — counts in full, with its own fade.
+    occ[LAYER_WALLS].assign(max(occ[LAYER_WALLS].mul(float(1).sub(selfWallsHere)), wallsBeyondSelf));
     const selfCoverageOverhead = channelOf(here, LAYER_OVERHEAD);
     // SNAPSHOT BEFORE THE EXCLUSION — the "tile is faded away" twin. While an
     // overhead tile is opaque its own footprint must not be darkened by its own
@@ -432,12 +478,19 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // returns exactly 1 however many layers are stacked.
     const attenuate = strength.mul(gate).mul(ramp);
     const layerStrength = [uStrength.x, uStrength.y, uStrength.z, uStrength.w];
+    // ⚠️ THE LAYERS UNION, THEN THE DARKNESS IS APPLIED ONCE (2026-11-01) — the TSL
+    // twin of `layer-smear.js#layerSmearVisibility`; read THAT for the argument. Each
+    // layer's occlusion is weighted by its strength relative to the strongest (so a
+    // debug view that zeroes a strength drops that layer), the open sky they leave
+    // multiplies, and `sMax · attenuate` darkens the union once.
+    const sMax = max(max(layerStrength[0], layerStrength[1]), max(layerStrength[2], layerStrength[3]));
+    const weight = (i) => layerStrength[i].div(max(sMax, float(1e-6)));
     // Built twice from one occlusion set — see `occOverheadRaw` above. Only the
     // overhead term differs between the two.
-    const wallsAndOverheadTransmittance = (overheadOcc) =>
+    const wallsAndOverheadOpen = (overheadOcc) =>
       float(1)
-        .sub(occ[LAYER_WALLS].mul(layerStrength[LAYER_WALLS]).mul(attenuate))
-        .mul(float(1).sub(overheadOcc.mul(layerStrength[LAYER_OVERHEAD]).mul(attenuate)));
+        .sub(occ[LAYER_WALLS].mul(weight(LAYER_WALLS)))
+        .mul(float(1).sub(overheadOcc.mul(weight(LAYER_OVERHEAD))));
     // ⚠️ THE BANDS UNION, THEY DO NOT COMPOUND — the TSL twin of
     // `layer-smear.js#layerSmearVisibility`'s own band block; read THAT for the
     // full argument (they are ONE nested stack sliced at two elevations, not
@@ -445,11 +498,12 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // storey darken a shadow that is already opaque).
     let bandOcc = float(0);
     for (const i of SHADOW_BAND_LAYER_INDICES) {
-      bandOcc = max(bandOcc, occ[i].mul(layerStrength[i]));
+      bandOcc = max(bandOcc, occ[i].mul(weight(i)));
     }
-    const bandTransmittance = float(1).sub(bandOcc.mul(attenuate));
-    const ownVis = wallsAndOverheadTransmittance(occ[LAYER_OVERHEAD]).mul(bandTransmittance).clamp(0, 1);
-    const ownVisFull = wallsAndOverheadTransmittance(occOverheadRaw).mul(bandTransmittance).clamp(0, 1);
+    const bandOpen = float(1).sub(bandOcc);
+    const darkenUnion = (open) => float(1).sub(float(1).sub(open).mul(sMax).mul(attenuate)).clamp(0, 1);
+    const ownVis = darkenUnion(wallsAndOverheadOpen(occ[LAYER_OVERHEAD]).mul(bandOpen));
+    const ownVisFull = darkenUnion(wallsAndOverheadOpen(occOverheadRaw).mul(bandOpen));
 
     // ⚠️ THE CASCADE — see `lowerFieldTexNode`'s own header for the model. A
     // JS-time branch: floor 0 has no lower field and compiles this out entirely.

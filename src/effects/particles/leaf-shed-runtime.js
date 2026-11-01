@@ -733,7 +733,8 @@ export function createLeafShedEngine({
       if (Number.isFinite(v.shadowThrowX) && Number.isFinite(v.shadowThrowY)) {
         uShadowThrow.value.set(v.shadowThrowX, v.shadowThrowY);
       }
-      if (Number.isFinite(v.daylight01)) uShadowDay.value = Math.min(1, Math.max(0, v.daylight01));
+      // Up to 2: the shared darkness relative to clear noon runs past 1 at golden hour (2026-11-01).
+      if (Number.isFinite(v.daylight01)) uShadowDay.value = Math.min(2, Math.max(0, v.daylight01));
       if (Number.isFinite(v.crownHeightPx) && v.crownHeightPx > 0) {
         uLiftScale.value = 0.35 / v.crownHeightPx;
         uCrownPx.value = v.crownHeightPx;

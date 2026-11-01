@@ -69,7 +69,7 @@ import {
   FLY_LOOKS,
   FIREFLY_FLASH_STYLES,
 } from './critter-species.js';
-import { createShadowHandle } from '../shadow-access.js';
+import { createShadowHandle, opacityForNoonStrength } from '../shadow-access.js';
 import { windGridKey } from '../particles/critter-runtime.js';
 import { hexToRgb01 } from '../candle-flame-geometry.js';
 
@@ -290,7 +290,9 @@ export function flyShadowFromSky(env, params) {
   const height = Number.isFinite(params?.flyHeight) && params.flyHeight > 0 ? params.flyHeight : 80;
   const cast = createShadowHandle({ sun: env?.sun ?? null, weather: env?.weather ?? null }).forCaster({
     heightPx: height,
-    strength01: Number.isFinite(params?.shadowStrength) ? params.shadowStrength : 0.45,
+    // `shadowStrength` is the author's NOON darkness (2026-11-01, the shadow consistency pass):
+    // kept exactly at clear noon, and from there it follows the shared sky like every shadow.
+    strength01: opacityForNoonStrength(Number.isFinite(params?.shadowStrength) ? params.shadowStrength : 0.45),
   });
   return {
     shadowShift: [cast.offsetX / height, cast.offsetY / height],

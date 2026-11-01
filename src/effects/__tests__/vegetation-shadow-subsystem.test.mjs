@@ -21,7 +21,7 @@ import {
   VEG_SHADOW_SMEAR_TAPS,
 } from '../vegetation-shadow-subsystem.js';
 import { VEGETATION_KINDS } from '../vegetation.js';
-import { maxThrowForHeightPx, BASE_SOFTNESS_PX } from '../shadow-access.js';
+import { BASE_SOFTNESS_PX, DEFAULT_SHADOW_LOOK, shadowMaxThrowPerPx } from '../shadow-access.js';
 import { shadowPenumbraPx } from '../lighting/light-visibility.js';
 import { computeQuadCorners } from '../../foundry/scene-geometry.js';
 
@@ -137,25 +137,24 @@ export function run(t) {
     ok('the smear tap count is the shared constant the material builds against', VEG_SHADOW_SMEAR_TAPS === 6);
   }
 
-  // --- golden hour: darker and longer, with NO bigger quad -----------------
-  // The pad is the fill bill. Shifting the quad onto the streak means doubling
-  // the longest throw must leave the pad exactly where it was before the shift
-  // (the old formula: one full un-stretched throw + the blur allowance).
+  // --- golden hour: arrives through `forCaster`, never re-applied here -------
+  // 2026-11-01 (the shadow consistency pass): the golden-hour darkness and length are
+  // the SHARED ones (`shadow-access.js#GOLDEN_SHADOW_*`, the building bake's own),
+  // already inside the `cast` this subsystem receives. The longest throw is the shared
+  // golden cap at the Sun Shadows card's default dawn/dusk length (8× height); the pad
+  // is half of it (the shifted quad) plus the blur allowance, still hard-capped at 320.
   for (const kind of VEGETATION_KINDS) {
     const h = kind.shadowHeightPx;
     const blur = shadowPenumbraPx({ heightPx: h, elevationDeg: 0, baseSoftnessPx: BASE_SOFTNESS_PX }) * 2;
-    const oldPad = Math.min(320, maxThrowForHeightPx(h) + blur);
+    const maxThrow = h * shadowMaxThrowPerPx(DEFAULT_SHADOW_LOOK);
+    ok(`${kind.id}: the longest throw is the shared golden cap`, vegetationShadowMaxThrowPx(kind) === maxThrow);
     ok(
-      `${kind.id}: the pad is unchanged by the ×2 golden length`,
-      Math.abs(vegetationShadowPadPx(kind) - oldPad) < 1e-9
+      `${kind.id}: the pad is half that throw plus the blur, capped at 320`,
+      Math.abs(vegetationShadowPadPx(kind) - Math.min(320, maxThrow / 2 + blur)) < 1e-9
     );
     ok(
-      `${kind.id}: the longest golden throw is twice the daytime bound`,
-      vegetationShadowMaxThrowPx(kind) === maxThrowForHeightPx(h) * 2
-    );
-    ok(
-      `${kind.id}: the quad can hold that whole throw`,
-      vegetationShadowReachPx(kind) === vegetationShadowMaxThrowPx(kind)
+      `${kind.id}: the quad holds the whole throw, or as much as the capped pad allows`,
+      Math.abs(vegetationShadowReachPx(kind) - Math.min(maxThrow, 2 * (vegetationShadowPadPx(kind) - blur))) < 1e-9
     );
   }
   {
@@ -163,15 +162,12 @@ export function run(t) {
     makeSubsystem({ castStrength: 0.45 }).syncUniforms(day, TREE, PLACEMENT, PARAMS);
     const gold = fakeShadowUniforms();
     makeSubsystem({ castStrength: 0.45, golden01: 1 }).syncUniforms(gold, TREE, PLACEMENT, PARAMS);
-    ok('golden hour darkens the shadow (×1.45)', Math.abs(gold.uShadowStrength.value - 0.45 * 1.45) < 1e-9);
+    ok('golden hour is NOT re-applied to the strength (it is already in the cast)', gold.uShadowStrength.value === 0.45);
     ok(
-      'golden hour lengthens the sweep ×2',
-      Math.abs(gold.uShadowSmearUv.value.x - 2 * day.uShadowSmearUv.value.x) < 1e-12
+      'golden hour is NOT re-applied to the sweep',
+      Math.abs(gold.uShadowSmearUv.value.x - day.uShadowSmearUv.value.x) < 1e-12
     );
-    ok('no golden hour leaves strength untouched', day.uShadowStrength.value === 0.45);
-    const strong = fakeShadowUniforms();
-    makeSubsystem({ castStrength: 0.9, golden01: 1 }).syncUniforms(strong, TREE, PLACEMENT, PARAMS);
-    ok('golden strength never passes 0.97', strong.uShadowStrength.value === 0.97);
+    ok('the strength is the cast strength', day.uShadowStrength.value === 0.45);
     ok(
       'the quad shift is half the sweep',
       gold.uShadowShiftUv.value.x === gold.uShadowSmearUv.value.x / 2 &&

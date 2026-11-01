@@ -6316,6 +6316,13 @@ function install() {
           y: a.y,
           params: a.params,
           elevation: resolveAnchorElevationWorldUnits(a),
+          // THE SHADOW'S HEIGHT, IN WORLD PX (2026-11-01, the shadow consistency pass):
+          // how far above its OWN floor the rope hangs (`params.elevation`, in the
+          // scene's distance units) × the grid's px per unit — the conversion the
+          // building shadow bands already use (`getShadowFloorPlan`). `elevation` above
+          // is in distance units and includes the floor's base; it was passed to the
+          // shadow as px, so ropes threw ~1/20th of their shadow (0 on an unlocked floor).
+          heightPx: Math.max(0, Number(a.params?.elevation) || 0) * (readGridDistancePixels().distancePixels || 0),
         })),
       };
     }

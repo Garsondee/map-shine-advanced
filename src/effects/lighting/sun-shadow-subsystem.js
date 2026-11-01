@@ -212,6 +212,12 @@
 import { buildLayerSmearBakeMaterial, buildOverheadFadeMaterial, packOverheadFades } from './layer-smear-render.js';
 import { sunNeedsRebake } from './sun-occlusion.js';
 import {
+  SHADOW_CORE_STRENGTH,
+  GOLDEN_SHADOW_STRENGTH_GAIN,
+  GOLDEN_SHADOW_STRENGTH_CEIL,
+  GOLDEN_SHADOW_LENGTH_GAIN,
+} from '../shadow-access.js';
+import {
   resolveLayerSmear,
   layerSmearTierPlan,
   layerSmearBakeSamples,
@@ -329,7 +335,9 @@ export const SUN_SHADOW_EDGE_BAND_PX = 384;
 // ⚠️ 0.95 → 0.665 (author, 2026-10-16: "make the shadow 30% less strong" —
 // 0.95 × 0.7). A constant, not the `strength01` param, so it applies to every
 // scene including ones whose saved slider value would have masked a new default.
-export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.665, 0.665, 0.665, 0.665]);
+// 2026-11-01: the 0.665 now lives in `shadow-access.js#SHADOW_CORE_STRENGTH` — THE
+// shared core every producer's darkness is built from (the shadow consistency pass).
+export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([SHADOW_CORE_STRENGTH, SHADOW_CORE_STRENGTH, SHADOW_CORE_STRENGTH, SHADOW_CORE_STRENGTH]);
 // GOLDEN HOUR EXAGGERATION (2026-10-27, author: "building shadows should be very
 // strong and very long at the golden hour"). Both scale with `golden01` (the
 // ONE golden-hour bell, `world/sun.js`), so they vanish by midday and the
@@ -337,9 +345,19 @@ export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([0.665, 0.665, 0.665, 0.6
 //   STRENGTH_GAIN  0.665 × 1.45 ≈ 0.96 at the peak — nearly black cores.
 //   LENGTH_GAIN    ×2 on the length scale AND on the dawn/dusk cap, so the cap
 //                  (which is what actually bites at low sun) cannot undo it.
-const GOLDEN_SHADOW_STRENGTH_GAIN = 0.45;
-const GOLDEN_SHADOW_LENGTH_GAIN = 1;
-const GOLDEN_SHADOW_STRENGTH_CEIL = 0.97;
+/**
+ * The sun moved (`sunNeedsRebake`), OR the sky's darkness did (2026-11-01). The
+ * strength is baked into the field, so a cloud-cover change with the clock paused
+ * left building shadows at their old darkness until the sun next moved half a
+ * degree — while the cloud shadow over them (a live uniform) changed at once.
+ * 0.01 is well under a visible step and far above float noise.
+ */
+function skyNeedsRebake(last, atmosphere, quantizeDeg) {
+  if (sunNeedsRebake(last, atmosphere, quantizeDeg)) return true;
+  return Math.abs((atmosphere?.strengthMul ?? 1) - (last?.strengthMul ?? 1)) >= 0.01;
+}
+// The three gains moved to `shadow-access.js` (2026-11-01) so trees, ropes and every
+// other producer stretch and darken by the identical numbers (imported above).
 /** Shape of the distance falloff — higher hugs the caster more tightly.
  * 1.6→1 2026-08-02 (author, live — the tuned "preferred default" pass). */
 export const SUN_SHADOW_FALLOFF_EXP = 1;
@@ -1376,7 +1394,7 @@ function createFloorSlot({
     fieldBaked = true;
     publishField();
 
-    bakedSun = { azimuthDeg: atmosphere.azimuthDeg, elevationDeg: atmosphere.elevationDeg };
+    bakedSun = { azimuthDeg: atmosphere.azimuthDeg, elevationDeg: atmosphere.elevationDeg, strengthMul: atmosphere.strengthMul };
     // THE CASCADE'S STALENESS LINK — see `bakeSerial`'s own declaration.
     bakeSerial++;
     lastSunShadowBake = {
@@ -1541,7 +1559,7 @@ function createFloorSlot({
     // one frame of lag is impossible rather than merely unlikely.
     const lowerSerial = lowerField ? lowerField.getBakeSerial() : -1;
     const lowerChanged = lowerSerial !== lastSeenLowerSerial;
-    const sunChanged = sunNeedsRebake(bakedSun, getShadowHandle().atmosphere, plan.quantizeDeg);
+    const sunChanged = skyNeedsRebake(bakedSun, getShadowHandle().atmosphere, plan.quantizeDeg);
 
     // ⚠️ THE THROTTLE — see `SUN_SHADOW_BAKE_THROTTLE_MS`'s own doc for the
     // full "shared version counter" mechanism this defends against, and
@@ -1590,7 +1608,7 @@ function createFloorSlot({
       paramsChanged ||
       geometryChanged ||
       lowerChanged ||
-      sunNeedsRebake(bakedSun, getShadowHandle().atmosphere, plan.quantizeDeg)
+      skyNeedsRebake(bakedSun, getShadowHandle().atmosphere, plan.quantizeDeg)
     ) {
       sunShadowBakeRuns += 1;
       lastBakeWallClockMs = nowMs;

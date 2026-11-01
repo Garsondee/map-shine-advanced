@@ -19153,6 +19153,9 @@ async function startVtPanViewerUnserialized({
                 tile: wholeTile,
                 sub: null,
                 tex,
+                // The padding crop the colour material samples with — the
+                // depth proxy must sample with it too (scene-depth.js `uvScale`).
+                uvScale: compressedUvScale,
                 geometry,
                 material,
                 appearance,
@@ -24644,6 +24647,8 @@ async function startVtPanViewerUnserialized({
           const writerArgs = {
             THREE,
             tex: t.tex,
+            // Raw-path tiles have no padding and carry no uvScale: [1,1].
+            uvScale: t.uvScale,
             alphaThreshold: item.alphaThreshold ?? 0.75,
             floorIndex,
             flags,

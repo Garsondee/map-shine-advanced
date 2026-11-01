@@ -612,6 +612,16 @@ export function resolveSceneDepthFloorIndex({ item, sceneDoc, viewedFloorIndex, 
  *   (the very nodes its colour material reads), the proxy discards wherever
  *   the colour's `occlusionAlphaFactor` would start to fade — the same
  *   sample, the same maths, so the two cannot disagree.
+ * @param {number[]} [args.uvScale=[1,1]] - the SAME crop the tile's colour
+ *   material applies to `tex` (`buildWholeImageMaterial`'s `uUvScale`). A
+ *   BC1/BC7 texture is padded up to a multiple of 4 texels, so its uv 1.0 sits
+ *   past the art's real last texel; the colour draw scales uv by w/padW to land
+ *   back on it. This proxy used to sample raw `uv()`, so its silhouette sat up
+ *   to ~2 texels outward of the visible art on a 9750² roof (the offset grows
+ *   away from uv 0). Along a roof's top and left edges that culled the ground
+ *   under the roof's soft fringe, and the clear colour (the scene background,
+ *   #999 by default) showed through as a light outline (author, 2026-11-01:
+ *   "overhead tiles / tiles with transparency have these white edge pixels").
  * @returns {*} a `THREE.NodeMaterial`, with `.uLiveOcclusionAmount` set
  *   (a float uniform, initial value 0) when `liveOcclusionGate` is true.
  */
@@ -630,6 +640,7 @@ export function buildSceneDepthWriterMaterial({
   fluidMaskUvOffset = [0, 0],
   fluidMaskUvScale = [1, 1],
   fluidMaskEpsilon = FLUID_PRESENCE_EDGE0,
+  uvScale = [1, 1],
 }) {
   const { Fn, float, uniform, vec4, vec2, uv, texture, modelScale } = THREE.TSL;
   // G — THE LAYER'S PARALLAX SCALE (2026-10-28, `scene/scene-eye.js#encodeLayerScale01`): this proxy's
@@ -736,6 +747,9 @@ export function buildSceneDepthWriterMaterial({
   // common low default (0.75) from alone deciding "safe to skip what's
   // beneath me" — the exact hard-void-edge bug this fix targets.
   const uAlphaThreshold = tex ? uniform(float(Math.max(alphaThreshold, DEPTH_AUTHORITY_SOLID_ALPHA_FLOOR))) : null;
+  // A uniform, not a baked vec2, for the pipeline-recompile reason above: every
+  // padded texture has its own w/padW, and the raw path's [1,1] shares the shape.
+  const uTexUvScale = tex ? uniform(vec2(uvScale[0], uvScale[1])) : null;
   // THE FLUID-MASK UNIFORMS — only allocated when a mask was actually
   // supplied, mirroring `uAlphaThreshold`'s own "no tex, no threshold
   // uniform" discipline just above. `fluidMaskUvOffset`/`Scale` are
@@ -757,7 +771,8 @@ export function buildSceneDepthWriterMaterial({
     // alone can still decide.
     let discardCond = null;
     if (tex) {
-      const a = texture(tex).level(float(0)).a;
+      // uv scaled exactly as the colour draw scales it — see `uvScale`'s doc.
+      const a = texture(tex, uv().mul(uTexUvScale)).level(float(0)).a;
       discardCond = a.lessThan(uAlphaThreshold);
     }
     if (fluidMaskTex) {

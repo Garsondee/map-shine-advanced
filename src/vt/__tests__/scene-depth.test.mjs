@@ -478,6 +478,40 @@ export function run(t) {
     ok('writer: sampled the item´s own real texture', sampledTex === tex);
   }
 
+  // buildSceneDepthWriterMaterial — the alpha test samples with the SAME
+  // padding crop as the colour draw (author, 2026-11-01: light outlines on
+  // roof edges — the silhouette sat outward of the art and culled the ground
+  // under the roof's soft fringe). A 9750² BC7 roof pads to 9752².
+  {
+    const sampleUvFor = (uvScale) => {
+      const THREE = makeTHREE();
+      let sampledUv = null;
+      const originalTexture = THREE.TSL.texture;
+      THREE.TSL.texture = (tex, uvNode) => {
+        if (tex?.__kind === 'padded-texture') sampledUv = uvNode;
+        return originalTexture(tex, uvNode);
+      };
+      const tex = { __kind: 'padded-texture' };
+      buildSceneDepthWriterMaterial({ THREE, tex, alphaThreshold: 0.75, floorIndex: 0, flags: 0, uvScale });
+      return sampledUv;
+    };
+    const s = 9750 / 9752;
+    const padded = sampleUvFor([s, s]);
+    ok(
+      'writer: alpha is sampled at uv() × uvScale, the colour draw´s own crop — never raw uv()',
+      padded?.__kind === 'mul' && padded.subject.__kind === 'uv'
+    );
+    ok(
+      'writer: the crop is a UNIFORM (one pipeline for every padded size), carrying w/padW and h/padH',
+      padded?.other.__kind === 'uniform' && padded.other.value.x === s && padded.other.value.y === s
+    );
+    const unpadded = sampleUvFor(undefined);
+    ok(
+      'writer: no uvScale (a raw-path tile, no padding) samples at uv() × [1,1]',
+      unpadded?.other.value.x === 1 && unpadded.other.value.y === 1
+    );
+  }
+
   // buildSceneDepthWriterMaterial — alwaysOpaque (PERF, 2026-08-09, §4.3 of
   // the perf audit): the caller has already proven no texel of `tex` can
   // ever read below alphaThreshold, so the discard must be OMITTED from the

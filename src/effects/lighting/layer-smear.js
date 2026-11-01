@@ -58,7 +58,7 @@
  *
  * @module effects/lighting/layer-smear
  */
-import { marchDirectionToSun } from './sun-occlusion.js';
+import { marchDirectionToSun, GATE_SHARPEN_LOW, GATE_SHARPEN_HIGH } from './sun-occlusion.js';
 import { SHADOW_BAND_LAYER_INDICES } from './shadow-bands.js';
 
 /**
@@ -80,6 +80,11 @@ import { SHADOW_BAND_LAYER_INDICES } from './shadow-bands.js';
  * five-storey building throw a five-storey shadow instead of a one-storey one.
  */
 export const SHADOW_LAYER_COUNT = 4;
+
+/** The reach of a receiver's OWN soft footprint for the walls self-exclusion, world px (2026-11-01):
+ * stations closer than this get the self rule, further ones count raw. About half the derived
+ * `_Outdoors` grid's soft spill past a wall (~40 px, measured on the shadow bench). */
+export const SELF_PROBE_PX = 24;
 
 /**
  * Named indices into that packing. Only the ones something actually branches
@@ -520,8 +525,11 @@ export function layerSmearVisibility({
   const throws = resolved.throwPx;
   const occ = new Array(SHADOW_LAYER_COUNT).fill(0);
   // The walls the receiver's OWN coverage cannot explain, per station (see the self block below).
+  // Near stations get the self rule, far ones count raw — the TSL twin's note has why (2026-11-01).
   const selfWallsHere = clamp01(sampleLayers(x, y)?.[LAYER_WALLS] ?? 0);
   let wallsBeyondSelf = 0;
+  let wallsNear = 0;
+  let wallsFar = 0;
 
   for (let j = 0; j <= n; j++) {
     for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
@@ -570,8 +578,11 @@ export function layerSmearVisibility({
       const term = coverage * fall;
       if (term > occ[i]) occ[i] = term;
       if (i === LAYER_WALLS) {
-        const beyond = Math.min(1, Math.max(0, coverage - selfWallsHere) / Math.max(1e-4, 1 - selfWallsHere)) * fall;
-        if (beyond > wallsBeyondSelf) wallsBeyondSelf = beyond;
+        if (d < SELF_PROBE_PX) {
+          if (term > wallsNear) wallsNear = term;
+          const beyond = Math.min(1, Math.max(0, coverage - selfWallsHere) / Math.max(1e-4, 1 - selfWallsHere)) * fall;
+          if (beyond > wallsBeyondSelf) wallsBeyondSelf = beyond;
+        } else if (term > wallsFar) wallsFar = term;
       }
     }
   }
@@ -614,7 +625,11 @@ export function layerSmearVisibility({
   // where only one of the two was ever being asked.
   // Only the occlusion the receiver's own coverage cannot explain is discounted (2026-11-01) —
   // measured PER STATION on raw coverage; the TSL twin's note has the measurements and cases.
-  occ[LAYER_WALLS] = Math.max(occ[LAYER_WALLS] * (1 - selfWallsHere), wallsBeyondSelf);
+  // Far mass counts raw unless the receiver is CLEARLY inside a building (the receiver gate's curve):
+  // then it is this building's own interior, as a fully covered texel always was.
+  const gx = clamp01((1 - selfWallsHere - GATE_SHARPEN_LOW) / (GATE_SHARPEN_HIGH - GATE_SHARPEN_LOW));
+  const outside = gx * gx * (3 - 2 * gx);
+  occ[LAYER_WALLS] = Math.max(wallsNear * (1 - selfWallsHere), wallsBeyondSelf, wallsFar * outside);
   const selfCoverage = clamp01(sampleLayers(x, y)?.[LAYER_OVERHEAD] ?? 0);
   occ[LAYER_OVERHEAD] *= 1 - selfCoverage;
 

@@ -41,6 +41,7 @@ import {
   SHADOW_BAND_LAYER_INDICES,
   DIFFUSION_PER_HEIGHT_PX,
   STATION_BLUR_OVERLAP,
+  SELF_PROBE_PX,
 } from './layer-smear.js';
 
 /**
@@ -309,8 +310,18 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     const stationDither = fract(float(52.9829189).mul(fract(ditherPx.x.mul(0.06711056).add(ditherPx.y.mul(0.00583715)))));
     // The walls the receiver's OWN coverage cannot explain, gathered per station (see the
     // self block after the loop for why it must be per station, not from the final max).
+    // NEAR STATIONS ONLY (2026-11-01, author's third report: "the lighter band around the bottom
+    // left of this building"). The receiver's OWN mass can only be within its own soft footprint:
+    // stations closer than SELF_PROBE_PX get the self rule (discount what the receiver's own
+    // coverage explains, count any excess — the solid wall reached by stepping sunward); stations
+    // further out are someone else's mass and count raw. Judged on coverage alone, another
+    // building's soft shadow edge (~0.3) beside this building's spill (~0.5) was taken for self
+    // and discounted — a lighter L round the wall; a sunward-direction probe instead let a spill
+    // cast onto itself (a dark line hugging the wall).
     const selfWallsHere = channelOf(here, LAYER_WALLS);
     const wallsBeyondSelf = float(0).toVar();
+    const wallsNear = float(0).toVar();
+    const wallsFar = float(0).toVar();
     for (let j = 0; j <= STEPS; j++) {
       // ⚠️ EVERY LAYER WALKS ITS OWN THROW, NOT THE TALLEST LAYER'S (2026-10-28,
       // author: at the dawn/dusk extremes "building shadows leave a gap between
@@ -411,13 +422,16 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
         const fall = pow(float(1).sub(t), falloffExp).mul(select(L.greaterThan(float(1e-3)), float(1), float(0)));
         occ[i].assign(max(occ[i], coverage.mul(fall)));
         if (i === LAYER_WALLS) {
+          const isNear = select(d.lessThan(float(SELF_PROBE_PX)), float(1), float(0));
+          wallsNear.assign(max(wallsNear, coverage.mul(fall).mul(isNear)));
+          wallsFar.assign(max(wallsFar, coverage.mul(fall).mul(float(1).sub(isNear))));
           const beyond = coverage
             .sub(selfWallsHere)
             .max(float(0))
             .div(float(1).sub(selfWallsHere).max(float(1e-4)))
             .min(float(1))
             .mul(fall);
-          wallsBeyondSelf.assign(max(wallsBeyondSelf, beyond));
+          wallsBeyondSelf.assign(max(wallsBeyondSelf, beyond.mul(isNear)));
         }
       }
     }
@@ -456,7 +470,9 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // shadow too (≈ 0.6 after its fade): a bright line on the far side. Gathered per station on
     // raw coverage, any station that sees more mass than the receiver's own coverage — another
     // building, or this building's solid interior — counts in full, with its own fade.
-    occ[LAYER_WALLS].assign(max(occ[LAYER_WALLS].mul(float(1).sub(selfWallsHere)), wallsBeyondSelf));
+    // Far mass counts raw unless the receiver is CLEARLY inside a building (the gate's curve).
+    const outsideHere = smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), float(1).sub(selfWallsHere));
+    occ[LAYER_WALLS].assign(max(max(wallsNear.mul(float(1).sub(selfWallsHere)), wallsBeyondSelf), wallsFar.mul(outsideHere)));
     const selfCoverageOverhead = channelOf(here, LAYER_OVERHEAD);
     // SNAPSHOT BEFORE THE EXCLUSION — the "tile is faded away" twin. While an
     // overhead tile is opaque its own footprint must not be darkened by its own

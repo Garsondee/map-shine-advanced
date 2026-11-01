@@ -658,6 +658,14 @@ export function run(t) {
     const partialCoverage = 0.51;
     const partialWallSlab = (sx, sy) => {
       const out = new Array(SHADOW_LAYER_COUNT).fill(0);
+      // A THIN antialiased line (2026-11-01): the field bug was a ridge LINE, and mass further away than
+      // SELF_PROBE_PX is someone else's (it casts raw) — a uniform 600 px slab of 51% coverage is mass.
+      if (Math.hypot(sx, sy) < 6) out[LAYER_WALLS] = partialCoverage;
+      return out;
+    };
+    // The beside-it check below still wants a real partially-covered MASS to cast from.
+    const partialWallMass = (sx, sy) => {
+      const out = new Array(SHADOW_LAYER_COUNT).fill(0);
       if (Math.abs(sx) <= HALF && Math.abs(sy) <= HALF) out[LAYER_WALLS] = partialCoverage;
       return out;
     };
@@ -700,7 +708,7 @@ export function run(t) {
     const partialBesideVis = layerSmearVisibility({
       x: beside.x,
       y: beside.y,
-      sampleLayers: partialWallSlab,
+      sampleLayers: partialWallMass,
       resolved,
       steps: 32,
     });

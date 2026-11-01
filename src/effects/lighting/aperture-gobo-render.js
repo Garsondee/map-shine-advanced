@@ -114,8 +114,6 @@
 
 import {
   APERTURE_GOBO_DEFAULTS,
-  SOFT_NEAR_PX,
-  SOFT_CURVE,
   SOFT_FAR_PX_BASE,
   REACH_SOFT_FAR_PX_BASE,
   DIM_RADIUS_FADE_START,
@@ -128,6 +126,7 @@ import {
   CRACK_WIDTH_PX,
 } from './aperture-gobo.js';
 import { simplexFloat, fbmFloat, voronoiFloat } from './animations/tsl-noise-toolkit.js';
+import { buildShadowEdgeWidthNode } from './light-penumbra.js';
 
 /**
  * A small, deterministic 2D hash — the TSL port of `aperture-gobo.js#
@@ -444,34 +443,17 @@ export function buildApertureGoboTerm({ THREE, positionWorldXY, dist, apertureCo
     }
     arcGate = arcGate.toVar(`apGoboArcGate${k}`);
 
-    // ---- THE BLUR LAW (aperture-gobo.js#computeApertureSoftPx) — `dist` is
-    // the light's OWN dist01, free. ----
     const t01 = clamp(dist, float(0), float(1));
-    const soft = float(SOFT_NEAR_PX).add(shared.uSoftFarPx.sub(float(SOFT_NEAR_PX)).mul(t01.pow(float(SOFT_CURVE))));
-    // ---- THE CONTRAST FLOOR (aperture-gobo.js#computeApertureGoboTerm's own
-    // "THE CONTRAST FLOOR" header — found live, first look at design 4: blur
-    // wide enough to swallow a bar whole reads as "no pattern at all", not
-    // "a soft pattern"). Never let blur grow past half the thinnest feature
-    // it would otherwise erase — `min(mullion,frame)` for the spoke axis,
-    // `mullion` for the arc axis. ----
-    const spokeSoftNear = min(soft, max(min(shared.uMullion, shared.uFrame).div(2), float(0.5)));
-    const arcSoftNear = min(soft, max(shared.uMullion.div(2), float(0.5)));
-    // ---- THE REACH BLUR (aperture-gobo.js#REACH_SOFT_FAR_PX_BASE, round 15)
-    // ---- a SECOND, independent blur-width contributor, keyed on `x/xHead`
-    // (how far THIS fragment sits through the aperture's own geometric
-    // depth) rather than `dist01` — see that constant's own header for the
-    // live-diagnosed reason `dist01` alone left the arc gate's own sill/head
-    // boundary reading as a hard, un-blurred wall regardless of attenuation.
-    // `max` against the contrast-preserving values above, NOT a replacement
-    // of them: near the window (`reachT->0`) this contributes ~0 and the
-    // existing, already-confirmed-live near field is unchanged; far into the
-    // beam it grows past the small contrast floor and dominates, on BOTH
-    // axes — the deliberate "the ENTIRE effect" reading, not just the arc
-    // axis where the diagnosis was made.
-    const reachT = clamp(x.div(max(xHead, float(1e-3))), float(0), float(1));
-    const reachSoft = shared.uReachSoftFarPx.mul(reachT.pow(float(SOFT_CURVE)));
-    const spokeSoft = max(spokeSoftNear, reachSoft);
-    const arcSoft = max(arcSoftNear, reachSoft);
+    // ---- THE BLUR (aperture-gobo.js#computeAperturePenumbraSoftPx, 2026-11-01) — the lights' own
+    // shadow-edge law: thin at the glass, widening per px the light has travelled past the window
+    // along its own ray (`past = r·x/(a+x)`), on the lights' own dials, times the window card's
+    // Softness (1 at its default). Spoke half-width scaled onto the glass by `inv`. ----
+    const rLamp = vec2(s.sub(sL), x.add(a)).length();
+    const pastPx = rLamp.mul(max(x, float(0))).div(max(a.add(x), float(1e-6)));
+    const softnessScale = shared.uReachSoftFarPx.div(float(REACH_SOFT_FAR_PX_BASE * APERTURE_GOBO_DEFAULTS.softness));
+    const halfFloor = buildShadowEdgeWidthNode(THREE.TSL, pastPx).mul(softnessScale).mul(0.5);
+    const spokeSoft = max(halfFloor.mul(inv), float(0.5));
+    const arcSoft = max(halfFloor, float(0.5));
     const spokeOpen = smoothstep(spokeSoft.negate(), spokeSoft, spokeGate);
     const arcOpen = smoothstep(arcSoft.negate(), arcSoft, arcGate);
     const gobo = min(spokeOpen, arcOpen);

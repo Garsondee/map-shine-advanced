@@ -17,6 +17,7 @@ import {
   lightPenumbraAt,
   shadowEdgeVisibility,
   wallTravel,
+  shadowEdgeWidthPx,
   buildLightPenumbraNode,
   penumbraAttributeInputs,
   setLightPenumbra,
@@ -31,6 +32,12 @@ import {
 } from '../light-penumbra.js';
 import { writeLightSpanGeometry, LOCAL_STRIDE } from '../point-light-batch-mesh.js';
 import { GRADE_LOOK_PARAMS } from '../../grade/grade.js';
+import {
+  computeAperturePenumbraSoftPx,
+  apertureSoftnessScale,
+  REACH_SOFT_FAR_PX_BASE,
+  APERTURE_GOBO_DEFAULTS,
+} from '../aperture-gobo.js';
 
 const R = 400; // px
 const DIALS = { wallPx: 8, spread: 0.35 };
@@ -320,4 +327,29 @@ export function run(t) {
     built = false;
   }
   t.ok('the TSL node constructs', built);
+
+  // ── THE WINDOW PATTERN uses the same law (the author: "make sure that uses the same sort of soft
+  // lighting logic so that it is consistent"). A lamp 150 px in front of a window wall. ──
+  const g = (s, x) => ({ s, x, sL: 100, a: 150, inv: 150 / (150 + x) });
+  const pastOf = (s, x) => (Math.hypot(s - 100, x + 150) * x) / (150 + x);
+  let same = true;
+  for (const [s, x] of [
+    [100, 10],
+    [100, 200],
+    [40, 120],
+    [180, 400],
+  ]) {
+    const { arcSoft } = computeAperturePenumbraSoftPx(g(s, x), 1, DIALS);
+    if (Math.abs(arcSoft * 2 - shadowEdgeWidthPx(pastOf(s, x), DIALS)) > 1e-9 && arcSoft > 0.5) same = false;
+  }
+  t.ok('window pattern edges: the same width the lights’ wall shadows get at the same distance past', same);
+  const near = computeAperturePenumbraSoftPx(g(100, 5), 1, DIALS);
+  const far = computeAperturePenumbraSoftPx(g(100, 400), 1, DIALS);
+  t.ok('...thin right at the glass (5 px past it)', near.arcSoft <= 2.5 && near.spokeSoft <= 2.5);
+  t.ok('...widening far beyond it', far.arcSoft > 30);
+  t.ok(
+    '...and the window card’s Softness still scales it (1 at its default)',
+    apertureSoftnessScale(undefined) === 1 &&
+      Math.abs(apertureSoftnessScale(REACH_SOFT_FAR_PX_BASE * APERTURE_GOBO_DEFAULTS.softness * 2) - 2) < 1e-12
+  );
 }

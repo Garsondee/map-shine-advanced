@@ -283,6 +283,25 @@ function getDialUniforms(TSL) {
 }
 
 /**
+ * THE ONE SHADOW-EDGE LAW, for anything else that casts a shadow edge from a light (the window
+ * pattern, `aperture-gobo.js`): the full blur width, in px, `pastPx` beyond the occluder that
+ * casts the edge — thin at the occluder, widening by `spread` per px. Same dials as the lights.
+ * @param {number} pastPx @param {{wallPx:number, spread:number}} [dials]
+ */
+export function shadowEdgeWidthPx(pastPx, dials = dialValues) {
+  const tip = Math.max(CORNER_TIP_MIN_PX, Math.max(1e-3, dials.wallPx) * CORNER_TIP_FRACTION);
+  return tip + dials.spread * Math.max(0, Number(pastPx) || 0);
+}
+
+/** TSL twin of {@link shadowEdgeWidthPx}, on the shared dial uniforms. @param {object} TSL @param {*} pastPx */
+export function buildShadowEdgeWidthNode(TSL, pastPx) {
+  const { float, max } = TSL;
+  const dials = getDialUniforms(TSL);
+  const tip = max(max(dials.wallPx, float(1e-3)).mul(CORNER_TIP_FRACTION), float(CORNER_TIP_MIN_PX));
+  return tip.add(dials.spread.mul(max(pastPx, float(0))));
+}
+
+/**
  * Set the wall-edge softness. Safe before any light is built.
  * @param {{wallPx?: number, spread?: number}} dials - `wallPx` (scene px) softens where light
  *   meets a wall and where a shadow edge starts; `spread` is how much wider a shadow edge's

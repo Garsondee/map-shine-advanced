@@ -795,8 +795,10 @@ export function run(t) {
     // Before round 15 this transition happened entirely within ~40px
     // (x≈530 still ~1.0, x≈570 already 0) REGARDLESS of dist01 — the bug
     // this round fixes. Assert a REAL spread now exists.
-    const brightXNearEdge = [...Array(60).keys()].map((i) => 480 + i * 2).find((x) => goboAt(x) < 0.95);
-    const darkX = [...Array(60).keys()].map((i) => 480 + i * 2).find((x) => goboAt(x) < 0.02);
+    // Sampled 400..796 (2026-11-01): the lights' own shadow-edge law now fades this edge over
+    // ~170px (480 -> 650), past the old 480..598 window.
+    const brightXNearEdge = [...Array(100).keys()].map((i) => 400 + i * 4).find((x) => goboAt(x) < 0.95);
+    const darkX = [...Array(100).keys()].map((i) => 400 + i * 4).find((x) => goboAt(x) < 0.02);
     ok(
       'the far edge now fades across a real span of x, not a ~40px cliff',
       Number.isFinite(brightXNearEdge) && Number.isFinite(darkX) && darkX - brightXNearEdge > 40

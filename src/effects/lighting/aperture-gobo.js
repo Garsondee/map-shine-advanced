@@ -93,6 +93,8 @@
  * @module effects/lighting/aperture-gobo
  */
 
+import { shadowEdgeWidthPx } from './light-penumbra.js';
+
 /** Effect-level generator + softness defaults — the single source of truth
  * the params schema quotes, mirroring `WINDOW_DEFAULT_STRENGTH`'s own
  * pattern. `sillPx`/`headPx` are DELIBERATELY independent of `sun-shadows.js`
@@ -967,6 +969,40 @@ export function computeApertureSoftPx(dist01, softFarPx) {
   return SOFT_NEAR_PX + (far - SOFT_NEAR_PX) * Math.pow(t, SOFT_CURVE);
 }
 
+/**
+ * THE WINDOW PATTERN'S BLUR (2026-11-01) — the SAME law the lights' own wall shadows use
+ * (`light-penumbra.js#shadowEdgeWidthPx`), the author: "look at the window pattern effect and make
+ * sure that uses the same sort of soft lighting logic so that it is consistent".
+ *
+ * A mullion or frame bar is an occluder like any wall corner, so its shadow edge is thin at the
+ * glass and widens by the light's Shadow edge spread per px the light has travelled PAST the
+ * window, along its own ray: `past = r · x/(a+x)` (r = lamp to fragment, x = the fragment's depth
+ * beyond the wall, a = the lamp's distance in front of it). This replaces the two earlier laws —
+ * a blur keyed on distance from the LAMP (`computeApertureSoftPx`, capped by the contrast floor)
+ * and a reach blur keyed on `x/xHead` (`computeApertureReachSoftPx`) — which disagreed with the
+ * walls beside the window about where a shadow edge should be sharp.
+ *
+ * The gates take half-widths: the spoke gate is measured on the GLASS, so a floor width scales by
+ * `inv = a/(a+x)` onto it; the arc gate (rows, sill, head) is measured along the floor. Never
+ * under 0.5 px, so a bar right at the glass is not aliased.
+ *
+ * @param {{s:number, x:number, sL:number, a:number, inv:number}} g - the fragment's projection.
+ * @param {number} [softMul=1] - the window card's Softness, normalized ({@link apertureSoftnessScale}).
+ * @param {{wallPx:number, spread:number}} [dials] - the lights' dials (default: live).
+ * @returns {{spokeSoft:number, arcSoft:number}} half-widths, window-plane px / floor px.
+ */
+export function computeAperturePenumbraSoftPx(g, softMul = 1, dials) {
+  const past = (Math.hypot(g.s - g.sL, g.x + g.a) * g.x) / Math.max(g.a + g.x, 1e-6);
+  const half = (shadowEdgeWidthPx(past, dials) * softMul) / 2;
+  return { spokeSoft: Math.max(0.5, half * g.inv), arcSoft: Math.max(0.5, half) };
+}
+
+/** The window card's Softness as a multiplier on the shared law: 1 at the shipped default. */
+export function apertureSoftnessScale(reachSoftFarPx) {
+  const base = REACH_SOFT_FAR_PX_BASE * APERTURE_GOBO_DEFAULTS.softness;
+  return Number.isFinite(reachSoftFarPx) && reachSoftFarPx >= 0 ? reachSoftFarPx / base : 1;
+}
+
 const smoothstep01 = (edge0, edge1, v) => {
   if (edge0 === edge1) return v < edge0 ? 0 : 1;
   const t = Math.min(1, Math.max(0, (v - edge0) / (edge1 - edge0)));
@@ -1025,7 +1061,6 @@ export function computeApertureGoboTerm(P, aperture, h, dist01, windowParams, ex
   const proj = projectFloorPointToWindow(P, aperture);
   if (!proj) return { applicable: false, gobo: 1 };
 
-  const soft = computeApertureSoftPx(dist01, windowParams.softFarPx);
   const warpedSW = proj.sW + (Number.isFinite(extraSpokeOffsetPx) ? extraSpokeOffsetPx : 0);
   const spokeGate = computeApertureSpokeGate(warpedSW, {
     wallLen: windowParams.wallLen,
@@ -1047,24 +1082,11 @@ export function computeApertureGoboTerm(P, aperture, h, dist01, windowParams, ex
     rows: windowParams.rows,
     mullion: windowParams.mullion,
   });
-  // THE CONTRAST FLOOR (this function's own header) — never let blur grow
-  // wider than half the thinnest feature it would otherwise swallow whole.
-  const spokeSoftNear = Math.min(soft, Math.max(Math.min(windowParams.mullion, windowParams.frame) / 2, 0.5));
-  const arcSoftNear = Math.min(soft, Math.max(windowParams.mullion / 2, 0.5));
-  // THE REACH BLUR (`REACH_SOFT_FAR_PX_BASE`'s own header) — a SECOND,
-  // independent growth signal, keyed on how far THIS fragment sits through
-  // the aperture's own geometric depth (wall to the window-head's reach
-  // limit), not on `dist01`. `Math.max` against the contrast-preserving
-  // value above: near the window this is ~0 and the existing near-field
-  // behaviour (already confirmed live) wins unchanged; far into the beam it
-  // grows past the small contrast floor and dominates, genuinely diffusing
-  // the whole pattern — including the sill/head boundary itself, which is
-  // what turns that boundary's own former hard cliff into a real, visible
-  // fade.
-  const xHeadReach = computeApertureRowBoundaryX({ a: aperture.a, h, z: windowParams.headPx });
-  const reachSoft = computeApertureReachSoftPx(proj.x, xHeadReach, windowParams.reachSoftFarPx);
-  const spokeSoft = Math.max(spokeSoftNear, reachSoft);
-  const arcSoft = Math.max(arcSoftNear, reachSoft);
+  // THE BLUR — the lights' own shadow-edge law (`computeAperturePenumbraSoftPx`'s header).
+  const { spokeSoft, arcSoft } = computeAperturePenumbraSoftPx(
+    { s: proj.s, x: proj.x, sL: aperture.sL, a: aperture.a, inv: proj.inv },
+    apertureSoftnessScale(windowParams.reachSoftFarPx)
+  );
   const spokeOpen = smoothstep01(-spokeSoft, spokeSoft, spokeGate);
   const arcOpen = smoothstep01(-arcSoft, arcSoft, arcGate);
   const gobo = Math.min(spokeOpen, arcOpen);

@@ -77,6 +77,7 @@ export { SUN_SHADOW_DEBUG_VIEWS, sunShadowDebugPaints, sunShadowDebugView } from
 // candle wall-clip cache, and the per-frame reconcile.
 export { createPointLightPool, resolveAnchorElevationRank } from './lighting/point-light-pool.js';
 export { setPointLightSoftness, DEFAULT_POINT_LIGHT_SOFTNESS } from './lighting/point-light-illumination.js';
+export { setLightPenumbra, DEFAULT_WALL_SOFT_PX, DEFAULT_SHADOW_SPREAD } from './lighting/light-penumbra.js';
 // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — the pure descriptor
 // builder feeding `createPointLightPool`'s own `getPlayerCarriedLightSources`
 // injection seam, same "connection between [X] and a point light we

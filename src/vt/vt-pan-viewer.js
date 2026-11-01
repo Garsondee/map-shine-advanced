@@ -482,6 +482,9 @@ import {
   createPointLightPool,
   setPointLightSoftness,
   DEFAULT_POINT_LIGHT_SOFTNESS,
+  setLightPenumbra,
+  DEFAULT_WALL_SOFT_PX,
+  DEFAULT_SHADOW_SPREAD,
   DEFAULT_LIGHT_GLOW_DAY,
   describePointLightMergedMrt,
   buildPointLightMergedRendererMrtStructs,
@@ -12897,6 +12900,11 @@ async function startVtPanViewerUnserialized({
       setPointLightSoftness(
         Number.isFinite(Number(lp.lightSoftness)) ? Number(lp.lightSoftness) : DEFAULT_POINT_LIGHT_SOFTNESS
       );
+      // SOFT WALL EDGES — every point light's wall and shadow edges, shared uniforms (light-penumbra.js).
+      setLightPenumbra({
+        wallPx: Number.isFinite(Number(lp.lightWallSoftness)) ? Number(lp.lightWallSoftness) : DEFAULT_WALL_SOFT_PX,
+        spread: Number.isFinite(Number(lp.lightShadowSpread)) ? Number(lp.lightShadowSpread) : DEFAULT_SHADOW_SPREAD,
+      });
       if (!st?.enabled) {
         // Temperature Effects still shift a disabled Colour Grade — it is its
         // own card; an identity grade plus the delta is the delta alone.

@@ -290,6 +290,27 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
     label: 'Light shape',
     help: "How a lamp's light falls away. 0 is Foundry's own: an even disc of light with a soft rim. 1 is natural: a bright core that fades smoothly with distance, like a real lamp.",
   },
+  // SOFT WALL EDGES (2026-11-01) — effects/lighting/light-penumbra.js (defaults kept equal by a test).
+  lightWallSoftness: {
+    type: 'float',
+    min: 0,
+    max: 32,
+    step: 1,
+    default: 8,
+    category: 'Light',
+    label: 'Wall edge softness',
+    help: 'How softly a lamp’s light ends where it meets a wall, in pixels. 0 is a hard, pixel-sharp line.',
+  },
+  lightShadowSpread: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.35,
+    category: 'Light',
+    label: 'Shadow edge spread',
+    help: 'How much blurrier the edge of a wall’s shadow gets the further it runs from the wall. 0 keeps it sharp all the way; 1 spreads it very wide.',
+  },
 
   // ── Technical (behind Advanced) ──────────────────────────────────────────
   tint: {

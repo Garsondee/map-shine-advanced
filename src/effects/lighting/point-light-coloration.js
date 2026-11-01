@@ -115,6 +115,7 @@
 
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
 import { buildPointLightSharedTerms } from './point-light-illumination.js';
+import { penumbraAttributeInputs } from './light-penumbra.js';
 import { createWindHandle } from '../../world/index.js';
 import { getSafeProfile } from '../../core/safe-mode.js';
 import { markCompileDeferrable } from '../../core/compile-policy.js';
@@ -195,6 +196,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     anim,
     wind: windInputs,
     beamDirection,
+    penumbra = null,
   } = inputs;
 
   // dist / FALLOFF / THE HEIGHT-ELEVATION GATE / APERTURE GOBO — S2.13
@@ -214,6 +216,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
   const {
     dist,
     falloffGoboed: falloffNoReach,
+    penumbraNode,
     windowReachNode,
     uApLampHeight: uApColLampHeight,
     apApertures: apColApertures,
@@ -233,10 +236,13 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     beamDirection,
     beamShape,
     cookieTexture,
+    penumbra,
   });
 
-  // WINDOW REACH: the coloration is `colour * falloff`, so scaling the falloff scales its whole output.
-  const falloff = windowReachNode ? falloffNoReach.mul(windowReachNode) : falloffNoReach;
+  // WINDOW REACH and SOFT WALL EDGES: the coloration is `colour * falloff`, so scaling the falloff
+  // scales its whole output.
+  const falloffSoft = penumbraNode ? falloffNoReach.mul(penumbraNode) : falloffNoReach;
+  const falloff = windowReachNode ? falloffSoft.mul(windowReachNode) : falloffSoft;
 
   // Technique 1 ("Adaptive Luminance", the LightData default): the tint is
   // scaled by the underlying MAP pixel's own perceived brightness — BT.709
@@ -445,6 +451,7 @@ export function buildPointLightColorationMaterial({
   apGoboRows,
   apertureGoboShared,
   windowReach = null,
+  penumbra = false, // soft wall edges — see buildPointLightIlluminationMaterial's own param
 }) {
   const { uniform, vec2, vec3, vec4, float, positionLocal } = THREE.TSL;
 
@@ -497,6 +504,7 @@ export function buildPointLightColorationMaterial({
         : null,
       wind: uWindCenter ? { center: uWindCenter, exposure: uWindExposure, response: uWindResponse } : null,
       beamDirection: uBeamDirection,
+      penumbra: penumbra ? penumbraAttributeInputs(THREE.TSL) : null,
     },
     shared: { albedoTexture, depthTexNode, depthFlagsTexNode, apertureGoboShared, uGlobalTimeMs, windHandle },
     flags: {

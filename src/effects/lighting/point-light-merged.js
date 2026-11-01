@@ -127,6 +127,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     lightColor: uLightColor,
     anim,
     wind: windInputs,
+    penumbra = null,
   } = inputs;
 
   // Same screenUV-not-bare rule both single-channel cores follow — this
@@ -140,6 +141,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     dist,
     falloff: combinedFalloff,
     illumFalloff,
+    penumbraNode,
     depthFlagsHere,
   } = buildPointLightSharedTerms({
     THREE,
@@ -151,6 +153,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     depthFlagsTexNode,
     apertureCount: 0,
     illumReach: LIGHT_EXCESS_REACH,
+    penumbra,
   });
 
   // ============================================================================
@@ -276,7 +279,12 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     // The ambient fill's own rule (2026-11-01) — see point-light-illumination.js's copy.
     backgroundFloor = shadowDepthNode
       ? uBackgroundColor.mul(
-          buildSunAndCloudVisNode(THREE.TSL, { sunVis: sunVisHere, cloudVisRaw: cloudVis, fillShare: cloudFillShareNode ?? float(1), depth: shadowDepthNode })
+          buildSunAndCloudVisNode(THREE.TSL, {
+            sunVis: sunVisHere,
+            cloudVisRaw: cloudVis,
+            fillShare: cloudFillShareNode ?? float(1),
+            depth: shadowDepthNode,
+          })
         )
       : backgroundFloor.mul(cloudVis);
   }
@@ -289,6 +297,8 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     dist,
   });
   if (presence01) illumFinal = illumFinal.mul(presence01);
+  // Soft wall edges — the whole output, as in buildIlluminationShadingCore.
+  if (penumbraNode) illumFinal = illumFinal.mul(penumbraNode);
   const illumAlpha = float(1);
 
   // ============================================================================
@@ -341,8 +351,9 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     colorSeed = seeded.finalColor;
   }
 
-  const colorFinal = colorSeed.mul(reflection).mul(combinedFalloff);
-  const colorAlpha = combinedFalloff;
+  const colorFalloff = penumbraNode ? combinedFalloff.mul(penumbraNode) : combinedFalloff;
+  const colorFinal = colorSeed.mul(reflection).mul(colorFalloff);
+  const colorAlpha = colorFalloff;
 
   return { illumFinal, illumAlpha, colorFinal, colorAlpha };
 }

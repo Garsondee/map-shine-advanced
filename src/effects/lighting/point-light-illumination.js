@@ -164,6 +164,7 @@ import { buildWindowReachTerm } from './window-reach.js';
 import { repairLightPolygonFolds } from './light-polygon-repair.js';
 import { buildCanopyLightTerm } from './canopy-light.js';
 import { buildSunAndCloudVisNode } from './light-visibility.js';
+import { buildLightPenumbraNode, penumbraAttributeInputs } from './light-penumbra.js';
 
 /** A bake-less handle so an un-wired caller still gets Tier-0 organic wind
  * rather than a wind-inert light — see candle-flame-render.js's own identical
@@ -1420,8 +1421,12 @@ function makeSdPolygonEdgeDistance(TSL) {
  * @param {number} [args.illumReach=1] - where the ILLUMINATION copy of the curve
  *   (`illumFalloff*`) reaches 0, as a fraction of the radius — the illumination
  *   channel passes {@link LIGHT_EXCESS_REACH} (see `lightFloorFade`). JS-time.
+ * @param {{edge: *, corners: *, wall: *}|null} [args.penumbra] - the penumbra attribute nodes
+ *   (`light-penumbra.js#penumbraAttributeInputs`). Absent → no soft wall edges, nothing compiled.
  * @returns {{dist: *, falloff: *, falloffGoboed: *, illumFalloff: *, illumFalloffGoboed: *,
- *   depthHere: *, depthFlagsHere: *, uApLampHeight: (*|null), apApertures: (Array|null)}}
+ *   penumbraNode: (*|null), depthHere: *, depthFlagsHere: *, uApLampHeight: (*|null),
+ *   apApertures: (Array|null)}} `penumbraNode` is NOT folded into any falloff: each caller
+ *   applies it to its whole output, like `windowReachNode`.
  *   `falloff` is height-gated but NOT gobo-multiplied (illumination's own
  *   `combinedFalloff` return field is exactly this value); `falloffGoboed`
  *   additionally has the aperture-gobo term folded in (coloration's own
@@ -1449,6 +1454,7 @@ export function buildPointLightSharedTerms({
   beamShape = null,
   cookieTexture = null,
   illumReach = 1,
+  penumbra = null,
 }) {
   const { float, screenUV, smoothstep, length, positionWorld, mix } = THREE.TSL;
 
@@ -1513,7 +1519,8 @@ export function buildPointLightSharedTerms({
       let beamXY = canopy
         ? THREE.TSL.select(canopy.under.greaterThan(float(0.5)), localUnitXY.mul(canopy.liftScale), localUnitXY)
         : localUnitXY;
-      if (reach !== 1) beamXY = beamXY.mul(stretchToReachNode(THREE.TSL, length(beamXY), reach).div(length(beamXY).max(1e-6)));
+      if (reach !== 1)
+        beamXY = beamXY.mul(stretchToReachNode(THREE.TSL, length(beamXY), reach).div(length(beamXY).max(1e-6)));
       return buildBeamFalloffNode(THREE.TSL, { localUnitXY: beamXY, beamDirection, ...beamShape });
     }
     const attenForFalloff = attenuationEased.max(float(0.0001));
@@ -1610,12 +1617,18 @@ export function buildPointLightSharedTerms({
     }
   }
 
+  // SOFT WALL EDGES (2026-11-01, `light-penumbra.js`): a small fade where the light meets a wall,
+  // and a shadow edge that blurs wider the further it runs past the wall corner casting it.
+  // Inside the light's own polygon only, so it can never carry light through a wall.
+  const penumbraNode = penumbra ? buildLightPenumbraNode(THREE.TSL, { localUnitXY, ...penumbra }) : null;
+
   return {
     dist,
     falloff,
     falloffGoboed,
     illumFalloff,
     illumFalloffGoboed,
+    penumbraNode,
     windowReachNode,
     depthHere,
     depthFlagsHere,
@@ -1705,6 +1718,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     anim,
     wind: windInputs,
     beamDirection,
+    penumbra = null,
   } = inputs;
 
   /**
@@ -1762,6 +1776,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     dist,
     falloff: combinedFalloff,
     illumFalloffGoboed,
+    penumbraNode,
     windowReachNode,
     depthFlagsHere,
     uApLampHeight,
@@ -1783,6 +1798,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     beamShape,
     cookieTexture,
     illumReach: LIGHT_EXCESS_REACH,
+    penumbra,
   });
 
   // switchColor(bright, dim, dist) — TRANSITION, audit §5c. Exposed as a
@@ -2047,7 +2063,12 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     // building field — so this light's dim edge fades into exactly the floor the fill drew.
     backgroundFloor = shadowDepthNode
       ? uBackgroundColor.mul(
-          buildSunAndCloudVisNode(THREE.TSL, { sunVis: sunVisHere, cloudVisRaw: cloudVis, fillShare: cloudFillShareNode ?? float(1), depth: shadowDepthNode })
+          buildSunAndCloudVisNode(THREE.TSL, {
+            sunVis: sunVisHere,
+            cloudVisRaw: cloudVis,
+            fillShare: cloudFillShareNode ?? float(1),
+            depth: shadowDepthNode,
+          })
         )
       : backgroundFloor.mul(cloudVis);
   }
@@ -2107,6 +2128,9 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     dist,
   });
   if (presence01) shaped = shaped.mul(presence01);
+  // SOFT WALL EDGES: the whole output, floor included, so nothing of this light is left at a wall's
+  // edge to step against the true ambient beyond it.
+  if (penumbraNode) shaped = shaped.mul(penumbraNode);
   const outputColor = windowReachNode ? shaped.mul(windowReachNode) : shaped;
 
   return {
@@ -2356,6 +2380,9 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
  *   All five `cloud*` params omitted together ⇒ this term compiles out
  *   entirely, byte-identical to before this fix existed (same JS-time-branch
  *   posture `sunShadowSlotNodes` already has).
+ * @param {boolean} [args.penumbra=false] - soft wall edges (`light-penumbra.js`). Graph-build
+ *   time; true REQUIRES the mesh's geometry to carry the penumbra attributes
+ *   (`light-penumbra.js#bindPenumbraAttributes`; the pool's does).
  * @returns {{material: *, uRatio: *, uAttenuationEased: *, uExposure: *,
  *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[],
  *   uSpeedRaw: (*|null), uReverseSign: (*|null), uSeed: (*|null),
@@ -2404,6 +2431,7 @@ export function buildPointLightIlluminationMaterial({
   cloudStreakSpread,
   cloudStrengthNode,
   cloudBlurNode,
+  penumbra = false,
 }) {
   const { uniform, uniformArray, float, int, vec2, vec4, positionLocal } = THREE.TSL;
 
@@ -2482,6 +2510,7 @@ export function buildPointLightIlluminationMaterial({
           : null,
         wind: uWindCenter ? { center: uWindCenter, exposure: uWindExposure, response: uWindResponse } : null,
         beamDirection: uBeamDirection,
+        penumbra: penumbra ? penumbraAttributeInputs(THREE.TSL) : null,
       },
       shared: {
         attrTexNode,

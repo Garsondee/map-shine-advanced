@@ -101,6 +101,12 @@ import { buildPointLightColorationMaterial, computeColorationAlpha } from './poi
 import { canBatchLight, computeBucketKey, isColorationEligible } from './point-light-batch.js';
 import { createBatchedLightMesh } from './point-light-batch-mesh.js';
 import {
+  NEUTRAL_PENUMBRA,
+  PENUMBRA_FLOATS,
+  bindPenumbraAttributes,
+  writeLightPenumbraVertices,
+} from './light-penumbra.js';
+import {
   readActiveLightSources,
   readGridSizePixels,
   computeCandleWallClippedShape,
@@ -352,6 +358,22 @@ function shapePointsUnchanged(a, b) {
 }
 
 /**
+ * SOFT WALL EDGES (`light-penumbra.js`): bind `array` (PENUMBRA_FLOATS per fan vertex) as the
+ * geometry's penumbra attributes, views of one interleaved buffer. Slots not yet written
+ * are set neutral (fade nothing), so a light can never draw dark before its first shape write.
+ * @returns {*} the InterleavedBuffer (flag `.needsUpdate` after rewriting `array`).
+ */
+function setLightPenumbraGeometry(THREE, geometry, array) {
+  for (let o = 0; o < array.length; o += PENUMBRA_FLOATS) {
+    for (let k = 0; k < PENUMBRA_FLOATS; k++) array[o + k] = NEUTRAL_PENUMBRA[k];
+  }
+  const buffer = new THREE.InterleavedBuffer(array, PENUMBRA_FLOATS);
+  buffer.setUsage(THREE.DynamicDrawUsage);
+  bindPenumbraAttributes(THREE, geometry, buffer, 0);
+  return buffer;
+}
+
+/**
  * Place a light's mesh in world space. Foundry's OWN convention: the geometry
  * is already normalized to local unit-radius space by `triangulateLightFan`,
  * so the transform scales it back out. A plain light is a uniform circle; a
@@ -446,6 +468,10 @@ function createLightEntry({
   const positionAttribute = new THREE.BufferAttribute(scratchArray, 3);
   positionAttribute.setUsage(THREE.DynamicDrawUsage); // hints the backend: this buffer's DATA changes often
   geometry.setAttribute('position', positionAttribute);
+  // SOFT WALL EDGES (light-penumbra.js) — the same pre-allocate-once discipline, neutral until the
+  // light's first shape write.
+  const penArray = new Float32Array(INITIAL_LIGHT_FAN_VERTICES * PENUMBRA_FLOATS);
+  const penBuffer = setLightPenumbraGeometry(THREE, geometry, penArray);
   // PER-LIGHT (not shared) ambient uniforms — see update()'s own header for
   // why. Defaults match the pre-fix shared uniforms' own starting values;
   // overwritten every frame regardless.
@@ -555,6 +581,7 @@ function createLightEntry({
     depthTexNode: envLight.depthTexNode,
     depthFlagsTexNode: envLight.depthFlagsTexNode,
     blendSunVisibilityAcrossFloors,
+    penumbra: true,
   });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;
@@ -600,6 +627,7 @@ function createLightEntry({
     apGoboRows,
     apertureGoboShared,
     windowReach: windowReachColor,
+    penumbra: true,
   });
   const colorationMesh = new THREE.Mesh(geometry, colorationBuilt.material);
   colorationMesh.frustumCulled = false;
@@ -671,6 +699,8 @@ function createLightEntry({
     geometry,
     positionAttribute,
     scratchArray,
+    penArray,
+    penBuffer,
     uRatio,
     uAttenuationEased,
     uExposure,
@@ -2381,6 +2411,14 @@ export function createPointLightPool({
         } else {
           entry.positionAttribute.needsUpdate = true; // same buffer, new contents — re-upload, don't reallocate
         }
+        // SOFT WALL EDGES — derived from the same normalization; grown (and rebound) only on the
+        // rare frame the polygon outgrows the buffer, exactly like scratchArray above.
+        if (vertexCount * PENUMBRA_FLOATS > entry.penArray.length) {
+          entry.penArray = new Float32Array(vertexCount * PENUMBRA_FLOATS);
+          entry.penBuffer = setLightPenumbraGeometry(THREE, entry.geometry, entry.penArray);
+        }
+        writeLightPenumbraVertices(normalizedPolygon, light.radius, entry.penArray);
+        entry.penBuffer.needsUpdate = true;
         // Only the first `vertexCount` vertices are valid THIS frame.
         entry.geometry.setDrawRange(0, vertexCount);
         entry.lastShapeX = light.x;

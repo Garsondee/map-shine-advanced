@@ -75,6 +75,13 @@ import { buildIlluminationShadingCore, triangulateLightFan } from './point-light
 import { buildColorationShadingCore } from './point-light-coloration.js';
 import { buildMergedPointLightShadingCore } from './point-light-merged.js';
 import { markCompileDeferrable } from '../../core/compile-policy.js';
+import {
+  NEUTRAL_PENUMBRA,
+  PENUMBRA_FLOATS,
+  bindPenumbraAttributes,
+  penumbraAttributeInputs,
+  writeLightPenumbraVertices,
+} from './light-penumbra.js';
 
 /** Per-buffer float count — the SAME names `describeBucketVertexBuffers` emits.
  * `aAnim`/`aWind` keep their own itemSize (4 each) even when a `channel:
@@ -94,6 +101,11 @@ const ITEM_SIZES = Object.freeze({
   aAnim: 4,
   aWind: 4,
 });
+
+/** The geometry buffer's stride: `aLocalUnit` (2) then the penumbra floats (`aPenEdge`,
+ * `aPenCorner`, `aPenWall`) — views of ONE binding, so soft wall edges cost no vertex-buffer
+ * slot (merged buckets are already at the device's 8). */
+export const LOCAL_STRIDE = 2 + PENUMBRA_FLOATS;
 
 /** Matches `point-light-pool.js#INITIAL_LIGHT_FAN_VERTICES` — the per-light
  * fan scratch buffer this module keeps (one per bucket member, reused across
@@ -132,13 +144,31 @@ export function shapePointsUnchanged(a, b) {
  * @param {{position?: {[i:number]: number}, aLocalUnit?: {[i:number]: number}}} arrays
  * @param {number} start - first vertex index to write (the member's span start).
  * @param {number} vertexCount
+ * SOFT WALL EDGES (2026-11-01, `light-penumbra.js`): when `aLocalUnit` is the interleaved
+ * geometry buffer (`arrays.aPenEdge === arrays.aLocalUnit`, the same detection
+ * `writeMergedValueSpan` uses for aAnim/aWind), each vertex is {@link LOCAL_STRIDE} floats:
+ * local xy, then the six penumbra floats from `penArray` (neutral — fades nothing — when absent).
+ *
  * @param {ArrayLike<number>} localFanArray - `triangulateLightFan`'s own
  *   `array` output: interleaved local-space [x,y,z, ...], z always 0.
  * @param {number} originX @param {number} originY @param {number} radius
+ * @param {ArrayLike<number>|null} [penArray] - `writeLightPenumbraVertices`' own `array`
+ *   (PENUMBRA_FLOATS per vertex, same vertex order as `localFanArray`).
  */
-export function writeLightSpanGeometry(arrays, start, vertexCount, localFanArray, originX, originY, radius) {
+export function writeLightSpanGeometry(
+  arrays,
+  start,
+  vertexCount,
+  localFanArray,
+  originX,
+  originY,
+  radius,
+  penArray = null
+) {
   const pos = arrays.position;
   const local = arrays.aLocalUnit;
+  const withPen = !!local && arrays.aPenEdge === local;
+  const stride = withPen ? LOCAL_STRIDE : 2;
   for (let v = 0; v < vertexCount; v++) {
     const lx = localFanArray[v * 3 + 0];
     const ly = localFanArray[v * 3 + 1];
@@ -150,9 +180,14 @@ export function writeLightSpanGeometry(arrays, start, vertexCount, localFanArray
       pos[po + 2] = 0;
     }
     if (local) {
-      const lo = vi * 2;
+      const lo = vi * stride;
       local[lo + 0] = lx;
       local[lo + 1] = ly;
+      if (withPen) {
+        for (let k = 0; k < PENUMBRA_FLOATS; k++) {
+          local[lo + 2 + k] = penArray ? penArray[v * PENUMBRA_FLOATS + k] : NEUTRAL_PENUMBRA[k];
+        }
+      }
     }
   }
 }
@@ -467,6 +502,7 @@ function buildBatchedMaterial({ THREE, channel, shared, flags, layout }) {
       lightColor: vec3(aColorCNode.z, aColorCNode.w, aLightColorBNode.x),
       anim: animInput,
       wind: windInput,
+      penumbra: penumbraAttributeInputs(THREE.TSL),
     };
     const { illumFinal, illumAlpha, colorFinal, colorAlpha } = buildMergedPointLightShadingCore({
       THREE,
@@ -520,6 +556,7 @@ function buildBatchedMaterial({ THREE, channel, shared, flags, layout }) {
       brightColor: vec3(aColorBNode.z, aColorBNode.w, aColorCNode.x),
       anim: animInput,
       wind: windInput,
+      penumbra: penumbraAttributeInputs(THREE.TSL),
     };
   } else {
     const aLightColorNode = attribute('aLightColor', 'vec4');
@@ -538,6 +575,7 @@ function buildBatchedMaterial({ THREE, channel, shared, flags, layout }) {
       lightColor: vec3(aLightColorNode.x, aLightColorNode.y, aLightColorNode.z),
       anim: animInput,
       wind: windInput,
+      penumbra: penumbraAttributeInputs(THREE.TSL),
     };
   }
 
@@ -636,6 +674,19 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
         );
         continue;
       }
+      if (name === 'aLocalUnit') {
+        // SOFT WALL EDGES: local xy + the penumbra floats, one binding (see LOCAL_STRIDE). All three
+        // names resolve to the SAME raw array — writeLightSpanGeometry's `aPenEdge === aLocalUnit`.
+        const raw = new Float32Array(nextCapacity * LOCAL_STRIDE);
+        const interleaved = new THREE.InterleavedBuffer(raw, LOCAL_STRIDE);
+        interleaved.setUsage(THREE.DynamicDrawUsage);
+        arrays.aLocalUnit = raw;
+        arrays.aPenEdge = raw;
+        arrays.aPenCorner = raw;
+        geometry.setAttribute('aLocalUnit', new THREE.InterleavedBufferAttribute(interleaved, 2, 0));
+        bindPenumbraAttributes(THREE, geometry, interleaved, 2);
+        continue;
+      }
       const itemSize = ITEM_SIZES[name];
       const arr = new Float32Array(nextCapacity * itemSize);
       arrays[name] = arr;
@@ -661,6 +712,8 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
    * Float32Array per light per frame is the exact device-lost bug class
    * design doc §0 rule 3 forbids). */
   const fanScratch = new Map();
+  /** sourceId -> Float32Array — the member's reusable penumbra scratch (`light-penumbra.js`), same discipline. */
+  const penScratch = new Map();
   /** sourceId -> {x, y, radius, shapePoints} — the (x,y,radius,shapePoints)
    * this member's GEOMETRY (position/aLocalUnit span) was last written
    * against. ⚠️ DELIBERATELY SEPARATE from `bucket`'s own `rebuilt` flag:
@@ -765,6 +818,9 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
       for (const id of fanScratch.keys()) {
         if (!live.has(id)) fanScratch.delete(id);
       }
+      for (const id of penScratch.keys()) {
+        if (!live.has(id)) penScratch.delete(id);
+      }
       for (const id of lastPlacement.keys()) {
         if (!live.has(id)) lastPlacement.delete(id);
       }
@@ -793,7 +849,9 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
       const span = spans.get(m.sourceId);
       if (rebuilt || placementChanged(m.sourceId, m)) {
         const fan = fans.get(m.sourceId);
-        writeLightSpanGeometry(arrays, span.start, fan.vertexCount, fan.array, m.x, m.y, m.radius);
+        const pen = writeLightPenumbraVertices(fan.normalized, m.radius, penScratch.get(m.sourceId) ?? null);
+        penScratch.set(m.sourceId, pen.array);
+        writeLightSpanGeometry(arrays, span.start, fan.vertexCount, fan.array, m.x, m.y, m.radius, pen.array);
         lastPlacement.set(m.sourceId, { x: m.x, y: m.y, radius: m.radius, shapePoints: m.shapePoints });
         anyGeometryWrite = true;
       }
@@ -829,6 +887,7 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
     material.dispose();
     geometry.dispose();
     fanScratch.clear();
+    penScratch.clear();
     lastPlacement.clear();
     lastValues.clear();
   }

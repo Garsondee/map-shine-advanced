@@ -124,9 +124,29 @@ ${R}[data-minimized="true"] .msa-remote-body,
 ${R}[data-minimized="true"] .msa-remote-foot,
 ${R}[data-minimized="true"] .msa-tabs,
 ${R}[data-minimized="true"] .msa-status,
-${R}[data-minimized="true"] .msa-renderer-row{display:none}
+${R}[data-minimized="true"] .msa-renderer-row,
+${R}[data-minimized="true"] .msa-ready{display:none}
 
 ${uiKitCss(IN, { pressInside: REMOTE_PRESSABLES })}
+
+/* ---- the scene readiness card (MSA Ready, 2026-11-01) ---------------------------
+   Above the tabs, on every tab, only while the scene is not ready: a warm edge, one
+   row per floor with its two fixes, and a quiet footer. */
+${R} .msa-ready{flex:none; display:flex; flex-direction:column; gap:8px; margin:10px 14px 0;
+  padding:10px 12px; border:1px solid var(--line); border-left:3px solid var(--warn);
+  border-radius:var(--r-card); background:var(--bg1)}
+${R} .msa-ready[hidden]{display:none}
+${R} .msa-ready-head{display:flex; align-items:center; gap:7px; font-weight:650; font-size:.78rem; color:var(--ink0)}
+${R} .msa-ready-head .ico{width:14px; height:14px; color:var(--warn); flex:none}
+${R} .msa-ready-rows{display:flex; flex-direction:column; gap:6px}
+${R} .msa-ready-row{display:flex; align-items:center; gap:8px; justify-content:space-between}
+${R} .msa-ready-text{display:flex; flex-direction:column; min-width:0}
+${R} .msa-ready-name{font-size:.74rem; font-weight:600}
+${R} .msa-ready-detail{font-size:.68rem; color:var(--ink1); line-height:1.35}
+${R} .msa-ready-row[data-status="ready"] .msa-ready-name{color:var(--ok)}
+${R} .msa-ready-row[data-status="unknown"] .msa-ready-detail{color:var(--warn)}
+${R} .msa-ready-acts{display:flex; gap:5px; flex:none}
+${R} .msa-ready-foot{display:flex; gap:6px; justify-content:flex-end}
 
 /* ---- the header ---------------------------------------------------------------- */
 ${R} .msa-remote-head{display:flex; align-items:center; gap:var(--sp2); padding:8px 14px;

@@ -102,6 +102,7 @@ export { createAnchorAuthority, mergeAnchorSources, nearestAnchor } from './anch
 export {
   MASK_GRID_MAX_DIM,
   computeMaskGridSpec,
+  createMaskGrid,
   sampleMaskGridWorld,
   worldIndexMap,
   maskGridMean,
@@ -120,6 +121,37 @@ export {
   PAINT_EMBED_BYTE_BUDGET,
   PAINT_GRID_MAX_DIM,
 } from './paint-mask.js';
+
+// THE PAINTER'S HISTORY, replayable at any size (scene/mask-ops.js), and the
+// full-size export plan built on it (scene/mask-export.js) — "Save next to
+// map", Download and Import. Plus the Remote's Scene readiness model.
+export {
+  applyOp,
+  replayOps,
+  stampStroke,
+  specForRect,
+  compactOps,
+  seedFromGrid,
+  isValidOpList,
+  rectPoints,
+  cellOps,
+  roomCoverFromWalls,
+  fileByteToPainted,
+  opsByteEstimate,
+  fileSeed,
+  fileSeedUrlOf,
+} from './mask-ops.js';
+export {
+  planMaskFile,
+  kindFileSupport,
+  exportDimensions,
+  planBands,
+  greyToRgba,
+  checkImportSize,
+  splitPath,
+  WORLD_MASK_FOLDER,
+} from './mask-export.js';
+export { buildSceneReadiness, shouldAutoOpen, requiredKinds, suffixOf } from './scene-readiness.js';
 
 // THE DEPTH AUTHORITY (scene/depth-authority.js's header is the map,
 // docs/planning/Depth-Buffer.md the design doc) — stage 1 of the redesign

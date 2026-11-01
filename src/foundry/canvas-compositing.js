@@ -472,6 +472,29 @@ export function getMsaMayOwnArt() {
   return msaMayOwnArt;
 }
 
+/**
+ * THE PAINTER'S CLEAN VIEW (MSA Ready, 2026-11-01 — author: "let the painting
+ * tool see a version of the scene with effects turned off to make it easier to
+ * see and paint the black areas that are indoors"). Foundry's own map art, with
+ * Foundry's lighting/vision OUTPUT (`canvas.effects`) hidden too, so what shows
+ * is the plain painted map. The caller (boot.js) first hands the art back with
+ * `setMsaMayOwnArt(false)` and takes it again on the way out; this lever is
+ * only the effects half. This GM's screen only — nothing is saved or sent.
+ * @param {boolean} hidden
+ * @returns {boolean} whether the lever could be set.
+ */
+export function setFoundryEffectsHidden(hidden) {
+  try {
+    const effects = typeof canvas !== 'undefined' ? (canvas?.effects ?? null) : null;
+    if (!effects) return false;
+    effects.renderable = hidden !== true;
+    return true;
+  } catch (err) {
+    log.error('toggling canvas.effects for the clean view failed:', err);
+    return false;
+  }
+}
+
 /** Re-assert the transparent clear alpha after Foundry clobbers it. See header §2. */
 function reassertClearAlpha() {
   try {

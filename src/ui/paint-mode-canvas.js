@@ -31,6 +31,15 @@ const KIND_COLORS = {
 const colorFor = (kind) => KIND_COLORS[kind] ?? [255, 70, 0];
 
 /**
+ * `_Outdoors` previews its INDOOR part (MSA Ready, 2026-11-01 — author: "make it
+ * easier to see and paint the black areas that are indoors"). Its grid is white
+ * where outdoors, so a straight preview tinted the whole sky and left the rooms
+ * clear; inverted, the buildings are what light up, in a colour no map art uses.
+ */
+const INDOOR_TINT = [235, 40, 150];
+const invertedPreview = (kind) => kind === 'outdoors';
+
+/**
  * Bind the preview-canvas renderer to the painter's live `state`.
  * @param {object} state - the painter state (layers, dirty, previewRect, canvas, ctx, brush, draft…).
  * @param {{activeKey: () => string}} deps - `activeKey()` names the layer being painted right now.
@@ -95,7 +104,8 @@ export function createPaintCanvas(state, { activeKey }) {
     const layer = state.layers[key];
     if (!layer) return;
     const kind = key.split('::')[0];
-    const [cr, cg, cb] = colorFor(kind);
+    const invert = invertedPreview(kind);
+    const [cr, cg, cb] = invert ? INDOOR_TINT : colorFor(kind);
     const { spec, data } = layer;
     let g = state.gridCanvases[key];
     if (!g) {
@@ -122,12 +132,14 @@ export function createPaintCanvas(state, { activeKey }) {
       const { x0, y0, x1, y1 } = rect;
       for (let y = y0; y <= y1; y++) {
         const base = y * spec.w;
-        for (let x = x0; x <= x1; x++) packed[base + x] = rgbBase | (data[base + x] << 24);
+        if (invert) for (let x = x0; x <= x1; x++) packed[base + x] = rgbBase | ((255 - data[base + x]) << 24);
+        else for (let x = x0; x <= x1; x++) packed[base + x] = rgbBase | (data[base + x] << 24);
       }
       gctx.putImageData(img, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
       return;
     }
-    for (let i = 0; i < data.length; i++) packed[i] = rgbBase | (data[i] << 24);
+    if (invert) for (let i = 0; i < data.length; i++) packed[i] = rgbBase | ((255 - data[i]) << 24);
+    else for (let i = 0; i < data.length; i++) packed[i] = rgbBase | (data[i] << 24);
     gctx.putImageData(img, 0, 0);
   }
 
@@ -165,14 +177,36 @@ export function createPaintCanvas(state, { activeKey }) {
         if (!key.endsWith(floorSuffix)) continue;
         const g = state.gridCanvases[key];
         if (!g) continue;
-        cctx.globalAlpha = key === ak ? 0.8 : 0.32;
+        // The active layer at the GM's chosen opacity; others at 40% of it.
+        cctx.globalAlpha = key === ak ? state.overlayOpacity : state.overlayOpacity * 0.4;
         cctx.drawImage(g, left, top, w, h);
       }
       cctx.globalAlpha = 1;
     }
 
     drawDraft(cctx);
+    drawCellHover(cctx);
     drawBrushRing(cctx);
+  }
+
+  /** The grid cell (or hex) the Cells tool would paint, outlined under the cursor. */
+  function drawCellHover(cctx) {
+    if (state.tool !== 'cells' || !state.hoverOnBoard || !state.mouseClient) return;
+    const w0 = state.ctx.screenToWorld(state.mouseClient.x, state.mouseClient.y);
+    const pts = state.ctx.cellPolygonAt?.(w0.x, w0.y);
+    if (!pts) return;
+    const erase = state.brush.mode === 'erase';
+    const [cr, cg, cb] = erase ? [255, 90, 90] : invertedPreview(state.kind) ? [130, 230, 130] : colorFor(state.kind);
+    cctx.beginPath();
+    for (let k = 0; k + 1 < pts.length; k += 2) {
+      const p = state.ctx.worldToClient(pts[k], pts[k + 1]);
+      if (k === 0) cctx.moveTo(p.x, p.y);
+      else cctx.lineTo(p.x, p.y);
+    }
+    cctx.closePath();
+    cctx.strokeStyle = `rgba(${cr},${cg},${cb},0.95)`;
+    cctx.lineWidth = 2;
+    cctx.stroke();
   }
 
   function drawBrushRing(cctx) {
@@ -184,7 +218,13 @@ export function createPaintCanvas(state, { activeKey }) {
     const b = state.ctx.worldToClient(w0.x + state.brush.radius, w0.y);
     const rpx = Math.hypot(b.x - a.x, b.y - a.y);
     const erase = state.brush.mode === 'erase';
-    const [cr, cg, cb] = erase ? [255, 90, 90] : colorFor(state.kind);
+    const [cr, cg, cb] = invertedPreview(state.kind)
+      ? erase
+        ? INDOOR_TINT // painting indoors on `_Outdoors`
+        : [130, 230, 130]
+      : erase
+        ? [255, 90, 90]
+        : colorFor(state.kind);
     cctx.beginPath();
     cctx.arc(m.x, m.y, Math.max(2, rpx), 0, Math.PI * 2);
     cctx.strokeStyle = `rgba(${cr},${cg},${cb},0.9)`;
@@ -203,6 +243,19 @@ export function createPaintCanvas(state, { activeKey }) {
   function drawDraft(cctx) {
     const d = state.draft;
     if (!d || !d.vertices.length) return;
+    if (d.type === 'rect') {
+      const [a, b] = d.vertices;
+      const p0 = state.ctx.worldToClient(Math.min(a.x, b.x), Math.min(a.y, b.y));
+      const p1 = state.ctx.worldToClient(Math.max(a.x, b.x), Math.max(a.y, b.y));
+      const erase = state.brush.mode === 'erase';
+      const [cr, cg, cb] = invertedPreview(state.kind) ? (erase ? INDOOR_TINT : [130, 230, 130]) : colorFor(state.kind);
+      cctx.fillStyle = `rgba(${cr},${cg},${cb},0.25)`;
+      cctx.fillRect(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y);
+      cctx.strokeStyle = `rgba(${cr},${cg},${cb},0.95)`;
+      cctx.lineWidth = 2;
+      cctx.strokeRect(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y);
+      return;
+    }
     const pts = d.vertices.map((v) => state.ctx.worldToClient(v.x, v.y));
     const cur = state.cursorWorld ? state.ctx.worldToClient(state.cursorWorld.x, state.cursorWorld.y) : null;
     const [cr, cg, cb] = colorFor(state.kind);

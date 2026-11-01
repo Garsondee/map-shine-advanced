@@ -15,6 +15,7 @@
  */
 
 import { styleControl, label, legendItem, button, range, segmented } from './paint-mode-widgets.js';
+import { kindFileSupport } from '../scene/index.js';
 
 /**
  * Bind the toolbar builder to the painter's live `state` + its actions.
@@ -36,6 +37,15 @@ export function createToolbar(state, deps) {
     activeKey,
     confirmModal,
     paintableKinds: PAINTABLE_KINDS,
+    // MSA Ready (2026-11-01) — see paint-mode.js's header.
+    ensureSeeded,
+    startFromWalls,
+    startAllOutdoors,
+    setCleanViewOn,
+    saveToMapFile,
+    downloadFile,
+    importFile,
+    fileSupportFor,
   } = deps;
 
   function buildToolbar() {
@@ -64,24 +74,34 @@ export function createToolbar(state, deps) {
       return r;
     };
 
-    // tool switcher — the brush and the vector tools, all feeding the same masks
+    // tool switcher — the brush, the vector tools, and (MSA Ready) the quick
+    // shape tools for indoors/outdoors, all feeding the same masks
     const toolSeg = segmented(
       [
         ['🖌 Brush', 'brush'],
         ['• Point', 'point'],
         ['╱ Line', 'line'],
         ['⬠ Poly', 'polygon'],
+        ['▭ Rect', 'rect'],
+        ['▦ Cells', 'cells'],
+        ['⌂ Room', 'room'],
       ],
       () => state.tool,
       (v) => setTool(v)
     );
-    const snapWrap = document.createElement('label');
-    Object.assign(snapWrap.style, { display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto' });
-    const snapCb = document.createElement('input');
-    snapCb.type = 'checkbox';
-    snapCb.checked = state.snap;
-    snapCb.addEventListener('change', () => (state.snap = snapCb.checked));
-    snapWrap.append(snapCb, document.createTextNode('Snap ¼-grid'));
+    // Snap: Off / ¼ grid (the old sub-grid) / Grid (whole squares or hexes).
+    const snapSeg = segmented(
+      [
+        ['Free', 'off'],
+        ['¼ grid', 'quarter'],
+        ['Grid', 'grid'],
+      ],
+      () => state.snapMode,
+      (v) => (state.snapMode = v)
+    );
+    const snapWrap = document.createElement('div');
+    Object.assign(snapWrap.style, { display: 'flex', alignItems: 'center', gap: '4px' });
+    snapWrap.append(label('Snap'), snapSeg.el);
     // floor stepper — masks are per-floor AND this drives the live 3D view to
     // match (changeFloor), so the label doubles as a busy indicator while that
     // switch is in flight and the buttons disable to block rapid re-clicks.
@@ -136,6 +156,7 @@ export function createToolbar(state, deps) {
       layerFor(state.kind);
       markFull(activeKey());
       state.refreshToolbar?.();
+      ensureSeeded(state.kind);
     });
 
     const modeSeg = segmented(
@@ -147,6 +168,28 @@ export function createToolbar(state, deps) {
       () => state.brush.mode,
       (v) => (state.brush.mode = v)
     );
+    // `_Outdoors` speaks in its own words (MSA Ready): you paint INDOORS (black)
+    // or OUTDOORS (white), always at full strength — a half-indoors room is a bug.
+    const sideSeg = segmented(
+      [
+        ['■ Indoors', 'in'],
+        ['□ Outdoors', 'out'],
+      ],
+      () => (state.brush.mode === 'erase' ? 'in' : 'out'),
+      (v) => {
+        state.brush.mode = v === 'in' ? 'erase' : 'paint';
+        state.brush.strength = 255;
+        state.refreshToolbar?.();
+      }
+    );
+    const startAllBtn = button('All outdoors', startAllOutdoors, '143,214,255');
+    startAllBtn.title = 'Make this whole floor outdoors (white), then paint the buildings as indoors.';
+    const startWallsBtn = button('Start from walls', startFromWalls, '167,255,196');
+    startWallsBtn.title =
+      "Every room Foundry's walls close off becomes indoors; everything else outdoors. A first guess — check it, then fix what's wrong.";
+    const outdoorsWrap = document.createElement('div');
+    Object.assign(outdoorsWrap.style, { display: 'flex', alignItems: 'center', gap: '6px' });
+    outdoorsWrap.append(sideSeg.el, startAllBtn, startWallsBtn);
 
     const sizeR = range(
       'Size',
@@ -201,10 +244,32 @@ export function createToolbar(state, deps) {
     }
 
     const top = row();
-    top.append(label('Mask'), kindSel, modeSeg.el);
+    top.append(label('Mask'), kindSel, modeSeg.el, outdoorsWrap);
     const mid = row();
     mid.append(sizeR.el, strengthR.el, hardR.el);
+
+    // VIEW (MSA Ready) — Clean view: Foundry's plain map art, no lighting or
+    // weather, under the overlay; and how strongly the overlay shows.
+    const viewSeg = segmented(
+      [
+        ['Effects', 'fx'],
+        ['Clean map', 'clean'],
+      ],
+      () => (state.cleanView ? 'clean' : 'fx'),
+      (v) => setCleanViewOn(v === 'clean')
+    );
+    const opacityR = range(
+      'Overlay',
+      10,
+      100,
+      () => Math.round(state.overlayOpacity * 100),
+      (v) => (state.overlayOpacity = v / 100)
+    );
+    const viewRow = row();
+    viewRow.append(label('View'), viewSeg.el, opacityR.el);
+
     const saveBtn = button('💾 Save', save, '167,255,196');
+    saveBtn.title = 'Keep your painting in the scene (a draft). Save next to map makes it a real mask file.';
     const bottom = row();
     bottom.append(
       button('↶ Undo', undo, '143,214,255'),
@@ -212,6 +277,25 @@ export function createToolbar(state, deps) {
       saveBtn,
       button('Exit', requestExit, '143,214,255')
     );
+
+    // FULL-SIZE FILES (MSA Ready) — the mask at the map art's own pixel size.
+    const fileSaveBtn = button('⬆ Save next to map', () => saveToMapFile(), '167,255,196');
+    fileSaveBtn.title = "Write this mask at the map's full size, beside the map art, named so Map Shine finds it.";
+    const fileDownBtn = button('⬇ Download', () => downloadFile(), '143,214,255');
+    fileDownBtn.title =
+      'Save this mask at full size to your computer — to edit in GIMP, Krita or Photopea, or keep as a backup.';
+    const fileImportBtn = button('⤒ Import', () => importFile(), '143,214,255');
+    fileImportBtn.title =
+      'Pick a mask picture from your computer. Map Shine checks it fits the map, renames it and puts it beside the map art.';
+    const fileStatus = document.createElement('span');
+    Object.assign(fileStatus.style, { opacity: '0.8', maxWidth: '360px' });
+    const fileRow = row();
+    fileRow.append(label('File'), fileSaveBtn, fileDownBtn, fileImportBtn, fileStatus);
+    const setEnabled = (btn, on) => {
+      btn.disabled = !on;
+      btn.style.opacity = on ? '1' : '0.4';
+      btn.style.cursor = on ? 'pointer' : 'default';
+    };
 
     const legendRow = row();
     Object.assign(legendRow.style, {
@@ -227,18 +311,42 @@ export function createToolbar(state, deps) {
       legendItem('Enter', 'finish'),
       legendItem('Bksp', 'undo point'),
       legendItem('Ctrl+Z', 'undo'),
+      legendItem('S', 'snap'),
+      legendItem('V', 'clean view'),
       legendItem('Esc', 'cancel / exit')
     );
 
-    bar.append(toolRow, top, mid, bottom, legendRow);
+    bar.append(toolRow, top, mid, viewRow, bottom, fileRow, legendRow);
     state.refreshToolbar = () => {
       toolSeg.sync();
       sizeR.sync();
       strengthR.sync();
       hardR.sync();
       modeSeg.sync();
-      snapCb.checked = state.snap;
+      snapSeg.sync();
+      sideSeg.sync();
+      viewSeg.sync();
+      opacityR.sync();
       kindSel.value = state.kind;
+      const isOutdoors = state.kind === 'outdoors';
+      modeSeg.el.style.display = isOutdoors ? 'none' : '';
+      outdoorsWrap.style.display = isOutdoors ? 'flex' : 'none';
+      // The file row: what this layer can do, and why not when it can't.
+      const { info, loading } = fileSupportFor();
+      const support = kindFileSupport(state.kind, { fileExists: !!info?.existingUrl });
+      const hasArt = !!info?.artUrl;
+      const idle = !state.busy && !loading;
+      setEnabled(fileSaveBtn, idle && hasArt && support.canWrite);
+      setEnabled(fileDownBtn, idle && hasArt && support.canWrite);
+      setEnabled(fileImportBtn, idle && hasArt && support.canImport);
+      if (state.busy) fileStatus.textContent = state.busy;
+      else if (loading) fileStatus.textContent = 'Opening the mask file…';
+      else if (!info) fileStatus.textContent = 'Load a scene with map art to save files.';
+      else if (!hasArt) fileStatus.textContent = 'This floor has no map art to put a mask beside.';
+      else if (!support.canWrite) fileStatus.textContent = `Import only: ${support.why}.`;
+      else if (state.fileBacked[activeKey()]) fileStatus.textContent = 'This is the mask file — no unsaved changes.';
+      else if (info.existingUrl) fileStatus.textContent = 'Opened from its file; Save next to map replaces it.';
+      else fileStatus.textContent = 'No file yet.';
       floorLabelEl.textContent = state.floorSwitching ? `Floor ${state.floor} ⏳` : `Floor ${state.floor}`;
       floorPrevBtn.disabled = state.floorSwitching;
       floorNextBtn.disabled = state.floorSwitching;

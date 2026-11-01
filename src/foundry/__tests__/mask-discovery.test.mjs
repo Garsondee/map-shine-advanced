@@ -300,4 +300,27 @@ export async function run(t) {
     });
     t.ok('onProgress is optional; its absence does not break discovery', result.perFloor.length === 1);
   }
+  {
+    // MSA Ready (2026-11-01): a scene's remembered mask folder is listed too,
+    // and what is found there wins; an encoded art base still matches.
+    const OUT = maskKindById('outdoors').suffixes[0];
+    const FIRE = maskKindById('fire').suffixes[0];
+    const listings = {
+      'modules/pack/maps': [`modules/pack/maps/keep${FIRE}.webp`, `modules/pack/maps/keep${OUT}.webp`],
+      'worlds/w/msa': [`worlds/w/msa/keep${OUT}.png`],
+    };
+    const result = await discoverAuthoredMasks({
+      floors: [{ index: 0, id: 'bg', url: 'modules/pack/maps/keep.webp', maskDir: 'worlds/w/msa' }],
+      listDirectory: async (dir) => listings[dir] ?? [],
+      probeUrl: async () => false,
+    });
+    const found = result.byTargetId.get('bg');
+    t.ok('mask folder: its file wins', found.get('outdoors') === `worlds/w/msa/keep${OUT}.png`);
+    t.ok(
+      'mask folder: art-folder masks it lacks still found',
+      found.get('fire') === `modules/pack/maps/keep${FIRE}.webp`
+    );
+    const enc = matchMaskFiles([`maps/Town%20Square${OUT}.png`], 'Town%20Square', 'webp');
+    t.ok('an encoded art base matches decoded listings', enc.found.get('outdoors') === `maps/Town%20Square${OUT}.png`);
+  }
 }

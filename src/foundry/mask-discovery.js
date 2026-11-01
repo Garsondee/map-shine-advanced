@@ -111,6 +111,15 @@ export function splitArtUrl(url) {
  *   (see the art-variant fallback below) so a looser match is always visible.
  */
 export function matchMaskFiles(listedFiles, artBase, artExt) {
+  // The LISTED names are compared decoded (below), so the art's own base must
+  // be too — a scene whose art src is stored encoded (`Town%20Square.webp`)
+  // otherwise looks for `town%20square_…` among decoded names and finds
+  // nothing, ever (2026-11-01: "Save next to map" writes the decoded name).
+  try {
+    artBase = decodeURIComponent(artBase);
+  } catch (_) {
+    // Not valid percent-encoding — keep the raw base.
+  }
   // A file can never be its OWN mask — but the art-variant fallback below
   // (which re-tries progressively SHORTER bases) can accidentally reconstruct
   // the art's own name: an item whose art IS itself suffix-named (Vegetation's
@@ -254,6 +263,11 @@ async function defaultProbeUrl(url) {
  *   from any caller that wants item-keyed masks too, a `{id, url, name}` entry
  *   per Tile (boot.js appends these; `index` is a floor-only field and stays
  *   absent on a Tile entry — nothing here reads it).
+ *   An entry may also carry `maskDir`: a SECOND folder to look in, by the same
+ *   art base name (2026-11-01, MSA Ready — the scene's remembered mask folder,
+ *   where "Save next to map" writes when the art lives inside another
+ *   module's folder). A mask found there WINS over one beside the art: it is
+ *   the copy Map Shine itself wrote, so it is the newer of the two.
  * @param {(dir:string) => Promise<string[]|null>} [args.listDirectory] - injected for tests.
  * @param {(url:string) => Promise<boolean>} [args.probeUrl] - injected for tests.
  * @param {(p:{done:number, total:number, detail:string}) => void} [args.onProgress] -
@@ -344,6 +358,25 @@ export async function discoverAuthoredMasks({
             break;
           }
         }
+      }
+    }
+
+    // THE SCENE'S OWN MASK FOLDER (see `maskDir` in this function's doc). Listed
+    // only — never probed: it is a folder Map Shine wrote into itself, so a
+    // listing that fails is reported, not guessed around.
+    if (floor.maskDir && !isAbsoluteUrl(floor.maskDir)) {
+      if (!listingCache.has(floor.maskDir)) {
+        try {
+          listingCache.set(floor.maskDir, await listDirectory(floor.maskDir));
+        } catch (err) {
+          listingCache.set(floor.maskDir, null);
+          failures.push({ targetId: floor.id, stage: 'mask-folder', detail: String(err?.message || err) });
+        }
+      }
+      const extra = listingCache.get(floor.maskDir);
+      if (extra) {
+        const match = matchMaskFiles(extra, art.base, art.ext);
+        for (const [kindId, path] of match.found) found.set(kindId, path);
       }
     }
 

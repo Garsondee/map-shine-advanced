@@ -139,6 +139,7 @@ export {
   DEFAULT_EXPLORED_FOG_BASE,
   // PILLAR 11 — hand canvas.visibility to MSA. Default OFF; see its own header.
   setVisibilitySuppression,
+  setFoundryEffectsHidden,
   decideArtSuppression,
   MSA_OWNED_GROUPS,
 } from './canvas-compositing.js';
@@ -398,7 +399,23 @@ export {
   REGION_DARKNESS_OVERRIDE_PARAMS,
   DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE,
 } from './region-darkness-override.js';
-export { readPaintContext, savePaintedMasks, loadPaintedMasks } from './paint-adapter.js';
+export { readPaintContext, savePaintedMasks, loadPaintedMasks, readFloorWalls } from './paint-adapter.js';
+// MSA READY (2026-11-01) — full-size mask files: Save next to map, Download, Import.
+export {
+  canUploadFiles,
+  readWorldAndScene,
+  readSceneMaskFolder,
+  writeSceneMaskFolder,
+  readArtSize,
+  readMaskFileToGrid,
+  renderMaskFile,
+  uploadMaskFile,
+  downloadBlob,
+  pickLocalImage,
+  readLocalImageSize,
+  resizeImageFile,
+  mimeTypeForFile,
+} from './mask-file-writer.js';
 
 // GRID-GEOMETRY + POINTER READERS — feeds the masks.occlusion producer's
 // RADIAL channel (distancePixels), the point-light soft-edge margin

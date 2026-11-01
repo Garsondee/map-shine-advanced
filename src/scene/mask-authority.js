@@ -1538,6 +1538,35 @@ export function createMaskAuthority({ readPageImageData, log }) {
     getReport,
     getIngestStatus,
     /**
+     * MSA READY (2026-11-01) — `scene/scene-readiness.js#buildSceneReadiness`'s
+     * input: per floor, which drawables can carry its masks, its background
+     * art, which REQUIRED kinds no host has a file for, and what the background
+     * art's own discovery found. CHEAP by design — no derive, unlike
+     * `getReport()` (which recomputes products): it is asked straight after
+     * `setDiscovery`, on the scene-load path, where forcing the derive early is
+     * exactly the load freeze `msa-load-freeze-derive-cache` removed.
+     * `discovery: null` = discovery has not run for this scene yet.
+     */
+    getReadinessFacts() {
+      return {
+        discovery: scene.discovery
+          ? { method: scene.discovery.method ?? null, failures: scene.discovery.failures ?? [] }
+          : null,
+        floors: scene.floors.map((floor) => {
+          const bg = backgroundItemOf(floor);
+          return {
+            index: floor.index,
+            id: floor.id,
+            name: floor.name,
+            hostItemIds: hostsOfFloor(floor).map((item) => item.id),
+            artSrc: bg?.src ?? null,
+            requiredMissing: [...requiredMissingAuthoredIds(floor.id)],
+            found: bg ? (scene.discovery?.byTargetId?.get(bg.id) ?? null) : null,
+          };
+        }),
+      };
+    },
+    /**
      * The DERIVED products' own version counter — bumps only when
      * `recomputeIfDirty()` actually recomputes (a real content change),
      * unlike `version` (bumps on every `touch()`, including plain item-list

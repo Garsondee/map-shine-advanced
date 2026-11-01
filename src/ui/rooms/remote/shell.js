@@ -47,6 +47,7 @@ import { renderLooksBoard, renderRunningOrder } from './looks-board.js';
 import { renderPlayPads } from './play-pads.js';
 import { renderPrepBoard } from './prep-board.js';
 import { installMoreMenu, PATREON_URL } from './more-menu.js';
+import { createReadinessCard } from './readiness-card.js';
 import { listRemoteSections, onRemoteSectionsChanged, buildRemoteKit } from './extension-sections.js';
 import { createLogger } from '../../../core/log.js';
 import { raiseRoom, raiseRoomOnPress } from '../room-stack.js';
@@ -259,7 +260,14 @@ export function installRemote(opts = {}) {
   }
   onStatus('');
 
-  card.append(head, tabBar, body, status);
+  // THE SCENE READINESS CARD (MSA Ready, 2026-11-01) — above the tabs, on every
+  // tab, only while the scene is not ready; boot.js feeds it (`setReadiness`).
+  const readinessHost = document.createElement('section');
+  const readiness = createReadinessCard(readinessHost);
+  let lastReadiness = null;
+  let lastReadinessActions = {};
+
+  card.append(head, readinessHost, tabBar, body, status);
 
   // ---- the shared Fade Time ------------------------------------------------------
   const fadeTime = createFadeTimeControl(1);
@@ -591,6 +599,18 @@ export function installRemote(opts = {}) {
     /** The shared Fade Time, in ms (`0` = Cut). Pulled by boot.js's dial handlers. */
     getFadeOverMs() {
       return fadeTime.getOverMs();
+    },
+    /** MSA Ready: show (or clear) the Scene readiness card. `model` is
+     * scene/scene-readiness.js#buildSceneReadiness's result; `actions` its buttons. */
+    setReadiness(model, actions) {
+      lastReadiness = model ?? null;
+      if (actions) lastReadinessActions = actions;
+      readiness.render(lastReadiness, lastReadinessActions);
+    },
+    /** Repaint the card with the last model (e.g. the painter opened or closed). */
+    refreshReadiness(patch = {}) {
+      lastReadinessActions = { ...lastReadinessActions, ...patch };
+      readiness.render(lastReadiness, lastReadinessActions);
     },
   };
   room._msaRemoteController = controller;

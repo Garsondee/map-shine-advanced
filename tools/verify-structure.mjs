@@ -349,7 +349,12 @@ export const RULES = [
     // alpha bounding box for a UI thumbnail, off the main render loop entirely. Same
     // shape as vt/'s own exemption (CPU-side, off the live pipeline), different
     // directory because it's a UI concern, not a decode-path one.
-    allow: [`${sep}diag${sep}`, `${sep}vt${sep}`, `${sep}tile-thumbnail.js`],
+    // foundry/mask-file-writer.js (2026-11-01, MSA Ready, [structure-change]) is the
+    // same shape again: the painter's "Save next to map" / "Import" reads a decoded
+    // mask <img> drawn into a PLAIN <canvas 2d> (into the painter grid, and band by
+    // band into a full-size export) — on a GM's explicit click, never per frame and
+    // never from a WebGPU/WebGL target or this engine's render pipeline.
+    allow: [`${sep}diag${sep}`, `${sep}vt${sep}`, `${sep}tile-thumbnail.js`, `${sep}mask-file-writer.js`],
     why:
       'V2: 46 getImageData, 41 readRenderTargetPixels, 8 readPixels, 7 gl.finish() — each a full ' +
       'pipeline stall. The defining example reached through a global to read back ONE PIXEL. The ' +

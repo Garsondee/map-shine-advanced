@@ -15,6 +15,10 @@
  */
 
 import { getActiveSceneFloors } from './active-scene-source.js';
+import { readSceneWallSegments } from './scene-walls.js';
+import { createLogger } from '../core/log.js';
+
+const log = createLogger('paint-adapter');
 
 const MODULE_ID = 'map-shine-advanced';
 const PAINT_FLAG = 'paintedMasks';
@@ -153,6 +157,44 @@ export function readPaintContext() {
       const q = (grid?.size || 100) / 4;
       return { x: Math.round(wx / q) * q, y: Math.round(wy / q) * q };
     },
+    // MSA READY (2026-11-01): WHOLE-grid snapping for the shape tools — the
+    // corners of real squares (or hexes), so a building's outline lands on
+    // the grid the map was drawn to. Foundry's own snapper again, so hex and
+    // offset grids are its problem, not a second implementation here.
+    gridSize: c.grid?.size || c.dimensions?.size || 100,
+    gridless: !c.grid || c.grid.isGridless === true || c.grid.type === globalThis.CONST?.GRID_TYPES?.GRIDLESS,
+    snapVertex: (wx, wy) => {
+      const grid = c.grid;
+      const modes = globalThis.CONST?.GRID_SNAPPING_MODES;
+      if (grid && typeof grid.getSnappedPoint === 'function' && modes) {
+        const p = grid.getSnappedPoint({ x: wx, y: wy }, { mode: modes.VERTEX, resolution: 1 });
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) return { x: p.x, y: p.y };
+      }
+      const q = grid?.size || 100;
+      return { x: Math.round(wx / q) * q, y: Math.round(wy / q) * q };
+    },
+    /** The outline of the grid cell under a world point, as flat [x,y,…]
+     * (a square's 4 corners, a hex's 6), or null on a gridless scene. */
+    cellPolygonAt: (wx, wy) => {
+      const grid = c.grid;
+      if (!grid || grid.isGridless) return null;
+      try {
+        if (typeof grid.getOffset === 'function' && typeof grid.getVertices === 'function') {
+          const verts = grid.getVertices(grid.getOffset({ x: wx, y: wy }));
+          if (Array.isArray(verts) && verts.length >= 3) return verts.flatMap((v) => [v.x, v.y]);
+        }
+      } catch (err) {
+        // Fall through to the square-grid answer below, which is right for
+        // every square grid; say so once per call rather than guessing silently.
+        log.warn('grid.getVertices failed — using square cells:', err);
+      }
+      const q = grid.size || 100;
+      const x0 = Math.floor(wx / q) * q;
+      const y0 = Math.floor(wy / q) * q;
+      return [x0, y0, x0 + q, y0, x0 + q, y0 + q, x0, y0 + q];
+    },
+    /** This floor's Level id (null = the scene has no Levels). */
+    levelIdOf: (floorIndex) => floors[floorIndex]?.id ?? null,
   };
 }
 
@@ -212,4 +254,19 @@ export function loadPaintedMasks() {
   const c = activeCanvas();
   if (!c || !c.scene) return null;
   return c.scene.getFlag(MODULE_ID, PAINT_FLAG) ?? null;
+}
+
+/**
+ * The walls of one floor, for the painter's "Fill room" and "Start from walls"
+ * (MSA Ready, 2026-11-01) — the same reader, and the same room-dividing rule,
+ * the window light's room map uses.
+ * @param {number} floorIndex
+ * @returns {Array<{x1:number,y1:number,x2:number,y2:number,roomBarrier:boolean}>}
+ */
+export function readFloorWalls(floorIndex) {
+  const c = activeCanvas();
+  if (!c) return [];
+  const floorsResult = getActiveSceneFloors(c.scene ?? null);
+  const levelId = floorsResult.ok ? (floorsResult.floors[floorIndex]?.id ?? null) : null;
+  return readSceneWallSegments(levelId);
 }

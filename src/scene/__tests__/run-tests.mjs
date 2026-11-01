@@ -16,6 +16,9 @@ import { run as runMaskDeriveEquivalence } from './mask-derive-equivalence.test.
 import { run as runMaskAuthority } from './mask-authority.test.mjs';
 import { run as runSkyReachAccess } from './sky-reach-access.test.mjs';
 import { run as runPaintMask } from './paint-mask.test.mjs';
+import { run as runMaskOps } from './mask-ops.test.mjs';
+import { run as runMaskExport } from './mask-export.test.mjs';
+import { run as runSceneReadiness } from './scene-readiness.test.mjs';
 import { run as runAnchorCatalog } from './anchor-catalog.test.mjs';
 import { run as runAnchorAuthority } from './anchor-authority.test.mjs';
 import { run as runDepthAuthority } from './depth-authority.test.mjs';
@@ -68,6 +71,9 @@ const suites = [
   ['mask-authority', runMaskAuthority],
   ['sky-reach-access', runSkyReachAccess],
   ['paint-mask', runPaintMask],
+  ['mask-ops', runMaskOps],
+  ['mask-export', runMaskExport],
+  ['scene-readiness', runSceneReadiness],
   ['anchor-catalog', runAnchorCatalog],
   ['anchor-authority', runAnchorAuthority],
   ['depth-authority', runDepthAuthority],

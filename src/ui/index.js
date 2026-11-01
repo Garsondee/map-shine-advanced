@@ -11,6 +11,7 @@
 export { phaseDisplayName, REALTIME_RATE_HOURS_PER_MINUTE, formatClock } from './astrolabe-geometry.js';
 export { buildAstrolabeDial } from './rooms/remote/astrolabe-dial.js';
 export { installPainter } from './paint-mode.js';
+export { importMaskFlow, saveMaskFileFlow, downloadMaskFlow } from './mask-file-actions.js';
 export { openCameraPathDialog, closeCameraPathDialog } from './camera-path-dialog.js';
 export { installTileMotionPanel } from './rooms/remote/tile-motion-panel.js';
 export { installAnchorMode } from './anchor-mode.js';

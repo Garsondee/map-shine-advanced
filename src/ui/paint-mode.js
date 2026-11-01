@@ -46,7 +46,25 @@
  * (filled) — all rasterizing into the SAME mask the brush writes
  * (Shapes-and-Regions.md), with an optional 4×4 sub-grid snap, per-layer undo,
  * and a live draft preview. Deferred: retained/editable vector shapes + a
- * Select tool, bake-to-file (Mode B), the package gate.
+ * Select tool, the package gate.
+ *
+ * MSA READY (2026-11-01, author: "add tools for quickly painting shapes which
+ * can be snapped to the grid ... let the painting tool see a version of the
+ * scene with effects turned off ... save a full resolution version of the mask
+ * ... re-upload ... alongside the map albedo"):
+ *   - Rectangle, Grid cells and Fill room tools; snapping Off / ¼ grid / whole
+ *     grid (Foundry's own snapper, so hexes work).
+ *   - Every edit is ALSO recorded as a world-space op (`scene/mask-ops.js`), so
+ *     "Save next to map" / "Download" can draw the mask at the map art's own
+ *     pixel size with sharp shape edges (`ui/mask-file-actions.js`). The history
+ *     rides in the scene flag beside each layer's grid (`ops`), compacted when big.
+ *   - A layer whose floor already HAS a file for its kind opens FROM that file
+ *     (`ensureSeeded`) — so a Save next to map can never overwrite a Photoshop
+ *     mask with only the strokes painted on top of it.
+ *   - `_Outdoors` paints Indoors (black) / Outdoors (white), starts all
+ *     outdoors, offers Start from walls, and its preview tints the INDOOR part.
+ *   - Clean view: Foundry's plain map art under the overlay (boot.js owns the
+ *     switch — `deps.setCleanView`), with an overlay opacity slider.
  *
  * ⚠️ PAINT → RENDER, ON SAVE (2026-08-18) — "paint fire, see fire" is now
  * genuinely true, on Save. `deps.onLayersChanged` (see `installPainter`'s
@@ -69,10 +87,25 @@ import {
   serializePaintedMasks,
   hydratePaintedMasks,
   encodedByteEstimate,
+  isPaintLayerEmpty,
   PAINT_EMBED_BYTE_BUDGET,
   MASK_KINDS,
+  applyOp,
+  seedFromGrid,
+  fileSeed,
+  compactOps,
+  isValidOpList,
+  rectPoints,
+  roomCoverFromWalls,
 } from '../scene/index.js';
-import { readPaintContext, savePaintedMasks, loadPaintedMasks } from '../foundry/index.js';
+import {
+  readPaintContext,
+  savePaintedMasks,
+  loadPaintedMasks,
+  readFloorWalls,
+  readMaskFileToGrid,
+} from '../foundry/index.js';
+import { saveMaskFileFlow, downloadMaskFlow, importMaskFlow } from './mask-file-actions.js';
 import { setVtPanViewerFloor } from '../vt/index.js';
 // The painter's DOM chrome + preview renderer, split out 2026-07-25 (the
 // size-ratchet god-object reversal — this file was 1,083 lines / an 867-line
@@ -133,7 +166,19 @@ const PAINTABLE_KINDS = MASK_KINDS.filter((k) => Array.isArray(k.suffixes) && k.
  */
 export function installPainter(
   MapShine,
-  { onFloorChanged = null, onLayersChanged = null, onRequestFloorSwitch = null } = {}
+  {
+    onFloorChanged = null,
+    onLayersChanged = null,
+    onRequestFloorSwitch = null,
+    // MSA READY (2026-11-01) — boot.js's answers the painter cannot work out
+    // itself: where this floor's art and existing mask file are
+    // (`getMaskFile(floorIndex, kindId)` → ui/mask-file-actions.js's
+    // MaskFileInfo, or null), "a mask file was just written — find it"
+    // (`onMaskFileWritten`), and the Clean view switch (`setCleanView(on)`).
+    getMaskFile = null,
+    onMaskFileWritten = null,
+    setCleanView = null,
+  } = {}
 ) {
   const state = {
     active: false,
@@ -181,9 +226,23 @@ export function installPainter(
     mouseClient: null,
     hoverOnBoard: false, // is the CURRENT hover over Foundry's board (not a UI panel)? gates the ring
     brush: { radius: 90, strength: 180, hardness: 0.55, mode: 'add' }, // mode: paint | add | erase
-    tool: 'brush', // brush | point | line | polygon
-    draft: null, // in-progress line/polygon: { type, vertices: [{x,y}...] }
-    snap: false, // 4×4 sub-grid snap for vector vertices — OFF by default (precision-first)
+    tool: 'brush', // brush | point | line | polygon | rect | cells | room
+    draft: null, // in-progress line/polygon/rect: { type, vertices: [{x,y}...] }
+    // Vertex snapping: 'off' | 'quarter' (the old 4×4 sub-grid) | 'grid' (whole
+    // grid corners). OFF by default (precision-first); the shape tools are what
+    // 'grid' is for.
+    snapMode: 'off',
+    // THE WORLD-SPACE HISTORY (MSA Ready) — `${kind}::${floor}` -> op[]; see
+    // scene/mask-ops.js. Recorded beside every grid edit, replayed full-size on export.
+    ops: {},
+    stroke: null, // the brush stroke op being recorded
+    seeded: {}, // key -> true once `ensureSeeded` has decided this layer's starting point
+    loading: {}, // key -> true while a mask file is being read into the grid
+    fileBacked: {}, // key -> true while the grid equals its mask FILE (no draft to keep)
+    cellsDone: null, // Set of cell keys painted this cells-drag
+    cleanView: false,
+    overlayOpacity: 0.5, // the map must read through the tint — Clean view is for SEEING the art
+    busy: null, // a file action in flight: a short status string
     cursorWorld: null, // live cursor in world coords, for the rubber-band preview
     // UNDO IS PER-LAYER, NOT GLOBAL (2026-08-31): `${kind}::${floor}` -> snapshot[].
     // One flat stack meant Ctrl+Z popped whatever was pushed LAST — which could
@@ -197,11 +256,84 @@ export function installPainter(
   const notify = (msg, type = 'info') => globalThis.ui?.notifications?.[type]?.(msg);
   const keyOf = (kind) => `${kind}::${state.floor}`;
   const activeKey = () => keyOf(state.kind);
+  const kindDef = (kind) => PAINTABLE_KINDS.find((k) => k.id === kind) ?? null;
 
   function layerFor(kind) {
     const key = keyOf(kind);
     if (!state.layers[key]) state.layers[key] = createPaintLayer(state.ctx.sceneRect);
     return state.layers[key];
+  }
+
+  /** The active layer's history (created empty on first use). */
+  function opsFor(key = activeKey()) {
+    return (state.ops[key] ??= []);
+  }
+  function recordOp(op) {
+    opsFor().push(op);
+  }
+
+  /** Snap a world point by the current snap mode. */
+  function snapPoint(p) {
+    if (state.snapMode === 'grid') return state.ctx.snapVertex(p.x, p.y);
+    if (state.snapMode === 'quarter') return state.ctx.snapWorld(p.x, p.y);
+    return p;
+  }
+
+  /**
+   * DECIDE WHERE THIS LAYER STARTS (MSA Ready). Once per layer per painter
+   * session:
+   *   - it already has a history (from the scene flag) → keep it;
+   *   - its floor has a mask FILE for this kind → read the file into the grid,
+   *     then lay any older painted draft over it; the history starts with a
+   *     file seed, so a full-size export reads the file itself;
+   *   - an older draft with no history → its picture becomes the history;
+   *   - a blank `_Outdoors` → all outdoors (white): the GM paints the buildings.
+   */
+  async function ensureSeeded(kind = state.kind) {
+    const key = keyOf(kind);
+    if (state.seeded[key] || !state.ctx) return;
+    state.seeded[key] = true;
+    const layer = layerFor(kind);
+    if (state.ops[key]?.length) return;
+    const info = getMaskFile?.(state.floor, kind) ?? null;
+    const def = kindDef(kind);
+    if (info?.existingUrl) {
+      state.loading[key] = true;
+      state.refreshToolbar?.();
+      try {
+        const draft = isPaintLayerEmpty(layer) ? null : seedFromGrid(layer, { over: true });
+        const fromFile = await readMaskFileToGrid(info.existingUrl, layer.spec, def?.absentValue ?? 0);
+        layer.data.set(fromFile);
+        if (draft) applyOp(layer, draft);
+        state.ops[key] = draft
+          ? [fileSeed(info.existingUrl, layer.spec), draft]
+          : [fileSeed(info.existingUrl, layer.spec)];
+        if (!draft) state.fileBacked[key] = true;
+      } catch (err) {
+        state.seeded[key] = false; // let a later visit try again
+        notify(
+          `Map Shine: couldn't open the existing ${def?.suffixes?.[0] ?? kind} file (${err?.message || err}) — painting on top of nothing. Don't save over it.`,
+          'warn'
+        );
+        state.ops[key] = isPaintLayerEmpty(layer) ? [] : [seedFromGrid(layer)];
+      } finally {
+        state.loading[key] = false;
+        markFull(key);
+        state.refreshToolbar?.();
+      }
+      return;
+    }
+    if (!isPaintLayerEmpty(layer)) {
+      state.ops[key] = [seedFromGrid(layer)];
+      return;
+    }
+    if (kind === 'outdoors') {
+      layer.data.fill(255);
+      state.ops[key] = [{ t: 'fill', v: 255 }];
+      markFull(key);
+      return;
+    }
+    state.ops[key] = [];
   }
 
   // ---- the committed snapshot -------------------------------------------
@@ -289,11 +421,20 @@ export function installPainter(
     activeKey,
     confirmModal,
     paintableKinds: PAINTABLE_KINDS,
+    ensureSeeded,
+    startFromWalls,
+    startAllOutdoors,
+    setCleanViewOn,
+    saveToMapFile,
+    downloadFile,
+    importFile,
+    fileSupportFor,
   });
 
   // Flip the unsaved flag on the first edit of a save-cycle (and refresh the
   // toolbar once on that transition — cheap, not per-stamp).
   function markEdited() {
+    delete state.fileBacked[activeKey()]; // an edit makes this layer a draft again
     if (state.dirtySinceSave) return;
     state.dirtySinceSave = true;
     state.refreshToolbar?.();
@@ -335,6 +476,7 @@ export function installPainter(
     const next = Math.max(0, Math.min(max, state.floor + delta));
     if (next === state.floor) return;
     cancelDraft(); // an in-progress shape belonged to the old floor
+    endCells();
     state.floorSwitching = true;
     state.refreshToolbar?.();
     try {
@@ -360,6 +502,7 @@ export function installPainter(
     layerFor(state.kind); // ensure the new floor's layer exists
     markFull(activeKey());
     state.refreshToolbar?.();
+    ensureSeeded(state.kind);
   }
 
   // ---- painting ----------------------------------------------------------
@@ -375,7 +518,9 @@ export function installPainter(
     const layer = state.layers[key];
     if (!layer) return;
     const stack = (state.undo[key] ??= []);
-    stack.push({ key, data: layer.data.slice() });
+    // The history length rides with the pixels, so an undo rolls BOTH back —
+    // the grid and the record a full-size export replays can never disagree.
+    stack.push({ key, data: layer.data.slice(), opsLen: opsFor(key).length });
     if (stack.length > UNDO_LIMIT) stack.shift();
   }
 
@@ -385,6 +530,8 @@ export function installPainter(
     const snap = stack?.pop();
     if (!snap || !state.layers[key]) return;
     state.layers[key].data.set(snap.data);
+    if (Number.isInteger(snap.opsLen) && state.ops[key])
+      state.ops[key].length = Math.min(state.ops[key].length, snap.opsLen);
     markFull(key); // undo can change anywhere -> the whole grid re-packs
     markEdited();
   }
@@ -400,8 +547,11 @@ export function installPainter(
   }
 
   // Interpolate along the stroke so fast drags don't leave gaps (a real brush,
-  // not a series of disconnected dabs).
+  // not a series of disconnected dabs). The raw point is also appended to the
+  // stroke's recorded op — `scene/mask-ops.js#stampStroke` replays the SAME
+  // interpolation, so the record and the grid stay one picture.
   function paintTo(wx, wy) {
+    state.stroke?.pts.push(wx, wy);
     if (state.lastWorld) {
       const dx = wx - state.lastWorld.x;
       const dy = wy - state.lastWorld.y;
@@ -423,8 +573,187 @@ export function installPainter(
     if (!layer) return;
     pushUndo();
     layer.data.fill(0);
+    recordOp({ t: 'fill', v: 0 });
     markFull(activeKey());
     markEdited();
+  }
+
+  /** Apply one op to the active layer as an undoable edit. */
+  function commitOp(op, bbox = null, { undoable = true } = {}) {
+    const layer = layerFor(state.kind);
+    if (undoable) pushUndo();
+    applyOp(layer, op);
+    recordOp(op);
+    if (bbox) markWorldRect(activeKey(), ...bbox);
+    else markFull(activeKey());
+    markEdited();
+  }
+
+  const brushValue = () => ({ v: state.brush.strength, m: state.brush.mode });
+
+  // ---- MSA Ready: the outdoors starts --------------------------------------
+  /** "All outdoors": the whole floor white; the GM then paints the buildings. */
+  function startAllOutdoors() {
+    if (state.kind !== 'outdoors') return;
+    commitOp({ t: 'fill', v: 255 });
+  }
+
+  /**
+   * "Start from walls": every room Foundry's walls CLOSE becomes indoors
+   * (black), everything else outdoors — a first guess the GM then corrects.
+   */
+  function startFromWalls() {
+    if (state.kind !== 'outdoors') return;
+    const res = roomCoverFromWalls({
+      walls: readFloorWalls(state.floor),
+      sceneRect: state.ctx.sceneRect,
+      gridSize: state.ctx.gridSize,
+    });
+    if (!res.op) {
+      notify(`Map Shine: Start from walls found nothing to fill — ${res.reason}.`, 'warn');
+      return;
+    }
+    const layer = layerFor(state.kind);
+    pushUndo();
+    const fill = { t: 'fill', v: 255 };
+    const cover = { ...res.op, v: 255, m: 'erase' };
+    applyOp(layer, fill);
+    applyOp(layer, cover);
+    recordOp(fill);
+    recordOp(cover);
+    markFull(activeKey());
+    markEdited();
+    notify(
+      `Map Shine: ${res.rooms} closed room(s) painted as indoors. Fix anything the walls got wrong, then Save next to map.`
+    );
+  }
+
+  /** "Fill room": the one room the click is in. */
+  function fillRoomAt(p) {
+    const res = roomCoverFromWalls({
+      walls: readFloorWalls(state.floor),
+      sceneRect: state.ctx.sceneRect,
+      gridSize: state.ctx.gridSize,
+      at: p,
+    });
+    if (!res.op) {
+      notify(`Map Shine: Fill room — ${res.reason}.`, 'warn');
+      return;
+    }
+    commitOp({ ...res.op, ...brushValue() });
+  }
+
+  /** One grid cell (square or hex) under a world point, once per drag. */
+  function paintCellAt(p) {
+    const pts = state.ctx.cellPolygonAt(p.x, p.y);
+    if (!pts) {
+      notify('Map Shine: this scene has no grid — use the Rectangle tool instead.', 'warn');
+      endCells();
+      return;
+    }
+    const id = pts.map((v) => Math.round(v)).join(',');
+    if (state.cellsDone?.has(id)) return;
+    state.cellsDone?.add(id);
+    const xs = pts.filter((_, i) => i % 2 === 0);
+    const ys = pts.filter((_, i) => i % 2 === 1);
+    commitOp(
+      { t: 'poly', pts, ...brushValue() },
+      [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
+      {
+        undoable: false,
+      }
+    );
+  }
+  function endCells() {
+    if (!state.cellsDone) return false;
+    state.cellsDone = null;
+    return true;
+  }
+
+  // ---- MSA Ready: Clean view + full-size files ------------------------------
+  function setCleanViewOn(on) {
+    const next = on === true;
+    if (next === state.cleanView) return;
+    state.cleanView = next;
+    try {
+      setCleanView?.(next);
+    } catch (err) {
+      state.cleanView = false;
+      notify(`Map Shine: Clean view could not switch — ${err?.message || err}.`, 'warn');
+    }
+    state.refreshToolbar?.();
+  }
+
+  /** What Save / Download / Import can do for the active layer. */
+  function fileSupportFor() {
+    const info = getMaskFile?.(state.floor, state.kind) ?? null;
+    return { info, loading: !!state.loading[activeKey()] };
+  }
+
+  async function runFileAction(label, fn) {
+    if (state.busy) return null;
+    state.busy = label;
+    state.refreshToolbar?.();
+    try {
+      return await fn((p) => {
+        state.busy = `${label} ${Math.round((p.done / Math.max(1, p.total)) * 100)}%`;
+        state.refreshToolbar?.();
+      });
+    } finally {
+      state.busy = null;
+      state.refreshToolbar?.();
+    }
+  }
+
+  /** After a file landed beside the map: this layer IS that file now. */
+  async function adoptWrittenFile(key, path) {
+    state.fileBacked[key] = true;
+    state.ops[key] = [fileSeed(path, state.layers[key].spec)];
+    // Drop this layer's draft from the scene flag (the file is the truth now),
+    // saving any other drafts along the way, then let boot find the new file.
+    await save({ force: true });
+    // The scene redraws next; Clean view is a live switch on the OLD canvas, so
+    // hand the map back first rather than leave the new one half-switched.
+    setCleanViewOn(false);
+    onMaskFileWritten?.({ floorIndex: state.floor, kindId: state.kind, path });
+  }
+
+  async function saveToMapFile() {
+    const key = activeKey();
+    if (state.loading[key]) return;
+    const info = getMaskFile?.(state.floor, state.kind) ?? null;
+    const res = await runFileAction('Saving…', (onProgress) =>
+      saveMaskFileFlow({ info, kindId: state.kind, ops: opsFor(key), notify, onProgress })
+    );
+    if (res?.ok && res.path) await adoptWrittenFile(key, res.path);
+  }
+
+  async function downloadFile() {
+    const key = activeKey();
+    if (state.loading[key]) return;
+    const info = getMaskFile?.(state.floor, state.kind) ?? null;
+    await runFileAction('Drawing…', (onProgress) =>
+      downloadMaskFlow({ info, kindId: state.kind, ops: opsFor(key), notify, onProgress })
+    );
+  }
+
+  async function importFile() {
+    const key = activeKey();
+    const info = getMaskFile?.(state.floor, state.kind) ?? null;
+    const res = await runFileAction('Importing…', () => importMaskFlow({ info, kindId: state.kind, notify }));
+    if (!res?.ok || !res.path) return;
+    // Show the imported picture now (the scene reload that follows re-reads it too).
+    const layer = layerFor(state.kind);
+    try {
+      layer.data.set(
+        await readMaskFileToGrid(res.path, layer.spec, kindDef(state.kind)?.absentValue ?? 0, { fresh: true })
+      );
+      state.undo[key] = [];
+      markFull(key);
+    } catch (err) {
+      notify(`Map Shine: imported, but the painter couldn't show it yet (${err?.message || err}).`, 'warn');
+    }
+    await adoptWrittenFile(key, res.path);
   }
 
   // ---- vector tools (point / line / polygon) -----------------------------
@@ -451,16 +780,30 @@ export function installPainter(
     const xs = d.vertices.map((v) => v.x);
     const ys = d.vertices.map((v) => v.y);
     const bbox = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    const flat = d.vertices.flatMap((v) => [v.x, v.y]);
     if (d.type === 'polygon' && d.vertices.length >= 3) {
       pushUndo();
       rasterizePolygon(layer, d.vertices, opts);
+      recordOp({ t: 'poly', pts: flat, v: opts.value, m: opts.mode });
       markWorldRect(activeKey(), ...bbox);
       markEdited();
     } else if (d.type === 'line' && d.vertices.length >= 2) {
       pushUndo();
       rasterizeStrokedLine(layer, d.vertices, state.brush.radius * 2, { ...opts, hardness: state.brush.hardness });
+      recordOp({
+        t: 'line',
+        pts: flat,
+        w: state.brush.radius * 2,
+        v: opts.value,
+        h: state.brush.hardness,
+        m: opts.mode,
+      });
       markWorldRect(activeKey(), ...bbox, state.brush.radius);
       markEdited();
+    } else if (d.type === 'rect' && d.vertices.length === 2) {
+      const pts = rectPoints(d.vertices[0], d.vertices[1]);
+      if (pts[2] - pts[0] < 1 || pts[5] - pts[1] < 1) return; // a click, not a drag
+      commitOp({ t: 'poly', pts, v: opts.value, m: opts.mode }, [pts[0], pts[1], pts[4], pts[5]]);
     }
   }
 
@@ -483,10 +826,24 @@ export function installPainter(
    * mid-stroke is not stolen from by a captured pointer.
    * @returns {boolean} true if a stroke was actually running.
    */
+  /** Let go of a pointer the board captured for a rect/cells drag. */
+  function releaseCapture() {
+    const pid = state.pointerId;
+    state.pointerId = null;
+    if (pid === null) return;
+    try {
+      state.ctx?.boardElement?.releasePointerCapture?.(pid);
+    } catch (err) {
+      // The pointer is already gone (released outside, element re-created) — nothing to release.
+      if (err?.name !== 'NotFoundError') notify(`Map Shine: pointer release failed (${err?.message || err}).`, 'warn');
+    }
+  }
+
   function endStroke() {
     if (!state.painting) return false;
     state.painting = false;
     state.lastWorld = null;
+    state.stroke = null;
     const pid = state.pointerId;
     state.pointerId = null;
     if (pid !== null) {
@@ -507,14 +864,45 @@ export function installPainter(
       e.preventDefault();
       e.stopPropagation();
     };
-    const worldAt = (e) => {
-      const raw = state.ctx.screenToWorld(e.clientX, e.clientY);
-      return state.snap ? state.ctx.snapWorld(raw.x, raw.y) : raw;
+    const worldAt = (e) => snapPoint(state.ctx.screenToWorld(e.clientX, e.clientY));
+    const capture = (e) => {
+      state.pointerId = e.pointerId ?? null;
+      try {
+        state.ctx.boardElement?.setPointerCapture?.(e.pointerId);
+      } catch {
+        state.pointerId = null; // capture refused — the buttons guard in onMove still covers us
+      }
     };
     const onDown = (e) => {
       if (state.modalOpen) return; // a confirm dialog is up
       if (e.button !== 0) return; // left button only; right/middle fall through to Foundry (pan)
       if (e.target !== state.ctx.boardElement) return; // not the map -> let the UI (ours or Foundry's) have it
+      if (state.loading[activeKey()] || state.busy) {
+        // The layer is still being read from its file, or a save is running:
+        // a stroke now would be painted over (or written without it).
+        suppress(e);
+        return;
+      }
+      if (state.tool === 'rect') {
+        const p = worldAt(e);
+        state.draft = { type: 'rect', vertices: [p, p] };
+        capture(e);
+        suppress(e);
+        return;
+      }
+      if (state.tool === 'cells') {
+        pushUndo();
+        state.cellsDone = new Set();
+        capture(e);
+        paintCellAt(state.ctx.screenToWorld(e.clientX, e.clientY));
+        suppress(e);
+        return;
+      }
+      if (state.tool === 'room') {
+        fillRoomAt(state.ctx.screenToWorld(e.clientX, e.clientY));
+        suppress(e);
+        return;
+      }
       if (state.tool === 'brush') {
         state.painting = true;
         state.lastWorld = null;
@@ -529,6 +917,15 @@ export function installPainter(
         }
         pushUndo();
         const raw = state.ctx.screenToWorld(e.clientX, e.clientY); // the brush ignores snap (smooth strokes)
+        state.stroke = {
+          t: 'stroke',
+          pts: [],
+          r: state.brush.radius,
+          v: state.brush.strength,
+          h: state.brush.hardness,
+          m: state.brush.mode,
+        };
+        recordOp(state.stroke);
         paintTo(raw.x, raw.y);
         suppress(e);
         return;
@@ -536,6 +933,14 @@ export function installPainter(
       const p = worldAt(e);
       if (state.tool === 'point') {
         pushUndo();
+        recordOp({
+          t: 'stroke',
+          pts: [p.x, p.y],
+          r: state.brush.radius,
+          v: state.brush.strength,
+          h: state.brush.hardness,
+          m: state.brush.mode,
+        });
         stampWorld(p.x, p.y);
       } else if (state.tool === 'line' || state.tool === 'polygon') {
         // A click near the first vertex closes a polygon; otherwise add a vertex.
@@ -552,7 +957,25 @@ export function installPainter(
       state.mouseClient = { x: e.clientX, y: e.clientY };
       state.hoverOnBoard = e.target === state.ctx.boardElement;
       const raw = state.ctx.screenToWorld(e.clientX, e.clientY);
-      state.cursorWorld = state.snap ? state.ctx.snapWorld(raw.x, raw.y) : raw;
+      state.cursorWorld = snapPoint(raw);
+      if (state.draft?.type === 'rect') {
+        if (!(e.buttons & 1)) {
+          commitDraft(); // released outside the window
+          return;
+        }
+        state.draft.vertices[1] = state.cursorWorld;
+        suppress(e);
+        return;
+      }
+      if (state.cellsDone) {
+        if (state.modalOpen || !(e.buttons & 1)) {
+          endCells();
+          return;
+        }
+        paintCellAt(raw);
+        suppress(e);
+        return;
+      }
       // Once a brush stroke is underway, painting continues even if the drag
       // crosses a panel (ordinary paint-tool behaviour); vector tools are
       // click-based, so a move only updates the rubber-band cursor.
@@ -582,6 +1005,17 @@ export function installPainter(
     // Not gated on `state.tool`: a tool switch mid-stroke (the keyboard
     // shortcuts do not stop one) must still be able to end it.
     const onUp = (e) => {
+      if (state.draft?.type === 'rect') {
+        commitDraft();
+        releaseCapture();
+        suppress(e);
+        return;
+      }
+      if (endCells()) {
+        releaseCapture();
+        suppress(e);
+        return;
+      }
       if (endStroke()) suppress(e);
     };
     // The browser gave up on this pointer (touch cancelled, capture stolen,
@@ -631,7 +1065,12 @@ export function installPainter(
       else if (e.key.toLowerCase() === 'p') setTool('point');
       else if (e.key.toLowerCase() === 'l') setTool('line');
       else if (e.key.toLowerCase() === 'g') setTool('polygon');
-      else if (e.key.toLowerCase() === 's') state.snap = !state.snap;
+      else if (e.key.toLowerCase() === 'r') setTool('rect');
+      else if (e.key.toLowerCase() === 'c') setTool('cells');
+      else if (e.key.toLowerCase() === 'f') setTool('room');
+      else if (e.key.toLowerCase() === 'v') setCleanViewOn(!state.cleanView);
+      else if (e.key.toLowerCase() === 's')
+        state.snapMode = state.snapMode === 'off' ? 'grid' : state.snapMode === 'grid' ? 'quarter' : 'off';
       else return;
       state.refreshToolbar?.();
     };
@@ -682,18 +1121,32 @@ export function installPainter(
     // the auto-follow this project deferred earlier, unlocked for free once
     // the context carries the live viewed-floor index.
     state.floor = Math.max(0, Math.min(Math.max(0, ctx.floorCount - 1), ctx.viewedFloorIndex ?? 0));
+    // The Remote's readiness card opens on a NAMED floor's `_Outdoors` — a
+    // shape tool and whole-grid snap are where a GM starts on one of those.
+    if (opts.kind === 'outdoors' && opts.guided) {
+      state.tool = 'rect';
+      state.snapMode = ctx.gridless ? 'off' : 'grid';
+      state.brush.mode = 'erase';
+      state.brush.strength = 255;
+    }
     layerFor(state.kind);
     buildOverlay();
     installHandlers();
     state.active = true;
     for (const key of Object.keys(state.layers)) markFull(key);
     loop();
+    ensureSeeded(state.kind);
+    if (Number.isInteger(opts.floorIndex) && opts.floorIndex !== state.floor)
+      changeFloor(opts.floorIndex - state.floor);
   }
 
   function exit() {
     if (!state.active) return;
+    setCleanViewOn(false); // never leave the map in Clean view behind a closed painter
     state.active = false;
     endStroke(); // releases the pointer capture too — `painting = false` alone never did
+    endCells();
+    state.draft = null;
     if (state.raf) cancelAnimationFrame(state.raf);
     state.raf = 0;
     removeHandlers();
@@ -737,7 +1190,12 @@ export function installPainter(
   // ---- overlay + toolbar -------------------------------------------------
   function buildOverlay() {
     const overlay = document.createElement('div');
-    Object.assign(overlay.style, { position: 'fixed', inset: '0', zIndex: '100', pointerEvents: 'none' });
+    // ABOVE the map, BELOW every panel (MSA Ready, 2026-11-01): Foundry's board
+    // is z 0 and its token HUD z 1, its UI columns z 30, the Remote z 101. At 100
+    // the overlay tinted the Remote and Foundry's sidebars too — invisible with a
+    // small `_Fire` stroke, a pink wall over the UI once `_Outdoors` paints whole
+    // buildings. The toolbar (its own element, z 101) still sits on top.
+    Object.assign(overlay.style, { position: 'fixed', inset: '0', zIndex: '2', pointerEvents: 'none' });
     const canvas = document.createElement('canvas');
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
@@ -750,14 +1208,30 @@ export function installPainter(
     document.body.appendChild(state.toolbar);
   }
 
-  async function save() {
+  /**
+   * @param {{force?: boolean}} [opts] - `force` writes even with nothing
+   *   unsaved: a file just written beside the map must leave the flag (MSA Ready).
+   */
+  async function save({ force = false } = {}) {
     // Nothing to write. The Save button is `disabled` in this state (see
     // paint-mode-toolbar.js#refreshToolbar), so this is defence in depth for
     // any OTHER caller — a programmatic save, a macro — not the UI path: a
     // no-op save would still cost a scene-flag round trip and re-fire the
     // brush→render bridge for content nothing has changed.
-    if (!state.dirtySinceSave) return;
-    const payload = serializePaintedMasks(state.layers);
+    if (!state.dirtySinceSave && !force) return;
+    // A layer that IS its mask file keeps no draft: the file is the truth, and
+    // a stale draft would keep overriding it after the GM edits that file in
+    // another program (MSA Ready).
+    const drafts = Object.fromEntries(Object.entries(state.layers).filter(([key]) => !state.fileBacked[key]));
+    const payload = serializePaintedMasks(drafts);
+    // The world-space history rides beside each grid, compacted when it grows
+    // past its own budget (scene/mask-ops.js#compactOps — the picture is kept,
+    // only older edits' full-size sharpness is given up).
+    for (const key of Object.keys(payload)) {
+      const { ops } = compactOps(opsFor(key), state.layers[key]);
+      state.ops[key] = ops;
+      payload[key] = { ...payload[key], ops };
+    }
     // PAINT_EMBED_BYTE_BUDGET existed but was never actually checked anywhere
     // live — an "unwired museum" piece. The resolution bump (512 -> 2048) makes
     // it meaningfully more likely a detailed mask actually crosses it, so this
@@ -776,9 +1250,7 @@ export function installPainter(
       const names = heavy.map((h) => h.key.split('::')[0]).join(', ');
       msg += ` ⚠ ${names} ${heavy.length === 1 ? 'is' : 'are'} getting detailed (${heavy
         .map((h) => Math.round(h.bytes / 1024))
-        .join(
-          '/'
-        )} KB) — saved fine, but very fine painted detail will eventually want file-based storage (not yet built).`;
+        .join('/')} KB) — saved fine, but a detailed mask belongs in a file: use ⬆ Save next to map.`;
     }
     state.dirtySinceSave = false;
     // WHAT IS ON THE SCENE IS NOW WHAT IS IN MEMORY — so this is one of the
@@ -789,14 +1261,24 @@ export function installPainter(
     snapshotCommitted();
     state.pendingHydrate = false;
     state.refreshToolbar?.();
-    notify(msg, heavy.length ? 'warn' : 'info');
+    // A forced save with no drafts left is housekeeping after a file write —
+    // "saved 0 painted masks" there only confuses (found live, MSA Ready).
+    if (!(force && n === 0)) notify(msg, heavy.length ? 'warn' : 'info');
     // THE BRUSH→RENDER BRIDGE — see this module's own header. Every
     // in-memory layer, not just `payload`'s own non-empty subset: a layer
     // the author just cleared to fully-empty must still reach
     // ingestPaintedMask so it can stop overriding the render (self-alpha
     // makes an all-zero layer a no-op there, automatically — see that
     // function's own doc).
-    onLayersChanged?.(state.layers);
+    onLayersChanged?.(renderLayers());
+  }
+
+  /** The layer set the render should see: a file-backed layer contributes
+   * nothing of its own (null = forget), since its file is already discovered. */
+  function renderLayers() {
+    const out = {};
+    for (const [key, layer] of Object.entries(state.layers)) out[key] = state.fileBacked[key] ? null : layer;
+    return out;
   }
 
   // ---- scene load --------------------------------------------------------
@@ -834,6 +1316,16 @@ export function installPainter(
     const hydrated = payload ? hydratePaintedMasks(payload, ctx.sceneRect) : { layers: {} };
     pruneGridCaches(hydrated.layers);
     state.layers = hydrated.layers;
+    // Each layer's history, where one was saved (older flags have none —
+    // `ensureSeeded` then makes the layer's picture its history).
+    state.ops = {};
+    for (const key of Object.keys(hydrated.layers)) {
+      const ops = payload?.[key]?.ops;
+      if (isValidOpList(ops)) state.ops[key] = ops;
+    }
+    state.seeded = {};
+    state.fileBacked = {};
+    state.loading = {};
     state.undo = {};
     state.previewRect = {};
     state.dirtySinceSave = false; // freshly loaded from the scene = clean
@@ -841,7 +1333,11 @@ export function installPainter(
     snapshotCommitted(); // what the scene holds IS the committed truth
     for (const key of Object.keys(state.layers)) markFull(key);
     state.refreshToolbar?.();
-    if (announce) onLayersChanged?.(state.layers);
+    if (announce) onLayersChanged?.(renderLayers());
+    // NOT `ensureSeeded` here: a hydrate runs at the top of `canvasReady`, BEFORE
+    // that load's mask discovery — seeding now would miss a file written a moment
+    // ago and start `_Outdoors` all white over it (found live, MSA Ready). Boot
+    // calls `onMasksDiscovered` once discovery has run.
     return { loaded: Object.keys(state.layers).length > 0, mismatched: hydrated.mismatched };
   }
 
@@ -961,7 +1457,16 @@ export function installPainter(
      * conservative half of that choice. */
     getLayers() {
       if (state.pendingHydrate) return {};
-      return state.layers;
+      return renderLayers();
+    },
+    /** Is the painter open? */
+    isActive: () => state.active,
+    /** Boot: this scene's mask discovery has run — an open painter may now
+     * decide where its layer starts (from a file, if one was just found). */
+    onMasksDiscovered() {
+      if (!state.active || state.pendingHydrate) return;
+      ensureSeeded(state.kind);
+      state.refreshToolbar?.();
     },
     /** POOL HEALTH — see gridCachePoolStats' own declaration for the exact
      * hit/miss doctrine. */

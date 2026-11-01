@@ -624,6 +624,11 @@ import {
   applyArtSuppression,
   restoreFoundryArt,
   setMsaMayOwnArt,
+  getMsaMayOwnArt,
+  setFoundryEffectsHidden,
+  readWorldAndScene,
+  readSceneMaskFolder,
+  readPaintContext,
   getCanvasCompositingReport,
   getFoundryRendererCensus,
   setExploredFogBase,
@@ -769,6 +774,7 @@ import {
 import { buildLoadReport } from './diag/load-report.js';
 import {
   installPainter,
+  importMaskFlow,
   openCameraPathDialog,
   installTileMotionPanel,
   installAnchorMode,
@@ -813,6 +819,9 @@ import {
   maskKindById,
   MASK_KINDS,
   assembleLayerDescriptors,
+  buildSceneReadiness,
+  shouldAutoOpen,
+  suffixOf,
 } from './scene/index.js';
 import {
   buildEffectCard,
@@ -2294,6 +2303,11 @@ function install() {
           cancelledPrepareTokens.delete(cancelledPrepareTokens.values().next().value);
       },
     });
+    // MSA READY: the FIRST scene of a page load is drawn (canvasReady) before
+    // this 'ready' hook builds the Remote, so its readiness was worked out with
+    // no Remote to show it on — found live, 2026-11-01: the card appeared on a
+    // scene switch but never on a fresh page load. Show it now.
+    if (readinessPending) refreshSceneReadiness(readinessPending);
   }); // end Hooks.once('ready', ...) — see the deferral comment above installStudio
   // THE PLAYER ROOM (U5, docs/holy/UI-Testament.md §5.5) — safe to construct
   // unconditionally for every client, GM or not (its own header explains
@@ -2384,10 +2398,153 @@ function install() {
       }
     }
   }
+  // ===========================================================================
+  // MSA READY (2026-11-01) — the Scene readiness card, the painter's mask files
+  // and its Clean view. Author: *"If a scene doesn't have the correct masks like
+  // _Outdoors then it won't work but currently the GM may be confused as to why
+  // ... We need the MSA remote to load up automatically and show information if
+  // the scene isn't currently MSA ready"* — and the painting/export half that
+  // makes fixing it quick. The model is scene/scene-readiness.js, the card
+  // ui/rooms/remote/readiness-card.js, the files ui/mask-file-actions.js.
+  // ===========================================================================
+
+  /** Where one floor's art and existing mask file for a kind are — the
+   * painter's and the card's shared answer (ui/mask-file-actions.js#MaskFileInfo). */
+  function getMaskFileInfo(floorIndex, kindId) {
+    const ctx = readPaintContext();
+    if (!ctx.ready) return null;
+    const facts = maskAuthority.getReadinessFacts();
+    const floor = facts.floors.find((f) => f.index === floorIndex) ?? null;
+    const { worldId, sceneId } = readWorldAndScene();
+    return {
+      floorIndex,
+      artUrl: floor?.artSrc ?? null,
+      // A level's background art fills the scene rect — the same rect the
+      // painter's grid covers, so a mask drawn over it lines up by construction.
+      artRect: ctx.sceneRect,
+      existingUrl: floor?.found?.get?.(kindId) ?? null,
+      absentValue: maskKindById(kindId)?.absentValue ?? 0,
+      worldId,
+      sceneId,
+      maskFolder: readSceneMaskFolder(),
+    };
+  }
+
+  /** A mask file landed (painter Save next to map, or an Import): forget the
+   * remembered folder listing and draw the scene again, so the normal scene
+   * load discovers the new file — the one path every scene visit takes. */
+  async function onMaskFileWritten() {
+    maskDiscoveryCache.clear();
+    // A redraw of the SAME scene is read as a floor switch (the viewer is kept,
+    // discovery never re-runs) — found live, 2026-11-01: the new file was on
+    // disk and listed, but only a full page reload found it. Make this draw a
+    // cold start, the same three steps the blank-canvas watchdog takes.
+    forceColdStartNextDraw?.();
+    const res = await redrawActiveScene();
+    if (!res.ok) log.warn(`a mask file was written but the scene could not redraw (${res.reason}) — reload to see it.`);
+  }
+
+  /** THE PAINTER'S CLEAN VIEW — Foundry's plain map art (no MSA, and Foundry's
+   * own lighting output hidden) while the GM paints; MSA back on the way out.
+   * This client only. */
+  let cleanViewRestore = null;
+  function setPaintCleanView(on) {
+    if (on) {
+      if (cleanViewRestore) return;
+      cleanViewRestore = { msaOwned: getMsaMayOwnArt() };
+      setMsaMayOwnArt(false); // so a visibility refresh does not re-suppress the art under us
+      restoreFoundryArt();
+      setFoundryEffectsHidden(true);
+      return;
+    }
+    if (!cleanViewRestore) return;
+    const { msaOwned } = cleanViewRestore;
+    cleanViewRestore = null;
+    setFoundryEffectsHidden(false);
+    if (msaOwned && getVtPanViewerDiagnostics().active) {
+      setMsaMayOwnArt(true);
+      const result = applyArtSuppression();
+      if (!result.applied)
+        log.warn(`Clean view off: MSA could not take the art back (${result.code}): ${result.reason}`);
+    }
+  }
+
+  const READY_SNOOZE_PREFIX = 'msa-ready-snooze:';
+  function readinessSnoozed(sceneId) {
+    try {
+      return !!sceneId && globalThis.localStorage?.getItem(READY_SNOOZE_PREFIX + sceneId) === '1';
+    } catch (err) {
+      log.warn('could not read the readiness snooze (storage blocked) — treating it as not snoozed:', err);
+      return false;
+    }
+  }
+  function snoozeReadiness(sceneId) {
+    try {
+      if (sceneId) globalThis.localStorage?.setItem(READY_SNOOZE_PREFIX + sceneId, '1');
+    } catch (err) {
+      log.warn('could not remember "Not now" for this scene (storage blocked):', err);
+    }
+  }
+
+  const readinessNotify = (msg, type = 'info') => globalThis.ui?.notifications?.[type]?.(msg);
+
+  /**
+   * Re-read the scene's readiness and show it on the Remote. On a scene LOAD
+   * (`fromLoad`), a scene that is not ready opens the Remote by itself — GM only
+   * (the Remote exists only for a GM), and not after "Not now for this scene".
+   */
+  /** Set by the canvas hooks block below (it owns `lastRealSceneId`): make the
+   * next draw of the current scene a full, cold start. */
+  let forceColdStartNextDraw = null;
+  /** A readiness refresh asked for before the Remote existed (see the 'ready' hook). */
+  let readinessPending = null;
+  function refreshSceneReadiness({ fromLoad = false } = {}) {
+    if (fromLoad) MapShine.__painter?.onMasksDiscovered?.();
+    const remote = MapShine.__remote;
+    if (!remote?.setReadiness) {
+      // No Remote YET (first scene of a page load) — or never (a player). Kept
+      // for the 'ready' hook; a player's client simply never builds a Remote.
+      readinessPending = { fromLoad };
+      return;
+    }
+    readinessPending = null;
+    let model;
+    try {
+      model = buildSceneReadiness(maskAuthority.getReadinessFacts());
+    } catch (err) {
+      log.error('scene readiness could not be worked out:', err);
+      return;
+    }
+    const { sceneId } = readWorldAndScene();
+    remote.setReadiness(model, {
+      requiredSuffix: suffixOf('outdoors'),
+      onPaint: (floorIndex) => MapShine.__painter?.enter({ kind: 'outdoors', floorIndex, guided: true }),
+      onImport: async (floorIndex) => {
+        const res = await importMaskFlow({
+          info: getMaskFileInfo(floorIndex, 'outdoors'),
+          kindId: 'outdoors',
+          notify: readinessNotify,
+        });
+        if (res.ok) await onMaskFileWritten();
+      },
+      onSnooze: () => {
+        snoozeReadiness(sceneId);
+        remote.close();
+      },
+      onRecheck: () => onMaskFileWritten(),
+    });
+    if (fromLoad && shouldAutoOpen(model, { snoozed: readinessSnoozed(sceneId) })) {
+      if (!remote.isOpen()) remote.open();
+    }
+  }
+
   MapShine.__painter = installPainter(MapShine, {
     onFloorChanged: syncActiveFloorContext,
     onLayersChanged: (layersByKey) => ingestPaintedLayers(layersByKey),
     onRequestFloorSwitch: switchToPreparedFloor,
+    getMaskFile: getMaskFileInfo,
+    onMaskFileWritten,
+    setCleanView: setPaintCleanView,
   });
   // ANCHOR MODE (2026-07-22) — click-to-place/click-to-edit for discrete point
   // effects (candles today). Installed once, entered per-effect via the
@@ -4032,7 +4189,10 @@ function install() {
         visibleLevelIds: allLevelIds,
         isGM: true,
       });
-      await discoverMasksCached(sceneDoc.id ?? null, discoveryTargetsFrom(everyLevel.items));
+      await discoverMasksCached(
+        sceneDoc.id ?? null,
+        discoveryTargetsFrom(everyLevel.items, readSceneMaskFolder(sceneDoc))
+      );
       onStep?.({ phase: 'masks', done: 1, total: 1 });
       if (isCancelled?.()) return { ok: false, cancelled: true };
     }
@@ -16175,10 +16335,10 @@ function install() {
    * prewarm's discovery is a cache hit for the start rather than a near-miss.
    * @param {Array<{id: string, src: string, kind: string}>} items
    */
-  function discoveryTargetsFrom(items) {
+  function discoveryTargetsFrom(items, maskDir = null) {
     return items
       .filter((it) => it.kind === 'levelBackground' || it.kind === 'levelForeground' || it.kind === 'tile')
-      .map((it) => ({ id: it.id, url: it.src, name: it.id }));
+      .map((it) => ({ id: it.id, url: it.src, name: it.id, ...(maskDir ? { maskDir } : {}) }));
   }
 
   /**
@@ -16200,7 +16360,7 @@ function install() {
    * under way or done (loading audit L-04, Phase 5.2: overlap discovery with start-up). */
   const maskDiscoveryInflight = new Map();
   async function discoverMasksCached(sceneId, targets, onProgress) {
-    const key = `${sceneId}|${targets.map((t) => `${t.id}=${t.url}`).join(';')}`;
+    const key = `${sceneId}|${targets.map((t) => `${t.id}=${t.url}@${t.maskDir ?? ''}`).join(';')}`;
     const hit = maskDiscoveryCache.get(key);
     if (hit && wallClockMs() - hit.at < MASK_DISCOVERY_TTL_MS) {
       onProgress?.({ done: targets.length, total: targets.length, detail: 'remembered from earlier' });
@@ -16248,9 +16408,10 @@ function install() {
         visibleLevelIds: allLevelIds,
         isGM: true,
       });
-      discoverMasksCached(sceneDoc.id ?? null, discoveryTargetsFrom(everyLevel.items)).catch((err) =>
-        log.warn('early mask discovery failed — the scene start will list again:', err)
-      );
+      discoverMasksCached(
+        sceneDoc.id ?? null,
+        discoveryTargetsFrom(everyLevel.items, readSceneMaskFolder(sceneDoc))
+      ).catch((err) => log.warn('early mask discovery failed — the scene start will list again:', err));
     } catch (err) {
       log.warn('could not start mask discovery early — the scene start will do it:', err);
     }
@@ -16436,7 +16597,7 @@ function install() {
     // initially-visible ones (see that const's own comment) — so a floor with
     // NO background or foreground art at all — an all-Tile floor — contributes
     // no floor-level target and still gets full mask support from its tiles.
-    const discoveryTargets = discoveryTargetsFrom(allLevelsLayers.items);
+    const discoveryTargets = discoveryTargetsFrom(allLevelsLayers.items, readSceneMaskFolder(sceneDoc));
 
     // MASK DISCOVERY + AUTHORITY RESET — before the viewer starts, so
     // `layersForItem` is a sync manifest lookup by the time packs build.
@@ -16498,6 +16659,9 @@ function install() {
       resolvePlacement: (item, size) => computeItemPlacement(item, size, dimensions),
     });
     if (maskDiscovery) maskAuthority.setDiscovery(maskDiscovery);
+    // MSA READY — is this scene ready, and if not, say so on the Remote (and
+    // open it, once per load, unless the GM said "Not now" for this scene).
+    refreshSceneReadiness({ fromLoad: true });
 
     // VEGETATION'S URL LOOKUP — through the mask authority's own two query
     // doors now (2026-07-26): `authoredStatus` for a floor's background,
@@ -18563,6 +18727,13 @@ function install() {
     // cheap event was the actual crash: repeated full 512MB-atlas
     // reallocation on ordinary floor toggles.
     let lastRealSceneId = null;
+    // MSA READY — a mask file was just written: the next draw must rebuild,
+    // discovery included (see `onMaskFileWritten`).
+    forceColdStartNextDraw = () => {
+      stopVtPanViewer();
+      lastRealSceneId = null;
+      resetLoadingSceneMemory();
+    };
     // WHICH COLD LOAD IS THE CURRENT ONE (loading audit L-03). `canvasReady` is not
     // awaited by Foundry, so a second one can begin while the first is still booting (a
     // documented quirk of the initial load, and of any module that redraws the canvas).

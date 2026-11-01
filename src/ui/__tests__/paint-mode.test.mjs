@@ -28,12 +28,21 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createToolbar } from '../paint-mode-toolbar.js';
+import {
+  applyOp,
+  seedFromGrid,
+  fileSeed,
+  compactOps,
+  isValidOpList,
+  rectPoints,
+  roomCoverFromWalls,
+} from '../../scene/mask-ops.js';
 
 const PAINT_MODE_PATH = fileURLToPath(new URL('../paint-mode.js', import.meta.url));
 const IMPORT_RE = /^import\s+\{([\s\S]*?)\}\s+from\s+'[^']+';$/gm;
 const RETURN_ANCHOR = '\n  return {\n';
 const TEST_HANDLE =
-  '\n  return {\n    __test: { state, pushUndo, undo, discardEdits, applyHydrate, endStroke, activeKey, save },\n';
+  '\n  return {\n    __test: { state, pushUndo, undo, discardEdits, applyHydrate, endStroke, activeKey, save, opsFor, clearActive, commitOp, ensureSeeded },\n';
 
 /** Compile the real `installPainter` with its imports replaced by stubs. */
 function compileInstallPainter() {
@@ -72,14 +81,14 @@ function compileInstallPainter() {
 const installPainterFactory = compileInstallPainter();
 
 const SCENE_RECT = { x: 0, y: 0, width: 400, height: 400 };
-const gridSpec = { w: 4, h: 4, x: 0, y: 0, texelW: 100, texelH: 100 };
+const gridSpec = { w: 4, h: 4, x: 0, y: 0, width: 400, height: 400, texelW: 100, texelH: 100 };
 const makeLayer = (fill = 0) => ({ spec: gridSpec, data: new Uint8Array(16).fill(fill) });
 
 /**
  * A painter with every Foundry/DOM dependency stubbed. Returns the public
  * surface, the `__test` handle onto its internals, and the recorders.
  */
-function makePainter({ scenePayload = null, sceneLayers = null } = {}) {
+function makePainter({ scenePayload = null, sceneLayers = null, painterOpts = {} } = {}) {
   const calls = { saved: [], announced: [], confirms: [], notifications: [] };
   const answers = [];
   const board = {
@@ -133,8 +142,25 @@ function makePainter({ scenePayload = null, sceneLayers = null } = {}) {
       loop: () => {},
     }),
     createToolbar: () => () => ({}),
+    // MSA Ready: the history helpers are the REAL pure ones; files are stubs.
+    isPaintLayerEmpty: (layer) => !layer.data.some((v) => v > 0),
+    applyOp,
+    seedFromGrid,
+    fileSeed,
+    compactOps,
+    isValidOpList,
+    rectPoints,
+    roomCoverFromWalls,
+    readFloorWalls: () => [],
+    readMaskFileToGrid: async () => new Uint8Array(16).fill(200),
+    saveMaskFileFlow: async () => ({ ok: false }),
+    downloadMaskFlow: async () => ({ ok: false }),
+    importMaskFlow: async () => ({ ok: false }),
   };
-  const painter = installPainterFactory(deps)({}, { onLayersChanged: (layers) => calls.announced.push(layers) });
+  const painter = installPainterFactory(deps)(
+    {},
+    { onLayersChanged: (layers) => calls.announced.push(layers), ...painterOpts }
+  );
   return { painter, t: painter.__test, state: painter.__test.state, calls, answers, board, ctx };
 }
 
@@ -393,13 +419,18 @@ function runToolbarChecks(t) {
     const answers = [];
     const state = {
       tool: 'brush',
-      snap: false,
+      snapMode: 'off',
       floor: 2,
       kind: 'water',
       floorSwitching: false,
       dirtySinceSave: false,
       brush: { radius: 90, strength: 180, hardness: 0.55, mode: 'add' },
       refreshToolbar: null,
+      // MSA Ready
+      cleanView: false,
+      overlayOpacity: 0.8,
+      busy: null,
+      fileBacked: {},
     };
     const buildToolbar = createToolbar(state, {
       setTool: () => {},
@@ -419,6 +450,14 @@ function runToolbarChecks(t) {
         { id: 'fire', suffixes: ['_Fire'] },
         { id: 'water', suffixes: ['_Water'] },
       ],
+      ensureSeeded: () => {},
+      startFromWalls: () => {},
+      startAllOutdoors: () => {},
+      setCleanViewOn: () => {},
+      saveToMapFile: () => {},
+      downloadFile: () => {},
+      importFile: () => {},
+      fileSupportFor: () => ({ info: null, loading: false }),
     });
     const bar = buildToolbar();
     const buttons = collectButtons(bar);
@@ -455,5 +494,101 @@ function runToolbarChecks(t) {
     if (hadDocument) globalThis.document = previousDocument;
     else delete globalThis.document;
     throw err;
+  }
+}
+
+/**
+ * MSA READY (2026-11-01) — the painter's world-space history and its file
+ * handling: every edit is recorded beside the grid (and undone with it), Save
+ * writes the history into the flag but keeps no draft for a layer that IS its
+ * mask file, a blank `_Outdoors` starts all outdoors, and a layer whose floor
+ * already has a mask file opens FROM that file.
+ */
+export async function runMsaReady(t) {
+  const { ok } = t;
+  {
+    const { t: api, state } = makePainter();
+    state.layers['fire::0'] = makeLayer(10);
+    state.ops['fire::0'] = [];
+    state.kind = 'fire';
+    state.floor = 0;
+    api.clearActive();
+    const last = api.opsFor('fire::0').at(-1);
+    ok('Clear is recorded as a fill-0 op', last?.t === 'fill' && last?.v === 0);
+    api.commitOp({ t: 'fill', v: 77 });
+    ok(
+      'an op is applied to the grid and recorded',
+      state.layers['fire::0'].data[0] === 77 && api.opsFor('fire::0').length === 2
+    );
+    api.undo();
+    ok(
+      'undo rolls back the pixels AND the history together',
+      state.layers['fire::0'].data[0] === 0 && api.opsFor('fire::0').length === 1
+    );
+  }
+  {
+    const { t: api, state, calls } = makePainter();
+    state.layers['fire::0'] = makeLayer(10);
+    state.layers['water::0'] = makeLayer(30);
+    state.ops['fire::0'] = [{ t: 'fill', v: 10 }];
+    state.fileBacked['water::0'] = true;
+    state.dirtySinceSave = true;
+    await api.save();
+    const saved = calls.saved.at(-1) ?? {};
+    ok(
+      'save writes the history beside the grid',
+      Array.isArray(saved['fire::0']?.ops) && saved['fire::0'].ops[0].v === 10
+    );
+    ok('a file-backed layer keeps no draft in the flag', !('water::0' in saved));
+    ok('...and the render is told to forget it', calls.announced.at(-1)?.['water::0'] === null);
+    ok('the layer object itself is not mutated', !('ops' in state.layers['fire::0']));
+    await api.save();
+    ok('nothing unsaved: no write', calls.saved.length === 1);
+    await api.save({ force: true });
+    ok('force writes anyway', calls.saved.length === 2);
+  }
+  {
+    const { t: api, state } = makePainter();
+    state.kind = 'outdoors';
+    state.floor = 0;
+    state.ctx = { sceneRect: SCENE_RECT };
+    await api.ensureSeeded('outdoors');
+    ok(
+      'a blank outdoors layer starts white',
+      state.layers['outdoors::0'].data.every((v) => v === 255)
+    );
+    ok(
+      '...with a fill-255 history',
+      state.ops['outdoors::0']?.[0]?.t === 'fill' && state.ops['outdoors::0'][0].v === 255
+    );
+  }
+  {
+    const { t: api, state } = makePainter({ painterOpts: { getMaskFile: () => ({ existingUrl: 'maps/a.png' }) } });
+    state.kind = 'fire';
+    state.floor = 0;
+    state.ctx = { sceneRect: SCENE_RECT };
+    await api.ensureSeeded('fire');
+    ok(
+      'a layer with a file opens FROM the file',
+      state.layers['fire::0'].data.every((v) => v === 200)
+    );
+    ok(
+      "...its history starts with that file's seed",
+      state.ops['fire::0']?.[0]?.t === 'seed' && state.ops['fire::0'][0].url === 'maps/a.png'
+    );
+    ok('...and it counts as the file (no draft)', state.fileBacked['fire::0'] === true);
+  }
+  {
+    // An older painted draft over a file: the file is read first, the draft laid over it.
+    const { t: api, state } = makePainter({ painterOpts: { getMaskFile: () => ({ existingUrl: 'maps/a.png' }) } });
+    state.kind = 'fire';
+    state.floor = 0;
+    state.layers['fire::0'] = makeLayer(0);
+    state.layers['fire::0'].data[0] = 90;
+    state.ctx = { sceneRect: SCENE_RECT };
+    await api.ensureSeeded('fire');
+    const d = state.layers['fire::0'].data;
+    ok('draft over file: the draft wins where it painted', d[0] === 90 && d[1] === 200);
+    ok('...and the layer is a draft, not the file', !state.fileBacked['fire::0'] && state.ops['fire::0'].length === 2);
   }
 }

@@ -20,7 +20,7 @@ import { run as runPainterDepartment } from './painter-department.test.mjs';
 import { run as runStudioStyle } from './studio-style.test.mjs';
 import { run as runRoomStyle } from './room-style.test.mjs';
 import { run as runExtensionSections } from './extension-sections.test.mjs';
-import { run as runPaintMode } from './paint-mode.test.mjs';
+import { run as runPaintMode, runMsaReady as runPaintModeMsaReady } from './paint-mode.test.mjs';
 import { run as runEffectCatalog } from './effect-catalog.test.mjs';
 
 let passed = 0;
@@ -73,6 +73,7 @@ const suites = [
   // no-DOM path, so ordering it after that suite costs nothing and removes
   // the only way a leak could ever be mistaken for a passing assertion.
   ['paint-mode', runPaintMode],
+  ['paint-mode (MSA Ready)', runPaintModeMsaReady],
   ['effect-catalog', runEffectCatalog],
 ];
 

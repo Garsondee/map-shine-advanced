@@ -24587,7 +24587,7 @@ async function startVtPanViewerUnserialized({
       {
         const doorFloor = vegFloors.find((f) => f.index === view.floorIndex);
         if (doorFloor) {
-          doorGraphics.setLeafRenderOrder(doorRenderOrderUnderForeground(itemsWithVegetation, doorFloor.elevationTop));
+          doorGraphics.setLeafRenderOrder(doorRenderOrderUnderForeground(itemsWithVegetation, doorFloor));
         }
       }
       const wantedIds = new Set(items.map((i) => i.id));

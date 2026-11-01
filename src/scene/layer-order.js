@@ -221,14 +221,26 @@ export function sortByLayer(items) {
  * every consumer of the dense 0..N-1 ranks (depth authority, lights) is
  * undisturbed. Three sorts by numeric `renderOrder`, so a half step slots in.
  *
- * @param {Array<{key: LayerKey, renderOrder?: number}>} sortedItems - the
- *   stamped output of {@link sortByLayer}.
- * @param {number|null|undefined} elevationTop - the viewed Level's
- *   `elevation.top`; null/undefined read as Foundry's +Infinity.
+ * ⚠️ A Level with no top set reads as +Infinity (`Level#prepareBaseData`), yet
+ * its overhead tiles keep a FINITE elevation (`migrateOverheadTiles` puts an
+ * old overhead tile at foregroundElevation ?? 4 grid units). The foreground
+ * key alone then sits above those roofs — the live bug (2026-11-01: a door
+ * leaf drawn over a shingle roof). So the door is ALSO kept under the lowest
+ * TILE raised above the floor's ground and below its ceiling — the same
+ * "overhead" rule `scene/mask-derive.js` uses (`isOverhead`).
+ *
+ * @param {Array<{key: LayerKey, kind?: string, renderOrder?: number}>} sortedItems -
+ *   the stamped output of {@link sortByLayer}.
+ * @param {{elevationBottom?: number|null, elevationTop?: number|null}} floor -
+ *   the viewed Level's band; null/undefined bottom/top read as Foundry's -/+Infinity.
  * @returns {number}
  */
-export function doorRenderOrderUnderForeground(sortedItems, elevationTop) {
-  const top = typeof elevationTop === 'number' && !Number.isNaN(elevationTop) ? elevationTop : Infinity;
+export function doorRenderOrderUnderForeground(sortedItems, floor) {
+  const num = (v, fallback) => (typeof v === 'number' && !Number.isNaN(v) ? v : fallback);
+  const top = num(floor?.elevationTop, Infinity);
+  // Level#elevation.base: the floor's ground when its bottom is unbounded.
+  const ground = num(floor?.elevationBottom, -Infinity);
+  const base = Number.isFinite(ground) ? ground : Math.min(top, 0);
   const doorKey = makeLayerKey({
     elevation: top,
     sortLayer: -1,
@@ -237,11 +249,16 @@ export function doorRenderOrderUnderForeground(sortedItems, elevationTop) {
     tiebreak: -Infinity,
   });
   let below = -1;
+  let lowestOverhead = Infinity;
   for (const item of sortedItems) {
     if (typeof item.renderOrder !== 'number') continue;
     if (compareLayerKeys(item.key, doorKey) < 0 && item.renderOrder > below) below = item.renderOrder;
+    const e = item.key.elevation;
+    if (item.kind === 'tile' && e > base && e < top && item.renderOrder < lowestOverhead) {
+      lowestOverhead = item.renderOrder;
+    }
   }
-  return below + 0.5;
+  return Math.min(below + 0.5, lowestOverhead - 0.5);
 }
 
 /**

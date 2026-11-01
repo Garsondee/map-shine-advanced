@@ -91,7 +91,7 @@
  */
 
 import { shadowPenumbraPx, shadowOffsetDirection, clamp01 } from './lighting/light-visibility.js';
-import { layerThrowPx } from './lighting/layer-smear.js';
+import { layerThrowPx, softShadowCeilingPx } from './lighting/layer-smear.js';
 
 /**
  * How much overcast softens a shadow's edge. At full cloud the penumbra is
@@ -166,12 +166,30 @@ export const GOLDEN_SHADOW_STRENGTH_CEIL = 0.97;
 export const GOLDEN_SHADOW_LENGTH_GAIN = 1;
 
 /** The Sun Shadows card's own defaults (`effects/sun-shadows.js`), for a handle built without one. */
-export const DEFAULT_SHADOW_LOOK = Object.freeze({ strength01: 0.85, lengthScale: 0.5, dawnDuskLength: 4, softnessBias: 0.25 });
+export const DEFAULT_SHADOW_LOOK = Object.freeze({
+  strength01: 0.85,
+  lengthScale: 0.5,
+  dawnDuskLength: 4,
+  softnessBias: 0.25,
+  longestShadowSquares: 10,
+});
+
+/**
+ * The scene's longest shadow in world px: the card's "Longest shadow" (grid squares) × the grid.
+ * See `layer-smear.js#softShadowCeilingPx` for the rule every producer's throw eases into.
+ * @param {object} [look] @param {number} [gridSizePx] - px per grid square; invalid → 100.
+ * @returns {number} px, > 0.
+ */
+export function longestShadowPx(look, gridSizePx) {
+  const g = Number.isFinite(gridSizePx) && gridSizePx > 0 ? gridSizePx : 100;
+  return resolveShadowLook(look).longestShadowSquares * g;
+}
 
 /**
  * The look with every value made finite (a missing or junk slider falls back to its default).
  * @param {object} [look]
- * @returns {Readonly<{strength01:number, lengthScale:number, dawnDuskLength:number, softnessBias:number}>}
+ * @returns {Readonly<{strength01:number, lengthScale:number, dawnDuskLength:number, softnessBias:number,
+ *   longestShadowSquares:number}>}
  */
 export function resolveShadowLook(look) {
   const pick = (k, lo, hi) => {
@@ -183,12 +201,16 @@ export function resolveShadowLook(look) {
     lengthScale: pick('lengthScale', 0.05, 4),
     dawnDuskLength: pick('dawnDuskLength', 0.5, 12),
     softnessBias: pick('softnessBias', 0.05, 4),
+    longestShadowSquares: pick('longestShadowSquares', 1, 60),
   });
 }
 
 /** An opaque caster's core strength before the slider and the sky: 0.665, darker at golden hour. */
 export function shadowCoreStrength(golden01) {
-  return Math.min(GOLDEN_SHADOW_STRENGTH_CEIL, SHADOW_CORE_STRENGTH * (1 + GOLDEN_SHADOW_STRENGTH_GAIN * clamp01(golden01 ?? 0)));
+  return Math.min(
+    GOLDEN_SHADOW_STRENGTH_CEIL,
+    SHADOW_CORE_STRENGTH * (1 + GOLDEN_SHADOW_STRENGTH_GAIN * clamp01(golden01 ?? 0))
+  );
 }
 
 /**
@@ -232,6 +254,33 @@ export const SHADOW_NOON_REFERENCE_DEPTH = SHADOW_CORE_STRENGTH * DEFAULT_SHADOW
  * @param {number} noonStrength01
  * @returns {number} 0..1
  */
+/**
+ * THE TWO STAGES A SHADOW CAN BE DRAWN AT (2026-11-01, shadow consistency round 6).
+ *
+ * Buildings, overhead tiles and clouds remove LIGHT: the bake's visibility multiplies the scene's
+ * ambient (`environmental-light.js`: illum = ambient × sunVis), and the light-to-colour step then
+ * raises that ratio to a power. Vegetation and ropes darken the ground COLOUR, which passes through
+ * linearly. So the same darkness D read as D on a tree and as 1 − (1 − D)^γ on a building: equal
+ * while shadows are short and soft, apart at golden hour when a building's long shadow shows its
+ * full core. Measured on the shadow bench (linear luminance, full cores): D = 0.565 → building 0.76
+ * and D = 0.77 → building 0.92, both γ = 1.72. A constant gain cannot close that (it overshoots at
+ * noon); this transfer can, because it is the light stage's own curve.
+ *
+ * Feed it what the LIGHT stage would have been handed (opacity × the shared depth) and draw the
+ * result on the colour stage.
+ */
+export const SHADOW_LIGHT_STAGE_GAMMA = 1.72;
+
+/**
+ * A light-stage darkness, re-expressed for a shadow drawn on the ground colour.
+ * @param {number} lightStageDarkness01 - 0..1 (`forCaster(...).strength01`).
+ * @returns {number} 0..1, never lighter than the input.
+ */
+export function colourStageDarkness(lightStageDarkness01) {
+  const d = clamp01(Number(lightStageDarkness01) || 0);
+  return 1 - Math.pow(1 - d, SHADOW_LIGHT_STAGE_GAMMA);
+}
+
 export function opacityForNoonStrength(noonStrength01) {
   const s = Number(noonStrength01);
   return Number.isFinite(s) && s > 0 ? Math.min(1, s / SHADOW_NOON_REFERENCE_DEPTH) : 0;
@@ -387,14 +436,24 @@ export function shadowAtmosphere(sun, weather) {
  * @param {{elevationDeg?: number, azimuthDeg?: number, dayFactor01?: number}} [spec.sun] - `env.sun`.
  * @param {{cloudCover01?: number}} [spec.weather] - `env.weather`.
  * @param {number} [spec.maxOffsetPx] - cap on any caster's throw (world px).
+ * @param {number} [spec.gridSizePx] - px per grid square, for the longest shadow ({@link longestShadowPx}).
  * @returns {Readonly<object>}
  */
-export function createShadowHandle({ version = 0, sun = null, weather = null, maxOffsetPx = 4096, look = null } = {}) {
+export function createShadowHandle({
+  version = 0,
+  sun = null,
+  weather = null,
+  maxOffsetPx = 4096,
+  look = null,
+  gridSizePx = 100,
+} = {}) {
   const atmosphere = shadowAtmosphere(sun, weather);
   // THE SHARED LOOK (see SHADOW_CORE_STRENGTH): resolved once per sky, read by every caster.
   const shadowLook = resolveShadowLook(look);
   const depth01 = shadowDepth01(atmosphere, shadowLook);
   const throwPerPx = shadowThrowPerPx(atmosphere, shadowLook);
+  // THE LONGEST SHADOW every caster's throw eases into — the bake reads this same number off the handle.
+  const longestPx = longestShadowPx(shadowLook, gridSizePx);
 
   /**
    * Everything one caster needs, in world px. Plain JS (not TSL nodes) — a
@@ -425,7 +484,10 @@ export function createShadowHandle({ version = 0, sun = null, weather = null, ma
     // (and a separate golden ×2 in the vegetation subsystem): measured on the bench,
     // trees threw 2.2× further than buildings, relative to height, at noon.
     const scale = Number.isFinite(offsetScale) && offsetScale > 0 ? offsetScale : 1;
-    const length = Math.min(Number.isFinite(maxOffsetPx) && maxOffsetPx > 0 ? maxOffsetPx : 4096, h * throwPerPx * scale);
+    const length = Math.min(
+      Number.isFinite(maxOffsetPx) && maxOffsetPx > 0 ? maxOffsetPx : 4096,
+      softShadowCeilingPx(h * throwPerPx, longestPx) * scale
+    );
     const dir0 = shadowOffsetDirection(atmosphere.azimuthDeg);
     const offset = { x: dir0.x * length, y: dir0.y * length, length };
     const rawPenumbra = shadowPenumbraPx({
@@ -448,5 +510,5 @@ export function createShadowHandle({ version = 0, sun = null, weather = null, ma
     };
   }
 
-  return Object.freeze({ version, atmosphere, look: shadowLook, depth01, throwPerPx, forCaster });
+  return Object.freeze({ version, atmosphere, look: shadowLook, depth01, throwPerPx, longestPx, forCaster });
 }

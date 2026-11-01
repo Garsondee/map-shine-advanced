@@ -18,10 +18,12 @@ import {
   vegetationShadowReachPx,
   vegetationShadowMaxThrowPx,
   vegetationShadowShift,
+  vegetationShadowHeightPx,
+  vegetationArtCoversScene,
   VEG_SHADOW_SMEAR_TAPS,
 } from '../vegetation-shadow-subsystem.js';
 import { VEGETATION_KINDS } from '../vegetation.js';
-import { BASE_SOFTNESS_PX, DEFAULT_SHADOW_LOOK, shadowMaxThrowPerPx } from '../shadow-access.js';
+import { BASE_SOFTNESS_PX, DEFAULT_SHADOW_LOOK, shadowMaxThrowPerPx, colourStageDarkness } from '../shadow-access.js';
 import { shadowPenumbraPx } from '../lighting/light-visibility.js';
 import { computeQuadCorners } from '../../foundry/scene-geometry.js';
 
@@ -78,7 +80,10 @@ export function run(t) {
       'syncUniforms returns true when the effective strength is above zero',
       sub.syncUniforms(uni, TREE, PLACEMENT, PARAMS) === true
     );
-    ok('...and it wrote the strength through', uni.uShadowStrength.value === 0.45);
+    ok(
+      '...and it wrote the strength through (re-expressed for the colour stage)',
+      uni.uShadowStrength.value === colourStageDarkness(0.45)
+    );
   }
   {
     const sub = makeSubsystem({ castStrength: 0 });
@@ -154,7 +159,10 @@ export function run(t) {
     );
     ok(
       `${kind.id}: the quad holds the whole throw, or as much as the capped pad allows`,
-      Math.abs(vegetationShadowReachPx(kind) - Math.min(maxThrow, 2 * (vegetationShadowPadPx(kind) - blur))) < 1e-9
+      Math.abs(
+        vegetationShadowReachPx(kind) -
+          Math.min(maxThrow, 2 * (vegetationShadowPadPx(kind) - Math.min(blur, vegetationShadowPadPx(kind) * 0.25)))
+      ) < 1e-9
     );
   }
   {
@@ -162,16 +170,31 @@ export function run(t) {
     makeSubsystem({ castStrength: 0.45 }).syncUniforms(day, TREE, PLACEMENT, PARAMS);
     const gold = fakeShadowUniforms();
     makeSubsystem({ castStrength: 0.45, golden01: 1 }).syncUniforms(gold, TREE, PLACEMENT, PARAMS);
-    ok('golden hour is NOT re-applied to the strength (it is already in the cast)', gold.uShadowStrength.value === 0.45);
+    ok(
+      'golden hour is NOT re-applied to the strength (it is already in the cast)',
+      gold.uShadowStrength.value === colourStageDarkness(0.45)
+    );
     ok(
       'golden hour is NOT re-applied to the sweep',
       Math.abs(gold.uShadowSmearUv.value.x - day.uShadowSmearUv.value.x) < 1e-12
     );
-    ok('the strength is the cast strength', day.uShadowStrength.value === 0.45);
     ok(
-      'the quad shift is half the sweep',
-      gold.uShadowShiftUv.value.x === gold.uShadowSmearUv.value.x / 2 &&
-        gold.uShadowShiftWorld.value.x === gold.uShadowShiftUv.value.x * PLACEMENT.width
+      'the strength is the cast strength, on the colour stage',
+      day.uShadowStrength.value === colourStageDarkness(0.45)
+    );
+    // A canopy covering the whole scene (the usual _Tree/_Bush overlay) holds every on-scene shadow pixel
+    // on its own quad: no shift (2026-11-01, round 6 — the shift and its pad cap cut tree throws short).
+    ok(
+      'a scene-covering canopy is not shifted',
+      gold.uShadowShiftUv.value.x === 0 && gold.uShadowShiftWorld.value.x === 0 && gold.uShadowSmearUv.value.x !== 0
+    );
+    const tile = fakeShadowUniforms();
+    const TILE = { x: 1000, y: 1000, width: 600, height: 600 };
+    makeSubsystem({ castStrength: 0.45, golden01: 1 }).syncUniforms(tile, TREE, TILE, PARAMS);
+    ok(
+      'a tile canopy (not covering the scene) keeps the quad shift of half its sweep',
+      tile.uShadowShiftUv.value.x === tile.uShadowSmearUv.value.x / 2 &&
+        tile.uShadowShiftWorld.value.x === tile.uShadowShiftUv.value.x * TILE.width
     );
   }
 
@@ -238,4 +261,43 @@ export function run(t) {
     const expectedLod = Math.max(0, Math.min(5, Math.log2((47 / 3) * 1)));
     ok('the coarse-tier LOD matches the documented formula exactly', coarser.uShadowSmearLod.value === expectedLod);
   }
+  // ── PLANTS CAST FROM THEIR OWN HEIGHT (2026-11-01, shadow consistency round 6) ──
+  {
+    const bush = VEGETATION_KINDS.find((k) => k.id === 'bush');
+    ok(
+      'a tree casts from its Tree height through the grid (25 ft x 20 px/ft = 500 px)',
+      vegetationShadowHeightPx(TREE, { treeHeightFt: 25 }, 20) === 500
+    );
+    ok('a bush casts from its Bush height', vegetationShadowHeightPx(bush, { bushHeightFt: 2 }, 20) === 40);
+    ok(
+      'no readable grid → the kind\u2019s fixed fallback height',
+      vegetationShadowHeightPx(TREE, { treeHeightFt: 25 }, null) === TREE.shadowHeightPx
+    );
+    ok('no height param → the fallback, never 0', vegetationShadowHeightPx(TREE, {}, 20) === TREE.shadowHeightPx);
+    ok(
+      'the longest throw scales with the real height',
+      vegetationShadowMaxThrowPx(TREE, 500) === 500 * shadowMaxThrowPerPx(DEFAULT_SHADOW_LOOK)
+    );
+    ok(
+      'a tile is reached only as far as the pad it was BUILT with',
+      vegetationShadowReachPx(TREE, 500, 100) < vegetationShadowReachPx(TREE, 500, 320)
+    );
+    const rect = { x: 0, y: 0, width: 4000, height: 3000 };
+    ok(
+      'an overlay matching the scene rect covers the scene',
+      vegetationArtCoversScene({ x: 2000, y: 1500, width: 4000, height: 3000 }, rect)
+    );
+    ok('a tile does not', !vegetationArtCoversScene({ x: 500, y: 500, width: 300, height: 300 }, rect));
+  }
+  // ── THE COLOUR STAGE READS LIKE THE LIGHT STAGE (2026-11-01, round 6) ──
+  ok('colour stage: no shadow stays no shadow', colourStageDarkness(0) === 0);
+  ok('colour stage: a full shadow stays full', colourStageDarkness(1) === 1);
+  ok(
+    'colour stage: never lighter than the light-stage darkness it stands for',
+    [0.1, 0.3, 0.565, 0.77, 0.9].every((d) => colourStageDarkness(d) >= d)
+  );
+  ok(
+    'colour stage: the measured bench points (D 0.565 → 0.76, D 0.77 → 0.92)',
+    Math.abs(colourStageDarkness(0.565) - 0.76) < 0.01 && Math.abs(colourStageDarkness(0.77) - 0.92) < 0.01
+  );
 }

@@ -270,9 +270,11 @@ const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
  * @param {number} [args.lengthScale=1] - global throw multiplier (<1 = shorter).
  * @param {number} [args.maxLengthMul=0] - cap as a multiple of the layer's own
  *   height; 0/absent = uncapped.
+ * @param {number} [args.longestPx=0] - the scene's LONGEST SHADOW, world px
+ *   ({@link softShadowCeilingPx}); 0/absent = no ceiling.
  * @returns {number} world px, >= 0.
  */
-export function layerThrowPx({ heightPx, elevationDeg, lengthScale = 1, maxLengthMul = 0 }) {
+export function layerThrowPx({ heightPx, elevationDeg, lengthScale = 1, maxLengthMul = 0, longestPx = 0 }) {
   const h = Number.isFinite(heightPx) && heightPx > 0 ? heightPx : 0;
   if (h === 0) return 0;
   const elev = Math.min(90, Math.max(0, Number.isFinite(elevationDeg) ? elevationDeg : 90));
@@ -281,7 +283,35 @@ export function layerThrowPx({ heightPx, elevationDeg, lengthScale = 1, maxLengt
   const scaledTan = realTan / scale;
   const tanFloor = Number.isFinite(maxLengthMul) && maxLengthMul > 0 ? 1 / maxLengthMul : 0;
   const effTan = Math.max(scaledTan, tanFloor);
-  return Math.min(HARD_CAP_PX, effTan > MIN_TAN_ELEV ? h / effTan : HARD_CAP_PX);
+  return softShadowCeilingPx(Math.min(HARD_CAP_PX, effTan > MIN_TAN_ELEV ? h / effTan : HARD_CAP_PX), longestPx);
+}
+
+/**
+ * THE LONGEST SHADOW (2026-11-01, author: "a nice compromise where a tree's shadow doesn't look like it
+ * belongs to a different tree and doesn't look like it's completely detached … a solution that isn't
+ * physics accurate but which does look appealing from above … the same logic for all our elongated
+ * shadows so that things fit together in a scene").
+ *
+ * Every throw — a wall's, a canopy's, a rope's — eases into ONE scene-wide length, `C·tanh(throw / C)`,
+ * instead of running out to its height-relative cap. Why this shape:
+ *   - SHORT throws are untouched (tanh(x) ≈ x): through the day a 25 ft tree still throws about twice
+ *     a 13 ft wall, so height still reads.
+ *   - LONG throws converge: at the golden peak a tree, a wall and a tower all reach about C, so nothing
+ *     runs past its neighbours and a clump of _Tree art keeps its shadow among its own trunks. Physically
+ *     a 25 ft tree throws ~200 ft at a 7° sun — that is the "belongs to a different tree" streak.
+ *   - SMOOTH: no corner in time where a shadow suddenly stops growing (the dawn/dusk cap's own corner is
+ *     softened too, because it now sits beyond the knee).
+ * Grid-relative, not a pixel constant (the owner multiplies the Sun Shadows card's "Longest shadow", in
+ * squares, by the grid), so a 70 px and a 200 px grid map look alike.
+ *
+ * @param {number} throwPx - the physical (scaled, capped) throw.
+ * @param {number} [longestPx] - the ceiling C, world px; 0/absent/invalid = none.
+ * @returns {number} world px, always < C.
+ */
+export function softShadowCeilingPx(throwPx, longestPx = 0) {
+  const t = Number.isFinite(throwPx) && throwPx > 0 ? throwPx : 0;
+  const c = Number.isFinite(longestPx) && longestPx > 0 ? longestPx : 0;
+  return c > 0 ? c * Math.tanh(t / c) : t;
 }
 
 /**
@@ -453,6 +483,7 @@ function isotropicDepthTerm(sampleLayers, x, y, layerIndex, radiusPx) {
  * @param {number} args.azimuthDeg @param {number} args.elevationDeg
  * @param {number[]} args.heightsPx - one height per layer, `SHADOW_LAYER_COUNT` long.
  * @param {number} [args.lengthScale] @param {number} [args.maxLengthMul]
+ * @param {number} [args.longestPx] - the scene's longest shadow ({@link softShadowCeilingPx}).
  * @returns {{dirX:number, dirY:number, throwPx:number[], heightPx:number[], maxThrowPx:number}}
  *   `dirX/dirY` point TOWARD the sun — the direction the back-trace walks.
  *   `heightPx` is the resolved INPUT height per layer, carried through beside
@@ -462,14 +493,21 @@ function isotropicDepthTerm(sampleLayers, x, y, layerIndex, radiusPx) {
  *   both from the one resolve is what keeps the twin and the shader reading the
  *   same pair, rather than the caller re-deriving one of them.
  */
-export function resolveLayerSmear({ azimuthDeg, elevationDeg, heightsPx = [], lengthScale = 1, maxLengthMul = 0 }) {
+export function resolveLayerSmear({
+  azimuthDeg,
+  elevationDeg,
+  heightsPx = [],
+  lengthScale = 1,
+  maxLengthMul = 0,
+  longestPx = 0,
+}) {
   const dir = marchDirectionToSun(azimuthDeg);
   const throwPx = [];
   const heightPx = [];
   for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
     const h = Number.isFinite(heightsPx[i]) && heightsPx[i] > 0 ? heightsPx[i] : 0;
     heightPx.push(h);
-    throwPx.push(layerThrowPx({ heightPx: h, elevationDeg, lengthScale, maxLengthMul }));
+    throwPx.push(layerThrowPx({ heightPx: h, elevationDeg, lengthScale, maxLengthMul, longestPx }));
   }
   return { dirX: dir.x, dirY: dir.y, throwPx, heightPx, maxThrowPx: Math.max(0, ...throwPx) };
 }

@@ -216,6 +216,7 @@ import {
   GOLDEN_SHADOW_STRENGTH_GAIN,
   GOLDEN_SHADOW_STRENGTH_CEIL,
   GOLDEN_SHADOW_LENGTH_GAIN,
+  longestShadowPx,
 } from '../shadow-access.js';
 import {
   resolveLayerSmear,
@@ -337,7 +338,12 @@ export const SUN_SHADOW_EDGE_BAND_PX = 384;
 // scene including ones whose saved slider value would have masked a new default.
 // 2026-11-01: the 0.665 now lives in `shadow-access.js#SHADOW_CORE_STRENGTH` — THE
 // shared core every producer's darkness is built from (the shadow consistency pass).
-export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([SHADOW_CORE_STRENGTH, SHADOW_CORE_STRENGTH, SHADOW_CORE_STRENGTH, SHADOW_CORE_STRENGTH]);
+export const SUN_SHADOW_LAYER_STRENGTH = Object.freeze([
+  SHADOW_CORE_STRENGTH,
+  SHADOW_CORE_STRENGTH,
+  SHADOW_CORE_STRENGTH,
+  SHADOW_CORE_STRENGTH,
+]);
 // GOLDEN HOUR EXAGGERATION (2026-10-27, author: "building shadows should be very
 // strong and very long at the golden hour"). Both scale with `golden01` (the
 // ONE golden-hour bell, `world/sun.js`), so they vanish by midday and the
@@ -1328,6 +1334,8 @@ function createFloorSlot({
       // contract the previous model's `resolveSunMarch` used.
       lengthScale: (params.lengthScale ?? 1) * (1 + GOLDEN_SHADOW_LENGTH_GAIN * golden01),
       maxLengthMul: (params.dawnDuskLength ?? 0) * (1 + GOLDEN_SHADOW_LENGTH_GAIN * golden01),
+      // THE LONGEST SHADOW — the same ceiling every other producer's throw eases into (forCaster).
+      longestPx: longestShadowPx(params, dimensions?.size),
     });
     sunShadowBake.setSun(resolved);
     // THE DEBUG ISOLATION, applied here rather than in the derivation
@@ -1394,7 +1402,11 @@ function createFloorSlot({
     fieldBaked = true;
     publishField();
 
-    bakedSun = { azimuthDeg: atmosphere.azimuthDeg, elevationDeg: atmosphere.elevationDeg, strengthMul: atmosphere.strengthMul };
+    bakedSun = {
+      azimuthDeg: atmosphere.azimuthDeg,
+      elevationDeg: atmosphere.elevationDeg,
+      strengthMul: atmosphere.strengthMul,
+    };
     // THE CASCADE'S STALENESS LINK — see `bakeSerial`'s own declaration.
     bakeSerial++;
     lastSunShadowBake = {

@@ -471,11 +471,13 @@ import {
   createVegetationShadowSubsystem,
   padPlacement,
   vegetationShadowPadPx,
+  vegetationShadowHeightPx,
   VEG_SHADOW_RENDER_ORDER_MAGNITUDE,
   VEG_SHADOW_SMEAR_TAPS,
   buildVegetationSpringMaterials,
   VEG_SPRING_MAX_DT_SEC,
   createShadowHandle,
+  longestShadowPx,
   SHADOW_NOON_REFERENCE_DEPTH,
   createSunShadowSubsystem,
   // (maxThrowForHeightPx / shadowPenumbraPx / BASE_SOFTNESS_PX / edgeRamp01
@@ -12017,7 +12019,7 @@ async function startVtPanViewerUnserialized({
       // `shadow-access.js#SHADOW_CORE_STRENGTH`): the Sun Shadows card's own sliders
       // are the look EVERY shadow producer reads, so they ride the same rebuild key.
       const shadowLookParams = getSunShadowRenderState().params ?? {};
-      const shadowLookKey = `${shadowLookParams.strength01}|${shadowLookParams.lengthScale}|${shadowLookParams.dawnDuskLength}|${shadowLookParams.softnessBias}|${cloudVisualCoverMax}`;
+      const shadowLookKey = `${shadowLookParams.strength01}|${shadowLookParams.lengthScale}|${shadowLookParams.dawnDuskLength}|${shadowLookParams.softnessBias}|${shadowLookParams.longestShadowSquares}|${dimensions?.size}|${cloudVisualCoverMax}`;
       const skyKey = `${env.sun.elevationDeg.toFixed(3)}|${env.sun.azimuthDeg.toFixed(3)}|${env.sun.dayFactor01.toFixed(4)}|${env.weather.cloudCover01.toFixed(4)}|${skyRealism01.toFixed(4)}|${skyGoldenHour01.toFixed(3)}|${skyMoonlight01.toFixed(3)}|${(env.sun.golden01 ?? 0).toFixed(3)}|${shadowLookKey}`;
       if (skyKey !== lastSkyKey) {
         lastSkyKey = skyKey;
@@ -12029,6 +12031,7 @@ async function startVtPanViewerUnserialized({
           // the SAME number the cloud shadow's own depth reads (`cloudSkyHandle` below).
           weather: { ...env.weather, shadowCloudCover01: Math.min(env.weather.cloudCover01, cloudVisualCoverMax) },
           look: shadowLookParams,
+          gridSizePx: dimensions?.size,
         });
         uShadowDepth01.value = shadowHandle.depth01;
         // THE SKY HANDLE rides the SAME rebuild guard as the shadow handle, and
@@ -15866,11 +15869,27 @@ async function startVtPanViewerUnserialized({
      * construction; a rebake mints a new one). Passing the value would freeze
      * every vegetation shadow at the sky it booted under.
      */
+    /** World px per foot of the live scene (metres converted) — vegetation shadows cast from the plants'
+     * own Tree/Bush height through it (2026-11-01). Null when the grid is unreadable. */
+    function vegetationPxPerFt() {
+      const scale = derivePixelsPerMetre({
+        gridSizePixels: globalThis.canvas?.scene?.grid?.size,
+        gridDistance: globalThis.canvas?.scene?.grid?.distance,
+        gridUnits: globalThis.canvas?.scene?.grid?.units,
+      });
+      return Number.isFinite(scale?.pixelsPerMetre) && scale.pixelsPerMetre > 0 ? scale.pixelsPerMetre * 0.3048 : null;
+    }
+    /** The scene's longest shadow, world px — the ceiling every shadow eases into (`layer-smear.js#softShadowCeilingPx`). */
+    function longestShadowPxNow() {
+      return longestShadowPx(getSunShadowRenderState().params ?? {}, dimensions?.size);
+    }
     const vegShadows = createVegetationShadowSubsystem({
       THREE,
       scene,
       dimensions,
       getShadowHandle: () => shadowHandle,
+      getPxPerFt: vegetationPxPerFt,
+      getLongestShadowPx: longestShadowPxNow,
       setTileGeometry: (rec, placement, imageW, imageH, segments, padPx) =>
         setTileGeometry(rec, placement, imageW, imageH, segments, padPx),
       buildVegetationMaterial: (tex, item, kind, params, opts) =>
@@ -16482,6 +16501,9 @@ async function startVtPanViewerUnserialized({
     /** ONE PLANT, ONE BODY (2026-11-01): a canopy blob up to this radius moves as one rigid body;
      * a bigger one (a hedge, touching crowns) is split into bodies about twice this apart. */
     const VEG_PIVOT_MAX_RADIUS_PX = 450;
+    /** Vegetation shadow coverage gain — see the umbra note in the shadow branch. 1/0.74: the lowest core
+     * cover measured (17:00 on the shadow bench) reaches full. */
+    const VEG_SHADOW_CORE_GAIN = 1.35;
     /** How far past a plant's painted edge its pivot still applies (its quad's transparent margin). */
     const VEG_PIVOT_DILATE_PX = 120;
     /** Probes along a plant's move when it nears an indoor/outdoor boundary (per edge point). */
@@ -17440,6 +17462,30 @@ async function startVtPanViewerUnserialized({
       material.depthTest = false;
       material.depthWrite = false;
       material.side = THREE.DoubleSide;
+      // THE GROUND SHADOW STAYS UNDER WHAT STANDS ABOVE THE GROUND (2026-11-01, author: "some very ugly
+      // interactions between tree shadows and tiles with elevation / foreground tiles / foreground images").
+      // A tree shadow is a depthTest:false overlay ordered just above its ground, so painter order alone kept
+      // it under a roof — until early-Z composition drew the roof's fully-opaque cells as OPAQUE geometry,
+      // which three draws before every transparent overlay. The shadow then painted over those cells: on the
+      // Japanese Horror House a hard dark block sat on the roof, with a clean strip along the roof's edge
+      // (its blended edge cells, still drawn later in sort order). The fix is the base art's own early
+      // occlusion reject (`buildWholeImageMaterial`): discard wherever `buf:scene.depth` records something
+      // ranked above the HOST ground. 0 fails open (nothing discarded) until `rebuildSceneDepthProxies`
+      // writes the host's tie-safe depth.
+      // THE CANOPY TOO (same day, author: "bushes do this too … appearing inside the area of the overhead /
+      // roof tile"): a bush overlay sorts between a roof tile at elevation 0 and the floor's roof art at its
+      // top, and the roof's early-Z cells let it show through in the same blocks. A canopy has its own rank
+      // in the depth authority (`buildVegetationDepthItems`); `rebuildSceneDepthProxies` writes it. Map
+      // art drawn AS the floor (`isFloorSurface`) keeps the base art's own reject instead.
+      const uShadowExpectedDepth = asShadow ? uniform(float(0)) : null;
+      const uCanopyExpectedDepth = !asShadow && !isFloorSurface ? uniform(float(0)) : null;
+      const uOwnExpectedDepth = uShadowExpectedDepth ?? uCanopyExpectedDepth;
+      if (uOwnExpectedDepth && !debugForceMaskNodeOff) {
+        material.maskNode = querySceneDepth(THREE.TSL, {
+          depthTexture: sceneDepth.depthTexture,
+          expectedDepth: uOwnExpectedDepth,
+        }).isAtOrBelow;
+      }
 
       // THE SILHOUETTE-MOVING DISPLACEMENT (layers 1-3 of this function's own
       // header) — `buildVegetationSwayDisplacementNode`, shared with
@@ -17836,7 +17882,13 @@ async function startVtPanViewerUnserialized({
             worldY: THREE.TSL.positionWorld.y,
             rect: vec4(uSceneMin.x, uSceneMin.y, uSceneMin.x.add(uSceneSize.x), uSceneMin.y.add(uSceneSize.y)),
           });
-          const shadowAlpha = smeared.mul(uShadowStrength).mul(occlusionAlphaFactor(occ)).mul(shadowInScene);
+          // THE UMBRA IS FULL (2026-11-01, shadow consistency round 6): the side blur grows along a long
+          // shadow until it is as wide as the canopy, and then the middle never reached full cover — measured on
+          // the shadow bench, a tree's core reached 74-83% of a building's at golden hour (98% at noon, where the
+          // shadow is short). A crown is as opaque a caster as a wall: the gain restores the core and only
+          // steepens the soft edges a little; clamped, so a core that already reached 1 is unchanged.
+          const coverage = min(smeared.mul(float(VEG_SHADOW_CORE_GAIN)), float(1));
+          const shadowAlpha = coverage.mul(uShadowStrength).mul(occlusionAlphaFactor(occ)).mul(shadowInScene);
           // Flat black with alpha — under ordinary alpha blending this IS a
           // multiply-darken of whatever ground is beneath it.
           return vec4(float(0), float(0), float(0), shadowAlpha);
@@ -17980,6 +18032,8 @@ async function startVtPanViewerUnserialized({
 
       return {
         material,
+        // The canopy's early occlusion reject depth (see "THE CANOPY TOO"); null for a shadow or floor art.
+        uExpectedDepth: uCanopyExpectedDepth,
         // `null` when neither branch above ran (a shadow twin, or an overlay
         // whose host isn't a floor surface) — `syncAllFloorAttrUniformsForFrame`
         // skips a null pair, same posture as its vegetation-motion sibling.
@@ -18031,6 +18085,7 @@ async function startVtPanViewerUnserialized({
               uShadowEdgeClamp,
               uShadowShiftUv,
               uShadowShiftWorld,
+              uExpectedDepth: uShadowExpectedDepth,
             }
           : null,
         windHandleVersion: windHandle.version,
@@ -20470,7 +20525,11 @@ async function startVtPanViewerUnserialized({
             let shadowGeometry = null;
             let shadowBuilt = null;
             if (vegTier.shadowEnabled) {
-              const shadowPadPx = vegetationShadowPadPx(kind);
+              const shadowPadPx = vegetationShadowPadPx(
+                kind,
+                vegetationShadowHeightPx(kind, freshParams, vegetationPxPerFt()),
+                longestShadowPxNow()
+              );
               shadowBuilt = buildVegetationMaterial(loaded.tex, item, kind, freshParams, {
                 asShadow: true,
                 shadowPadUv: [
@@ -20489,6 +20548,7 @@ async function startVtPanViewerUnserialized({
               // The SAME tap count the shader above unrolled — see
               // effects/vegetation-shadow-subsystem.js#syncUniforms's own note.
               shadowBuilt.shadow.smearTaps = vegTier.shadowSmearTaps;
+              shadowBuilt.shadow.padPx = shadowPadPx;
               shadowGeometry = makeGeometry(shadowPadPx);
               shadowMesh = new THREE.Mesh(shadowGeometry, shadowBuilt.material);
               shadowMesh.frustumCulled = false;
@@ -20507,10 +20567,25 @@ async function startVtPanViewerUnserialized({
               // every residency pass, exactly like the canopy's own renderOrder.
               shadowMesh.renderOrder =
                 item.vegetationShadowRenderOrder?.[kind.id] ?? item.renderOrder + VEG_SHADOW_RENDER_ORDER_MAGNITUDE;
+              // Under whatever stands above its ground from the first frame (see the material's own note);
+              // `rebuildSceneDepthProxies` keeps it current after every re-rank.
+              {
+                const hostRank = depthAuthority.rankOf(item);
+                if (hostRank != null && shadowBuilt.shadow?.uExpectedDepth) {
+                  shadowBuilt.shadow.uExpectedDepth.value = computeTieSafeExpectedDepth(hostRank, depthAuthority.maxRank);
+                }
+              }
               scene.add(shadowMesh);
             }
 
-            const { material, appearance, motion, floorAttrUniforms, floorAttrItem } = buildVegetationMaterial(
+            const {
+              material,
+              appearance,
+              motion,
+              floorAttrUniforms,
+              floorAttrItem,
+              uExpectedDepth: canopyExpectedDepth,
+            } = buildVegetationMaterial(
               loaded.tex,
               item,
               kind,
@@ -20541,6 +20616,7 @@ async function startVtPanViewerUnserialized({
             entry.geometry = geometry;
             entry.material = material;
             entry.appearance = appearance;
+            entry.uExpectedDepth = canopyExpectedDepth ?? null;
             entry.motion = motion;
             // ⚠️ See `refreshItemFloorAttrUniforms`'s own header (`vt/scene-
             // attr.js`) — `syncAllFloorAttrUniformsForFrame` reads these every
@@ -23845,6 +23921,17 @@ async function startVtPanViewerUnserialized({
       const maxRank = depthAuthority.maxRank;
       const sceneDoc = globalThis.canvas?.scene ?? null;
       const viewedFloorIndex = view?.floorIndex ?? 0;
+      // THE GROUND SHADOWS' OCCLUSION DEPTH — the host ground's rank in THIS ranking (the stored depths
+      // are rescaled whenever maxRank moves, so a value from an earlier pass would be wrong). See
+      // `buildVegetationMaterial`'s "THE GROUND SHADOW STAYS UNDER" note.
+      for (const [id, st] of itemStates) {
+        if (!st?.vegetationOverlays) continue;
+        const hostRank = depthAuthority.rankOf({ id });
+        for (const kind of VEGETATION_KINDS) {
+          const u = st.vegetationOverlays[kind.id]?.shadow?.uniforms?.uExpectedDepth;
+          if (u) u.value = hostRank == null ? 0 : computeTieSafeExpectedDepth(hostRank, maxRank);
+        }
+      }
       // FLUID CARRIER TILES MUST OCCLUDE BY THEIR ACTUAL PIPE/GLASS
       // SILHOUETTE, NOT BY THEIR WHOLE RECTANGULAR QUAD
       // (mythica-machina-press#543, SECOND ROUND). A Fluid tile is commonly
@@ -23875,6 +23962,8 @@ async function startVtPanViewerUnserialized({
           if (overlay?.status !== 'ready' || !overlay.mesh?.visible || !overlay.geometry) continue;
           const rank = depthAuthority.rankOf(item);
           if (rank == null) continue;
+          // The canopy's own early occlusion reject (`buildVegetationMaterial`'s "THE CANOPY TOO").
+          if (overlay.uExpectedDepth) overlay.uExpectedDepth.value = computeTieSafeExpectedDepth(rank, maxRank);
           const z = rankToDepthZ(rank, maxRank);
           const floorIndex = resolveSceneDepthFloorIndex({
             item,

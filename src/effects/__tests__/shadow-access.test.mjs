@@ -28,7 +28,8 @@ import {
   GOLDEN_SHADOW_STRENGTH_GAIN,
 } from '../shadow-access.js';
 import { softenThrowPx, projectShadowOffset } from '../lighting/light-visibility.js';
-import { layerThrowPx } from '../lighting/layer-smear.js';
+import { layerThrowPx, softShadowCeilingPx } from '../lighting/layer-smear.js';
+import { longestShadowPx } from '../shadow-access.js';
 
 /** A caster ~a tree's height, so offsets/penumbrae are comfortably non-zero. */
 const TREE = { heightPx: 70 };
@@ -142,30 +143,75 @@ export function run(t) {
   // slider, one length rule, one set of golden gains.
   {
     const noon = createShadowHandle({ sun: NOON });
-    ok('an opaque caster at clear noon is the building core × the card default', Math.abs(noon.depth01 - SHADOW_CORE_STRENGTH * DEFAULT_SHADOW_LOOK.strength01) < 1e-12);
-    ok('a caster of opacity 1 gets exactly that darkness', Math.abs(noon.forCaster(TREE).strength01 - noon.depth01) < 1e-12);
-    ok('and half the opacity, half the darkness', Math.abs(noon.forCaster({ ...TREE, strength01: 0.5 }).strength01 - noon.depth01 / 2) < 1e-12);
+    ok(
+      'an opaque caster at clear noon is the building core × the card default',
+      Math.abs(noon.depth01 - SHADOW_CORE_STRENGTH * DEFAULT_SHADOW_LOOK.strength01) < 1e-12
+    );
+    ok(
+      'a caster of opacity 1 gets exactly that darkness',
+      Math.abs(noon.forCaster(TREE).strength01 - noon.depth01) < 1e-12
+    );
+    ok(
+      'and half the opacity, half the darkness',
+      Math.abs(noon.forCaster({ ...TREE, strength01: 0.5 }).strength01 - noon.depth01 / 2) < 1e-12
+    );
     const wall = 260;
     ok(
-      'a tree throws exactly what the building bake throws for its height (layerThrowPx)',
-      Math.abs(noon.forCaster(TREE).offsetPx - layerThrowPx({ heightPx: TREE.heightPx, elevationDeg: 60, lengthScale: 0.5, maxLengthMul: 4 })) < 1e-9 &&
-        Math.abs(noon.forCaster({ heightPx: wall }).offsetPx / wall - noon.forCaster(TREE).offsetPx / TREE.heightPx) < 1e-12
+      'a tree throws exactly what the building bake throws for its height (layerThrowPx, same longest shadow)',
+      Math.abs(
+        noon.forCaster(TREE).offsetPx -
+          layerThrowPx({
+            heightPx: TREE.heightPx,
+            elevationDeg: 60,
+            lengthScale: 0.5,
+            maxLengthMul: 4,
+            longestPx: noon.longestPx,
+          })
+      ) < 1e-9 &&
+        // Throw per px of height agrees while shadows are short; only the longest-shadow ceiling bends it.
+        Math.abs(
+          noon.forCaster({ heightPx: wall }).offsetPx / wall / (noon.forCaster(TREE).offsetPx / TREE.heightPx) - 1
+        ) < 0.01
     );
     const gold = createShadowHandle({ sun: { elevationDeg: 2, azimuthDeg: 270, golden01: 1 } });
-    ok('golden hour darkens by the shared gain, capped', shadowCoreStrength(1) === Math.min(0.97, SHADOW_CORE_STRENGTH * (1 + GOLDEN_SHADOW_STRENGTH_GAIN)));
-    ok('and at the bell’s peak every opaque caster is strongly dark (the author’s golden hour)', gold.depth01 > 0.75 && gold.depth01 < 0.97);
+    ok(
+      'golden hour darkens by the shared gain, capped',
+      shadowCoreStrength(1) === Math.min(0.97, SHADOW_CORE_STRENGTH * (1 + GOLDEN_SHADOW_STRENGTH_GAIN))
+    );
+    ok(
+      'and at the bell’s peak every opaque caster is strongly dark (the author’s golden hour)',
+      gold.depth01 > 0.75 && gold.depth01 < 0.97
+    );
     ok('golden hour doubles the cap: 8 heights at a 2° sun', Math.abs(gold.throwPerPx - 8) < 1e-9);
-    const look = createShadowHandle({ sun: NOON, look: { strength01: 0.5, lengthScale: 1, dawnDuskLength: 4, softnessBias: 0.25 } });
-    ok('the Sun Shadows sliders ARE the shared look (strength)', Math.abs(look.depth01 - SHADOW_CORE_STRENGTH * 0.5) < 1e-12);
+    const look = createShadowHandle({
+      sun: NOON,
+      look: { strength01: 0.5, lengthScale: 1, dawnDuskLength: 4, softnessBias: 0.25 },
+    });
+    ok(
+      'the Sun Shadows sliders ARE the shared look (strength)',
+      Math.abs(look.depth01 - SHADOW_CORE_STRENGTH * 0.5) < 1e-12
+    );
     ok('the Sun Shadows sliders ARE the shared look (length)', Math.abs(look.throwPerPx - 2 * noon.throwPerPx) < 1e-9);
     const capped = createShadowHandle({ sun: NOON, weather: { cloudCover01: 1, shadowCloudCover01: 0.3 } });
     const raw = createShadowHandle({ sun: NOON, weather: { cloudCover01: 0.3 } });
-    ok('shadows fade with the CAPPED cover the cloud shadow reads, when given', Math.abs(capped.depth01 - raw.depth01) < 1e-12);
+    ok(
+      'shadows fade with the CAPPED cover the cloud shadow reads, when given',
+      Math.abs(capped.depth01 - raw.depth01) < 1e-12
+    );
     // A darkness the author tuned AT NOON (a fly's 0.15) is kept at clear noon exactly…
-    ok('a noon-tuned strength is kept exactly at clear noon', Math.abs(noon.forCaster({ ...TREE, strength01: opacityForNoonStrength(0.15) }).strength01 - 0.15) < 1e-12);
+    ok(
+      'a noon-tuned strength is kept exactly at clear noon',
+      Math.abs(noon.forCaster({ ...TREE, strength01: opacityForNoonStrength(0.15) }).strength01 - 0.15) < 1e-12
+    );
     // …and from there follows the shared sky.
-    ok('and is darker at golden hour, like every shadow', gold.forCaster({ ...TREE, strength01: opacityForNoonStrength(0.15) }).strength01 > 0.15);
-    ok('the noon reference is the card default at clear noon', Math.abs(SHADOW_NOON_REFERENCE_DEPTH - noon.depth01) < 1e-12);
+    ok(
+      'and is darker at golden hour, like every shadow',
+      gold.forCaster({ ...TREE, strength01: opacityForNoonStrength(0.15) }).strength01 > 0.15
+    );
+    ok(
+      'the noon reference is the card default at clear noon',
+      Math.abs(SHADOW_NOON_REFERENCE_DEPTH - noon.depth01) < 1e-12
+    );
     ok('no strength, no opacity', opacityForNoonStrength(0) === 0 && opacityForNoonStrength(NaN) === 0);
   }
 
@@ -280,6 +326,55 @@ export function run(t) {
     ok(
       'projectShadowOffset without softKnee is the old hard-clamp behaviour',
       Math.abs(ui.length - (26 / Math.tan((55 * Math.PI) / 180)) * 5) < 1e-6
+    );
+  }
+
+  // --- THE LONGEST SHADOW: one ceiling every elongated shadow eases into (2026-11-01) ---
+  {
+    ok('no ceiling leaves a throw untouched', softShadowCeilingPx(1234, 0) === 1234);
+    ok('a short throw is almost untouched (within 1% at a tenth of the ceiling)', softShadowCeilingPx(100, 1000) > 99);
+    ok('a long throw never reaches the ceiling', softShadowCeilingPx(8000, 1000) < 1000);
+    let prev = 0;
+    let rising = true;
+    for (let x = 0; x <= 6000; x += 50) {
+      const y = softShadowCeilingPx(x, 1000);
+      if (y < prev) rising = false;
+      prev = y;
+    }
+    ok('the eased throw never shrinks as the raw throw grows (no shadow retreats as the sun sinks)', rising);
+    ok(
+      'the ceiling is the card squares × the grid',
+      longestShadowPx({ longestShadowSquares: 6 }, 140) === 840 && longestShadowPx({}, 100) === 1000
+    );
+
+    const GRID = 100;
+    const handle = (sun) => createShadowHandle({ sun, weather: CLEAR, gridSizePx: GRID });
+    const WALL = 260; // the card's Wall height
+    const TREE25 = 500; // a 25 ft tree on a 5 ft = 100 px grid
+    const noon = handle(NOON);
+    const ratioNoon = noon.forCaster({ heightPx: TREE25 }).offsetPx / noon.forCaster({ heightPx: WALL }).offsetPx;
+    ok(
+      `at noon a tree still throws about its height's share more than a wall (${ratioNoon.toFixed(3)} vs ${(TREE25 / WALL).toFixed(3)})`,
+      ratioNoon > (TREE25 / WALL) * 0.97
+    );
+    const golden = handle({ elevationDeg: 7, azimuthDeg: 270, golden01: 1 });
+    const tree = golden.forCaster({ heightPx: TREE25 }).offsetPx;
+    const wall = golden.forCaster({ heightPx: WALL }).offsetPx;
+    ok(
+      `at the golden peak no shadow passes the longest shadow (tree ${tree.toFixed(0)}, wall ${wall.toFixed(0)}, ceiling ${golden.longestPx})`,
+      tree < golden.longestPx && wall < golden.longestPx
+    );
+    ok('at the golden peak a tall tree and a wall converge (within 10%)', tree / wall < 1.1);
+    const bake = layerThrowPx({
+      heightPx: WALL,
+      elevationDeg: 7,
+      lengthScale: DEFAULT_SHADOW_LOOK.lengthScale * 2,
+      maxLengthMul: DEFAULT_SHADOW_LOOK.dawnDuskLength * 2,
+      longestPx: longestShadowPx(DEFAULT_SHADOW_LOOK, GRID),
+    });
+    ok(
+      `the building bake and every other caster throw a wall the same distance (${bake.toFixed(2)} vs ${wall.toFixed(2)})`,
+      Math.abs(bake - wall) < 1e-6
     );
   }
 }

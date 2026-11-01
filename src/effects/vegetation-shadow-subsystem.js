@@ -69,7 +69,7 @@
  * @module effects/vegetation-shadow-subsystem
  */
 
-import { BASE_SOFTNESS_PX, DEFAULT_SHADOW_LOOK, shadowMaxThrowPerPx } from './shadow-access.js';
+import { BASE_SOFTNESS_PX, DEFAULT_SHADOW_LOOK, shadowMaxThrowPerPx, colourStageDarkness } from './shadow-access.js';
 import { shadowPenumbraPx } from './lighting/light-visibility.js';
 import { edgeRamp01 } from './lighting/sun-occlusion.js';
 
@@ -153,7 +153,8 @@ const VEG_SHADOW_MAX_PAD_PX = 320;
 
 /** Ceiling on the smear's mip level. Past ~5 the sample is a featureless blob
  * anyway, and reading beyond a texture's real chain is undefined. */
-const VEG_SHADOW_MAX_SMEAR_LOD = 5;
+// 8 since round 6: real-height throws space the stations ~170 px apart; a 32 px blur left combs.
+const VEG_SHADOW_MAX_SMEAR_LOD = 8;
 
 /**
  * THE SIDE EDGES (2026-11-01, author: "These two side edges of the vegetation shadows need
@@ -175,7 +176,11 @@ export const VEG_SHADOW_SIDE_BLUR_GROW = 0.12;
  * is a mass on the ground, so it touches its own foot. Until this the sweep always began
  * at 0 with a SHARP read — a dark copy of the canopy that sat under the tree all day.
  */
-export const VEG_SHADOW_SMEAR_START = Object.freeze({ tree: 0.4, bush: 0 });
+// 0 since round 6 (2026-11-01): with trees casting from their REAL height the lift became 0.4 of a
+// 2,000 px golden throw and the shadow floated 800 px off its tree (author: "completely detached").
+// The trunk's own shadow is not drawn, so the crown's must start at the plant; the foot is a blurred
+// read now, so no sharp static copy sits under the tree (the reason the lift was added).
+export const VEG_SHADOW_SMEAR_START = Object.freeze({ tree: 0, bush: 0 });
 
 /**
  * Which sides of a plant's art lie ON the scene edge (2026-11-01, author: "You have clipping
@@ -230,15 +235,47 @@ export function vegetationShadowEdgeClamp(placement, sceneRect, tolPx = 2) {
  * @param {import('./vegetation.js').VegetationKind} kind
  * @returns {number} px
  */
-export function vegetationShadowMaxThrowPx(kind) {
+export function vegetationShadowMaxThrowPx(kind, heightPx = kind?.shadowHeightPx ?? 0, longestPx = 0) {
   // The shared golden-hour cap at the Sun Shadows card's DEFAULT dawn/dusk length (8×
   // height). Build-time, so a raised slider is clamped by `vegetationShadowReachPx`.
-  return (kind?.shadowHeightPx ?? 0) * shadowMaxThrowPerPx(DEFAULT_SHADOW_LOOK);
+  // Never past the scene's longest shadow (`softShadowCeilingPx` stays below it).
+  const capped = heightPx * shadowMaxThrowPerPx(DEFAULT_SHADOW_LOOK);
+  return Number.isFinite(longestPx) && longestPx > 0 ? Math.min(capped, longestPx) : capped;
+}
+
+/**
+ * HOW TALL THIS PLANT CASTS (2026-11-01, shadow consistency round 6). Buildings cast from the Sun
+ * Shadows card's own Wall height (260 px); vegetation cast from a fixed per-kind `shadowHeightPx` (tree
+ * 70 px, bush 16 px) that never heard the author's Tree/Bush height (25 ft / 2 ft). On a 5 ft = 100 px
+ * grid a 25 ft tree is 500 px — twice a wall — yet it threw like a fence post: measured at 17:30 on
+ * the shadow bench, a building's shadow ran ~1,500 px, the tree's ~400 px. Now the same height every
+ * other vegetation system reads (`vegetation-render.js#vegetationHeightFt`), through the scene's grid.
+ *
+ * @param {object} kind @param {object} [params] - live vegetation params (`treeHeightFt`/`bushHeightFt`).
+ * @param {number|null} [pxPerFt] - world px per foot of this scene; null/invalid → the kind's fixed fallback.
+ * @returns {number} px
+ */
+export function vegetationShadowHeightPx(kind, params, pxPerFt) {
+  const fallback = kind?.shadowHeightPx ?? 0;
+  if (!(Number.isFinite(pxPerFt) && pxPerFt > 0)) return fallback;
+  const key = `${kind?.id}HeightFt`;
+  const ft = Number.isFinite(params?.[key]) ? params[key] : null;
+  return ft !== null && ft > 0 ? ft * pxPerFt : fallback;
+}
+
+/**
+ * Does this canopy's art cover the whole scene (the usual `_Tree`/`_Bush` overlay)? Then every on-scene
+ * shadow pixel already lies on its own quad: no shift is needed, and no pad can cut the throw short.
+ * @param {object} placement @param {{x:number,y:number,width:number,height:number}} sceneRect
+ */
+export function vegetationArtCoversScene(placement, sceneRect) {
+  const e = vegetationShadowEdgeClamp(placement, sceneRect, 4);
+  return e[0] === 1 && e[1] === 1 && e[2] === 1 && e[3] === 1;
 }
 
 /** The penumbra allowance on every side of the quad — see vegetationShadowPadPx. */
-function vegetationShadowBlurAllowancePx(kind) {
-  const h = kind?.shadowHeightPx ?? 0;
+function vegetationShadowBlurAllowancePx(kind, heightPx = kind?.shadowHeightPx ?? 0) {
+  const h = heightPx;
   return shadowPenumbraPx({ heightPx: h, elevationDeg: 0, baseSoftnessPx: BASE_SOFTNESS_PX }) * VEG_SHADOW_PAD_BLUR_MUL;
 }
 
@@ -307,11 +344,11 @@ export function padPlacement(placement, padPx) {
  * @param {import('./vegetation.js').VegetationKind} kind
  * @returns {number} px
  */
-export function vegetationShadowPadPx(kind) {
+export function vegetationShadowPadPx(kind, heightPx = kind?.shadowHeightPx ?? 0, longestPx = 0) {
   // HALF the longest throw, not all of it: the quad moves to sit on the streak
   // (`vegetationShadowShift`), so it only has to reach half a throw either side.
   // With the golden-hour gain at ×2 this is the same pad as before the shift.
-  const throwPx = vegetationShadowMaxThrowPx(kind) / 2;
+  const throwPx = vegetationShadowMaxThrowPx(kind, heightPx, longestPx) / 2;
   // ⚠️ THE PAD IS PURE OVERDRAW — it multiplies every vegetation shadow's
   // FILL AREA. v1 sized it for the atmospheric WORST case (grazing-sun
   // penumbra × (1+CLOUD_SOFTEN) × (1+NIGHT_SOFTEN) = 12×): a 944px pad on a
@@ -319,7 +356,7 @@ export function vegetationShadowPadPx(kind) {
   // live at 120fps → 80fps. Those extreme-blur cases are also the FAINTEST
   // the model produces (~2% strength), so clipping their invisible fringe
   // buys back an order of magnitude of fill for nothing. Hard-capped too.
-  return Math.min(VEG_SHADOW_MAX_PAD_PX, throwPx + vegetationShadowBlurAllowancePx(kind));
+  return Math.min(VEG_SHADOW_MAX_PAD_PX, throwPx + vegetationShadowBlurAllowancePx(kind, heightPx));
 }
 
 /**
@@ -331,9 +368,13 @@ export function vegetationShadowPadPx(kind) {
  * @param {import('./vegetation.js').VegetationKind} kind
  * @returns {number} px
  */
-export function vegetationShadowReachPx(kind) {
-  const room = 2 * Math.max(0, vegetationShadowPadPx(kind) - vegetationShadowBlurAllowancePx(kind));
-  return Math.min(vegetationShadowMaxThrowPx(kind), room);
+export function vegetationShadowReachPx(kind, heightPx = kind?.shadowHeightPx ?? 0, builtPadPx = null, longestPx = 0) {
+  const pad = Number.isFinite(builtPadPx) ? builtPadPx : vegetationShadowPadPx(kind, heightPx, longestPx);
+  // The blur allowance takes at most a quarter of the pad: at a real tree height (500 px+) the grazing-sun
+  // penumbra alone outgrew the 320 px cap and left a tile tree NO reach at all. Its faint outer fringe is
+  // what the quad edge clips instead (the same trade the pad cap itself makes).
+  const room = 2 * Math.max(0, pad - Math.min(vegetationShadowBlurAllowancePx(kind, heightPx), pad * 0.25));
+  return Math.min(vegetationShadowMaxThrowPx(kind, heightPx, longestPx), room);
 }
 
 /**
@@ -357,6 +398,10 @@ export function createVegetationShadowSubsystem({
   getShadowHandle,
   setTileGeometry,
   buildVegetationMaterial,
+  // World px per foot of the live scene (grid size / grid distance, metres converted). A getter: the
+  // scene can change under a long-lived subsystem. Absent → the kinds' fixed fallback heights.
+  getPxPerFt = () => null,
+  getLongestShadowPx = () => 0,
 }) {
   /**
    * Give a Case-1 self-vegetation TILE its own ground shadow — a twin mesh
@@ -405,7 +450,11 @@ export function createVegetationShadowSubsystem({
     // geometry is built once and never rebuilt as the sun moves. A quad
     // rebuilt per sun step would be the `BufferAttribute has no dispose()`
     // trap (reference_bufferattribute_no_dispose_trap) on a timer.
-    const padPx = vegetationShadowPadPx(kind);
+    const padPx = vegetationShadowPadPx(
+      kind,
+      vegetationShadowHeightPx(kind, params, getPxPerFt()),
+      getLongestShadowPx()
+    );
     const w = Math.max(1, Math.abs(state.placement?.width ?? 1));
     const h = Math.max(1, Math.abs(state.placement?.height ?? 1));
     const shadowPadUv = [padPx / w, padPx / h];
@@ -427,6 +476,7 @@ export function createVegetationShadowSubsystem({
     // gap/LOD maths below must agree with it or the ladder-fix's "consecutive
     // stations overlap" guarantee breaks (see VEG_SHADOW_SMEAR_TAPS's own doc).
     built.shadow.smearTaps = taps;
+    built.shadow.padPx = padPx;
     const shadowRec = { tile: t.tile, sub: null, geometry: new THREE.BufferGeometry(), segments: 0 };
     setTileGeometry(shadowRec, state.placement, imageW, imageH, segments, padPx);
     const mesh = new THREE.Mesh(shadowRec.geometry, built.material);
@@ -501,8 +551,9 @@ export function createVegetationShadowSubsystem({
     // passes the SAME shape (`something.uniforms`), so this cannot recur.
     if (!uniforms) return false;
     const shadowHandle = getShadowHandle();
+    const casterHeightPx = vegetationShadowHeightPx(kind, params, getPxPerFt());
     const cast = shadowHandle.forCaster({
-      heightPx: kind.shadowHeightPx,
+      heightPx: casterHeightPx,
       strength01: params?.shadowStrength ?? 0,
     });
     const w = Math.max(1, Math.abs(placement?.width ?? 1));
@@ -525,11 +576,17 @@ export function createVegetationShadowSubsystem({
     // note where this file's own golden constants used to be). Length is clamped to
     // what this kind's quad holds.
     const throwPx = cast.offsetPx;
-    const reachPx = vegetationShadowReachPx(kind);
+    // A scene-covering overlay holds every on-scene shadow pixel on its own quad: no reach cap, no shift.
+    // A tile is cut to the pad its quad was actually built with.
+    const coversScene = vegetationArtCoversScene(placement, dimensions.sceneRect);
+    const reachPx = coversScene
+      ? Infinity
+      : vegetationShadowReachPx(kind, casterHeightPx, uniforms.padPx, getLongestShadowPx());
     const lengthMul = cast.offsetPx > 0 ? Math.min(throwPx, reachPx) / cast.offsetPx : 1;
     const offX = cast.offsetX * lengthMul * ramp;
     const offY = cast.offsetY * lengthMul * ramp;
-    const strength01 = cast.strength01;
+    // Drawn on the ground colour, read like a building's shadow on the light (shadow-access.js#colourStageDarkness).
+    const strength01 = colourStageDarkness(cast.strength01);
 
     // THE SWEEP VECTOR, in this tile's UV space: the full throw. The fragment
     // sweeps art-UV from 0 to this, so t=0 is the plant's own footprint (the
@@ -540,7 +597,9 @@ export function createVegetationShadowSubsystem({
     // The quad sits on the streak, not on the plant — see vegetationShadowShift.
     // Optional only so a uniform bag built before the shift existed still syncs.
     if (uniforms.uShadowShiftUv && uniforms.uShadowShiftWorld) {
-      const shift = vegetationShadowShift(offX / w, offY / h, placement);
+      const shift = coversScene
+        ? { uvX: 0, uvY: 0, worldX: 0, worldY: 0 }
+        : vegetationShadowShift(offX / w, offY / h, placement);
       uniforms.uShadowShiftUv.value.set(shift.uvX, shift.uvY);
       uniforms.uShadowShiftWorld.value.set(shift.worldX, shift.worldY);
     }
@@ -588,7 +647,10 @@ export function createVegetationShadowSubsystem({
     // Optional only so a uniform bag built before it existed still syncs.
     if (uniforms.uShadowPenumbraLod) {
       const penTexels = (cast.penumbraPx * artTexelsPerWorldPx) / 2;
-      uniforms.uShadowPenumbraLod.value = Math.max(0, Math.min(VEG_SHADOW_MAX_SMEAR_LOD, Math.log2(Math.max(1, penTexels))));
+      uniforms.uShadowPenumbraLod.value = Math.max(
+        0,
+        Math.min(VEG_SHADOW_MAX_SMEAR_LOD, Math.log2(Math.max(1, penTexels)))
+      );
     }
 
     return strength01 > 0;

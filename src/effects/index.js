@@ -630,6 +630,8 @@ export {
   createVegetationShadowSubsystem,
   padPlacement,
   vegetationShadowPadPx,
+  vegetationShadowHeightPx,
+  vegetationArtCoversScene,
   VEG_SHADOW_RENDER_ORDER_MAGNITUDE,
   VEG_SHADOW_SMEAR_TAPS,
 } from './vegetation-shadow-subsystem.js';
@@ -663,6 +665,7 @@ export {
   shadowDepth01,
   shadowThrowPerPx,
   shadowMaxThrowPerPx,
+  longestShadowPx,
   opacityForNoonStrength,
 } from './shadow-access.js';
 

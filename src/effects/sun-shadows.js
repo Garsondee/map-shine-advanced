@@ -187,6 +187,19 @@ export const SUN_SHADOW_PARAMS = Object.freeze({
     label: 'Dawn/dusk length',
     help: 'The furthest a shadow can stretch at dawn or dusk, as a multiple of the thing casting it. Lower = shorter, less exaggerated low-sun shadows. This is the main knob for taming long evening shadows.',
   },
+  longestShadowSquares: {
+    // THE LONGEST SHADOW (author, 2026-11-01: "a solution that isn't physics accurate but which does look
+    // appealing from above … the same logic for all our elongated shadows"). Every producer's throw —
+    // buildings, trees, bushes, ropes — eases into this one length (`layer-smear.js#softShadowCeilingPx`).
+    type: 'float',
+    min: 1,
+    max: 60,
+    step: 0.5,
+    default: 10,
+    category: 'Look',
+    label: 'Longest shadow (squares)',
+    help: 'The furthest any shadow reaches, in grid squares — buildings, trees, bushes and ropes alike. Short daytime shadows are unaffected; long evening ones ease into this length instead of running across the map, so a tree’s shadow stays among its own trees.',
+  },
   lengthScale: {
     // GLOBAL length multiplier (author: "make the shadows a lot shorter, 1/2 of
     // what it is right now"). Default 0.5 halves every shadow at every hour.

@@ -198,6 +198,7 @@ import {
   buildRopeChainMaterial,
   buildRopeChainShadowMaterial,
 } from './rope-chain-render.js';
+import { colourStageDarkness } from './shadow-access.js';
 
 const log = createLogger('RopeChain');
 
@@ -432,7 +433,8 @@ export function createRopeChainSubsystem({
       strength01: ROPE_CHAIN_SHADOW_STRENGTH_DEFAULT,
     });
     rec.shadowUniforms.uCastOffsetPx.value.set(cast.offsetX, cast.offsetY);
-    rec.shadowUniforms.uStrength01.value = cast.strength01;
+    // A rope darkens the ground colour: read like a building's shadow (shadow-access.js#colourStageDarkness).
+    rec.shadowUniforms.uStrength01.value = colourStageDarkness(cast.strength01);
     rec.shadowUniforms.uPenumbraPx.value = cast.penumbraPx;
   }
 

@@ -1029,3 +1029,163 @@ const VEGETATION_TIER_PLANS = Object.freeze([
   Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 12, rotationLiftEnabled: false }), // 5 shadow-finest
   Object.freeze({ flutterEnabled: true, shadowEnabled: true, shadowSmearTaps: 12, rotationLiftEnabled: true }), // 6 torque-sway
 ]);
+
+// ============================================================================
+// ONE PLANT, ONE BODY — the pivot map (2026-11-01, vegetation lab)
+// ============================================================================
+// Author: "Prevent bushes/trees from deforming into blobs during the highest
+// wind." Measured on a bench of real Japanese Horror House canopies with a
+// per-triangle area-scale view: the crush/stretch bands across a canopy come
+// from the CLUMP JITTER (per-500-px-cell phase, strength and direction, blended
+// across cell borders) — with the spreads at 0 the area range fell from
+// 0.69..1.30 to 0.95..1.17; torque and gust wander changed nothing. Two halves of
+// one bush sat in two clumps and swayed out of step, and the art between them was
+// torn or squashed — worse the harder the wind blew.
+//
+// The fix is the physical one: a bush is one body. Every texel of a canopy image
+// is given the PIVOT of the plant it belongs to (its connected blob's centre), and
+// the sway reads its wind, phase, strength, direction and rotation AT THE PIVOT,
+// so the whole plant translates and turns rigidly — area kept exactly, whatever the
+// wind — while the next bush, with its own pivot, still moves out of step with it.
+// A blob bigger than `maxRadiusTexels` (a hedge, a forest of touching crowns) is
+// split into Voronoi cells of seeds about two radii apart, so a forest is many
+// bodies, not one giant rotating plate. Texels near a plant inherit the nearest
+// plant's pivot (a short dilation), so the transparent margin of its triangles
+// moves with it; the linear filter blends pivots smoothly where two meet.
+
+/**
+ * Build the pivot map for one canopy image from its coarse alpha grid.
+ *
+ * @param {{w: number, h: number, data: ArrayLike<number>}} grid - alpha, 0..255, row 0 = image top (v = 0).
+ * @param {object} [opts]
+ * @param {number} [opts.alphaThreshold=96] - a texel at or above this is canopy.
+ * @param {number} [opts.maxRadiusTexels=12] - a blob wider than this is split into several bodies.
+ * @param {number} [opts.dilateTexels=4] - how far past a plant its pivot reaches.
+ * @param {number} [opts.minTexels=2] - specks smaller than this are left to the dilation.
+ * @returns {{data: Float32Array, w: number, h: number, bodies: number}} RGBA per texel:
+ *   R,G = the pivot's uv, B = the body's radius in texels, A = 1 where a pivot was assigned.
+ */
+export function buildVegetationPivotMap(grid, opts = {}) {
+  const { alphaThreshold = 96, maxRadiusTexels = 12, dilateTexels = 4, minTexels = 2 } = opts;
+  const w = Math.max(0, grid?.w | 0);
+  const h = Math.max(0, grid?.h | 0);
+  const out = new Float32Array(w * h * 4);
+  if (!w || !h || !grid?.data || grid.data.length < w * h) return { data: out, w, h, bodies: 0 };
+  const src = grid.data;
+  const label = new Int32Array(w * h).fill(-1);
+  const stack = new Int32Array(w * h);
+  /** body id → [u, v, radiusTexels] */
+  const bodies = [];
+  // pivot index per texel (into `bodies`), -1 = none
+  const owner = new Int32Array(w * h).fill(-1);
+  let blobId = 0;
+  for (let start = 0; start < w * h; start++) {
+    if (label[start] !== -1 || src[start] < alphaThreshold) continue;
+    const members = [];
+    let sp = 0;
+    stack[sp++] = start;
+    label[start] = blobId;
+    while (sp > 0) {
+      const i = stack[--sp];
+      members.push(i);
+      const x = i % w;
+      const y = (i / w) | 0;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1]) {
+        if (j >= 0 && label[j] === -1 && src[j] >= alphaThreshold) {
+          label[j] = blobId;
+          stack[sp++] = j;
+        }
+      }
+    }
+    blobId++;
+    if (members.length < minTexels) continue;
+    // Seeds: one at the centroid for a plant-sized blob; a lattice of seeds
+    // 2*maxRadius apart (snapped onto the blob, then one Lloyd step) for a big one.
+    let cx = 0;
+    let cy = 0;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const i of members) {
+      const x = i % w;
+      const y = (i / w) | 0;
+      cx += x;
+      cy += y;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    cx /= members.length;
+    cy /= members.length;
+    const radius = Math.sqrt(members.length / Math.PI);
+    let seeds = [[cx, cy]];
+    if (radius > maxRadiusTexels) {
+      const step = 2 * maxRadiusTexels;
+      const nx = Math.max(1, Math.round((maxX - minX + 1) / step));
+      const ny = Math.max(1, Math.round((maxY - minY + 1) / step));
+      seeds = [];
+      for (let a = 0; a < ny; a++) {
+        for (let b = 0; b < nx; b++)
+          seeds.push([minX + ((b + 0.5) * (maxX - minX + 1)) / nx, minY + ((a + 0.5) * (maxY - minY + 1)) / ny]);
+      }
+    }
+    const assign = new Int32Array(members.length);
+    for (let iter = 0; iter < (seeds.length > 1 ? 2 : 1); iter++) {
+      const sums = seeds.map(() => [0, 0, 0]);
+      members.forEach((i, k) => {
+        const x = i % w;
+        const y = (i / w) | 0;
+        let best = 0;
+        let bd = Infinity;
+        seeds.forEach(([sx, sy], s) => {
+          const d = (x - sx) * (x - sx) + (y - sy) * (y - sy);
+          if (d < bd) {
+            bd = d;
+            best = s;
+          }
+        });
+        assign[k] = best;
+        sums[best][0] += x;
+        sums[best][1] += y;
+        sums[best][2]++;
+      });
+      seeds = seeds.map((s, k) => (sums[k][2] ? [sums[k][0] / sums[k][2], sums[k][1] / sums[k][2]] : s));
+    }
+    const counts = seeds.map(() => 0);
+    for (let k = 0; k < members.length; k++) counts[assign[k]]++;
+    const base = bodies.length;
+    seeds.forEach(([sx, sy], s) => bodies.push([(sx + 0.5) / w, (sy + 0.5) / h, Math.sqrt(counts[s] / Math.PI)]));
+    members.forEach((i, k) => {
+      owner[i] = base + assign[k];
+    });
+  }
+  // Dilate: every texel within `dilateTexels` of a plant takes the nearest plant's pivot (BFS rings).
+  let frontier = [];
+  for (let i = 0; i < w * h; i++) if (owner[i] >= 0) frontier.push(i);
+  for (let ring = 0; ring < dilateTexels && frontier.length; ring++) {
+    const next = [];
+    for (const i of frontier) {
+      const x = i % w;
+      const y = (i / w) | 0;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1]) {
+        if (j >= 0 && owner[j] < 0) {
+          owner[j] = owner[i];
+          next.push(j);
+        }
+      }
+    }
+    frontier = next;
+  }
+  for (let i = 0; i < w * h; i++) {
+    const o = owner[i];
+    if (o < 0) continue;
+    const [u, v, r] = bodies[o];
+    out[i * 4] = u;
+    out[i * 4 + 1] = v;
+    out[i * 4 + 2] = r;
+    out[i * 4 + 3] = 1;
+  }
+  return { data: out, w, h, bodies: bodies.length };
+}

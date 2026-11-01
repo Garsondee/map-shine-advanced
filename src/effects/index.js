@@ -608,6 +608,7 @@ export {
   VEGETATION_MIN_VERTICES_PER_CLUMP,
   buildTessellatedQuadGeometry,
   vegetationTierPlan,
+  buildVegetationPivotMap,
   VEGETATION_DEFAULT_TIER,
   vegetationCanopyElevation,
   vegetationHeightFt,

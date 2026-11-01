@@ -465,6 +465,7 @@ import {
   vegetationAliasFreeClumpSizePx,
   buildTessellatedQuadGeometry,
   vegetationTierPlan,
+  buildVegetationPivotMap,
   vegetationSpringGridSpec,
   createVegetationShadowSubsystem,
   padPlacement,
@@ -16477,6 +16478,15 @@ async function startVtPanViewerUnserialized({
      * maxima at once, which would otherwise compound into a multi-thousand-
      * pixel throw. Generous: normal tuning never approaches it. */
     const VEG_MAX_DISPLACE_PX = 320;
+    /** ONE PLANT, ONE BODY (2026-11-01): a canopy blob up to this radius moves as one rigid body;
+     * a bigger one (a hedge, touching crowns) is split into bodies about twice this apart. */
+    const VEG_PIVOT_MAX_RADIUS_PX = 450;
+    /** How far past a plant's painted edge its pivot still applies (its quad's transparent margin). */
+    const VEG_PIVOT_DILATE_PX = 120;
+    /** Probes along a plant's move when it nears an indoor/outdoor boundary (per edge point). */
+    const VEG_WALL_PROBE_STEPS = 8;
+    /** How far short of the boundary a plant that would reach it stops (world px). */
+    const VEG_WALL_GAP_PX = 6;
     /** ABSOLUTE ceiling on the flutter UV shuffle. Slightly tighter than V2's
      * own proven `flutterCap` (0.006, vegetation-bulk-wind.js) — V2 never
      * stacks a Wind-response/intensity family on top the way this project's
@@ -16556,6 +16566,16 @@ async function startVtPanViewerUnserialized({
      * without lowering the peak (the peak is brought down separately, by
      * `VEG_FLUTTER_GALE_DAMP_FLOOR` and `VEG_FLUTTER_UV_CAP` above). */
     const VEG_FLUTTER_SPEED_CURVE = 2.2;
+    /** LEAF SHIMMER (2026-11-01) — amplitude in world px at the lightest air (grows ×2.5 by a full breeze). */
+    const VEG_SHIMMER_PX = 1.4;
+    /** Leaf-cluster size of the shimmer: cycles per world px (~1 per 32 px). */
+    const VEG_SHIMMER_SPACE_FREQ = 1 / 32;
+    /** How fast the shimmer churns (noise units per second): a lively leaf jiggle, not a sway. */
+    const VEG_SHIMMER_RATE = 1.6;
+    /** Breeze puffs: the size of the patches that shimmer together in light air (world px). */
+    const VEG_SHIMMER_PUFF_PX = 420;
+    /** Leaves turning: ± brightness at full shimmer. */
+    const VEG_SHIMMER_LIGHT = 0.07;
     /**
      * GUST WANDER — the spatial scale and churn rate of the extra curl-noise
      * octave `buildVegetationSwayDisplacementNode` folds into each kind's lean
@@ -16674,10 +16694,26 @@ async function startVtPanViewerUnserialized({
       sceneSize,
       asShadow,
       rotationLiftEnabled,
+      pivot = null,
     }) {
       const { vec2, float, positionLocal, sin, cos, length, pow, max, min, mix, smoothstep, clamp, texture } =
         THREE.TSL;
       const worldXY = vec2(positionLocal.x, positionLocal.y);
+      // ONE PLANT, ONE BODY (2026-11-01) — see `effects/vegetation-render.js#buildVegetationPivotMap`.
+      // `motionXY` is where this vertex's plant is asked how the wind moves it: the plant's own pivot
+      // (every vertex of one bush gets the same answer, so the bush moves rigidly), or the vertex itself
+      // where no plant claims it (bare quad, or the map not built yet — the old behaviour).
+      let motionXY = worldXY;
+      let pivotXY = null;
+      let pivotWeight = float(0);
+      let pivotRadiusPx = float(1);
+      if (pivot) {
+        const ps = texture(pivot.texture, pivot.artUv);
+        pivotWeight = ps.a;
+        pivotXY = pivot.uFrame.xy.add(pivot.uFrame.zw.mul(ps.x)).add(pivot.uFrameV.mul(ps.y));
+        pivotRadiusPx = max(ps.z.mul(pivot.uTexelPx), float(1));
+        motionXY = mix(worldXY, pivotXY, pivotWeight);
+      }
       // THE ARRIVAL LAG — see `effects/vegetation.js#VEGETATION_KINDS`'s own
       // "THE THREE ARRIVAL/DECORRELATION CONSTANTS" header for the author
       // report. `windLagFraction` is a BUILD-TIME per-kind constant (0 for
@@ -16740,7 +16776,7 @@ async function startVtPanViewerUnserialized({
        * is noise-floor next to what the same shader already pays.
        */
       const kindClumpSizePx = motion.uClumpSizePx.mul(kindClumpMul);
-      const cellF = worldXY.div(kindClumpSizePx);
+      const cellF = motionXY.div(kindClumpSizePx);
       const cell = cellF.floor();
       const cellFrac = cellF.sub(cell);
       const blendX = smoothstep(float(0), float(1), cellFrac.x);
@@ -16788,7 +16824,7 @@ async function startVtPanViewerUnserialized({
        * far larger than a clump.
        */
       const fieldWindLean = windHandle.strengthNode(THREE.TSL, {
-        centerXY: worldXY,
+        centerXY: motionXY,
         time: windTime,
         // READ the wind baked this frame (epic mmp-fpu): the field's ~18 noise evaluations were inlined into
         // every vegetation material, tree and bush, canopy and shadow twin. Trees read "now"; bushes read the
@@ -16813,7 +16849,7 @@ async function startVtPanViewerUnserialized({
       const wanderVec = curlNoise2D(THREE.TSL, {
         // Continuous for the same reason the field sample above is — a wander
         // that jumped at clump seams would put the discontinuity straight back.
-        p: worldXY,
+        p: motionXY,
         timeSec: windTime.mul(float(0.001)),
         spaceFreq: VEG_GUST_WANDER_SPACE_FREQ,
         rate: VEG_GUST_WANDER_RATE,
@@ -16847,7 +16883,8 @@ async function startVtPanViewerUnserialized({
       // SCENE-EDGE-FADE — computed from the REST position, same reasoning as
       // the original: fading based on the displaced position would make the
       // fade depend on the very displacement it is supposed to gate.
-      const sceneUv = worldXY.sub(sceneMin).div(sceneSize);
+      // Per plant (2026-11-01): faded where the PLANT stands, so a bush at the scene edge stays whole.
+      const sceneUv = motionXY.sub(sceneMin).div(sceneSize);
       const edgeDistX = min(sceneUv.x, float(1).sub(sceneUv.x));
       const edgeDistY = min(sceneUv.y, float(1).sub(sceneUv.y));
       const edgeFadeWidthNormX = motion.uEdgeFadeWidthPx.div(sceneSize.x);
@@ -16935,7 +16972,17 @@ async function startVtPanViewerUnserialized({
         // hard cap below — one more slider (torqueGain) that could be maxed
         // out alongside sway/gale, exactly the scenario that cap already
         // exists for.
-        translateDisplace = translateDisplace.add(rotationDisplace.mul(edgeFade));
+        let rotationBody = rotationDisplace;
+        if (pivotXY) {
+          const pivotUv = clamp(pivotXY.sub(gridOriginXY).div(gridExtentXY), vec2(0, 0), vec2(1, 1));
+          const angle = texture(vegSpringPublishRT.texture, pivotUv).x;
+          const offset = worldXY.sub(pivotXY);
+          const c = cos(angle);
+          const sn = sin(angle);
+          const turned = vec2(offset.x.mul(c).sub(offset.y.mul(sn)), offset.x.mul(sn).add(offset.y.mul(c))).sub(offset);
+          rotationBody = mix(rotationDisplace, turned, pivotWeight);
+        }
+        translateDisplace = translateDisplace.add(rotationBody.mul(edgeFade));
 
         // LIFT — CANOPY ONLY, deliberately never the shadow (asShadow=true
         // skips this branch entirely, not merely zeroes it): this renderer's
@@ -16956,11 +17003,14 @@ async function startVtPanViewerUnserialized({
           // LENGTH does not — so this carries the identical meaning (0 at the
           // clump's centre, 1 half a cell out) without reintroducing the
           // discontinuity the rest of this block just removed.
-          const radialWeight = clamp(
+          const radialWeightCell = clamp(
             length(cellFrac.sub(vec2(float(0.5), float(0.5)))).div(float(0.5)),
             float(0),
             float(1)
           );
+          const radialWeight = pivotXY
+            ? mix(radialWeightCell, clamp(length(worldXY.sub(pivotXY)).div(pivotRadiusPx), float(0), float(1)), pivotWeight)
+            : radialWeightCell;
           liftY = springLiftRaw.mul(radialWeight).mul(edgeFade);
         }
       }
@@ -17006,7 +17056,40 @@ async function startVtPanViewerUnserialized({
           });
         const restOutdoors = maskAt(worldXY);
         const reach = min(maskAt(worldXY.add(cappedDisplace.mul(float(0.5)))), maskAt(worldXY.add(cappedDisplace)));
-        xy = cappedDisplace.mul(mix(float(1), reach, restOutdoors));
+        const perVertex = cappedDisplace.mul(mix(float(1), reach, restOutdoors));
+        xy = perVertex;
+        // ONE PLANT STOPS AS ONE BODY (2026-11-01, author: "Prevent bushes/trees from pushing through
+        // walls / pushing inside the black part of _Outdoors if they started in the white part and vice
+        // versa"). The per-vertex gate above pins the vertices that would cross and lets the rest of the
+        // plant go on — which tore a bush pressed against a wall into a stretched strip (and still let
+        // its triangles straddle the wall). With a pivot, every vertex asks the SAME question about the
+        // whole plant: how far can its leading edge (pivot + radius along the move, plus two shoulders)
+        // travel before the mask changes from what the plant stands on? The plant moves that far and no
+        // further — rigidly, both ways (an outdoor plant stays out, an indoor one stays in). A plant
+        // painted already overlapping the wall cannot move toward it at all, only along or away.
+        if (pivotXY) {
+          const moveLen = length(cappedDisplace);
+          const dir = cappedDisplace.div(max(moveLen, float(1e-4)));
+          const side = vec2(dir.y.negate(), dir.x);
+          const restSide = maskAt(pivotXY);
+          const origins = [
+            pivotXY.add(dir.mul(pivotRadiusPx.mul(float(0.9)))),
+            pivotXY.add(dir.mul(pivotRadiusPx.mul(float(0.55)))).add(side.mul(pivotRadiusPx.mul(float(0.75)))),
+            pivotXY.add(dir.mul(pivotRadiusPx.mul(float(0.55)))).sub(side.mul(pivotRadiusPx.mul(float(0.75)))),
+          ];
+          let allowed = float(1);
+          for (const o of origins) {
+            for (let i = VEG_WALL_PROBE_STEPS; i >= 1; i--) {
+              const t = i / VEG_WALL_PROBE_STEPS;
+              const crossed = smoothstep(float(0.3), float(0.6), maskAt(o.add(dir.mul(moveLen.mul(float(t))))).sub(restSide).abs());
+              // Crossed at step i → allowed at most the step before it (minus a small gap).
+              allowed = min(allowed, mix(float(1), float(Math.max(0, (i - 1) / VEG_WALL_PROBE_STEPS)), crossed));
+            }
+          }
+          const gap = clamp(float(VEG_WALL_GAP_PX).div(max(moveLen, float(1e-4))), float(0), float(1));
+          const bodyScale = clamp(allowed.sub(gap.mul(THREE.TSL.step(allowed, float(0.999)))), float(0), float(1));
+          xy = mix(perVertex, cappedDisplace.mul(bodyScale), pivotWeight);
+        }
       }
       return { xy, liftY };
     }
@@ -17150,6 +17233,9 @@ async function startVtPanViewerUnserialized({
         // so a caller that has not been updated to resolve a tier changes
         // nothing, matching flutterEnabled/smearTaps's own precedent.
         rotationLiftEnabled = false,
+        // ONE PLANT, ONE BODY (2026-11-01): `{ texture, corners, texelPx }` — the canopy image's pivot
+        // map (`buildVegetationPivotMap`), the ART quad's world corners and world px per map texel.
+        pivotMap = null,
       } = {}
     ) {
       // Demand-allocate tier 6's shared spring grid the FIRST time any mesh
@@ -17326,6 +17412,25 @@ async function startVtPanViewerUnserialized({
       const uShadowShiftUv = uniform(vec2(0, 0));
       const uShadowShiftWorld = uniform(vec2(0, 0));
 
+      // The art quad's frame: world = c00 + u·(c10 − c00) + v·(c01 − c00). Packed (xy = c00, zw = u edge).
+      let pivot = null;
+      if (pivotMap?.texture && Array.isArray(pivotMap.corners) && pivotMap.corners.length === 4) {
+        const [c00, c10, , c01] = pivotMap.corners;
+        const artUv = asShadow
+          ? uv()
+              .mul(uUvScale)
+              .mul(vec2(1 + 2 * shadowPadUv[0], 1 + 2 * shadowPadUv[1]))
+              .sub(vec2(shadowPadUv[0], shadowPadUv[1]))
+          : uv().mul(uUvScale);
+        pivot = {
+          texture: pivotMap.texture,
+          artUv,
+          uFrame: uniform(vec4(c00.x, c00.y, c10.x - c00.x, c10.y - c00.y)),
+          uFrameV: uniform(vec2(c01.x - c00.x, c01.y - c00.y)),
+          uTexelPx: uniform(float(Math.max(1e-3, pivotMap.texelPx ?? 1))),
+          gridW: pivotMap.texture.image?.width ?? 1,
+        };
+      }
       const material = new THREE.NodeMaterial();
       // Redrawn every frame, so it may compile on a worker thread and appear a few frames late rather than
       // block the GPU process (core/compile-policy.js). The map's own art material is a different builder.
@@ -17375,6 +17480,7 @@ async function startVtPanViewerUnserialized({
           sceneSize: uSceneSize,
           asShadow,
           rotationLiftEnabled,
+          pivot,
         });
         const displaced = positionLocal
           .add(vec3(displace.xy.x, displace.xy.y, float(0)))
@@ -17396,6 +17502,8 @@ async function startVtPanViewerUnserialized({
         // including the coarse-presence texture sample — is never
         // CONSTRUCTED when this is false, not merely multiplied by zero).
         let sampleUv = uv().mul(uUvScale);
+        // Leaf shimmer's light half (see below): leaves turning catch the light. 0 = untouched.
+        const shimmerLight = float(0).toVar('vegShimmerLight');
         if (!asShadow && flutterEnabled) {
           // ── THE FOLIAGE-PRESENCE GATE ──────────────────────────────────
           // See VEG_FLUTTER_GATE_LOD's own header for the measurement that
@@ -17550,6 +17658,44 @@ async function startVtPanViewerUnserialized({
             // addAssign, not `sampleUv = ...`: a shader-run-time write into the
             // var, so it happens only on the taken branch. See the gate header.
             gatedUv.addAssign(rawFlutterDisplacement.mul(flutterCapScale));
+
+            // ── LEAF SHIMMER IN LIGHT AIR (2026-11-01, author: "Improve the fluttering of vegetation in
+            // lower winds") ───────────────────────────────────────────────────────────────────────────
+            // Measured on the vegetation bench: below ~35% wind a canopy only DRIFTED as a whole (frame
+            // differences lit its outline, never its interior) — the flutter above rises with wind^2.2 and
+            // churns at `flutterFrequency` (0.1), so on a still day the leaves were frozen. Real leaves
+            // in light air jiggle a pixel or two in small clusters, a patch at a time as puffs of breeze
+            // pass, and flash lighter as they turn. So: a finer, faster curl wobble with its amplitude in
+            // WORLD px (the flutter above is in UV, which scales with the canopy file), gated to wherever
+            // any air moves at all, patchy in light air and everywhere in a breeze, handing over to the
+            // gale flutter above as the wind rises. Its own fold-free cap (finer noise folds sooner).
+            const shimmerT = uGlobalTimeMs.mul(float(0.001 * VEG_SHIMMER_RATE));
+            const shimmerVec = curlNoise2D(THREE.TSL, {
+              p: worldXY,
+              timeSec: shimmerT,
+              spaceFreq: float(VEG_SHIMMER_SPACE_FREQ).mul(uFlutterScale),
+              rate: 1,
+              phaseX: 211,
+              phaseY: 377,
+            });
+            const puffs = smoothstep(
+              float(0.25),
+              float(0.75),
+              THREE.TSL.mx_noise_float(
+                THREE.TSL.vec3(worldXY.x.div(float(VEG_SHIMMER_PUFF_PX)), worldXY.y.div(float(VEG_SHIMMER_PUFF_PX)), shimmerT.mul(float(0.08)))
+              )
+                .mul(float(0.5))
+                .add(float(0.5))
+            );
+            const airMoves = smoothstep(float(0.005), float(0.06), localSpeed);
+            const breezeEverywhere = smoothstep(float(0.08), float(0.3), localSpeed);
+            const shimmerFade = float(1).sub(smoothstep(float(0.4), float(0.9), galeness).mul(float(0.7)));
+            const shimmer01 = airMoves.mul(mix(puffs, float(1), breezeEverywhere)).mul(shimmerFade).mul(edgeFade);
+            const shimmerFoldFreePx = float(VEG_FLUTTER_FOLD_SAFETY).div(float(VEG_SHIMMER_SPACE_FREQ).mul(uFlutterScale));
+            const shimmerPx = min(float(VEG_SHIMMER_PX).mul(float(1).add(localSpeed.mul(float(1.5)))), shimmerFoldFreePx);
+            const shimmerDir = shimmerVec.div(max(length(shimmerVec), float(1))); // |v| <= 1
+            gatedUv.addAssign(shimmerDir.mul(shimmerPx.mul(shimmer01)).mul(uUvPerWorldPx));
+            shimmerLight.assign(shimmerDir.x.mul(shimmer01));
           });
           sampleUv = gatedUv;
         }
@@ -17697,6 +17843,7 @@ async function startVtPanViewerUnserialized({
 
         const c = texture(tex, sampleUv).toVar();
         c.rgb.mulAssign(uTint);
+        c.rgb.mulAssign(float(1).add(shimmerLight.mul(float(VEG_SHIMMER_LIGHT))));
         c.a.mulAssign(uAlpha);
         c.a.mulAssign(uIntensity);
         c.a.mulAssign(occlusionAlphaFactor(occ));
@@ -17867,6 +18014,8 @@ async function startVtPanViewerUnserialized({
           uGustTurbulence,
           // Pushed on placement change, not per frame — see its own header.
           uUvPerWorldPx,
+          // The pivot map's art frame (2026-11-01), re-pushed with the UV basis.
+          pivot,
         },
         shadow: asShadow
           ? {
@@ -20258,6 +20407,27 @@ async function startVtPanViewerUnserialized({
             // CLOSED on it instead, by design (third round) — never
             // hover-fading is the correct behaviour for a canopy with no
             // real alpha data by any method.
+            // ONE PLANT, ONE BODY (2026-11-01): the pivot map, from the same coarse alpha. Bodies of up to
+            // ~450 world px radius stay whole (a big tree is one body); a hedge or forest is split.
+            let vegPivotMap = null;
+            if (vegCoverageGrid) {
+              const artW = Math.hypot(corners[1].x - corners[0].x, corners[1].y - corners[0].y);
+              const texelPx = artW / Math.max(1, vegCoverageGrid.w);
+              const built = buildVegetationPivotMap(vegCoverageGrid, {
+                maxRadiusTexels: Math.max(2, VEG_PIVOT_MAX_RADIUS_PX / Math.max(1e-3, texelPx)),
+                dilateTexels: Math.max(1, Math.ceil(VEG_PIVOT_DILATE_PX / Math.max(1e-3, texelPx))),
+              });
+              // Half float: a 32-bit float texture is not filterable on WebGPU without an optional feature.
+              const half = new Uint16Array(built.data.length);
+              for (let i = 0; i < half.length; i++) half[i] = THREE.DataUtils.toHalfFloat(built.data[i]);
+              const pivotTex = new THREE.DataTexture(half, built.w, built.h, THREE.RGBAFormat, THREE.HalfFloatType);
+              pivotTex.minFilter = THREE.LinearFilter;
+              pivotTex.magFilter = THREE.LinearFilter;
+              pivotTex.flipY = false;
+              pivotTex.needsUpdate = true;
+              vegPivotMap = { texture: pivotTex, corners, texelPx };
+              entry.pivotTexture = pivotTex;
+            }
             const vegCoverageMask = vegCoverageGrid
               ? buildCoverageCellMask({
                   grid: vegCoverageGrid,
@@ -20309,6 +20479,7 @@ async function startVtPanViewerUnserialized({
                 smearTaps: vegTier.shadowSmearTaps,
                 rotationLiftEnabled: vegTier.rotationLiftEnabled,
                 uvPerWorldBasis: state.placement,
+                pivotMap: vegPivotMap,
               });
               // The smear LOD's scale factor — see the Case-1 site's own note.
               // `loaded.tex.image` carries the decoded art's true pixel width.
@@ -20349,6 +20520,7 @@ async function startVtPanViewerUnserialized({
                 // The world→UV basis the fold-free flutter cap needs; re-pushed
                 // by `syncVegetationUvBasis` whenever this placement changes.
                 uvPerWorldBasis: state.placement,
+                pivotMap: vegPivotMap,
               }
             );
             const geometry = makeGeometry();
@@ -20528,6 +20700,13 @@ async function startVtPanViewerUnserialized({
         1 / Math.max(1, Math.abs(placement.width ?? 1)),
         1 / Math.max(1, Math.abs(placement.height ?? 1))
       );
+      // ONE PLANT, ONE BODY: a moved or resized canopy moves its plants' pivots with it.
+      if (motion.pivot) {
+        const [c00, c10, , c01] = computeQuadCorners(placement);
+        motion.pivot.uFrame.value.set(c00.x, c00.y, c10.x - c00.x, c10.y - c00.y);
+        motion.pivot.uFrameV.value.set(c01.x - c00.x, c01.y - c00.y);
+        motion.pivot.uTexelPx.value = Math.max(1e-3, Math.hypot(c10.x - c00.x, c10.y - c00.y) / Math.max(1, motion.pivot.gridW));
+      }
     }
 
     /**

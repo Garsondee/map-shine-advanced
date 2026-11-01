@@ -23,6 +23,7 @@ import {
   VEGETATION_VERTEX_SPACING_PX,
   springChase,
   vegetationSpringGridSpec,
+  buildVegetationPivotMap,
 } from '../vegetation-render.js';
 import { VEGETATION_KINDS } from '../vegetation.js';
 import { makeLayerKey, sortByLayer, SORT_LAYERS } from '../../scene/layer-order.js';
@@ -1027,6 +1028,47 @@ export function run(t) {
         const gridDy = gridCell(b).cy - gridCell(a).cy;
         return existingDx === gridDx && existingDy === gridDy;
       })()
+    );
+  }
+  // ── ONE PLANT, ONE BODY — the pivot map (2026-11-01) ───────────────────
+  {
+    const w = 40;
+    const h = 30;
+    const data = new Uint8Array(w * h);
+    const disc = (cx, cy, r) => {
+      for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++) if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) data[y * w + x] = 255;
+    };
+    disc(8, 8, 4);
+    disc(25, 15, 3);
+    for (let y = 20; y < 28; y++) for (let x = 2; x < 38; x++) data[y * w + x] = 255; // a long hedge
+    const p = buildVegetationPivotMap({ w, h, data }, { maxRadiusTexels: 4, dilateTexels: 3 });
+    const at = (x, y) => Array.from(p.data.slice((y * w + x) * 4, (y * w + x) * 4 + 4));
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    const a = at(8, 8);
+    ok("pivot map: a bush's pivot is its own centre (uv)", near(a[0], 8.5 / w) && near(a[1], 8.5 / h) && a[3] === 1);
+    ok(
+      'pivot map: every texel of one bush shares one pivot (it moves as one body)',
+      [at(5, 8), at(11, 8), at(8, 5), at(8, 11)].every((b) => near(b[0], a[0]) && near(b[1], a[1]))
+    );
+    ok(
+      'pivot map: the transparent margin just past a bush takes its pivot',
+      near(at(13, 8)[0], a[0]) && at(13, 8)[3] === 1
+    );
+    ok('pivot map: a second bush has a pivot of its own', near(at(25, 15)[0], 25.5 / w) && !near(at(25, 15)[0], a[0]));
+    const hedge = [at(4, 24)[0], at(20, 24)[0], at(35, 24)[0]];
+    ok(
+      'pivot map: a hedge longer than the body radius is split into several bodies along its length',
+      hedge[0] < hedge[1] && hedge[1] < hedge[2]
+    );
+    ok(
+      'pivot map: bare ground far from any plant has no pivot (falls back to the per-vertex sway)',
+      at(20, 2)[3] === 0
+    );
+    ok('pivot map: the body radius is recorded in texels', at(25, 15)[2] > 2 && at(25, 15)[2] < 4);
+    ok(
+      'pivot map: an empty grid returns no bodies',
+      buildVegetationPivotMap({ w: 4, h: 4, data: new Uint8Array(16) }).bodies === 0
     );
   }
 }

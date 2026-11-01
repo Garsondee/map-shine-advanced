@@ -404,6 +404,168 @@ function buildCornerBR(onStatus, onOpenTileMotion) {
   return el;
 }
 
+/** A labelled button of the compact dial's transport row (one class — see remote-style.js). */
+function transportBtn(icon, text, title, onClick) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'msa-transport-btn';
+  btn.title = title;
+  btn.innerHTML = `${icon ? iconMarkup(icon) : ''}<span>${text}</span>`;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+/** Hang a one-level menu of `items` under `btn`; a second press, or a press elsewhere, closes it. */
+function toggleMenuUnder(btn, items) {
+  const open = btn.querySelector('.msa-jump-menu');
+  if (open) {
+    open.remove();
+    return;
+  }
+  const menu = document.createElement('div');
+  menu.className = 'msa-jump-menu';
+  for (const item of items) {
+    const b = menuItemBtn(item.label, item.title);
+    if (item.pressed) b.setAttribute('aria-pressed', 'true');
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      menu.remove();
+      item.onClick();
+    });
+    menu.appendChild(b);
+  }
+  btn.appendChild(menu);
+  const closeOnOutside = (e) => {
+    if (!menu.contains(e.target) && !btn.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('pointerdown', closeOnOutside, true);
+    }
+  };
+  setTimeout(() => document.addEventListener('pointerdown', closeOnOutside, true), 0);
+}
+
+/**
+ * THE COMPACT DIAL (the Remote's Play tab, 2026-11-01 redesign). The same dial,
+ * drawn smaller, with a labelled transport row under it instead of the twelve
+ * corner slots (six of which did nothing). The clock's mode moved to Prep, and the
+ * transport only offers what works in the current mode — so nothing here can be
+ * pressed and then explain afterwards that it is the wrong mode:
+ *  - Free clock: Play/Pause, Speed, Jump (a Jump sweeps the dial over the Fade Time).
+ *  - World clock: Jump (moves Foundry's own game time on: next dawn, +1 day...).
+ * Strike, Gust and Tile motion became the Play tab's pads and Prep's tools.
+ */
+function renderCompactAstrolabe(container, ctx) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msa-astro-wrap msa-astro-compact';
+  const statusLine = document.createElement('div');
+  statusLine.className = 'msa-astro-status';
+  const onStatus = (text) => {
+    statusLine.textContent = text ?? '';
+  };
+  const freeClock = () => ctx.getPosture() === 'aesthetic';
+
+  const scaler = document.createElement('div');
+  scaler.className = 'msa-dial-scale';
+  const dialHost = document.createElement('div');
+  dialHost.className = 'msa-astro-dial-host';
+  const dialSlot = document.createElement('div');
+  dialSlot.className = 'msa-astro-dial-slot';
+  dialHost.appendChild(dialSlot);
+  scaler.appendChild(dialHost);
+
+  const transport = document.createElement('div');
+  transport.className = 'msa-transport';
+  transport.setAttribute('role', 'group');
+  transport.setAttribute('aria-label', 'Time');
+
+  const flowBtn = transportBtn('play', 'Play', 'Run the clock', () => {
+    ctx.onFlowToggle();
+    sync();
+  });
+  const speedBtn = transportBtn(null, '×1', 'How fast the clock runs', () => {
+    const current = ctx.getFlowRate?.() ?? 0;
+    toggleMenuUnder(
+      speedBtn,
+      FLOW_SPEED_STEPS.map((step, i) => ({
+        label: `×${FLOW_SPEED_MULTIPLIERS[i]}`,
+        title: `×${FLOW_SPEED_MULTIPLIERS[i]} — ${formatRate(step)}`,
+        pressed: step === current,
+        onClick: () => {
+          ctx.onSetFlowRate?.(step);
+          sync();
+        },
+      }))
+    );
+  });
+  const jumpBtn = transportBtn('calendar', 'Jump', 'Jump to the next dawn, noon, dusk or midnight', () => {
+    const items = HOUR_JUMPS.map((j) => ({
+      label: j.label,
+      onClick: async () => {
+        if (freeClock()) {
+          ctx.onSweepToHour?.(j.hour);
+          onStatus('');
+          return;
+        }
+        const r = await jumpToHour(j.hour, { posture: ctx.getPosture(), source: 'remote-transport' });
+        onStatus(
+          r.ok ? `Game time moved to the ${j.label.replace('Next ', '').toLowerCase()}.` : `Jump refused: ${r.reason}`
+        );
+      },
+    }));
+    if (!freeClock()) {
+      for (const [n, label, fn] of [
+        [1, '+1 Day', advanceDays],
+        [1, '+1 Week', advanceWeeks],
+      ]) {
+        items.push({
+          label,
+          onClick: async () => {
+            const r = await fn(n, { posture: ctx.getPosture(), source: 'remote-transport' });
+            onStatus(r.ok ? `Game time moved on ${label.slice(1)}.` : `Refused: ${r.reason}`);
+          },
+        });
+      }
+    }
+    toggleMenuUnder(jumpBtn, items);
+  });
+  const modeNote = document.createElement('span');
+  modeNote.className = 'msa-transport-mode';
+  transport.append(flowBtn, speedBtn, jumpBtn, modeNote);
+
+  let shown = '';
+  function sync() {
+    const free = freeClock();
+    const playing = ctx.isFlowPlaying();
+    const rate = ctx.getFlowRate?.() ?? 0;
+    const idx = nearestRateIndex(rate > 0 ? rate : FLOW_SPEED_STEPS[0]);
+    const key = `${free}|${playing}|${idx}`;
+    if (key === shown) return;
+    shown = key;
+    flowBtn.hidden = !free;
+    speedBtn.hidden = !free;
+    flowBtn.innerHTML = `${iconMarkup(playing ? 'pause' : 'play')}<span>${playing ? 'Pause' : 'Play'}</span>`;
+    setTip(flowBtn, playing ? 'Stop the clock here' : 'Run the clock');
+    flowBtn.setAttribute('aria-pressed', String(playing));
+    speedBtn.querySelector('span').textContent = `×${TIME_RATE_MULTIPLIERS[idx]}`;
+    setTip(speedBtn, `How fast the clock runs (${formatRate(TIME_RATE_STEPS[idx])})`);
+    modeNote.textContent = free ? 'Free clock' : 'World clock';
+    modeNote.title = free
+      ? 'You set the hour. Change it in Prep.'
+      : "Foundry's game time sets the hour. Change it in Prep.";
+  }
+
+  ctx.mountAstrolabeDial(dialSlot, {
+    onLockedAttempt: () =>
+      onStatus('The World clock sets the hour — use Jump, or switch to the Free clock in Prep to drag it.'),
+    onWindClick: ctx.onWindClick,
+    onDateClick: () => jumpBtn.click(),
+  });
+  wrap.append(scaler, transport, statusLine);
+  container.appendChild(wrap);
+  sync();
+  return { syncFlowState: sync };
+}
+
 /**
  * @param {HTMLElement} container
  * @param {{mountAstrolabeDial: (el: HTMLElement, dialCtx: {onLockedAttempt: () => void, onWindClick?: () => void, onDateClick?: () => void}) => void,
@@ -422,6 +584,7 @@ function buildCornerBR(onStatus, onOpenTileMotion) {
  *   own controls, another connected client).
  */
 export function renderAstrolabePanel(container, ctx) {
+  if (ctx.compact) return renderCompactAstrolabe(container, ctx);
   const wrap = document.createElement('div');
   wrap.className = 'msa-astro-wrap';
 

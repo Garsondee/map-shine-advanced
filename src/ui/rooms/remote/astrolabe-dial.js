@@ -651,6 +651,8 @@ export function buildAstrolabeDial(opts = {}) {
     clockTime.textContent = formatClock(hour);
     clockPhase.textContent = (state.phase ?? '').toUpperCase();
     dateText.textContent = state.dateText ?? '—';
+    // No calendar, no date: a bare "—" pill reads as broken (2026-11-01).
+    dateBtn.hidden = !state.dateText;
     const dir = Number.isFinite(state.windDirectionDeg) ? state.windDirectionDeg : 0;
     // Speed was accepted in this function's own JSDoc but never actually
     // read here (2026-08-18 fix; gap-audit against the old astrolabe.js's

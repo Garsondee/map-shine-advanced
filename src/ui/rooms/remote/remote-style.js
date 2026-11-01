@@ -71,6 +71,19 @@ export const REMOTE_PRESSABLES = Object.freeze([
   '.msa-debug-btn',
   '.msa-debug-more',
   '.msa-foot-btn', // the footer's buttons and links
+  // The 2026-11-01 tabbed redesign:
+  '.msa-tab', // Play / Mix / Prep
+  '.msa-scope', // the header's This scene / All scenes chip
+  '.msa-look', // a Look tile
+  '.msa-look-add', // the Save look tile
+  '.msa-facet', // a facet toggle (Time, Weather...)
+  '.msa-pad', // an effect pad (Strike, Gust, Next scene)
+  '.msa-transport-btn', // Play / speed / Jump under the dial
+  '.msa-np-snap', // Now Playing's "Finish now"
+  '.msa-run-card', // the running order's "Next" card
+  '.msa-run-btn', // a running-order row's up / down / remove
+  '.msa-run-play', // a running-order row's name (plays it)
+  '.msa-more-item', // a row of the header's more menu
 ]);
 
 /**
@@ -107,6 +120,8 @@ ${R} .msa-remote-card{width:100%; max-height:calc(100vh - 60px); background:var(
 ${R} .msa-remote-card.msa-enter{animation:msaRoomIn 200ms var(--ease-out) both}
 ${R}[data-minimized="true"] .msa-remote-body,
 ${R}[data-minimized="true"] .msa-remote-foot,
+${R}[data-minimized="true"] .msa-tabs,
+${R}[data-minimized="true"] .msa-status,
 ${R}[data-minimized="true"] .msa-renderer-row{display:none}
 
 ${uiKitCss(IN, { pressInside: REMOTE_PRESSABLES })}
@@ -436,6 +451,227 @@ ${IN} .msa-pop-status{margin-top:6px; color:var(--ink2); font-size:.68rem}
 ${IN} .msa-pop-foot{display:flex; gap:6px; margin-top:8px; border-top:1px solid var(--line); padding-top:8px}
 ${IN} .msa-input--num{width:64px; flex:none; text-align:right}
 
+/* ==== THE TABBED REMOTE (2026-11-01) ===========================================================
+   One device for changing a scene's mood: a header that says where you are and what your
+   changes touch, three tabs (Play / Mix / Prep), and a status line. See shell.js. */
+${R} .msa-remote-card{position:relative}
+/* Strike answers back: a white blink across the card (opacity only, fades out in 220ms). */
+${R} .msa-remote-card::after{content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+  background:#fff; opacity:0; transition:opacity 220ms var(--ease-out); z-index:30}
+${R} .msa-remote-card.msa-flash::after{opacity:.14; transition:none}
+${R} .msa-remote-head{gap:6px; padding:8px 10px 8px 14px}
+${R} .msa-remote-title{min-width:0; flex:0 1 auto; letter-spacing:.01em; text-transform:none;
+  font-size:.82rem; color:var(--ink0)}
+${R} .msa-remote-title-ico{display:flex; flex:none; color:var(--shine)}
+${R} .msa-remote-title-ico .ico{width:14px; height:14px}
+${R} .msa-remote-scene{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0}
+${R} .msa-scope{flex:none; padding:3px 9px; border-radius:999px; border:1px solid var(--line); background:var(--bg2);
+  color:var(--ink1); font-size:.64rem; font-weight:600}
+${R} .msa-scope[data-scope="scene"]{border-color:var(--shine-glow); color:var(--shine); background:var(--shine-soft)}
+${R} .msa-scope[hidden]{display:none}
+${R} .msa-heart{display:grid; place-items:center; color:#ff7a8a; text-decoration:none}
+${R} .msa-heart .ico{width:15px; height:15px}
+
+/* the tabs */
+${R} .msa-tabs{display:grid; grid-template-columns:repeat(3, 1fr); gap:2px; margin:10px 12px 0; padding:3px;
+  background:var(--bg2); border:1px solid var(--line); border-radius:999px; flex:none}
+${R} .msa-tab{padding:5px 0; border:none; border-radius:999px; background:none; color:var(--ink2);
+  font-size:.74rem; font-weight:650; letter-spacing:.04em}
+${R} .msa-tab[aria-selected="true"]{background:var(--shine-soft); color:var(--shine)}
+${R} .msa-remote-body{padding:12px 14px 14px; gap:0}
+${R} .msa-pane{display:flex; flex-direction:column; gap:12px}
+${R} .msa-pane[hidden]{display:none}
+${R} .msa-pane:not([hidden]){animation:msaFadeUp 160ms var(--ease-out) backwards}
+${R} .msa-status{flex:none; padding:7px 14px; border-top:1px solid var(--line); background:var(--bg1);
+  font-size:.7rem; color:var(--ink1)}
+${R} .msa-status[hidden]{display:none}
+
+/* one section header everywhere: a small caps title, and whatever control belongs on its right */
+${R} .msa-section-head{display:flex; align-items:center; gap:8px; min-height:22px}
+${R} .msa-section-title{display:flex; align-items:center; gap:6px; font-size:.64rem; letter-spacing:.2em;
+  text-transform:uppercase; color:var(--ink2); white-space:nowrap}
+${R} .msa-section-title .ico{width:12px; height:12px; color:var(--shine)}
+${R} .msa-hint{font-size:.68rem; color:var(--ink1); line-height:1.4}
+${R} .msa-btn{text-decoration:none}
+${R} .msa-btn .ico{width:13px; height:13px}
+
+/* the shared Fade Time, as a compact pill in a section header */
+${R} .msa-fade-slot{margin-left:auto; min-width:0}
+${R} .msa-fade-slot .msa-fade-time{display:flex; gap:1px; padding:2px; background:var(--bg2);
+  border:1px solid var(--line); border-radius:999px}
+${R} .msa-fade-slot .msa-fade-time .msa-seg{border:none; border-radius:999px; background:none; padding:2px 7px;
+  font-size:.62rem; font-weight:600}
+${R} .msa-fade-slot .msa-fade-time .msa-seg[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine); border:none}
+
+/* segmented rows (clock mode, pace, renderer, durations) */
+${R} .msa-seg-row{display:flex; gap:2px; padding:2px; background:var(--bg2); border:1px solid var(--line); border-radius:999px}
+${R} .msa-seg-row .msa-seg{flex:1; padding:4px 8px; border:none; border-radius:999px; background:none;
+  color:var(--ink2); font-size:.68rem; font-weight:600}
+${R} .msa-seg-row .msa-seg[aria-pressed="true"]{background:var(--shine-soft); color:var(--shine)}
+${R} .msa-chip-grid{grid-template-columns:repeat(2, 1fr)}
+${R} .msa-wx-chip{display:inline-flex; align-items:center; justify-content:center; gap:5px}
+${R} .msa-wx-chip > span{overflow:hidden; text-overflow:ellipsis}
+${R} .msa-wx-chip .ico{width:12px; height:12px; flex:none}
+
+/* Now Playing: label, "Finish now", and a progress line along its bottom edge */
+${R} .msa-now-playing{position:relative; overflow:hidden}
+${R} .msa-np-label{flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+${R} .msa-np-snap{flex:none; padding:1px 9px; border-radius:999px; border:1px solid var(--shine-glow);
+  background:none; color:var(--shine); font-size:.64rem; font-weight:600}
+${R} .msa-np-snap[hidden]{display:none}
+${R} .msa-np-bar{position:absolute; left:0; bottom:0; width:100%; height:2px; background:var(--shine);
+  transform-origin:0 50%; transform:scaleX(var(--p, 0)); opacity:0; transition:opacity 200ms var(--ease-out)}
+${R} .msa-np-bar[data-on="true"]{opacity:.9}
+
+/* the compact dial: the same 340px dial, drawn at three quarters, with a transport row */
+${R} .msa-astro-compact{gap:6px}
+${R} .msa-dial-scale{position:relative; width:252px; height:252px}
+${R} .msa-dial-scale > .msa-astro-dial-host{position:absolute; top:0; left:0; width:340px; height:340px;
+  transform:scale(.741); transform-origin:0 0}
+${R} .msa-astro-compact .msa-astro-pill{font-size:.84rem; padding:4px 11px}
+${R} .msa-astro-compact .msa-astro-time{font-size:1.85rem}
+${R} .msa-astro-pill[hidden]{display:none}
+${R} .msa-transport{display:flex; align-items:center; justify-content:center; gap:6px; width:100%}
+${R} .msa-transport-btn{position:relative; display:inline-flex; align-items:center; gap:5px; height:26px; padding:0 10px;
+  border-radius:999px; border:1px solid var(--line); background:var(--bg2); color:var(--ink1);
+  font-size:.7rem; font-weight:600}
+${R} .msa-transport-btn .ico{width:12px; height:12px}
+${R} .msa-transport-btn[hidden]{display:none}
+${R} .msa-transport-btn[aria-pressed="true"]{border-color:var(--shine-glow); color:var(--shine); background:var(--shine-soft)}
+${R} .msa-transport-btn:has(> .msa-jump-menu:active){transform:none}
+${R} .msa-transport-mode{margin-left:2px; font-size:.62rem; color:var(--ink2); letter-spacing:.04em}
+
+/* the Looks grid — each tile its own little sky */
+${R} .msa-looks{display:flex; flex-direction:column; gap:8px}
+${R} .msa-look-grid{display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; max-height:196px; overflow-y:auto;
+  padding:2px; scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent}
+${R} .msa-look, ${R} .msa-look-add{position:relative; display:flex; flex-direction:column; min-width:0; padding:0;
+  border-radius:10px; border:1px solid var(--line); background:var(--bg2); color:var(--ink0);
+  overflow:hidden; text-align:left}
+/* Foundry centres every button's children (align-items:center), which squeezed the
+   swatch to 0px wide live — a tile lays its sky and name out edge to edge itself. */
+${R} .msa-look{align-items:stretch; justify-content:flex-start}
+${R} .msa-menu-item, ${R} .msa-more-item, ${R} .msa-run-play{justify-content:flex-start}
+${R} .msa-run-card{align-items:flex-start; justify-content:center}
+${R} .msa-look-sky{position:relative; display:block; height:38px;
+  background:linear-gradient(180deg, var(--look-top), var(--look-bottom))}
+${R} .msa-look-facets{position:absolute; left:5px; bottom:4px; display:flex; gap:3px;
+  color:rgba(255,255,255,.88); filter:drop-shadow(0 1px 1px rgba(0,0,0,.65))}
+${R} .msa-look-facets .ico{width:10px; height:10px}
+${R} .msa-look-warn{position:absolute; left:5px; top:4px; display:flex; color:var(--warn)}
+${R} .msa-look-warn .ico{width:11px; height:11px}
+/* two lines before an ellipsis: "Golden afternoon" reads whole at four tiles a row */
+${R} .msa-look-name{display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden;
+  padding:4px 6px 5px; font-size:.64rem; font-weight:600; line-height:1.25; word-break:break-word}
+${R} .msa-look[aria-pressed="true"]{border-color:var(--shine);
+  box-shadow:0 0 0 1px var(--shine), 0 0 14px color-mix(in oklab, var(--shine) 30%, transparent)}
+/* fading in: dashed, the same "on its way, not there yet" the weather chips use */
+${R} .msa-look[data-fading="true"]{border-style:dashed}
+${R} .msa-look-more{position:absolute; top:3px; right:3px; width:16px; height:16px; display:grid; place-items:center;
+  border-radius:5px; background:rgba(8,10,20,.5); color:#fff; opacity:0; transition:opacity 120ms var(--ease-out)}
+${R} .msa-look-more .ico{width:10px; height:10px; transform:rotate(90deg)}
+${R} .msa-look[data-menu="true"] .msa-look-more, ${R} .msa-look:focus-visible .msa-look-more{opacity:1}
+${R} .msa-look-add{align-items:center; justify-content:center; gap:4px; min-height:60px; border-style:dashed;
+  color:var(--ink2); font-size:.66rem; font-weight:600}
+${R} .msa-look-add .ico{width:14px; height:14px}
+${R} .msa-look-add[aria-expanded="true"]{border-color:var(--shine); color:var(--shine)}
+/* The save form, a tile's menu and the transition picker are BOTTOM SHEETS over the Play
+   tab: they rise over the pads and GO instead of pushing the tab past the window. */
+${R} .msa-pane{position:relative}
+${R} .msa-look-form, ${R} .msa-look-menu, ${R} .msa-arm-pop{position:absolute; left:0; right:0; bottom:0; z-index:15;
+  max-height:100%; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:12px;
+  border:1px solid var(--line-strong); border-top-color:var(--shine-glow); border-radius:var(--r-card);
+  background:var(--bg1); box-shadow:0 -10px 30px rgba(0,0,0,.45);
+  animation:msaFadeUp 160ms var(--ease-out) backwards}
+${R} .msa-astro-compact .msa-astro-status:empty{display:none}
+${R} .msa-pane-mix .msa-wx-board{display:flex; flex-direction:column; gap:14px}
+${R} .msa-prep .msa-player-light-picker .msa-wx-chips{grid-template-columns:repeat(2, 1fr)}
+${R} .msa-arm-pop[hidden]{display:none}
+${R} .msa-look-form-row{display:flex; align-items:center; justify-content:flex-end; gap:6px}
+${R} .msa-look-form-row--start{justify-content:flex-start; flex-wrap:wrap}
+${R} .msa-look-menu-head{display:flex; align-items:center; gap:6px; font-size:.78rem; font-weight:700}
+${R} .msa-look-menu-head .hbtn{margin-left:auto; width:22px; height:22px}
+${R} .msa-look-menu-items{display:flex; flex-direction:column; gap:2px}
+${R} .msa-look-menu-items .msa-menu-item{gap:8px}
+${R} .msa-menu-item .ico{width:12px; height:12px; color:var(--ink2); flex:none}
+${R} .msa-look-menu-sub{font-size:.6rem; letter-spacing:.18em; text-transform:uppercase; color:var(--ink2)}
+${R} .msa-facets{display:flex; flex-wrap:wrap; gap:4px}
+${R} .msa-facet{display:inline-flex; align-items:center; gap:4px; padding:3px 8px; border-radius:999px;
+  border:1px solid var(--line); background:var(--bg2); color:var(--ink2); font-size:.66rem; font-weight:600}
+${R} .msa-facet .ico{width:11px; height:11px}
+${R} .msa-facet[aria-pressed="true"]{border-color:var(--shine); color:var(--shine); background:var(--shine-soft)}
+
+/* the effect pads */
+${R} .msa-pads-wrap{display:flex; flex-direction:column; gap:8px}
+${R} .msa-pads{display:grid; grid-template-columns:repeat(3, 1fr); gap:6px}
+${R} .msa-pad{display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; min-width:0;
+  min-height:50px; padding:6px 4px; border-radius:12px; border:1px solid var(--line-strong);
+  background:linear-gradient(180deg, var(--bg3), var(--bg2)); color:var(--ink0);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05), 0 2px 6px rgba(0,0,0,.3)}
+${R} .msa-pad-ico{display:flex; color:var(--shine)}
+${R} .msa-pad-ico .ico{width:17px; height:17px}
+${R} .msa-pad-label{max-width:100%; font-size:.66rem; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+${R} .msa-pad[data-armed="true"]{border-color:var(--warn); color:var(--warn);
+  background:color-mix(in oklab, var(--warn) 14%, var(--bg2))}
+${R} .msa-pad[data-armed="true"] .msa-pad-ico{color:var(--warn)}
+${R} .msa-pad.msa-pad-hit{animation:msaPopIn 160ms var(--ease-out) backwards}
+
+/* the running order (GO) */
+${R} .msa-run{display:flex; flex-direction:column; gap:6px}
+${R} .msa-run-card{flex:1; display:flex; flex-direction:column; gap:2px; min-width:0; padding:7px 10px; text-align:left;
+  background:var(--bg2); border:1px solid var(--line); border-radius:var(--r-card); color:var(--ink0)}
+${R} .msa-run-card[aria-expanded="true"]{border-color:var(--line-strong)}
+${R} .msa-run-row{display:flex; align-items:center; gap:4px; padding:3px 4px 3px 8px; border-radius:7px; color:var(--ink1)}
+${R} .msa-run-row.done .msa-run-play{opacity:.45; text-decoration:line-through}
+${R} .msa-run-row.next .msa-run-play{color:var(--shine)}
+${R} .msa-run-play{flex:1; min-width:0; padding:2px 0; border:none; background:none; color:inherit; text-align:left;
+  font-size:.74rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+${R} .msa-run-btn{flex:none; width:20px; height:20px; display:grid; place-items:center; padding:0; border-radius:5px;
+  border:none; background:none; color:var(--ink2)}
+${R} .msa-run-btn .ico{width:11px; height:11px}
+${R} .msa-run-up .ico{transform:rotate(-90deg)}
+${R} .msa-run-down .ico{transform:rotate(90deg)}
+
+/* the header's more menu */
+${R} .msa-more{position:absolute; top:44px; right:10px; z-index:20; width:252px; display:flex; flex-direction:column;
+  gap:3px; padding:8px; background:var(--glass); backdrop-filter:blur(var(--glass-blur));
+  border:1px solid var(--line-strong); border-radius:12px; box-shadow:var(--shadow3);
+  transform-origin:100% 0; animation:msaPopIn 160ms var(--ease-out) backwards}
+${R} .msa-more[hidden]{display:none}
+${R} .msa-more-head{padding:6px 4px 2px; font-size:.58rem; letter-spacing:.2em; text-transform:uppercase; color:var(--ink2)}
+${R} .msa-more-item{display:flex; align-items:center; gap:8px; width:100%; height:28px; padding:0 8px; border-radius:7px;
+  border:none; background:none; color:var(--ink0); font-size:.72rem; text-align:left; text-decoration:none}
+${R} .msa-more-item .ico{width:13px; height:13px; flex:none; color:var(--ink2)}
+${R} .msa-more-state{margin-left:auto; font-size:.64rem; color:var(--ink2)}
+${R} .msa-more-danger{color:var(--fail)}
+${R} .msa-more-danger.is-armed{background:color-mix(in oklab, var(--fail) 18%, transparent)}
+${R} .msa-more-patreon .ico{color:#ff7a8a}
+${R} .msa-more-size{display:flex; align-items:center; justify-content:space-between; height:30px; padding:0 8px;
+  font-size:.72rem; color:var(--ink0)}
+${R} .msa-more-size .msa-scale-strip{position:static; transform:none; flex-direction:row; box-shadow:none; padding:2px}
+
+/* Prep */
+${R} .msa-prep{display:flex; flex-direction:column; gap:18px}
+${R} .msa-prep-sec{display:flex; flex-direction:column; gap:8px}
+${R} .msa-prep-sec[hidden]{display:none}
+${R} .msa-prep-body{display:flex; flex-direction:column; gap:8px}
+${R} .msa-lib{display:flex; flex-direction:column; gap:4px; max-height:260px; overflow-y:auto;
+  scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent}
+${R} .msa-lib-row{display:flex; align-items:center; gap:8px; padding:6px 8px; border:1px solid var(--line);
+  border-radius:8px; background:var(--bg2)}
+${R} .msa-lib-main{flex:1; min-width:0; display:grid; grid-template-columns:minmax(0, 1fr) auto; column-gap:6px; row-gap:1px}
+${R} .msa-lib-main .msa-hint{grid-column:1 / -1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+${R} .msa-lib-name{font-size:.74rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+${R} .msa-lib-sets{display:flex; align-items:center; gap:3px; color:var(--ink2)}
+${R} .msa-lib-sets .ico{width:11px; height:11px}
+${R} .msa-lib-actions{display:flex; gap:4px; flex:none}
+${R} .msa-support{display:flex; flex-direction:column; gap:8px; padding:12px; border-radius:var(--r-card);
+  border:1px solid color-mix(in oklab, #ff7a8a 35%, var(--line));
+  background:linear-gradient(135deg, color-mix(in oklab, #ff7a8a 12%, var(--bg2)), var(--bg2))}
+${R} .msa-support-text{font-size:.72rem; line-height:1.45; color:var(--ink1)}
+${R} .msa-support-text strong{color:var(--ink0)}
+${R} .msa-btn--patreon{background:linear-gradient(135deg, #ff8a5b, #ff6b74); color:#fff; border-color:transparent}
+
 /* ---- hover: only where hover exists ----------------------------------------------------------
    Every hover rule in the sheet is in this one block, so a tap on a touch screen never
    leaves a stuck hover state. A lit (aria-pressed) toggle keeps its look under the pointer:
@@ -466,6 +702,22 @@ ${wxChipHoverCss(R)}
   ${R} .msa-foot-btn:not(.is-armed):not(#msa-remote-patreon):hover{background:var(--bg3)}
   ${R} .msa-foot-btn.is-armed:hover{background:color-mix(in oklab, var(--fail) 24%, var(--bg2))}
   ${R} #msa-remote-patreon:hover{filter:brightness(1.08)}
+  ${R} .msa-tab:not([aria-selected="true"]):hover{color:var(--ink0)}
+  ${R} .msa-scope:hover{border-color:var(--shine-glow); color:var(--ink0)}
+  ${R} .msa-heart:hover{color:#ff9aa6}
+  ${R} .msa-look:not([aria-pressed="true"]):hover{border-color:var(--line-strong)}
+  ${R} .msa-look:hover .msa-look-more{opacity:1}
+  ${R} .msa-look-add:hover{border-color:var(--shine-glow); color:var(--ink0)}
+  ${R} .msa-facet:not([aria-pressed="true"]):hover{border-color:var(--line-strong); color:var(--ink0)}
+  ${R} .msa-pad:not([data-armed="true"]):hover{border-color:var(--shine-glow)}
+  ${R} .msa-transport-btn:not([aria-pressed="true"]):hover{border-color:var(--line-strong); color:var(--ink0)}
+  ${R} .msa-np-snap:hover{background:var(--shine-soft)}
+  ${R} .msa-run-card:hover{border-color:var(--line-strong)}
+  ${R} .msa-run-btn:hover{background:var(--bg3); color:var(--ink0)}
+  ${R} .msa-run-play:hover{color:var(--ink0)}
+  ${R} .msa-more-item:not(.is-armed):hover{background:var(--bg3)}
+  ${R} .msa-seg-row .msa-seg:not([aria-pressed="true"]):hover{color:var(--ink0)}
+  ${R} .msa-btn--patreon:hover{filter:brightness(1.08)}
 }
 `.trim();
 }

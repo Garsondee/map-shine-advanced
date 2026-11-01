@@ -3,6 +3,7 @@ import { run as runParams } from './params-schema.test.mjs';
 import { run as runFrameClock } from './frame-clock.test.mjs';
 import { run as runGregorianMath } from './gregorian-math.test.mjs';
 import { run as runCuesSchema } from './cues-schema.test.mjs';
+import { run as runLooksSchema } from './looks-schema.test.mjs';
 import { run as runDialsSchema } from './dials-schema.test.mjs';
 import { run as runImpulseSchema } from './impulse-schema.test.mjs';
 import { run as runSceneScale } from './scene-scale.test.mjs';
@@ -29,6 +30,7 @@ const suites = [
   ['frame-clock', runFrameClock],
   ['gregorian-math', runGregorianMath],
   ['cues-schema', runCuesSchema],
+  ['looks-schema', runLooksSchema],
   ['dials-schema', runDialsSchema],
   ['impulse-schema', runImpulseSchema],
   ['scene-scale', runSceneScale],

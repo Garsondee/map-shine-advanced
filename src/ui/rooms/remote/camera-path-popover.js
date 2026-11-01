@@ -282,9 +282,12 @@ function buildBody(pathState, rerender, onStatus) {
 
 /**
  * Install the Remote's camera-path popover, once.
+ * @param {{getAnchorRect?: () => DOMRect|null}} [ctx] - the opening room's rect: the
+ *   popover opens beside the Remote (2026-11-01; it used to open on the far side of
+ *   the screen), the same placement the wind popover uses.
  * @returns {{open: () => void, close: () => void, toggle: () => void, isOpen: () => boolean}}
  */
-export function installCameraPathPopover() {
+export function installCameraPathPopover(ctx = {}) {
   if (document.getElementById(PANEL_ID)) return document.getElementById(PANEL_ID)._msaController;
 
   let pathState = { keyframes: [], settings: { ...CAMERA_PATH_DEFAULT_SETTINGS } };
@@ -348,6 +351,17 @@ export function installCameraPathPopover() {
       open = true;
       win.hidden = false;
       win.style.display = 'block';
+      const r = ctx.getAnchorRect?.();
+      if (r && r.width > 0) {
+        const w = win.offsetWidth || 380;
+        const fitsRight = r.right + 8 + w <= window.innerWidth - 8;
+        Object.assign(win.style, {
+          left: `${fitsRight ? r.right + 8 : Math.max(8, r.left - 8 - w)}px`,
+          right: 'auto',
+          top: `${Math.max(8, r.top)}px`,
+          transformOrigin: fitsRight ? '0 0' : '100% 0',
+        });
+      }
       replayClass(win, 'msa-pop-enter');
       render();
       setStatus(`Loaded ${pathState.keyframes.length} keyframe(s) from this scene.`);

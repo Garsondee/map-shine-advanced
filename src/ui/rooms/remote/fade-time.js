@@ -17,7 +17,7 @@
 
 /** @type {ReadonlyArray<{label: string, ms: number}>} */
 export const TEMPO = Object.freeze([
-  { label: 'Now', ms: 0 },
+  { label: 'Cut', ms: 0 },
   { label: '10s', ms: 10_000 },
   { label: '1m', ms: 60_000 },
   { label: '5m', ms: 300_000 },

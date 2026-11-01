@@ -303,6 +303,17 @@ export { registerScenePresetSettings, readScenePresets, writeScenePresets } from
 // and writes, mirroring fade-persistence.js's own shape.
 export { readCueStack, writeCueStack, watchCueStack } from './cues-persistence.js';
 
+// LOOKS PERSISTENCE (2026-11-01) — the world-wide Looks library (a world setting)
+// and each scene's running order (a scene flag). core/looks-schema.js validates.
+export {
+  registerLooksSettings,
+  readLooksLibraryRaw,
+  writeLooksLibraryRaw,
+  readLookSequence,
+  writeLookSequence,
+  watchLookSequence,
+} from './looks-persistence.js';
+
 // THE LIGHT-SOURCE READER — feeds light.accumulate's point-light illumination
 // rung; the one place canvas.effects.lightSources is read. Also the scene's
 // own Global Illumination config (canvas.scene.environment.globalLight) —

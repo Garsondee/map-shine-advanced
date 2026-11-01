@@ -37,6 +37,15 @@ import {
   createFadeSourceRegistry,
 } from '../../src/world/index.js';
 import { validateCue, orderedCues, cueToFadePatch } from '../../src/core/cues-schema.js';
+import {
+  STARTER_LOOKS,
+  captureLook,
+  lookFacets,
+  planLookApply,
+  tidyLook,
+  validateLook,
+  withFacets,
+} from '../../src/core/looks-schema.js';
 
 installTokens();
 document.documentElement.dataset.theme = 'dark';
@@ -212,14 +221,25 @@ function fadeToArchetype(archetypeId, overMs) {
 // same two real states (weather fade in flight / settled default), same
 // narrower-than-the-mock scope. `'day'` matches every other pushUpdate()
 // call in this harness, which has no real phase computation either.
+function nowPlayingProgress(nowMs) {
+  if (activeLookFake && nowMs < activeLookFake.untilMs) {
+    return (nowMs - activeLookFake.startedAtMs) / (activeLookFake.untilMs - activeLookFake.startedAtMs);
+  }
+  const live = Object.values(fadeState).filter((e) => !isEntryExpired(e, nowMs) && e.overMs > 0);
+  return live.length ? Math.min(...live.map((e) => (nowMs - e.startedAtMs) / e.overMs)) : null;
+}
 function buildNowPlayingLabel(nowMs) {
+  if (activeLookFake && nowMs < activeLookFake.untilMs) {
+    return `Fading to ${activeLookFake.name} — ${Math.max(0, Math.round((activeLookFake.untilMs - nowMs) / 1000))}s left`;
+  }
   const fading = Object.entries(fadeState).find(([key, e]) => key.startsWith('weather.') && !isEntryExpired(e, nowMs));
   if (fading) {
     const entry = fading[1];
     const remainS = Math.max(0, Math.round((entry.startedAtMs + entry.overMs - nowMs) / 1000));
     return `Fading to ${entry.label ?? 'a new sky'} — ${remainS}s left`;
   }
-  return `Holding — ${phaseDisplayName('day', true)}`;
+  const phase = phaseDisplayName('day', true);
+  return activeLookFake ? `${activeLookFake.name} · ${phase}` : phase;
 }
 function tickFades() {
   const nowMs = performance.now();
@@ -239,7 +259,7 @@ function tickFades() {
   }
   fadeState = pruneExpired(fadeState, nowMs);
   if (anyCompleted) remote.refreshWeatherBoard();
-  remote.updateNowPlaying({ label: buildNowPlayingLabel(nowMs) });
+  remote.updateNowPlaying({ label: buildNowPlayingLabel(nowMs), progress01: nowPlayingProgress(nowMs) });
   requestAnimationFrame(tickFades);
 }
 
@@ -312,11 +332,155 @@ const IMPULSES = [
   },
 ];
 
+// ---- A FAKE LOOKS ENGINE (2026-11-01 Remote redesign) --------------------------------
+// The REAL core/looks-schema.js (capture, reconcile, plan, swatches) over this page's
+// fakeSky, so the Play tab's grid, Save look, the tile menu, GO and Prep's library all
+// work here. Applying is instant except the weather, which rides the same fake fade the
+// mood chips use. `?looks=stale` adds a Look holding a removed setting, to show Tidy.
+const looksLib = STARTER_LOOKS.map((l) => ({ ...l, values: { ...l.values } }));
+if (new URLSearchParams(location.search).get('looks') === 'stale') {
+  looksLib.push({ id: 'old-one', name: 'Old campaign look', v: 1, values: { 'time.hour': 9, 'removed.slider': 0.4 } });
+}
+let lookSeq = ['starter-golden-afternoon', 'starter-grey-morning', 'starter-storm'];
+let lookNext = 0;
+let activeLookFake = null; // {id, startedAtMs, untilMs}
+const lookRead = (key) =>
+  ({
+    'time.hour': fakeSky.todHour,
+    'weather.archetype': fakeSky.weatherArchetype,
+    'weather.cloudCover01': fakeSky.cloudCover01,
+    'weather.precip01': fakeSky.precip01,
+    'weather.temperature01': fakeSky.temperature01 ?? 0.55,
+    'wind.speed01': fakeSky.windSpeed01,
+    'wind.directionDeg': fakeSky.windDirectionDeg,
+    'sky.realism01': fakeSky.realism01 ?? 0,
+    'sky.goldenHour01': fakeSky.goldenHour01 ?? 1,
+    'sky.moonlight01': fakeSky.moonlight01 ?? 0,
+    'sky.gradeEnvStrength': fakeSky.gradeEnvStrength ?? 0,
+    'night.darkness01': fakeSky.darkness01 ?? 0,
+  })[key];
+function playFakeLook(id, overMs) {
+  const look = looksLib.find((l) => l.id === id);
+  if (!look) return { ok: false, reason: 'no such Look', skipped: [] };
+  const { apply, skipped } = planLookApply(look, {
+    worldClock: fakeSky.mode !== 'aesthetic',
+    isKnownArchetype: (a) => WEATHER_ARCHETYPES.some((x) => x.id === a),
+  });
+  if (apply.length === 0) return { ok: false, reason: skipped[0]?.reason ?? 'nothing to play', skipped };
+  for (const { key, value } of apply) {
+    if (key === 'weather.archetype') fadeToArchetype(value, overMs);
+    else if (key === 'time.hour') fakeSky.todHour = value;
+    else if (key === 'wind.speed01') fakeSky.windSpeed01 = value;
+    else if (key === 'wind.directionDeg') fakeSky.windDirectionDeg = value;
+    else if (key === 'night.darkness01') fakeSky.darkness01 = value;
+    else fakeSky[key.split('.')[1]] = value;
+  }
+  const nowMs = performance.now(); // preview-only stand-in for wallClockMs()
+  activeLookFake = { id, name: look.name, startedAtMs: nowMs, untilMs: nowMs + overMs };
+  remoteDialInstance?.update({
+    hour: fakeSky.todHour,
+    phase: 'day',
+    windDirectionDeg: fakeSky.windDirectionDeg,
+    windSpeed01: fakeSky.windSpeed01,
+    cloudCover01: fakeSky.cloudCover01,
+    canSetHour: fakeSky.mode === 'aesthetic',
+  });
+  log(`look -> ${look.name} over ${overMs}ms (${skipped.length} skipped)`);
+  return { ok: true, reason: null, skipped };
+}
+const fakeLooks = {
+  list: () => looksLib,
+  play: (id, overMs) => playFakeLook(id, overMs),
+  capture: async (name, facets) => {
+    const look = captureLook({ id: `look-${looksLib.length + 1}`, name, facets, read: lookRead });
+    if (!validateLook(look).ok) return { ok: false, reason: 'nothing to save' };
+    looksLib.push(look);
+    remote.refreshLooks();
+    return { ok: true, reason: null, look };
+  },
+  recapture: async (id) => {
+    const i = looksLib.findIndex((l) => l.id === id);
+    if (i !== -1)
+      looksLib[i] = captureLook({ id, name: looksLib[i].name, facets: lookFacets(looksLib[i]), read: lookRead });
+    remote.refreshLooks();
+  },
+  setFacets: async (id, facets) => {
+    const i = looksLib.findIndex((l) => l.id === id);
+    if (i === -1) return { ok: false, reason: 'no such Look' };
+    const kept = withFacets(looksLib[i], facets);
+    const added = facets.filter((f) => !lookFacets(looksLib[i]).includes(f));
+    const fresh = added.length ? captureLook({ id, name: kept.name, facets: added, read: lookRead }).values : {};
+    looksLib[i] = { ...kept, values: { ...kept.values, ...fresh } };
+    remote.refreshLooks();
+    return { ok: true };
+  },
+  rename: async (id, name) => {
+    const l = looksLib.find((x) => x.id === id);
+    if (l) l.name = String(name).trim();
+    remote.refreshLooks();
+  },
+  remove: async (id) => {
+    looksLib.splice(
+      looksLib.findIndex((l) => l.id === id),
+      1
+    );
+    remote.refreshLooks();
+  },
+  tidy: async (id) => {
+    const i = looksLib.findIndex((l) => l.id === id);
+    if (i !== -1) looksLib[i] = tidyLook(looksLib[i]);
+    remote.refreshLooks();
+  },
+  sequence: () => lookSeq,
+  setSequence: async (ids) => {
+    lookSeq = ids.slice();
+    remote.refreshLooks();
+  },
+  nextIndex: () => lookNext,
+  setNextIndex: (i) => {
+    lookNext = i;
+    remote.refreshLooks();
+  },
+  next: (overMs) => {
+    const ids = lookSeq.filter((id) => looksLib.some((l) => l.id === id));
+    if (lookNext >= ids.length) return { ok: false, reason: 'end of the running order' };
+    const r = playFakeLook(ids[lookNext], overMs);
+    if (r.ok) lookNext += 1;
+    return r;
+  },
+  activeId: () => activeLookFake?.id ?? null,
+  isFading: () => Boolean(activeLookFake && performance.now() < activeLookFake.untilMs),
+  isWorldClock: () => fakeSky.mode !== 'aesthetic',
+  baseline: (overMs) => fadeToArchetype('clear', overMs),
+};
+
 /** The transitions board's throwaway state (see `transitionBoard` below). */
 const fakeTransition = { defaults: { preset: 'cinematic', pace: 'measured' }, armed: null };
 
 const remote = installRemote({
   impulses: IMPULSES,
+  looks: fakeLooks,
+  getSceneName: () => 'Dockside Tavern',
+  onSweepToHour: (hour, overMs) => {
+    fakeSky.todHour = hour;
+    log(`sweep -> ${hour} over ${overMs}ms`);
+    remote.onSetModeRepaint?.();
+  },
+  onSnapFades: () => {
+    const nowMs = performance.now();
+    let any = false;
+    for (const [key, entry] of Object.entries(fadeState)) {
+      if (!isEntryExpired(entry, nowMs)) {
+        fadeState[key] = { ...entry, overMs: Math.max(0, nowMs - entry.startedAtMs) };
+        any = true;
+      }
+    }
+    if (activeLookFake && activeLookFake.untilMs > nowMs) {
+      activeLookFake.untilMs = nowMs;
+      any = true;
+    }
+    return any;
+  },
   // 2026-08-18 fix: the Remote's OWN dial (astrolabe-dial.js), matching the
   // approved mock for real instead of the old createAstrolabe()'s
   // pre-LANTERN styling — see that module's own header for the full story.
@@ -349,6 +513,8 @@ const remote = installRemote({
         log('ring drag refused — clock mode is not Aesthetic');
         dialCtx?.onLockedAttempt?.();
       },
+      onWindClick: dialCtx?.onWindClick,
+      onDateClick: dialCtx?.onDateClick,
     });
     container.appendChild(remoteDialInstance.root);
     pushUpdate();
@@ -462,6 +628,11 @@ const remote = installRemote({
     onWindSpeed01Commit: (v) => {
       fakeSky.windSpeed01 = v;
       log(`wind -> ${v}`);
+    },
+    getNightDarkness: () => fakeSky.darkness01 ?? 0,
+    onNightDarknessCommit: (v) => {
+      fakeSky.darkness01 = v;
+      log(`night darkness -> ${v}`);
     },
     getSunLatitude: () => fakeSky.latitudeDeg ?? 30,
     onSunLatitudeCommit: (v) => {

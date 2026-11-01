@@ -253,6 +253,19 @@ import { createPerfHud } from './diag/perf-hud.js';
 import { createLogger } from './core/log.js';
 import { wallClockMs } from './core/frame-clock.js';
 import { validateCue, validateCueStack, orderedCues, cueToFadePatch } from './core/cues-schema.js';
+import {
+  STARTER_LOOKS,
+  captureLook,
+  looksFromCues,
+  lookFacets,
+  normalizeLibrary,
+  planLookApply,
+  reconcileLook,
+  serializeLibrary,
+  tidyLook,
+  validateLook,
+  withFacets,
+} from './core/looks-schema.js';
 import { validateImpulseList } from './core/impulse-schema.js';
 import {
   ambientVectorFromWind,
@@ -698,6 +711,12 @@ import {
   readCueStack,
   writeCueStack,
   watchCueStack,
+  registerLooksSettings,
+  readLooksLibraryRaw,
+  writeLooksLibraryRaw,
+  readLookSequence,
+  writeLookSequence,
+  watchLookSequence,
   registerCalendarSetting,
   installActiveCalendar,
   standDownPf2eDarknessSync,
@@ -2005,6 +2024,11 @@ function install() {
         // still in flight, matching `getAxisValue`/`getTemperature` above.
         getWindSpeed01: () => fadeSourceRegistry.readLive('wind.speed01'),
         onWindSpeed01Commit: (v) => fadeWindSpeedTo(v, MapShine.__remote?.getFadeOverMs?.() ?? 0),
+        // NIGHT DARKNESS (2026-11-01 Remote redesign) — the Mix tab's "Night" fader,
+        // moved from the Player Lights board; fades over the Fade Time like every
+        // other fader (the 'night' fade source, persisted on arrival).
+        getNightDarkness: () => fadeSourceRegistry.readLive('night.darkness01'),
+        onNightDarknessCommit: (v) => fadeNightDarknessTo(v, MapShine.__remote?.getFadeOverMs?.() ?? 0),
         getSceneOverride: () => skyScope.sceneOverrides === true,
         // The cloud pin glyph (2026-08-18 fix — gap-audit against the old
         // astrolabe.js's own Cloud row). `weatherPinnedAxes` already rides the
@@ -2050,6 +2074,40 @@ function install() {
         },
       },
       onBaseline: (overMs) => fadeWeatherToBaseline(overMs),
+      // THE TABBED REMOTE (2026-11-01). The header names the scene; the Free
+      // clock's Jump sweeps the dial over the Fade Time; Now Playing's "Finish
+      // now" lands every fade in flight.
+      getSceneName: () => (typeof canvas !== 'undefined' ? (canvas?.scene?.name ?? '') : ''),
+      onSweepToHour: (hour, overMs) => {
+        sweepVtPanViewerTimeOfDay(hour, overMs);
+        if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
+      },
+      onSnapFades: () => snapFadesToEnd(),
+      // THE LOOKS (core/looks-schema.js, the LOOKS block further down this
+      // install()) — the Play tab's grid and GO, Prep's library. Closure
+      // references, safe for the same reason weatherBoard's are.
+      looks: {
+        list: () => looksLibrary,
+        play: (id, overMs) => playLookById(id, overMs),
+        capture: (name, facets) => captureLookFromLive(name, facets),
+        recapture: (id) => recaptureLook(id),
+        setFacets: (id, facets) => setLookFacets(id, facets),
+        rename: (id, name) => renameLook(id, name),
+        remove: (id) => deleteLook(id),
+        tidy: (id) => tidyLookById(id),
+        sequence: () => lookSequence,
+        setSequence: (ids) => saveLookSequence(ids),
+        nextIndex: () => lookSequenceNext,
+        setNextIndex: (i) => {
+          lookSequenceNext = Math.max(0, Math.min(Number(i) || 0, lookSequence.length));
+          MapShine.__remote?.refreshLooks?.();
+        },
+        next: (overMs) => playNextInSequence(overMs),
+        activeId: () => activeLook?.id ?? null,
+        isFading: () => Boolean(activeLook && wallClockMs() < activeLook.untilMs),
+        isWorldClock: () => isWorldClock(),
+        baseline: (overMs) => fadeWeatherToBaseline(overMs),
+      },
       // THE PLAYER LIGHT BOARD (mythica-machina-press#77, mythica-machina-
       // press#577) — same closure-reference safety as weatherBoard above.
       // `getPermissions` re-reads the scene flag fresh every paint (the
@@ -13102,6 +13160,39 @@ function install() {
       applyAmbientWind();
     },
   });
+  // THE SKY'S LIGHT FIELDS (Looks, 2026-11-01) — Sky light, Golden hour, Moonlight
+  // and Atmosphere used to commit straight through editSky(), instantly, so nothing
+  // could FADE them; a Look has to. LIVE push only, every tick, through the same
+  // closure setters applyLookToEngines uses; persisted once, on arrival, by
+  // fadeSkyFieldsTo's own pendingSkyFadeCompletions entry (an editSky patch). The
+  // "don't stomp a live fade" guard for these lives in applyLookToEngines.
+  const SKY_LIGHT_DEFAULTS = Object.freeze({ realism01: 0, goldenHour01: 1, moonlight01: 0, gradeEnvStrength: 0 });
+  fadeSourceRegistry.registerSource('sky', {
+    keys: () => Object.keys(SKY_LIGHT_DEFAULTS),
+    typeOf: (field) => (field in SKY_LIGHT_DEFAULTS ? 'float' : undefined),
+    readLive: (field) => liveFadeValue(`sky.${field}`) ?? skyScope.sky?.[field] ?? SKY_LIGHT_DEFAULTS[field],
+    write: (field, value) => {
+      if (field === 'realism01') setVtPanViewerSkyRealism(value);
+      else if (field === 'goldenHour01') setVtPanViewerSkyLook({ goldenHour01: value });
+      else if (field === 'moonlight01') setVtPanViewerSkyLook({ moonlight01: value });
+      else if (field === 'gradeEnvStrength') setVtPanViewerGradeEnvStrength(value);
+    },
+  });
+
+  // NIGHT DARKNESS (Looks, 2026-11-01) — how black unlit ground gets at night. It
+  // lives in the scene's player-light permissions flag, so it is persisted once on
+  // arrival (the `__night` completion shape in pumpWeatherFades) and pushed live
+  // every tick through the same setDarknessRealism lever the slider uses.
+  fadeSourceRegistry.registerSource('night', {
+    keys: () => ['darkness01'],
+    typeOf: (field) => (field === 'darkness01' ? 'float' : undefined),
+    readLive: (field) =>
+      field === 'darkness01' ? (liveFadeValue('night.darkness01') ?? getDarknessRealism()) : undefined,
+    write: (field, value) => {
+      if (field === 'darkness01') setDarknessRealism(value);
+    },
+  });
+
   /** The dial value of a wind fade IN FLIGHT, either shape, else null. */
   function liveWindFadeSpeed01() {
     const perceived = liveFadeValue('wind.perceived01');
@@ -13434,6 +13525,12 @@ function install() {
    * @returns {string}
    */
   function buildNowPlayingLabel(dial, nowMs) {
+    // A Look in flight names itself — the GM pressed ONE button, so the bar
+    // names that, not whichever of its five fades happens to be listed first.
+    if (activeLook && nowMs < activeLook.untilMs) {
+      const remainS = Math.max(0, Math.round((activeLook.untilMs - nowMs) / 1000));
+      return `Fading to ${activeLook.name} — ${remainS}s left`;
+    }
     const fading = Object.entries(fadeState).find(
       ([key, e]) => key.startsWith('weather.') && !isEntryExpired(e, nowMs)
     );
@@ -13446,7 +13543,27 @@ function install() {
       const remainS = Math.max(0, Math.round(dial.syncRemainingSec ?? 0));
       return `Sweeping to ${formatClock(dial.targetHour)} — ${remainS}s left`;
     }
-    return `Holding — ${phaseDisplayName(dial.phase, dial.rising)}`;
+    const phase = phaseDisplayName(dial.phase, dial.rising);
+    return activeLook ? `${activeLook.name} · ${phase}` : phase;
+  }
+
+  /**
+   * How far through the longest thing in flight we are, 0..1, or null when nothing
+   * is fading — the Remote's Now Playing bar draws this as its progress line.
+   * @param {{isSyncing?: boolean, syncRemainingSec?: number}} dial @param {number} nowMs @returns {number|null}
+   */
+  function nowPlayingProgress(dial, nowMs) {
+    if (activeLook && nowMs < activeLook.untilMs && activeLook.untilMs > activeLook.startedAtMs) {
+      return (nowMs - activeLook.startedAtMs) / (activeLook.untilMs - activeLook.startedAtMs);
+    }
+    let best = null;
+    for (const entry of Object.values(fadeState)) {
+      if (isEntryExpired(entry, nowMs) || !(entry.overMs > 0)) continue;
+      const p = (nowMs - entry.startedAtMs) / entry.overMs;
+      if (best === null || p < best) best = p;
+    }
+    if (best !== null) return Math.max(0, Math.min(1, best));
+    return dial?.isSyncing ? 0.5 : null;
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -13698,6 +13815,399 @@ function install() {
   MapShine.revertCueTest = () => revertCueTest();
   MapShine.isCueTestActive = () => isCueTestActive();
 
+  // ══════════════════════════════════════════════════════════════════════
+  // LOOKS (2026-11-01) — the Remote's one-button mood system, replacing its
+  // mood chips + cue deck (core/looks-schema.js's header has the whole design,
+  // including how Looks stay in step with the engine). A Look is a partial set
+  // of channel values; playing one STAGES each value through LOOK_ADAPTERS and
+  // then starts real fades through the SAME fade functions the Remote's own
+  // sliders use, so a Look fades exactly as far and as fast as a hand-made
+  // change would — and persists the same way, on arrival.
+  //
+  // The library is a WORLD setting (one set of Looks for every map at this
+  // table); each scene keeps its own running order (Look ids) for GO.
+  // ══════════════════════════════════════════════════════════════════════
+  /** @type {import('./core/looks-schema.js').Look[]} */
+  let looksLibrary = [];
+  /** This scene's running order (Look ids) and the index GO plays next. */
+  let lookSequence = [];
+  let lookSequenceNext = 0;
+  let lookSequenceUnsub = null;
+  /** The Look last played on this client and when its fade lands — the Remote's
+   * lit tile and the Now Playing bar read this. @type {{id: string, name: string, startedAtMs: number, untilMs: number}|null} */
+  let activeLook = null;
+
+  /** Foundry's own clock drives the hour ('almanac', or the older 'follow'). */
+  const isWorldClock = () => skyScope.sky?.mode === 'almanac' || skyScope.sky?.mode === 'follow';
+  const isKnownArchetype = (id) => WEATHER_ARCHETYPES.some((a) => a.id === id);
+
+  /**
+   * Every Look channel's door: `read` the live value (capture), `stage` a value
+   * into the batch commitLookStage starts. core/looks-schema.js#LOOK_CHANNELS is
+   * the list — looks-schema.test.mjs reads THIS table and fails the build when
+   * the two disagree, so a channel cannot be added on one side and forgotten on
+   * the other.
+   */
+  const LOOK_ADAPTERS = {
+    'time.hour': {
+      read: () => getVtPanViewerTodHour(),
+      stage: (v, s) => {
+        s.hour = v;
+      },
+    },
+    'weather.archetype': {
+      read: () => skyScope.sky?.weatherArchetype ?? 'custom',
+      stage: (v, s) => {
+        s.archetype = v;
+      },
+    },
+    'weather.cloudCover01': {
+      read: () => fadeSourceRegistry.readLive('weather.cloudCover01'),
+      stage: (v, s) => {
+        s.weatherAxes.cloudCover01 = v;
+      },
+    },
+    'weather.precip01': {
+      read: () => fadeSourceRegistry.readLive('weather.precip01'),
+      stage: (v, s) => {
+        s.weatherAxes.precip01 = v;
+      },
+    },
+    'weather.temperature01': {
+      read: () => fadeSourceRegistry.readLive('weather.temperature01'),
+      stage: (v, s) => {
+        s.temperature = v;
+      },
+    },
+    'wind.speed01': {
+      read: () => liveWindFadeSpeed01() ?? windSpeed01,
+      stage: (v, s) => {
+        s.windSpeed = v;
+      },
+    },
+    'wind.directionDeg': {
+      read: () => windDirectionDeg,
+      stage: (v, s) => {
+        s.windDirectionDeg = v;
+      },
+    },
+    'sky.realism01': {
+      read: () => fadeSourceRegistry.readLive('sky.realism01'),
+      stage: (v, s) => {
+        s.sky.realism01 = v;
+      },
+    },
+    'sky.goldenHour01': {
+      read: () => fadeSourceRegistry.readLive('sky.goldenHour01'),
+      stage: (v, s) => {
+        s.sky.goldenHour01 = v;
+      },
+    },
+    'sky.moonlight01': {
+      read: () => fadeSourceRegistry.readLive('sky.moonlight01'),
+      stage: (v, s) => {
+        s.sky.moonlight01 = v;
+      },
+    },
+    'sky.gradeEnvStrength': {
+      read: () => fadeSourceRegistry.readLive('sky.gradeEnvStrength'),
+      stage: (v, s) => {
+        s.sky.gradeEnvStrength = v;
+      },
+    },
+    'night.darkness01': {
+      read: () => fadeSourceRegistry.readLive('night.darkness01'),
+      stage: (v, s) => {
+        s.darkness = v;
+      },
+    },
+    // END LOOK_ADAPTERS
+  };
+
+  /**
+   * Cloud and rain together, as ONE gesture — two separate fadeWeatherAxisTo calls
+   * would each persist the other axis's half-faded value on arrival.
+   * @param {{cloudCover01?: number, precip01?: number}} patch @param {number} overMs @param {string} label
+   */
+  function fadeWeatherAxesTo(patch, overMs, label) {
+    const nowMs = wallClockMs();
+    const gestureId = `look-axes:${nowMs}`;
+    const targets = {};
+    for (const [axisName, to] of Object.entries(patch)) {
+      targets[`weather.${axisName}`] = {
+        to,
+        type: 'float',
+        overMs,
+        curve: 'ease',
+        from: fadeSourceRegistry.readLive(`weather.${axisName}`),
+      };
+    }
+    fadeState = mergeFadeState(fadeState, { id: gestureId, label, targets }, nowMs);
+    const live = {
+      cloudCover01: fadeSourceRegistry.readLive('weather.cloudCover01'),
+      precip01: fadeSourceRegistry.readLive('weather.precip01'),
+    };
+    pendingSkyFadeCompletions.set(gestureId, { ...live, ...patch });
+    void editSky({ weatherArchetype: 'custom', ...live });
+    void writeFadeState(fadeState);
+  }
+
+  /** The 'sky' light fields, as one gesture persisted by one editSky patch on arrival.
+   * @param {Record<string, number>} patch @param {number} overMs @param {string} label */
+  function fadeSkyFieldsTo(patch, overMs, label) {
+    const nowMs = wallClockMs();
+    const gestureId = `look-sky:${nowMs}`;
+    const targets = {};
+    for (const [field, to] of Object.entries(patch)) {
+      targets[`sky.${field}`] = {
+        to,
+        type: 'float',
+        overMs,
+        curve: 'ease',
+        from: fadeSourceRegistry.readLive(`sky.${field}`),
+      };
+    }
+    fadeState = mergeFadeState(fadeState, { id: gestureId, label, targets }, nowMs);
+    pendingSkyFadeCompletions.set(gestureId, { ...patch });
+    void writeFadeState(fadeState);
+  }
+
+  /** Night darkness, persisted to the scene's player-light flag on arrival.
+   * @param {number} value @param {number} overMs */
+  function fadeNightDarknessTo(value, overMs) {
+    const nowMs = wallClockMs();
+    const gestureId = `look-night:${nowMs}`;
+    fadeState = mergeFadeState(
+      fadeState,
+      {
+        id: gestureId,
+        label: 'Night darkness',
+        targets: {
+          'night.darkness01': {
+            to: value,
+            type: 'float',
+            overMs,
+            curve: 'ease',
+            from: fadeSourceRegistry.readLive('night.darkness01'),
+          },
+        },
+      },
+      nowMs
+    );
+    pendingSkyFadeCompletions.set(gestureId, { __night: true, value });
+    void writeFadeState(fadeState);
+  }
+
+  /** Start every staged fade. One function, so the order (time, sky, wind, light,
+   * dark) is decided once. @param {object} s @param {number} overMs @param {string} label */
+  function commitLookStage(s, overMs, label) {
+    if (Number.isFinite(s.hour)) {
+      sweepVtPanViewerTimeOfDay(s.hour, overMs);
+      if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: s.hour });
+    }
+    if (typeof s.archetype === 'string') fadeWeatherToArchetype(s.archetype, overMs);
+    else if (Object.keys(s.weatherAxes).length > 0) fadeWeatherAxesTo(s.weatherAxes, overMs, label);
+    if (Number.isFinite(s.temperature)) fadeTemperatureTo(s.temperature, overMs);
+    if (Number.isFinite(s.windSpeed)) fadeWindSpeedTo(s.windSpeed, overMs);
+    if (Number.isFinite(s.windDirectionDeg)) void MapShine.setWind({ directionDeg: s.windDirectionDeg });
+    if (Object.keys(s.sky).length > 0) fadeSkyFieldsTo(s.sky, overMs, label);
+    if (Number.isFinite(s.darkness)) fadeNightDarknessTo(s.darkness, overMs);
+    MapShine.__remote?.refreshWeatherBoard();
+  }
+
+  /**
+   * Fade the scene to a Look. Skips (and reports) what cannot play: the hour under
+   * the World clock, a setting that no longer exists, an unusable value.
+   * @param {string} id @param {number} overMs
+   * @returns {{ok: boolean, reason: string|null, skipped: Array<{key: string, reason: string}>}}
+   */
+  function playLookById(id, overMs) {
+    const look = looksLibrary.find((l) => l.id === id);
+    if (!look) return { ok: false, reason: `no Look with id '${id}'`, skipped: [] };
+    const { apply, skipped } = planLookApply(look, { worldClock: isWorldClock(), isKnownArchetype });
+    if (apply.length === 0) {
+      return { ok: false, reason: skipped[0]?.reason ?? 'this Look has nothing to play', skipped };
+    }
+    const ms = Math.max(0, Number(overMs) || 0);
+    const staged = { weatherAxes: {}, sky: {} };
+    for (const { key, value } of apply) LOOK_ADAPTERS[key]?.stage(value, staged);
+    commitLookStage(staged, ms, look.name);
+    const nowMs = wallClockMs();
+    activeLook = { id: look.id, name: look.name, startedAtMs: nowMs, untilMs: nowMs + ms };
+    for (const s of skipped) log.info(`Look "${look.name}": skipped ${s.key} — ${s.reason}`);
+    MapShine.__remote?.refreshLooks?.();
+    return { ok: true, reason: null, skipped };
+  }
+
+  /** Finish every fade in flight NOW (the Now Playing bar's Snap). @returns {boolean} whether anything was running */
+  function snapFadesToEnd() {
+    const nowMs = wallClockMs();
+    let any = false;
+    const next = {};
+    for (const [key, entry] of Object.entries(fadeState)) {
+      if (!isEntryExpired(entry, nowMs)) {
+        next[key] = { ...entry, overMs: Math.max(0, nowMs - entry.startedAtMs) };
+        any = true;
+      } else next[key] = entry;
+    }
+    if (any) {
+      fadeState = next;
+      void writeFadeState(fadeState);
+    }
+    const dial = getVtPanViewerTimeDialState();
+    if (dial?.isSyncing && Number.isFinite(dial.targetHour)) {
+      sweepVtPanViewerTimeOfDay(dial.targetHour, 0);
+      any = true;
+    }
+    if (activeLook && activeLook.untilMs > nowMs) activeLook = { ...activeLook, untilMs: nowMs };
+    return any;
+  }
+
+  /** Re-read the library from its world setting. An unset library starts with the
+   * starter Looks (in memory only — nothing is written until a GM changes one). */
+  function loadLooksLibrary() {
+    const { raw, reason } = readLooksLibraryRaw();
+    if (reason) log.warn(reason);
+    looksLibrary =
+      raw === '' ? STARTER_LOOKS.map((l) => ({ ...l, values: { ...l.values } })) : normalizeLibrary(raw).looks;
+  }
+
+  /** @param {import('./core/looks-schema.js').Look[]} next */
+  async function saveLooksLibrary(next) {
+    looksLibrary = next;
+    MapShine.__remote?.refreshLooks?.();
+    const result = await writeLooksLibraryRaw(serializeLibrary(next));
+    if (!result.ok) log.warn(result.reason);
+    return result;
+  }
+
+  const newLookId = () => `look-${wallClockMs().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const readLookChannel = (key) => LOOK_ADAPTERS[key]?.read();
+
+  /** "Save look": capture the chosen facets from the live scene. */
+  async function captureLookFromLive(name, facets) {
+    const look = captureLook({ id: newLookId(), name, facets, read: readLookChannel });
+    const check = validateLook(look);
+    if (!check.ok) return { ok: false, reason: check.errors.join('; '), look: null };
+    const result = await saveLooksLibrary([...looksLibrary, look]);
+    return { ok: result.ok, reason: result.reason, look };
+  }
+
+  /** Replace a Look's values with the live scene, keeping its facets. */
+  async function recaptureLook(id) {
+    const old = looksLibrary.find((l) => l.id === id);
+    if (!old) return { ok: false, reason: `no Look with id '${id}'` };
+    const facets = lookFacets(old);
+    const fresh = captureLook({
+      id,
+      name: old.name,
+      facets: facets.length > 0 ? facets : undefined,
+      read: readLookChannel,
+    });
+    return saveLooksLibrary(looksLibrary.map((l) => (l.id === id ? fresh : l)));
+  }
+
+  /** Change which facets a Look holds — removed ones are dropped, added ones are
+   * captured from the live scene. */
+  async function setLookFacets(id, facets) {
+    const old = looksLibrary.find((l) => l.id === id);
+    if (!old) return { ok: false, reason: `no Look with id '${id}'` };
+    const had = new Set(lookFacets(old));
+    const added = facets.filter((f) => !had.has(f));
+    const kept = withFacets(old, facets);
+    const fresh =
+      added.length > 0 ? captureLook({ id, name: old.name, facets: added, read: readLookChannel }).values : {};
+    const next = { ...kept, values: { ...kept.values, ...fresh } };
+    if (!validateLook(next).ok) return { ok: false, reason: 'a Look needs at least one facet' };
+    return saveLooksLibrary(looksLibrary.map((l) => (l.id === id ? next : l)));
+  }
+
+  function renameLook(id, name) {
+    const clean = String(name ?? '').trim();
+    if (!clean) return Promise.resolve({ ok: false, reason: 'a Look needs a name' });
+    return saveLooksLibrary(looksLibrary.map((l) => (l.id === id ? { ...l, name: clean } : l)));
+  }
+
+  function deleteLook(id) {
+    if (activeLook?.id === id) activeLook = null;
+    return saveLooksLibrary(looksLibrary.filter((l) => l.id !== id));
+  }
+
+  function tidyLookById(id) {
+    return saveLooksLibrary(looksLibrary.map((l) => (l.id === id ? tidyLook(l) : l)));
+  }
+
+  /** What a Look will do here: its facets, and what is stale or unusable. */
+  function inspectLook(id) {
+    const look = looksLibrary.find((l) => l.id === id);
+    return look ? reconcileLook(look, { isKnownArchetype }) : null;
+  }
+
+  async function saveLookSequence(next) {
+    lookSequence = next;
+    if (lookSequenceNext > lookSequence.length) lookSequenceNext = 0;
+    MapShine.__remote?.refreshLooks?.();
+    const result = await writeLookSequence(next);
+    if (!result.ok) log.warn(result.reason);
+    return result;
+  }
+
+  /** GO: play the next Look in this scene's running order. */
+  function playNextInSequence(overMs) {
+    const ids = lookSequence.filter((id) => looksLibrary.some((l) => l.id === id));
+    if (ids.length === 0) return { ok: false, reason: 'this scene has no running order yet', skipped: [] };
+    if (lookSequenceNext >= ids.length) return { ok: false, reason: 'end of the running order', skipped: [] };
+    const result = playLookById(ids[lookSequenceNext], overMs);
+    if (result.ok) lookSequenceNext += 1;
+    MapShine.__remote?.refreshLooks?.();
+    return result;
+  }
+
+  /**
+   * Load this scene's running order. The first time a scene with an old cue stack
+   * is opened, its cues become Looks (added to the library) and its running order
+   * — once, GM only, never deleting the old cue flag.
+   */
+  function loadLookSequenceForScene() {
+    const { sequence, present, reason } = readLookSequence();
+    if (reason) log.info(`running order (canvasReady): ${reason}`);
+    lookSequence = sequence;
+    lookSequenceNext = 0;
+    if (!present && cueStack.length > 0 && MapShine.debug?.isGM?.()) {
+      const { looks, sequence: fromCues } = looksFromCues(cueStack);
+      if (looks.length > 0) {
+        const fresh = looks.filter((l) => !looksLibrary.some((x) => x.id === l.id));
+        if (fresh.length > 0) void saveLooksLibrary([...looksLibrary, ...fresh]);
+        void saveLookSequence(fromCues);
+        log.info(`running order: imported ${looks.length} cue(s) from this scene as Looks`);
+      }
+    }
+    MapShine.__remote?.refreshLooks?.();
+    lookSequenceUnsub?.();
+    lookSequenceUnsub = watchLookSequence(() => {
+      lookSequence = readLookSequence().sequence;
+      if (lookSequenceNext > lookSequence.length) lookSequenceNext = 0;
+      MapShine.__remote?.refreshLooks?.();
+    });
+  }
+
+  // LOOKS' CONSOLE DOOR — every lever the Remote uses, callable by hand too.
+  MapShine.looks = {
+    list: () => looksLibrary.slice(),
+    play: (id, overMs = 0) => playLookById(id, overMs),
+    capture: (name, facets) => captureLookFromLive(name, facets),
+    recapture: (id) => recaptureLook(id),
+    setFacets: (id, facets) => setLookFacets(id, facets),
+    rename: (id, name) => renameLook(id, name),
+    remove: (id) => deleteLook(id),
+    tidy: (id) => tidyLookById(id),
+    inspect: (id) => inspectLook(id),
+    sequence: () => lookSequence.slice(),
+    setSequence: (ids) => saveLookSequence(Array.isArray(ids) ? ids : []),
+    next: (overMs = 0) => playNextInSequence(overMs),
+    snap: () => snapFadesToEnd(),
+  };
+
   /**
    * The per-tick half of the Fade Engine: pushes every active entry's eased
    * value LIVE (cheap, in-memory) every animation frame, and persists a
@@ -13796,6 +14306,11 @@ function install() {
           // door (wind-persistence.js), not editSky (completion isn't a
           // sky patch here).
           void MapShine.setWind({ speed01: completion.speed01 });
+        } else if (completion.__night) {
+          void writeScenePlayerLightPermissions({ darknessRealism01: completion.value }).then((result) => {
+            if (!result.ok) log.warn(`night darkness not persisted: ${result.reason}`);
+            resolveAndApplyPlayerLightPermissions();
+          });
         } else {
           void editSky(completion);
         }
@@ -14269,12 +14784,19 @@ function install() {
     if (sky.precipKindAuthored && sky.precipKindAuthored !== 'auto') {
       setVtPanViewerPrecipKind(sky.precipKindAuthored);
     }
-    setVtPanViewerSkyRealism(sky.realism01);
-    setVtPanViewerSkyLook({ goldenHour01: sky.goldenHour01, moonlight01: sky.moonlight01 });
+    // The same "don't stomp a live fade" guard as cloud/precip/temperature above,
+    // for the light fields a Look fades (the 'sky' fade source): the fade-start
+    // gesture's own persistence echo must not snap them back mid-fade.
+    const skyLightFading = (field) => fadeState[`sky.${field}`] && !isEntryExpired(fadeState[`sky.${field}`], nowMs);
+    if (!skyLightFading('realism01')) setVtPanViewerSkyRealism(sky.realism01);
+    setVtPanViewerSkyLook({
+      ...(skyLightFading('goldenHour01') ? {} : { goldenHour01: sky.goldenHour01 }),
+      ...(skyLightFading('moonlight01') ? {} : { moonlight01: sky.moonlight01 }),
+    });
     // THE ENVIRONMENTAL GRADE (docs/planning/Grade.md) — its strength drives the
     // automatic ToD/weather look + cloud desaturation. (The ARTISTIC grade is a
     // separate effect now, resolved through its own cascade, not from here.)
-    setVtPanViewerGradeEnvStrength(sky.gradeEnvStrength);
+    if (!skyLightFading('gradeEnvStrength')) setVtPanViewerGradeEnvStrength(sky.gradeEnvStrength);
     // SUN LATITUDE (mythica-machina-press#170).
     setVtPanViewerSunLatitude(sky.latitudeDeg);
   };
@@ -14308,7 +14830,9 @@ function install() {
    */
   const resolveAndApplyPlayerLightPermissions = () => {
     const { permissions } = readScenePlayerLightPermissions();
-    setDarknessRealism(permissions.darknessRealism01);
+    // A Look fading the night's darkness owns the live value until it arrives.
+    const nightEntry = fadeState['night.darkness01'];
+    if (!(nightEntry && !isEntryExpired(nightEntry, wallClockMs()))) setDarknessRealism(permissions.darknessRealism01);
     MapShine.__remote?.refreshPlayerLightBoard?.();
     MapShine.__player?.refreshPlayerLightPicker?.();
   };
@@ -14581,7 +15105,10 @@ function install() {
             // since U2 with zero callers; see buildNowPlayingLabel's own doc
             // for the full story. Riding the same ~10Hz throttle as the dial
             // itself, not a second timer.
-            MapShine.__remote?.updateNowPlaying?.({ label: buildNowPlayingLabel(payload, wallClockMs()) });
+            MapShine.__remote?.updateNowPlaying?.({
+              label: buildNowPlayingLabel(payload, wallClockMs()),
+              progress01: nowPlayingProgress(payload, wallClockMs()),
+            });
             // The weather board's own Clouds/Rain faders (2026-09-10 fix,
             // author: "the sliders and weather buttons feel like two
             // completely detached systems") — `cloudCoverEased01`/
@@ -17981,6 +18508,15 @@ function install() {
           cueStack = cues;
           MapShine.__remote?.refreshCueDeck();
         });
+        // LOOKS (2026-11-01) — the world library and this scene's running order.
+        // After the cue stack above: a scene with old cues and no running order
+        // imports them as Looks, once.
+        try {
+          loadLooksLibrary();
+          loadLookSequenceForScene();
+        } catch (err) {
+          log.error('looks (canvasReady) failed:', err);
+        }
         const floorsResult = getActiveSceneFloors(sceneDoc);
         if (!floorsResult.ok) {
           log.warn(`real-scene VT viewer: ${floorsResult.error}`);
@@ -18767,6 +19303,20 @@ function install() {
         registerScenePresetSettings();
       } catch (err) {
         log.error('scene presets settings registration failed:', err);
+      }
+
+      // THE LOOKS LIBRARY SETTING (2026-11-01) — same placement as the scene
+      // presets just above. Unlike them it DOES need an onChange: every open
+      // Remote shows the library, so a second GM's save must repaint it.
+      try {
+        registerLooksSettings({
+          onChange: () => {
+            loadLooksLibrary();
+            MapShine.__remote?.refreshLooks?.();
+          },
+        });
+      } catch (err) {
+        log.error('looks settings registration failed:', err);
       }
 
       // THE REGION DARKNESS OVERRIDE SETTING — same "own init-hook try/catch,

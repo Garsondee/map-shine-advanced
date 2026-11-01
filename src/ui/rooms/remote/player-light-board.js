@@ -66,7 +66,7 @@ function pill(text, title, pressed, onClick) {
  * }} ctx
  * @returns {{refresh: () => void, refreshCarried: () => void}}
  */
-export function renderPlayerLightBoard(container, ctx) {
+export function renderPlayerLightBoard(container, ctx, { compact = false } = {}) {
   const wrap = document.createElement('div');
   wrap.className = 'msa-wx-board';
 
@@ -82,7 +82,9 @@ export function renderPlayerLightBoard(container, ctx) {
   hint.textContent = 'Which carried light/vision modes players may pick on THIS scene.';
 
   const chipRow = document.createElement('div');
-  chipRow.className = 'msa-wx-chips';
+  // Compact (the Remote's Prep tab, 2026-11-01): a two-column grid, so every mode
+  // shows its whole name instead of "Low-light Visi…".
+  chipRow.className = compact ? 'msa-wx-chips msa-chip-grid' : 'msa-wx-chips';
 
   const masterHost = document.createElement('div');
   const realismHost = document.createElement('div');
@@ -92,7 +94,11 @@ export function renderPlayerLightBoard(container, ctx) {
   const carriedHost = document.createElement('div');
   carriedHost.className = 'msa-pl-carried';
 
-  wrap.append(label, hint, chipRow, masterHost, realismHost, carriedHost);
+  // Compact drops the heading and hint (the Prep section draws its own) and the
+  // Night darkness slider, which became the Mix tab's "Night" fader — one home
+  // for one value.
+  if (compact) wrap.append(chipRow, masterHost, carriedHost);
+  else wrap.append(label, hint, chipRow, masterHost, realismHost, carriedHost);
   container.appendChild(wrap);
   const carriedPicker = renderPlayerLightPicker(carriedHost);
 

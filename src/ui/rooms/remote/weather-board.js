@@ -168,7 +168,7 @@ const ENV_CHANNELS = Object.freeze([
   {
     key: 'skyRealism',
     label: 'Sky light',
-    shortLabel: 'Sky',
+    shortLabel: 'Light',
     icon: 'sun',
     help: 'How much the sky itself lights the scene.',
     getValue: 'getSkyRealism',
@@ -195,7 +195,7 @@ const ENV_CHANNELS = Object.freeze([
   {
     key: 'atmosphere',
     label: 'Atmosphere',
-    shortLabel: 'Atmos',
+    shortLabel: 'Colour',
     icon: 'fog',
     help: 'Environmental colour-grade strength.',
     getValue: 'getGradeEnvStrength',
@@ -240,7 +240,39 @@ const ENV_CHANNELS = Object.freeze([
     unit: 'degrees',
     bipolar: true,
   },
+  {
+    // NIGHT DARKNESS (2026-11-01 Remote redesign) — one of the strongest mood
+    // controls MSA has, moved here from the Player Lights board (where it hid
+    // as a lone horizontal slider) so it sits with the other light faders and
+    // fades with the Fade Time like them. Looks set it too ('night.darkness01').
+    key: 'night',
+    label: 'Night darkness',
+    shortLabel: 'Night',
+    icon: 'moon',
+    help: 'How black unlit ground gets at full night — 0 keeps Foundry’s gentle grey, 1 is true black so lights matter.',
+    getValue: 'getNightDarkness',
+    onCommit: 'onNightDarknessCommit',
+  },
 ]);
+
+/**
+ * The SVG sprite icon for a weather type (2026-11-01) — the archetypes carry
+ * colour emoji (⛅ 💨), which ignore the theme and differ per OS; the Remote
+ * draws every icon from its own sprite instead. Matched on the id's words, so a
+ * new archetype gets a sensible icon with no edit here.
+ * @param {string} id @returns {string}
+ */
+export function weatherIconFor(id) {
+  const s = String(id ?? '');
+  if (/storm|thunder|lightning/.test(s)) return 'bolt';
+  if (/snow|sleet|hail|blizzard|ice/.test(s)) return 'snow';
+  if (/rain|drizzle|shower|monsoon/.test(s)) return 'rain';
+  if (/fog|mist|veil|haze/.test(s)) return 'fog';
+  if (/gale|wind|gust/.test(s)) return 'wind';
+  if (/ash|smoke|volcan/.test(s)) return 'ash';
+  if (/clear|sun/.test(s)) return 'sun';
+  return 'cloud';
+}
 
 function chip(text, title, onClick) {
   const btn = document.createElement('button');
@@ -325,10 +357,13 @@ export function renderWeatherBoard(container, ctx) {
   fadeTitle.textContent = 'Fade time';
   const fadeHint = document.createElement('span');
   fadeHint.className = 'msa-wx-hint';
-  const fadeTime = createFadeTimeControl();
+  // The Remote's tabbed shell (2026-11-01) owns ONE Fade Time shared by Play and
+  // Mix and hands it in as `externalFade`; this board only builds its own when
+  // rendered on its own.
+  const fadeTime = ctx.externalFade ?? createFadeTimeControl();
   function syncFadeHint() {
     const label = fadeTime.getLabel();
-    fadeHint.textContent = label === 'Now' ? 'changes cut instantly' : `changes ease over ${label}`;
+    fadeHint.textContent = label === 'Cut' ? 'changes cut instantly' : `changes ease over ${label}`;
   }
   syncFadeHint();
   // Delegated, not owned: fade-time.js's own per-button listeners (added
@@ -343,7 +378,7 @@ export function renderWeatherBoard(container, ctx) {
   // label's own row (mock: #wxTitle + .modeseg share one line), not as its
   // own separate full-width row above the chips.
   const moodsTitle = document.createElement('span');
-  moodsTitle.textContent = 'Moods';
+  moodsTitle.textContent = 'Weather';
   // Browse (2026-08-18 fix) — the mock's own #wxBrowseBtn: icon + "Browse" +
   // a live count of the FULL catalog, opening weather-picker.js's overlay.
   // Mock places it beside the mode toggle in the same header row, not its
@@ -360,12 +395,12 @@ export function renderWeatherBoard(container, ctx) {
   const directBtn = document.createElement('button');
   directBtn.type = 'button';
   directBtn.className = 'msa-seg';
-  directBtn.textContent = 'Direct';
+  directBtn.textContent = 'Set';
   directBtn.title = 'You choose the sky — mood chips are destinations, faders are trims.';
   const driftBtn = document.createElement('button');
   driftBtn.type = 'button';
   driftBtn.className = 'msa-seg';
-  driftBtn.textContent = 'Drift';
+  driftBtn.textContent = 'Wander';
   driftBtn.title = 'You set a climate — the sky wanders inside it on its own.';
   modeRow.append(directBtn, driftBtn);
   const headerRight = document.createElement('div');
@@ -425,20 +460,20 @@ export function renderWeatherBoard(container, ctx) {
   // mock channels have live backing today (LIVE_CHANNELS, above): "Channels"
   // names what the section IS, not how many rows happen to be in it.
   const chanTitle = document.createElement('span');
-  chanTitle.textContent = 'Channels';
+  chanTitle.textContent = 'Mixer';
   const faderHost = document.createElement('div');
   faderHost.className = 'msa-wx-faders';
   const chanBlock = document.createElement('div');
   chanBlock.append(blockLabel('gauge', chanTitle), faderHost);
 
-  wrap.append(fadeBlock, moodsBlock, chanBlock);
+  wrap.append(...(ctx.externalFade ? [] : [fadeBlock]), moodsBlock, chanBlock);
   container.appendChild(wrap);
 
   function paintMode() {
     const mode = ctx.getWeatherMode();
     directBtn.setAttribute('aria-pressed', String(mode !== 'almanac'));
     driftBtn.setAttribute('aria-pressed', String(mode === 'almanac'));
-    moodsTitle.textContent = mode === 'almanac' ? 'Climates' : 'Moods';
+    moodsTitle.textContent = mode === 'almanac' ? 'Climate' : 'Weather';
   }
   directBtn.addEventListener('click', () => {
     ctx.onWeatherModeChange('director');
@@ -468,6 +503,8 @@ export function renderWeatherBoard(container, ctx) {
   function renderChips() {
     chipRow.innerHTML = '';
     const mode = ctx.getWeatherMode();
+    // Climate names are long ("Continental Plains"): two columns, never truncated.
+    chipRow.classList.toggle('msa-chip-grid', mode === 'almanac');
     if (mode === 'almanac') {
       const activeBiome = ctx.getWeatherBiome();
       // FAVOURITE_BIOME_IDS' own order (declared above), not WEATHER_BIOMES'
@@ -506,7 +543,7 @@ export function renderWeatherBoard(container, ctx) {
         Boolean
       );
       for (const archetype of favourites) {
-        const btn = chip(`${archetype.icon} ${archetype.label}`, archetype.blurb, () => {
+        const btn = chip(archetype.label, archetype.blurb, () => {
           ctx.fadeToArchetype(archetype.id, fadeTime.getOverMs());
           // Re-paint NOW, not just on arrival: the sky is already 'custom'
           // the instant the fade starts (fadeToArchetype's own doc), so the
@@ -517,6 +554,7 @@ export function renderWeatherBoard(container, ctx) {
           // calls refreshWeatherBoard() on actual completion.
           renderChips();
         });
+        btn.innerHTML = `${iconMarkup(weatherIconFor(archetype.id))}<span>${archetype.label}</span>`;
         btn.setAttribute('aria-pressed', String(archetype.id === activeArchetype));
         if (archetype.id === fadingId) btn.dataset.pending = 'true';
         chipRow.appendChild(btn);
@@ -551,7 +589,7 @@ export function renderWeatherBoard(container, ctx) {
     // animate on a mood click was invisible. The first group IS
     // ARCHETYPE_OWNED_AXES' two faders (LIVE_CHANNELS' own doc, above).
     const autoGroup = faderGroup(
-      mode === 'almanac' ? 'Climate' : 'Moods',
+      mode === 'almanac' ? 'Climate' : 'Sky',
       mode === 'almanac'
         ? 'The climate moves these on its own in Drift mode.'
         : 'Mood chips fade these to their own values.',
@@ -559,8 +597,12 @@ export function renderWeatherBoard(container, ctx) {
     );
     // Only the channels this host actually wires get a column (the loop below
     // skips any without a getter), so only they claim a share of the width.
-    const envChannels = ENV_CHANNELS.filter((channel) => typeof ctx[channel.getValue] === 'function');
-    const handGroup = faderGroup('By hand', 'Nothing moves these but you.', envChannels.length);
+    // Sun latitude is set once per world: the tabbed shell shows it in Prep.
+    const envChannels = ENV_CHANNELS.filter(
+      (channel) =>
+        typeof ctx[channel.getValue] === 'function' && !(ctx.hideSunLatitude && channel.key === 'sunLatitude')
+    );
+    const handGroup = faderGroup('Light & air', 'Only you and your Looks move these.', envChannels.length);
     const divider = document.createElement('div');
     divider.className = 'msa-wx-fader-divider';
     rack.append(autoGroup.root, divider, handGroup.root);
@@ -661,7 +703,9 @@ export function renderWeatherBoard(container, ctx) {
     // the old label named the STATE without ever naming the CONSEQUENCE of
     // flipping it, which is what actually needed explaining. Real bool
     // param via the SAME buildParamControl door every other row here uses.
-    if (typeof ctx.getSceneOverride === 'function') {
+    // The tabbed shell shows this as the header's scope chip instead (it decides
+    // what EVERY change on the Remote touches, so it belongs above all of them).
+    if (typeof ctx.getSceneOverride === 'function' && !ctx.scopeInHeader) {
       faderHost.appendChild(
         buildParamControl(
           'sceneOverride',

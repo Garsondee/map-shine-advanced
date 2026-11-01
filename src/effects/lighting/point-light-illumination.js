@@ -395,8 +395,16 @@ export const FIRE_INVERSE_SQUARE_STEEPNESS = 12;
  * natural), so it fades with a Look and costs no rebuild. Set through the Colour Grade's
  * Light group (`grade.js#lightSoftness`) → `setPointLightSoftness`.
  */
-/** The shipped Light shape — kept equal to `grade.js#lightSoftness`'s default (a test pins it). */
-export const DEFAULT_POINT_LIGHT_SOFTNESS = 1;
+/**
+ * The shipped Light shape — kept equal to `grade.js#lightSoftness`'s default (a test pins it).
+ * 0 (Foundry's disc) on purpose, measured 2026-11-01: the natural shape spreads a lamp's
+ * near-white area, and with the film response on 'none' (the default — the author's call)
+ * nothing rolls those cores off: Docklands' quay at night went from 1.3% to 7.5% blown. With
+ * the 'rolloff' film response the natural shape is clean (a player torch: 24% → 0.4%), so the
+ * starter Looks use the pair (`LOOK_REST_SOFTNESS` 1 + 'rolloff'), and flipping both defaults
+ * together is the recommendation left with the author.
+ */
+export const DEFAULT_POINT_LIGHT_SOFTNESS = 0;
 export const NATURAL_FALLOFF_K = 1;
 export const NATURAL_FALLOFF_PEAK = 1.1;
 

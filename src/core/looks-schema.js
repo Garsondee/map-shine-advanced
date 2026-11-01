@@ -679,7 +679,12 @@ export function lookSwatch(look, { cloudOf } = {}) {
   return { top: hex(top), bottom: hex(bottom), band };
 }
 
-/** The light model's shipped values, which every starter returns to (tests pin them to the params). */
+/**
+ * The light model values every starter returns to. Lamp glow in daylight is the shipped
+ * default; the light shape is deliberately the NATURAL one (1), not the shipped 0: starters
+ * also carry the 'rolloff' film response, and the pair is clean where the soft shape alone
+ * blows lamp cores (see point-light-illumination.js#DEFAULT_POINT_LIGHT_SOFTNESS).
+ */
 export const LOOK_REST_GLOW_DAY = 0.25;
 export const LOOK_REST_SOFTNESS = 1;
 

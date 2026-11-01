@@ -285,7 +285,7 @@ export const GRADE_LOOK_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1, // 2026-11-01: natural, measured on the light bench (see point-light-illumination.js)
+    default: 0, // Foundry's disc until the roll-off is the default too (point-light-illumination.js#DEFAULT_POINT_LIGHT_SOFTNESS)
     category: 'Light',
     label: 'Light shape',
     help: "How a lamp's light falls away. 0 is Foundry's own: an even disc of light with a soft rim. 1 is natural: a bright core that fades smoothly with distance, like a real lamp.",

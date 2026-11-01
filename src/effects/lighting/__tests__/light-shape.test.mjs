@@ -32,7 +32,13 @@ export function run(t) {
     'the shipped default matches the Colour Grade default',
     GRADE_LOOK_PARAMS.lightSoftness.default === DEFAULT_POINT_LIGHT_SOFTNESS
   );
-  t.ok('every starter Look returns to the shipped light shape', LOOK_REST_SOFTNESS === DEFAULT_POINT_LIGHT_SOFTNESS);
+  t.ok(
+    'starter Looks use the natural shape, and only with the roll-off that keeps it clean',
+    LOOK_REST_SOFTNESS === 1 &&
+      STARTER_LOOKS.every(
+        (l) => l.values['grade.lightSoftness'] !== 1 || ['rolloff', 'aces'].includes(l.values['grade.toneMapping'])
+      )
+  );
   t.ok('...and to the shipped lamp glow in daylight', LOOK_REST_GLOW_DAY === GRADE_LOOK_PARAMS.lightGlowDay.default);
   const restBloom = STARTER_LOOKS.filter((l) => l.values['bloom.dayThreshold'] === BLOOM_PARAMS.dayThreshold.default);
   t.ok('...and most to the shipped bloom daylight floor', restBloom.length >= STARTER_LOOKS.length / 2);

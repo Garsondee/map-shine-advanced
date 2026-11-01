@@ -179,6 +179,11 @@ export function run(t) {
     ok('visibility: upper level art defaults to SURFACE occlusion', bBg.occlusion.modes === OCCLUSION_MODES.SURFACE);
     const aBg = both.items.find((i) => i.levelId === 'a' && i.kind === 'levelBackground');
     ok("visibility: the viewed level's own art is never isUpper", aBg.isUpper === false && aBg.occlusion.modes === 0);
+    const aFg = both.items.find((i) => i.levelId === 'a' && i.kind === 'levelForeground');
+    ok(
+      "visibility: the viewed level's own roof art is SURFACE-occludable (Foundry gives every level texture SURFACE)",
+      !aFg || aFg.occlusion.modes === OCCLUSION_MODES.SURFACE
+    );
     ok(
       'visibility: no viewed level -> nothing at all',
       collectLevelTextures({ levels: [a] }, { viewedLevelId: 'nope' }).items.length === 0

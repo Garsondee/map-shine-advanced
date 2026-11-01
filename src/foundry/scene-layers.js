@@ -308,9 +308,18 @@ export function collectLevelTextures(sceneDoc, { viewedLevelId, visibleLevelIds,
         alpha: 1,
         tint: normalizeTint(cfg.tint),
         alphaThreshold: cfg.alphaThreshold ?? 0.75,
-        // `#drawLevelTexture` (primary.mjs:305) gives upper-level art SURFACE
-        // occlusion so you can see through the floor you're standing under.
-        occlusion: { modes: !isView && ownElevation > viewedBottom ? 2 /* SURFACE */ : 0, alpha: 0 },
+        // `#drawLevelTexture` (primary.mjs:310) gives EVERY level texture SURFACE
+        // occlusion: upper-level art so you can see through the floor you're
+        // standing under, and a Level's FOREGROUND (its roof art) so a "Define
+        // Surface" Region below the roof (between floor and roof) lifts it off a
+        // token under it.
+        // The viewed Level's own BACKGROUND stays NONE on purpose: SURFACE would
+        // cost it the early-Z fast path on the biggest texture in the scene, for
+        // the rare surface placed at floor height.
+        occlusion: {
+          modes: !isBackground || (!isView && ownElevation > viewedBottom) ? 2 /* SURFACE */ : 0,
+          alpha: 0,
+        },
         restrictsLight: isBackground,
         restrictsWeather: isBackground,
         isUpper: !isView && ownElevation > viewedBottom,

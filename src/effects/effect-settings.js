@@ -27,6 +27,20 @@ import { SCALE_LADDER, SUPERSAMPLE_CHOICES } from '../graph/index.js';
 import { getSafeProfile } from '../core/safe-mode.js';
 
 /** The three GLOBAL (not per-effect) setting keys. */
+/**
+ * The smallest RADIAL reveal disc, in world px, for a stored
+ * {@link GLOBAL_SETTING_KEYS.roofRevealRadius} value. Anything unreadable reads
+ * as 0 (Foundry's own radius, nothing added) — never a guessed width.
+ * @param {unknown} stored - the setting's string value (grid squares).
+ * @param {number} gridSizePx - pixels per grid square.
+ * @returns {number}
+ */
+export function roofRevealMinRadiusPx(stored, gridSizePx) {
+  const squares = Number(stored);
+  if (!Number.isFinite(squares) || squares <= 0 || !Number.isFinite(gridSizePx) || gridSizePx <= 0) return 0;
+  return squares * gridSizePx;
+}
+
 export const GLOBAL_SETTING_KEYS = Object.freeze({
   /** THE MASTER OFF-SWITCH (client) — Keyhole.md §4.3's "one legitimate switch":
    * MSA fully off, pure Foundry rendering, no proxies, no keyhole. Sits BEFORE
@@ -121,6 +135,13 @@ export const GLOBAL_SETTING_KEYS = Object.freeze({
   /** How long the GM waits for players to finish preparing a scene before switching
    * anyway (world). */
   switchWaitSeconds: 'switchWaitSeconds',
+  /** ROOF REVEAL RADIUS (world, 2026-11-01) — the smallest RADIAL occlusion
+   * disc any token opens in a roof, in grid squares; `'0'` = Foundry's own
+   * (the token's half-size, or its Occlusion Radius). Foundry's default is far
+   * too tight to play under, so MSA defaults wider (author: "the radial needs
+   * to be a lot wider than defaults"). A token whose own Occlusion Radius is
+   * larger keeps it. Read by `roofRevealMinRadiusPx`. */
+  roofRevealRadius: 'roofRevealRadius',
   /** THE ONE TRANSITION (world, 2026-10-26) — the preset every load, scene change and floor change
    * plays (`ui/scene-transition.js#TRANSITION_PRESETS`), the pace that scales it, and the GM's
    * armed one-shot override for the next scene change (JSON `{id, type, durationMs}`, or ''). */
@@ -317,6 +338,24 @@ export function describeEffectSettings(manifests = []) {
       config: true,
       name: 'Map Shine — Longest wait for players when changing scene (GM)',
       hint: 'When you change scene, the switch waits for every player to finish preparing, up to this long, then goes ahead regardless. A player who has not finished simply sees their own loading screen.',
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.roofRevealRadius,
+      scope: 'world',
+      kind: 'enum',
+      choices: {
+        0: "Foundry's own (the token's size, or its Occlusion Radius)",
+        2: '2 grid squares',
+        3: '3 grid squares',
+        4: '4 grid squares',
+        6: '6 grid squares',
+      },
+      default: '3',
+      config: true,
+      name: 'Map Shine — Roof reveal radius (GM)',
+      hint:
+        'How far round a token a Radial roof opens, at the least. A token whose own Occlusion Radius is larger keeps ' +
+        "its own. Foundry's own setting opens only the token's own size.",
     },
     {
       key: GLOBAL_SETTING_KEYS.transitionPreset,

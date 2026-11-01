@@ -23,6 +23,7 @@ export {
   computeOcclusionState,
   mapElevation,
   buildElevationTable,
+  nextDown,
 } from './occlusion.js';
 export {
   computeCameraFrustum,

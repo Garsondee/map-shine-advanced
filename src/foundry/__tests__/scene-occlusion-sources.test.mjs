@@ -8,6 +8,7 @@ import {
   deriveGridSizePixels,
   computeTokenOcclusionRadiusPx,
   deriveOccludableToken,
+  deriveOccludedSurface,
   deriveMouseHoverPoint,
 } from '../scene-occlusion-sources.js';
 
@@ -111,6 +112,39 @@ export function run(t) {
     );
     ok('vision on but no usable polygon => treated as no vision (radial reveals)', empty.visionActive === false);
     ok('a token with no position is skipped', deriveOccludableToken({ id: 'x', center: null }, 100) === null);
+    const wide = deriveOccludableToken({ ...base, visionActive: false, los: null, testPoints: null }, 100, 300);
+    ok('the roof reveal floor widens a default token disc', wide.radiusPx === 300);
+    const own = deriveOccludableToken(
+      { ...base, occludableRadius: 10, visionActive: false, los: null, testPoints: null },
+      100,
+      300
+    );
+    ok("a token's own larger Occlusion Radius wins over the floor", own.radiusPx === 1050);
+  }
+
+  // ---- deriveOccludedSurface ------------------------------------------------
+  {
+    const tri = {
+      vertices: new Float32Array([0, 0, 10, 0, 10, 10, 0, 10]),
+      indices: new Uint16Array([0, 1, 2, 0, 2, 3]),
+    };
+    const s = deriveOccludedSurface({ key: 'r,20', elevation: 20, region: { triangulation: tri } });
+    ok(
+      'a surface keeps its key, elevation and triangulation',
+      s.key === 'r,20' && s.elevation === 20 && s.indices.length === 6
+    );
+    ok(
+      'a surface with no triangulation is skipped',
+      deriveOccludedSurface({ key: 'r,20', elevation: 20, region: {} }) === null
+    );
+    ok(
+      'a ragged index list is skipped, never drawn wrong',
+      deriveOccludedSurface({
+        key: 'r',
+        elevation: 1,
+        region: { triangulation: { vertices: tri.vertices, indices: [0, 1] } },
+      }) === null
+    );
   }
 
   // ---- deriveMouseHoverPoint: mythica-machina-press#470's hover-fade hit

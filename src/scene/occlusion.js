@@ -162,6 +162,29 @@ export function mapElevation(table, elevation) {
 }
 
 /**
+ * The largest double strictly below `x` — Foundry's own `Math.nextDown`
+ * (it patches Math; plain JS has no such function). Foundry uses it twice in
+ * occlusion: a SURFACE writes `nextDown(surface.elevation)` into the mask, and
+ * a Level's FOREGROUND art reads its own elevation as `nextDown(elevation)`
+ * (`_occludedBySameElevationSurfaces = false`), so a surface at exactly the
+ * roof's height lifts the upper floor's art standing on it, never the roof
+ * below it. An occluder hides only what sits ABOVE it, so a roof is lifted
+ * by a surface placed below it (between the floor and the roof).
+ * @param {number} x
+ * @returns {number}
+ */
+export function nextDown(x) {
+  if (Number.isNaN(x) || x === -Infinity) return x;
+  if (x === Infinity) return Number.MAX_VALUE;
+  if (x === 0) return -Number.MIN_VALUE;
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  const bits = view.getBigUint64(0);
+  view.setBigUint64(0, x > 0 ? bits - 1n : bits + 1n);
+  return view.getFloat64(0);
+}
+
+/**
  * @typedef {object} OcclusionState
  * @property {number} fade - weight for the mask's R channel, 0..1.
  * @property {number} radial - weight for G, 0..1.

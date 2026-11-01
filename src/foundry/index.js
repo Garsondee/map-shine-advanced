@@ -431,6 +431,8 @@ export {
   computeTokenOcclusionRadiusPx,
   deriveOccludableToken,
   readOccludableTokens,
+  deriveOccludedSurface,
+  readOccludedSurfaces,
   readMouseHoverPoint,
   deriveMouseHoverPoint,
 } from './scene-occlusion-sources.js';

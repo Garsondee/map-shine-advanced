@@ -15,6 +15,7 @@ import {
   isHoverFadeEligible,
   buildElevationTable,
   mapElevation,
+  nextDown,
   computeOcclusionState,
   testTokenOcclusion,
   testItemHoverAlpha,
@@ -30,6 +31,21 @@ const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
 export function run(t) {
   const { ok } = t;
+
+  // --- nextDown: Foundry's Math.nextDown, which surfaces and roof art rely on ---
+  {
+    ok('nextDown(20) is just below 20', nextDown(20) < 20 && nextDown(20) > 19.999999);
+    ok('nextDown(-5) is just below -5', nextDown(-5) < -5 && nextDown(-5) > -5.000001);
+    ok('nextDown(0) is the smallest negative', nextDown(0) === -Number.MIN_VALUE);
+    ok('nextDown(Infinity) is MAX_VALUE', nextDown(Infinity) === Number.MAX_VALUE);
+    // A surface at 20 and a roof (foreground) at 20 share one index: the
+    // surface never hides the roof it sits level with. Art standing ON the
+    // surface (an upper floor's background, read at its own 20) is hidden.
+    const table = buildElevationTable([0, nextDown(20)]);
+    const surface = mapElevation(table, nextDown(20));
+    ok('a surface does not occlude the roof at its own height', !(surface < mapElevation(table, nextDown(20))));
+    ok('a surface occludes the floor art standing on it', surface < mapElevation(table, 20));
+  }
 
   // --- the constants must match Foundry's bitflags exactly -----------------
   {

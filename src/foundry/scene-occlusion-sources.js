@@ -153,20 +153,25 @@ export function computeTokenOcclusionRadiusPx({ footprint, occludableRadius, dis
  * @param {{points?: number[], origin?: {x:number,y:number}}|null} raw.los - the token's vision polygon.
  * @param {Array<{x:number,y:number}>|null} raw.testPoints - `TokenDocument#getOcclusionTestPoints()`.
  * @param {number} distancePixels
+ * @param {number} [minRadiusPx=0] - MSA's roof reveal floor (the
+ *   `roofRevealRadius` world setting); Foundry's own radius wins when larger.
  * @returns {{id:string, elevation:number, centerX:number, centerY:number, radiusPx:number,
  *   visionActive:boolean, los:{points:number[], originX:number, originY:number}|null,
  *   testPoints:Array<{x:number,y:number}>, minX:number, minY:number, maxX:number, maxY:number}|null}
  */
-export function deriveOccludableToken(raw, distancePixels) {
+export function deriveOccludableToken(raw, distancePixels, minRadiusPx = 0) {
   const cx = raw?.center?.x;
   const cy = raw?.center?.y;
   if (!raw?.id || !Number.isFinite(cx) || !Number.isFinite(cy)) return null;
   const elevation = Number.isFinite(raw.elevation) ? raw.elevation : 0;
-  const radiusPx = computeTokenOcclusionRadiusPx({
-    footprint: raw.size,
-    occludableRadius: raw.occludableRadius,
-    distancePixels,
-  });
+  const radiusPx = Math.max(
+    computeTokenOcclusionRadiusPx({
+      footprint: raw.size,
+      occludableRadius: raw.occludableRadius,
+      distancePixels,
+    }),
+    Number.isFinite(minRadiusPx) ? minRadiusPx : 0
+  );
   // Foundry tests several dense, wall-constrained points per token; fall back
   // to the centre only when they could not be read.
   const testPoints = (Array.isArray(raw.testPoints) ? raw.testPoints : []).filter(
@@ -222,9 +227,10 @@ export function deriveOccludableToken(raw, distancePixels) {
  * Foundry-owned runtime state (Foundry stays authoritative for vision,
  * Keyhole.md §4.3). Never throws; an unreadable canvas reads as no occluders.
  *
+ * @param {{minRadiusPx?: number}} [options] - minRadiusPx: see deriveOccludableToken.
  * @returns {{tokens: Array<NonNullable<ReturnType<typeof deriveOccludableToken>>>, reason: string|null}}
  */
-export function readOccludableTokens() {
+export function readOccludableTokens({ minRadiusPx = 0 } = {}) {
   try {
     const layer = typeof canvas !== 'undefined' ? (canvas?.tokens ?? null) : null;
     if (!layer) return { tokens: [], reason: 'no token layer' };
@@ -252,7 +258,8 @@ export function readOccludableTokens() {
           los: token?.vision?.los ?? null,
           testPoints,
         },
-        distancePixels
+        distancePixels,
+        minRadiusPx
       );
       if (derived) tokens.push(derived);
     }
@@ -299,5 +306,46 @@ export function readMouseHoverPoint() {
     return deriveMouseHoverPoint(c.mousePosition, c.mousePositionVisible, c.mousePositionExplored);
   } catch (_) {
     return null;
+  }
+}
+
+/**
+ * One occluded SURFACE as the occlusion pass draws it. Pure: validates the
+ * Region's own triangulation (`PolygonTree#triangulation`, earcut, holes
+ * already cut) so a malformed one is skipped rather than drawn wrong.
+ * @param {{key?: string, elevation?: number, region?: {triangulation?: {vertices?: ArrayLike<number>, indices?: ArrayLike<number>}}}} raw
+ * @returns {{key: string, elevation: number, vertices: ArrayLike<number>, indices: ArrayLike<number>}|null}
+ */
+export function deriveOccludedSurface(raw) {
+  const tri = raw?.region?.triangulation;
+  const vertices = tri?.vertices;
+  const indices = tri?.indices;
+  if (typeof raw?.key !== 'string' || !Number.isFinite(raw?.elevation)) return null;
+  if (!vertices || !indices || vertices.length < 6 || indices.length < 3 || indices.length % 3 !== 0) return null;
+  return { key: raw.key, elevation: raw.elevation, vertices, indices };
+}
+
+/**
+ * Live read of the SURFACES Foundry says are occluded right now —
+ * `canvas.masks.occlusion.occludedSurfaces`, which Foundry keeps current itself
+ * (a token under a Region's "Define Surface" with occlusion, a hovered surface,
+ * a non-token layer showing the foreground). Verified live under MSA
+ * 2026-11-01. SURFACE occlusion mode reads these (the mask's A channel); it is
+ * how a Level's own roof art and upper floors get out of the way in v14.
+ * Never throws; an unreadable canvas reads as none.
+ * @returns {{surfaces: Array<NonNullable<ReturnType<typeof deriveOccludedSurface>>>, reason: string|null}}
+ */
+export function readOccludedSurfaces() {
+  try {
+    const set = typeof canvas !== 'undefined' ? canvas?.masks?.occlusion?.occludedSurfaces : null;
+    if (!set) return { surfaces: [], reason: 'no occlusion mask' };
+    const surfaces = [];
+    for (const raw of set) {
+      const s = deriveOccludedSurface(raw);
+      if (s) surfaces.push(s);
+    }
+    return { surfaces, reason: null };
+  } catch (err) {
+    return { surfaces: [], reason: `reading occluded surfaces threw: ${err?.message ?? err}` };
   }
 }

@@ -797,6 +797,7 @@ export {
   effectEnableKey,
   choiceLabels,
   GLOBAL_SETTING_KEYS,
+  roofRevealMinRadiusPx,
   renderScaleChoices,
 } from './effect-settings.js';
 

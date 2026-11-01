@@ -287,6 +287,7 @@ import {
   readGridSizePixels,
   // Foundry's own occluder set + vision polygons (scene-occlusion-sources.js).
   readOccludableTokens,
+  readOccludedSurfaces,
   // THE LIVE POINTER READ (mythica-machina-press#470) — the one place
   // canvas.mousePosition/.mousePositionVisible/.mousePositionExplored are
   // read; see scene-occlusion-sources.js's own header for why this reads
@@ -324,6 +325,7 @@ import {
   createHoverFadeState,
   mapElevation,
   buildElevationTable,
+  nextDown,
   // THE HOVER-FADE WIRING (mythica-machina-press#470) — isOccludable/
   // isHoverFadeEligible gate which items this frame's hit test and hover-fade
   // advance even bother with; testItemHoverAlpha/testTokenOcclusion are the
@@ -567,6 +569,7 @@ import {
   parseCubeLut,
   profileRank,
   GLOBAL_SETTING_KEYS,
+  roofRevealMinRadiusPx,
   extractDripEdges,
   // mythica-machina-press#316 — the authored-mask sibling of extractDripEdges
   // just above, same module, same coordinate convention, different selection
@@ -13341,6 +13344,60 @@ async function startVtPanViewerUnserialized({
       return { mesh, material, geometry, uElevation, attr: null, capacity: 0, lastPoints: null };
     }
 
+    /** surface key -> one occluded SURFACE's writer (buildOcclusionSurface). */
+    const occlusionSurfaceMeshes = new Map();
+
+    /**
+     * SURFACE OCCLUSION (2026-11-01) — one occluded Region surface, filled
+     * into the mask's A channel at its elevation index: Foundry's own
+     * `surfaces.beginFill(0xFFFFFF, occlusionElevation / 255)` + `polygonTree
+     * .drawShape` (occlusion.mjs:216). Geometry is the Region's own
+     * triangulation (earcut, holes cut), rebuilt only when Foundry hands over a
+     * new one. Which surfaces are occluded is Foundry's call
+     * (`readOccludedSurfaces`).
+     */
+    function buildOcclusionSurface() {
+      const { uniform, float, vec4 } = THREE.TSL;
+      const uElevation = uniform(float(1));
+      const material = new THREE.NodeMaterial();
+      material.transparent = false;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.side = THREE.DoubleSide;
+      material.blending = THREE.CustomBlending;
+      material.blendEquation = THREE.MinEquation;
+      material.blendSrc = THREE.OneFactor;
+      material.blendDst = THREE.OneFactor;
+      material.blendEquationAlpha = THREE.MinEquation;
+      material.blendSrcAlpha = THREE.OneFactor;
+      material.blendDstAlpha = THREE.OneFactor;
+      material.fragmentNode = vec4(float(1), float(1), float(1), uElevation);
+      const geometry = new THREE.BufferGeometry();
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.frustumCulled = false;
+      occlusionScene.add(mesh);
+      return { mesh, material, geometry, uElevation, lastVertices: null };
+    }
+
+    /** Point one surface entry at `surface`'s triangulation (rebuilt only when it changed). */
+    function writeOcclusionSurface(entry, surface) {
+      if (entry.lastVertices === surface.vertices) return;
+      const v = surface.vertices;
+      const pos = new Float32Array((v.length / 2) * 3);
+      for (let i = 0, k = 0; i < v.length; i += 2) {
+        pos[k++] = v[i];
+        pos[k++] = v[i + 1];
+        pos[k++] = 0;
+      }
+      entry.geometry.dispose();
+      entry.geometry = new THREE.BufferGeometry();
+      entry.geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      const Index = v.length / 2 > 65535 ? Uint32Array : Uint16Array;
+      entry.geometry.setIndex(new THREE.BufferAttribute(Index.from(surface.indices), 1));
+      entry.mesh.geometry = entry.geometry;
+      entry.lastVertices = v;
+    }
+
     /** Rewrite one LOS entry's fan for `los` ({points, originX, originY}). */
     function writeOcclusionLosFan(entry, los) {
       const pts = los.points;
@@ -13700,7 +13757,18 @@ async function startVtPanViewerUnserialized({
       // a RADIAL disc (the schema default 0 drew none — Foundry draws at least
       // the token's own size). Every occluder now draws its disc, and its vision
       // polygon when it has one.
-      const occludable = readOccludableTokens();
+      // The roof reveal floor (world setting `roofRevealRadius`, grid squares):
+      // Foundry's own disc is only the token's size — far too tight to play under.
+      let revealMinPx = 0;
+      try {
+        revealMinPx = roofRevealMinRadiusPx(
+          readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.roofRevealRadius),
+          readGridSizePixels().gridSizePixels
+        );
+      } catch (_) {
+        revealMinPx = 0; // not registered yet (a cold boot) — Foundry's own radius
+      }
+      const occludable = readOccludableTokens({ minRadiusPx: revealMinPx });
       let occluderCount = 0;
       let testTokenCount = 0;
       let anyVision = false;
@@ -13742,6 +13810,14 @@ async function startVtPanViewerUnserialized({
       maskOccluderElevationScratch.length = occluderCount;
       occlusionTestTokenScratch.length = testTokenCount;
       occlusionMask.visionActive = anyVision;
+      // Occluded SURFACES join the elevation table at `nextDown(elevation)`,
+      // exactly as Foundry queues them (occlusion.mjs:196).
+      const occludedSurfaces = readOccludedSurfaces().surfaces;
+      let elevationCount = occluderCount;
+      for (const surface of occludedSurfaces) {
+        maskOccluderElevationScratch[elevationCount++] = nextDown(surface.elevation);
+      }
+      maskOccluderElevationScratch.length = elevationCount;
       const occluders = maskOccluderScratch;
 
       occlusionMask.elevationTable = buildElevationTable(maskOccluderElevationScratch);
@@ -13782,6 +13858,21 @@ async function startVtPanViewerUnserialized({
       }
       for (const [id, entry] of occlusionLosMeshes) {
         if (!seen.has(id)) entry.mesh.visible = false;
+      }
+      const seenSurfaces = new Set();
+      for (const surface of occludedSurfaces) {
+        seenSurfaces.add(surface.key);
+        let entry = occlusionSurfaceMeshes.get(surface.key);
+        if (!entry) {
+          entry = buildOcclusionSurface();
+          occlusionSurfaceMeshes.set(surface.key, entry);
+        }
+        writeOcclusionSurface(entry, surface);
+        entry.uElevation.value = mapElevation(occlusionMask.elevationTable, nextDown(surface.elevation));
+        entry.mesh.visible = true;
+      }
+      for (const [key, entry] of occlusionSurfaceMeshes) {
+        if (!seenSurfaces.has(key)) entry.mesh.visible = false;
       }
 
       // Render into occlusionMask.rt — same symmetric save/restore pattern as
@@ -13835,7 +13926,13 @@ async function startVtPanViewerUnserialized({
         const item = state.item;
         const elevation = item?.key?.elevation;
         if (elevation === undefined) continue;
-        const value = mapElevation(occlusionMask.elevationTable, elevation);
+        // A Level's FOREGROUND reads its own height as nextDown (Foundry's
+        // `_occludedBySameElevationSurfaces = false`, primary.mjs:308): a surface
+        // AT the roof's height lifts the upper floor standing on it, never the roof.
+        const value = mapElevation(
+          occlusionMask.elevationTable,
+          item.kind === 'levelForeground' ? nextDown(elevation) : elevation
+        );
         const modes = item?.occlusion?.modes ?? OCCLUSION_MODES.NONE;
 
         // THE HOST'S OWN HOVER HIT TEST — "is the pointer over THIS item's

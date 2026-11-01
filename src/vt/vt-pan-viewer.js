@@ -17286,6 +17286,14 @@ async function startVtPanViewerUnserialized({
        * part of the way before any of it lands; a bush sits on the ground and starts at 0.
        * Written by `vegetation-shadow-subsystem.js#syncUniforms` per kind. */
       const uShadowSmearStart = uniform(float(0));
+      /** THE SCENE EDGE (2026-11-01, author: "You have clipping issues at scene edges") — per
+       * side of this plant's art (−u, +u, −v, +v), 1 where that side lies ON the scene edge. A
+       * plant cut by the map border really carries on past it, so its shadow reads the edge
+       * column outward there instead of "no plant"; with the canopy's lift that "no plant"
+       * showed as a straight cut standing well inside the map. 0 everywhere else, which keeps
+       * the old rule (a clamped edge column smeared across the pad paints a black bar).
+       * Written by `vegetation-shadow-subsystem.js#syncUniforms`. */
+      const uShadowEdgeClamp = uniform(vec4(0, 0, 0, 0));
       /** THE SHIFTED QUAD (2026-10-27) — the quad moves by half the throw onto
        * the streak (`uShadowShiftWorld`, vertex) and the fragment adds the same
        * step back in UV (`uShadowShiftUv`), so the picture stays put while the
@@ -17569,8 +17577,8 @@ async function startVtPanViewerUnserialized({
            * faint smooth smudge the author said they'd accept — for ONE fetch
            * per station, not a wider multi-tap. */
           const alphaAt = (at, lod) => {
-            const inX = step(float(0), at.x).mul(step(at.x, float(1)));
-            const inY = step(float(0), at.y).mul(step(at.y, float(1)));
+            const inX = max(step(float(0), at.x), uShadowEdgeClamp.x).mul(max(step(at.x, float(1)), uShadowEdgeClamp.y));
+            const inY = max(step(float(0), at.y), uShadowEdgeClamp.z).mul(max(step(at.y, float(1)), uShadowEdgeClamp.w));
             const uvc = vec2(at.x.clamp(0, 1), at.y.clamp(0, 1));
             const s = lod ? texture(tex).sample(uvc).level(lod) : texture(tex, uvc);
             return s.a.mul(inX).mul(inY);
@@ -17846,6 +17854,7 @@ async function startVtPanViewerUnserialized({
               uShadowPenumbraLod,
               uShadowSideBlur,
               uShadowSmearStart,
+              uShadowEdgeClamp,
               uShadowShiftUv,
               uShadowShiftWorld,
             }

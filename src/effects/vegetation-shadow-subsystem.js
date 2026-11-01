@@ -178,6 +178,32 @@ export const VEG_SHADOW_SIDE_BLUR_GROW = 0.12;
 export const VEG_SHADOW_SMEAR_START = Object.freeze({ tree: 0.4, bush: 0 });
 
 /**
+ * Which sides of a plant's art lie ON the scene edge (2026-11-01, author: "You have clipping
+ * issues at scene edges"): [−u, +u, −v, +v], 1 = on the edge. There the shadow reads the art's
+ * edge column outward (the plant carries on past the map border); elsewhere it reads nothing.
+ * Unrotated placements only — a rotated plant's art edges are not the scene's.
+ * @param {object} placement - {x, y, width, height, rotation} (centre, signed size).
+ * @param {{x:number,y:number,width:number,height:number}} sceneRect
+ * @param {number} [tolPx=2]
+ * @returns {number[]}
+ */
+export function vegetationShadowEdgeClamp(placement, sceneRect, tolPx = 2) {
+  if (!placement || !sceneRect || Math.abs(placement.rotation ?? 0) > 1e-3) return [0, 0, 0, 0];
+  const w = placement.width ?? 0;
+  const h = placement.height ?? 0;
+  const x0 = placement.x - Math.abs(w) / 2;
+  const x1 = placement.x + Math.abs(w) / 2;
+  const y0 = placement.y - Math.abs(h) / 2;
+  const y1 = placement.y + Math.abs(h) / 2;
+  const left = x0 <= sceneRect.x + tolPx ? 1 : 0;
+  const right = x1 >= sceneRect.x + sceneRect.width - tolPx ? 1 : 0;
+  const top = y0 <= sceneRect.y + tolPx ? 1 : 0;
+  const bottom = y1 >= sceneRect.y + sceneRect.height - tolPx ? 1 : 0;
+  // A mirrored axis flips which UV side is which.
+  return [w < 0 ? right : left, w < 0 ? left : right, h < 0 ? bottom : top, h < 0 ? top : bottom];
+}
+
+/**
  * GOLDEN HOUR EXAGGERATION (2026-10-27, author: "Tree and vegetation shadows at
  * dusk and dawn should be a lot darker and a lot longer, more like we've changed
  * the building shadows"). The same three numbers the building shadows use
@@ -545,6 +571,10 @@ export function createVegetationShadowSubsystem({
     const gapTexels = ((cast.offsetPx * lengthMul) / taps) * artTexelsPerWorldPx;
     uniforms.uShadowSmearLod.value = Math.max(0, Math.min(VEG_SHADOW_MAX_SMEAR_LOD, Math.log2(Math.max(1, gapTexels))));
     if (uniforms.uShadowSmearStart) uniforms.uShadowSmearStart.value = VEG_SHADOW_SMEAR_START[kind?.id] ?? 0;
+    if (uniforms.uShadowEdgeClamp) {
+      const e = vegetationShadowEdgeClamp(placement, dimensions.sceneRect);
+      uniforms.uShadowEdgeClamp.value.set(e[0], e[1], e[2], e[3]);
+    }
     // The side edges (see VEG_SHADOW_SIDE_BLUR_START): blur at the plant, and added by the tip.
     if (uniforms.uShadowSideBlur) {
       const sweepPx = Math.hypot(offX, offY);

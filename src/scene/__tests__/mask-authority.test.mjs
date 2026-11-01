@@ -7,7 +7,7 @@
  * reset → discovery → ingest → derive → sample → report — runs under Node.
  */
 import { createMaskAuthority, RequiredMaskMissingError } from '../mask-authority.js';
-import { PACKED_TRIO_LAYER_NAME, CASTER_HEIGHT_SCALE_PX } from '../mask-catalog.js';
+import { PACKED_TRIO_LAYER_NAME, CASTER_HEIGHT_SCALE_PX, MASK_KINDS } from '../mask-catalog.js';
 
 /** Synthetic "bitmap": already ImageData-shaped; the injected reader is identity. */
 function syntheticPage(size, { r = 0, g = 0, b = 0, a = 255 } = {}) {
@@ -349,6 +349,32 @@ export async function run(t) {
       'an unresolvable floor index reports floorFound:false cleanly, never throws',
       unknownStatus.floorFound === false && unknownStatus.backgroundItemId === null
     );
+  }
+
+  // --- getFloorMaskFacts — the painter's Masks panel (2026-11-01) -----------
+  {
+    const l0 = authority.getFloorMaskFacts(0);
+    t.ok('mask facts: discovery has run', l0.checked === true && l0.failed === false);
+    t.ok(
+      'mask facts: a discovered + decoded file is loaded',
+      l0.kinds.outdoors.url === 'art/base_Outdoors.png' && l0.kinds.outdoors.loaded === true
+    );
+    t.ok(
+      'mask facts: a discovered file the authority never decodes reports loaded:null, not false',
+      l0.kinds.shadow.url === 'art/base_Shadow.png' && l0.kinds.shadow.loaded === null
+    );
+    t.ok('mask facts: an undiscovered kind has no url', l0.kinds.water.url === null && l0.kinds.water.loaded === null);
+    t.ok('mask facts: every catalog kind is listed', Object.keys(l0.kinds).length === MASK_KINDS.length);
+    const l1 = authority.getFloorMaskFacts(1);
+    t.ok(
+      "mask facts: a TILE's own file counts for its floor (any host, not just the background)",
+      l1.kinds.specular.url === 'art/tile_Specular.png'
+    );
+    t.ok(
+      '...and nothing else is claimed there',
+      Object.entries(l1.kinds).every(([id, k]) => id === 'specular' || k.url === null)
+    );
+    t.ok('mask facts: an unknown floor is null, never a throw', authority.getFloorMaskFacts(99) === null);
   }
 
   t.ok('authored indoors kills skyReach even where nothing covers', authority.sampleWorld('skyReach', 0, 75, 50) === 0);

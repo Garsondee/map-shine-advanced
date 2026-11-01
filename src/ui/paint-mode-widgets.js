@@ -163,7 +163,9 @@ export function createConfirmModal(state) {
       Object.assign(back.style, {
         position: 'fixed',
         inset: '0',
-        zIndex: '200',
+        // Above Foundry's own "Game Paused" banner (#pause, z 10100), which
+        // otherwise sits right across the dialog's text (found live, 2026-11-01).
+        zIndex: '10200',
         pointerEvents: 'auto',
         background: 'rgba(0,0,0,0.45)',
         display: 'flex',

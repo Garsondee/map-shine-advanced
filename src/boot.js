@@ -2545,6 +2545,7 @@ function install() {
     getMaskFile: getMaskFileInfo,
     onMaskFileWritten,
     setCleanView: setPaintCleanView,
+    getMaskFacts: (floorIndex) => maskAuthority.getFloorMaskFacts(floorIndex),
   });
   // ANCHOR MODE (2026-07-22) — click-to-place/click-to-edit for discrete point
   // effects (candles today). Installed once, entered per-effect via the

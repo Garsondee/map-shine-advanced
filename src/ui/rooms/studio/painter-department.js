@@ -125,9 +125,12 @@ export const PAINT_REACH = Object.freeze({
   // declared `seam` (`effects/prism/prism.js`'s own header) — nothing draws
   // yet even with a perfect file, so the `why` below says so explicitly
   // rather than reusing a sibling's phrasing that would overclaim.
+  // (2026-11-01) The pass is LIVE now (`graph/passes.js#surface.prism`, status
+  // 'live'); `prism-seams.js` still resolves `authoredStatusForItem(...)` — a
+  // FILE — so this is the ordinary file-only case its siblings are.
   prism: {
     reach: 'file-only',
-    why: "Prism's own render pass does not exist yet (a declared seam) — neither paint nor a mask file draws anything today; save the mask now and it is ready the moment the pass lands.",
+    why: 'Prism reads the mask file only — paint it, then save it next to the map to see it.',
   },
   // UNLIKE prism's own entry just above, Iridescence's render pass (`graph/
   // passes.js#surface.iridescence`) is genuinely `live` from day one

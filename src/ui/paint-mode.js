@@ -114,6 +114,7 @@ import { setVtPanViewerFloor } from '../vt/index.js';
 import { createConfirmModal } from './paint-mode-widgets.js';
 import { createPaintCanvas } from './paint-mode-canvas.js';
 import { createToolbar } from './paint-mode-toolbar.js';
+import { createMaskList } from './paint-mode-mask-list.js';
 
 const UNDO_LIMIT = 10; // at PAINT_GRID_MAX_DIM=4096 each undo snapshot is ~16MB — keep the stack bounded
 
@@ -178,6 +179,10 @@ export function installPainter(
     getMaskFile = null,
     onMaskFileWritten = null,
     setCleanView = null,
+    // THE MASKS PANEL (2026-11-01) — `getMaskFacts(floorIndex)`: which mask
+    // files this floor has and whether they are loaded (mask-authority.js#
+    // getFloorMaskFacts), for ui/paint-mode-mask-list.js.
+    getMaskFacts = null,
   } = {}
 ) {
   const state = {
@@ -243,6 +248,14 @@ export function installPainter(
     cleanView: false,
     overlayOpacity: 0.5, // the map must read through the tint — Clean view is for SEEING the art
     busy: null, // a file action in flight: a short status string
+    // THE MASKS PANEL — open or not, and which layers have edits since the last
+    // Save (the Save button only knows "something"; the panel and the switch
+    // prompt name WHICH). `paintedMemo`: key -> "has painted content", so the
+    // panel doesn't rescan a 16 MB grid per row per refresh.
+    maskListOpen: false,
+    editedKeys: new Set(),
+    paintedMemo: {},
+    refreshMaskList: null,
     cursorWorld: null, // live cursor in world coords, for the rubber-band preview
     // UNDO IS PER-LAYER, NOT GLOBAL (2026-08-31): `${kind}::${floor}` -> snapshot[].
     // One flat stack meant Ctrl+Z popped whatever was pushed LAST — which could
@@ -318,6 +331,7 @@ export function installPainter(
         state.ops[key] = isPaintLayerEmpty(layer) ? [] : [seedFromGrid(layer)];
       } finally {
         state.loading[key] = false;
+        delete state.paintedMemo[key];
         markFull(key);
         state.refreshToolbar?.();
       }
@@ -395,6 +409,8 @@ export function installPainter(
     state.undo = {};
     state.previewRect = {};
     state.dirtySinceSave = false;
+    state.editedKeys.clear();
+    state.paintedMemo = {};
     for (const key of Object.keys(state.layers)) markFull(key);
     state.refreshToolbar?.();
     return true;
@@ -416,12 +432,9 @@ export function installPainter(
     undo,
     clearActive,
     requestExit,
-    layerFor,
-    markFull,
     activeKey,
     confirmModal,
     paintableKinds: PAINTABLE_KINDS,
-    ensureSeeded,
     startFromWalls,
     startAllOutdoors,
     setCleanViewOn,
@@ -429,12 +442,99 @@ export function installPainter(
     downloadFile,
     importFile,
     fileSupportFor,
+    switchKind,
+    toggleMaskList: (open) => maskList.toggle(open),
   });
+  const maskList = createMaskList(state, {
+    paintableKinds: PAINTABLE_KINDS,
+    getMaskFacts,
+    paintInfoFor,
+    switchKind,
+  });
+
+  /** The layer's suffix as the GM knows it, with its floor. */
+  const suffixOfKey = (key) => {
+    const sep = key.lastIndexOf('::');
+    const def = kindDef(key.slice(0, sep));
+    return `${def?.suffixes?.[0] ?? key.slice(0, sep)} (floor ${key.slice(sep + 2)})`;
+  };
+
+  /**
+   * THE ONE DOOR FOR CHANGING LAYER — the Mask dropdown and the Masks panel
+   * both come through here, so a quick switch can never lose work: with
+   * unsaved painting the GM is asked first, and the prompt names the layers
+   * it is about. Resolves true when the painter is now on `target`.
+   */
+  let switching = false;
+  async function switchKind(target) {
+    if (target === state.kind || !kindDef(target) || switching) return target === state.kind;
+    switching = true;
+    try {
+      endStroke();
+      endCells();
+      cancelDraft();
+      const targetSuffix = kindDef(target).suffixes[0];
+      if (state.dirtySinceSave) {
+        const edited = [...state.editedKeys].map(suffixOfKey);
+        const what = edited.length ? edited.join(', ') : 'this painting';
+        const choice = await confirmModal(
+          'Unsaved painting',
+          `You have unsaved painting on ${what}. Save it before switching to ${targetSuffix}? ` +
+            'If you switch without saving it stays here in the painter, and Exit asks again before anything is lost.',
+          [
+            { action: 'save', label: '💾 Save, then switch', accent: '167,255,196' },
+            { action: 'switch', label: 'Switch, save later', accent: '143,214,255' },
+            { action: 'cancel', label: 'Stay here', accent: '255,196,120' },
+          ]
+        );
+        if (choice !== 'save' && choice !== 'switch') return false;
+        if (choice === 'save') {
+          await save();
+          if (state.dirtySinceSave) return false; // the save failed (it said why) — stay on the work
+        }
+      }
+      state.kind = target;
+      layerFor(target);
+      markFull(activeKey());
+      state.refreshToolbar?.();
+      ensureSeeded(target);
+      return true;
+    } finally {
+      switching = false;
+      state.refreshMaskList?.();
+    }
+  }
+
+  /** What the Masks panel needs from the painter's own memory for one kind on
+   * this floor: is there painting on it, and is any of it unsaved. A layer that
+   * IS its file is the file's row, not painting; nor is `_Outdoors`'s untouched
+   * all-outdoors starting point. */
+  function paintInfoFor(kind) {
+    const key = keyOf(kind);
+    const layer = state.layers[key];
+    const unsaved = state.editedKeys.has(key);
+    if (!layer || state.fileBacked[key]) return { painted: false, unsaved };
+    if (!(key in state.paintedMemo)) {
+      const ops = state.ops[key];
+      const untouchedStart = !unsaved && ops?.length === 1 && ops[0].t === 'fill' && ops[0].v === 255;
+      // A kind whose default is WHITE (`_Outdoors`: black = indoors) can be
+      // painted all black — an all-zero grid that is still real work, so its
+      // history counts as well as its pixels.
+      const darkIsPaint = (kindDef(kind)?.absentValue ?? 0) > 0 && (ops?.length ?? 0) > 0;
+      state.paintedMemo[key] = !untouchedStart && (darkIsPaint || !isPaintLayerEmpty(layer));
+    }
+    return { painted: state.paintedMemo[key], unsaved };
+  }
 
   // Flip the unsaved flag on the first edit of a save-cycle (and refresh the
   // toolbar once on that transition — cheap, not per-stamp).
   function markEdited() {
     delete state.fileBacked[activeKey()]; // an edit makes this layer a draft again
+    delete state.paintedMemo[activeKey()];
+    if (!state.editedKeys.has(activeKey())) {
+      state.editedKeys.add(activeKey());
+      state.refreshMaskList?.();
+    }
     if (state.dirtySinceSave) return;
     state.dirtySinceSave = true;
     state.refreshToolbar?.();
@@ -749,6 +849,7 @@ export function installPainter(
         await readMaskFileToGrid(res.path, layer.spec, kindDef(state.kind)?.absentValue ?? 0, { fresh: true })
       );
       state.undo[key] = [];
+      delete state.paintedMemo[key];
       markFull(key);
     } catch (err) {
       notify(`Map Shine: imported, but the painter couldn't show it yet (${err?.message || err}).`, 'warn');
@@ -1069,6 +1170,7 @@ export function installPainter(
       else if (e.key.toLowerCase() === 'c') setTool('cells');
       else if (e.key.toLowerCase() === 'f') setTool('room');
       else if (e.key.toLowerCase() === 'v') setCleanViewOn(!state.cleanView);
+      else if (e.key.toLowerCase() === 'm') maskList.toggle();
       else if (e.key.toLowerCase() === 's')
         state.snapMode = state.snapMode === 'off' ? 'grid' : state.snapMode === 'grid' ? 'quarter' : 'off';
       else return;
@@ -1152,7 +1254,9 @@ export function installPainter(
     removeHandlers();
     state.overlay?.remove();
     state.toolbar?.remove();
-    state.overlay = state.toolbar = state.canvas = null;
+    state.maskListEl?.remove();
+    state.refreshMaskList = null; // also stops a pending loading re-check from drawing into a removed panel
+    state.overlay = state.toolbar = state.canvas = state.maskListEl = null;
   }
 
   // Exit, but guard unsaved work first (the data-loss point — masks live in
@@ -1206,6 +1310,8 @@ export function installPainter(
     state.canvas = canvas;
     state.toolbar = buildToolbar();
     document.body.appendChild(state.toolbar);
+    state.maskListEl = maskList.build(); // hidden until ☰ Masks / M opens it
+    document.body.appendChild(state.maskListEl);
   }
 
   /**
@@ -1253,6 +1359,7 @@ export function installPainter(
         .join('/')} KB) — saved fine, but a detailed mask belongs in a file: use ⬆ Save next to map.`;
     }
     state.dirtySinceSave = false;
+    state.editedKeys.clear();
     // WHAT IS ON THE SCENE IS NOW WHAT IS IN MEMORY — so this is one of the
     // exactly two moments the discard target is re-taken. It also resolves a
     // deferred scene load: these layers have just been written to the CURRENT
@@ -1329,6 +1436,8 @@ export function installPainter(
     state.undo = {};
     state.previewRect = {};
     state.dirtySinceSave = false; // freshly loaded from the scene = clean
+    state.editedKeys.clear();
+    state.paintedMemo = {};
     state.pendingHydrate = false;
     snapshotCommitted(); // what the scene holds IS the committed truth
     for (const key of Object.keys(state.layers)) markFull(key);

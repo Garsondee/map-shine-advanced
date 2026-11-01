@@ -1567,6 +1567,37 @@ export function createMaskAuthority({ readPageImageData, log }) {
       };
     },
     /**
+     * THE PAINTER'S MASK LIST (2026-11-01) — `ui/mask-list-model.js`'s file
+     * facts for ONE floor: per authored kind, the file discovered on ANY host of
+     * the floor (background, foreground or a tile — the same any-host rule as
+     * `requiredMissingAuthoredIds`), and whether its content has been decoded.
+     * `loaded` is `null` for a kind this authority never decodes (not
+     * `rasterize`): its effect reads the file itself, so "found" is all there
+     * is to know. Cheap like `getReadinessFacts` — no derive.
+     * @param {number} floorIndex
+     * @returns {{checked: boolean, failed: boolean,
+     *   kinds: Record<string, {url: string|null, loaded: boolean|null}>}|null} null = no such floor.
+     */
+    getFloorMaskFacts(floorIndex) {
+      const floor = scene.floors.find((f) => f.index === floorIndex);
+      if (!floor) return null;
+      const hosts = hostsOfFloor(floor);
+      const kinds = {};
+      for (const kind of MASK_KINDS) {
+        const host = hosts.find((item) => scene.discovery?.byTargetId?.get(item.id)?.get(kind.id));
+        const url = host ? scene.discovery.byTargetId.get(host.id).get(kind.id) : null;
+        const loaded = !url || !kind.rasterize ? null : scene.ingests.has(`${host.id}/${kind.id}`);
+        kinds[kind.id] = { url: url ?? null, loaded };
+      }
+      // A failure counts only if it was one of THIS floor's hosts that could not be looked at.
+      const hostIds = new Set(hosts.map((item) => item.id));
+      return {
+        checked: !!scene.discovery,
+        failed: (scene.discovery?.failures ?? []).some((f) => hostIds.has(f.targetId)),
+        kinds,
+      };
+    },
+    /**
      * The DERIVED products' own version counter — bumps only when
      * `recomputeIfDirty()` actually recomputes (a real content change),
      * unlike `version` (bumps on every `touch()`, including plain item-list

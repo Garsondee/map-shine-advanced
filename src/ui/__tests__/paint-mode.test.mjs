@@ -42,7 +42,7 @@ const PAINT_MODE_PATH = fileURLToPath(new URL('../paint-mode.js', import.meta.ur
 const IMPORT_RE = /^import\s+\{([\s\S]*?)\}\s+from\s+'[^']+';$/gm;
 const RETURN_ANCHOR = '\n  return {\n';
 const TEST_HANDLE =
-  '\n  return {\n    __test: { state, pushUndo, undo, discardEdits, applyHydrate, endStroke, activeKey, save, opsFor, clearActive, commitOp, ensureSeeded },\n';
+  '\n  return {\n    __test: { state, pushUndo, undo, discardEdits, applyHydrate, endStroke, activeKey, save, opsFor, clearActive, commitOp, ensureSeeded, switchKind, paintInfoFor },\n';
 
 /** Compile the real `installPainter` with its imports replaced by stubs. */
 function compileInstallPainter() {
@@ -88,7 +88,7 @@ const makeLayer = (fill = 0) => ({ spec: gridSpec, data: new Uint8Array(16).fill
  * A painter with every Foundry/DOM dependency stubbed. Returns the public
  * surface, the `__test` handle onto its internals, and the recorders.
  */
-function makePainter({ scenePayload = null, sceneLayers = null, painterOpts = {} } = {}) {
+function makePainter({ scenePayload = null, sceneLayers = null, painterOpts = {}, depsOverride = {} } = {}) {
   const calls = { saved: [], announced: [], confirms: [], notifications: [] };
   const answers = [];
   const board = {
@@ -123,6 +123,7 @@ function makePainter({ scenePayload = null, sceneLayers = null, painterOpts = {}
     MASK_KINDS: [
       { id: 'fire', suffixes: ['_Fire'] },
       { id: 'water', suffixes: ['_Water'] },
+      { id: 'outdoors', suffixes: ['_Outdoors'], absentValue: 1, required: true },
     ],
     readPaintContext: () => ctx,
     savePaintedMasks: async (payload) => {
@@ -156,6 +157,9 @@ function makePainter({ scenePayload = null, sceneLayers = null, painterOpts = {}
     saveMaskFileFlow: async () => ({ ok: false }),
     downloadMaskFlow: async () => ({ ok: false }),
     importMaskFlow: async () => ({ ok: false }),
+    // The Masks panel is DOM; its model is tested on its own (mask-list-model.test.mjs).
+    createMaskList: () => ({ build: () => ({}), toggle: () => {} }),
+    ...depsOverride,
   };
   const painter = installPainterFactory(deps)(
     {},
@@ -439,8 +443,6 @@ function runToolbarChecks(t) {
       undo: () => {},
       clearActive: () => cleared.push(true),
       requestExit: () => {},
-      layerFor: () => {},
-      markFull: () => {},
       activeKey: () => `${state.kind}::${state.floor}`,
       confirmModal: (title, message) => {
         confirms.push({ title, message });
@@ -450,7 +452,6 @@ function runToolbarChecks(t) {
         { id: 'fire', suffixes: ['_Fire'] },
         { id: 'water', suffixes: ['_Water'] },
       ],
-      ensureSeeded: () => {},
       startFromWalls: () => {},
       startAllOutdoors: () => {},
       setCleanViewOn: () => {},
@@ -458,6 +459,8 @@ function runToolbarChecks(t) {
       downloadFile: () => {},
       importFile: () => {},
       fileSupportFor: () => ({ info: null, loading: false }),
+      switchKind: async () => true,
+      toggleMaskList: () => {},
     });
     const bar = buildToolbar();
     const buttons = collectButtons(bar);
@@ -590,5 +593,81 @@ export async function runMsaReady(t) {
     const d = state.layers['fire::0'].data;
     ok('draft over file: the draft wins where it painted', d[0] === 90 && d[1] === 200);
     ok('...and the layer is a draft, not the file', !state.fileBacked['fire::0'] && state.ops['fire::0'].length === 2);
+  }
+}
+
+/**
+ * THE MASKS PANEL (2026-11-01) — switching layer goes through ONE door
+ * (`switchKind`), used by both the Mask dropdown and the panel. Author: *"Be
+ * sure to offer a chance to save if swapping so that we don't lose work in
+ * progress by accident."*
+ */
+export async function runMaskList(t) {
+  const { ok } = t;
+  const setup = (opts) => {
+    const p = makePainter(opts);
+    p.state.ctx = { sceneRect: SCENE_RECT };
+    p.state.kind = 'fire';
+    p.state.floor = 0;
+    p.state.layers['fire::0'] = makeLayer(0);
+    p.state.ops['fire::0'] = [];
+    return p;
+  };
+  {
+    const { t: api, state, calls } = setup();
+    ok('nothing unsaved: switches straight away', (await api.switchKind('water')) === true && state.kind === 'water');
+    ok('...without asking', calls.confirms.length === 0);
+    ok('an unknown kind is refused', (await api.switchKind('nope')) === false && state.kind === 'water');
+  }
+  {
+    const { t: api, state, calls, answers } = setup();
+    api.commitOp({ t: 'fill', v: 50 }); // an edit on _Fire, floor 0
+    ok('an edit is tracked per layer', state.editedKeys.has('fire::0') && state.dirtySinceSave);
+    answers.push('cancel');
+    ok('Stay here: no switch', (await api.switchKind('water')) === false && state.kind === 'fire');
+    ok('...the prompt names the unsaved layer', calls.confirms[0]?.message.includes('_Fire (floor 0)'));
+    ok('...and where it was going', calls.confirms[0]?.message.includes('_Water'));
+    ok('...and nothing was saved', calls.saved.length === 0);
+    answers.push(undefined);
+    ok('a dismissed prompt also stays', (await api.switchKind('water')) === false && state.kind === 'fire');
+    answers.push('switch');
+    ok('Switch, save later: switches', (await api.switchKind('water')) === true && state.kind === 'water');
+    ok('...keeping the work unsaved, not lost', state.dirtySinceSave && state.layers['fire::0'].data[0] === 50);
+    ok('...still named as unsaved', state.editedKeys.has('fire::0') && calls.saved.length === 0);
+  }
+  {
+    const { t: api, state, calls, answers } = setup();
+    api.commitOp({ t: 'fill', v: 50 });
+    answers.push('save');
+    ok('Save, then switch: switches', (await api.switchKind('water')) === true && state.kind === 'water');
+    ok('...after writing the scene', calls.saved.length === 1 && !state.dirtySinceSave);
+    ok('...and nothing is listed as unsaved', state.editedKeys.size === 0);
+  }
+  {
+    const failing = setup({ depsOverride: { savePaintedMasks: async () => ({ ok: false, reason: 'no permission' }) } });
+    failing.t.commitOp({ t: 'fill', v: 50 });
+    failing.answers.push('save');
+    ok(
+      'a save that fails keeps you on your work',
+      (await failing.t.switchKind('water')) === false && failing.state.kind === 'fire'
+    );
+  }
+  {
+    const { t: api, state } = setup();
+    ok('an empty layer is not "painted"', api.paintInfoFor('fire').painted === false);
+    ok('a kind never opened is not "painted"', api.paintInfoFor('water').painted === false);
+    api.commitOp({ t: 'fill', v: 50 });
+    const info = api.paintInfoFor('fire');
+    ok('after an edit: painted and unsaved', info.painted && info.unsaved);
+    state.fileBacked['fire::0'] = true;
+    ok('a layer that IS its file is the file, not painting', api.paintInfoFor('fire').painted === false);
+  }
+  {
+    const { t: api, state } = setup();
+    state.kind = 'outdoors';
+    await api.ensureSeeded('outdoors');
+    ok("_Outdoors's untouched all-outdoors start is not painting", api.paintInfoFor('outdoors').painted === false);
+    api.commitOp({ t: 'fill', v: 0 });
+    ok('...but once edited it is', api.paintInfoFor('outdoors').painted === true);
   }
 }

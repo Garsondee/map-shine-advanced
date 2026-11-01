@@ -16,6 +16,7 @@
 
 import { styleControl, label, legendItem, button, range, segmented } from './paint-mode-widgets.js';
 import { kindFileSupport } from '../scene/index.js';
+import { MASK_LIST_BOX } from './paint-mode-mask-list.js';
 
 /**
  * Bind the toolbar builder to the painter's live `state` + its actions.
@@ -32,13 +33,10 @@ export function createToolbar(state, deps) {
     undo,
     clearActive,
     requestExit,
-    layerFor,
-    markFull,
     activeKey,
     confirmModal,
     paintableKinds: PAINTABLE_KINDS,
     // MSA Ready (2026-11-01) — see paint-mode.js's header.
-    ensureSeeded,
     startFromWalls,
     startAllOutdoors,
     setCleanViewOn,
@@ -46,6 +44,9 @@ export function createToolbar(state, deps) {
     downloadFile,
     importFile,
     fileSupportFor,
+    // The Masks panel (2026-11-01): the painter's one switch door, and the panel toggle.
+    switchKind,
+    toggleMaskList,
   } = deps;
 
   function buildToolbar() {
@@ -120,6 +121,9 @@ export function createToolbar(state, deps) {
     // kind picker — labelled by the catalog's own suffix, never a literal
     const kindSel = document.createElement('select');
     styleControl(kindSel);
+    // Foundry's own stylesheet gives every <select> `width: 100%`, which made
+    // this one take a whole row of the toolbar to itself.
+    Object.assign(kindSel.style, { width: 'auto', flex: '0 0 auto' });
     for (const k of PAINTABLE_KINDS) {
       const o = document.createElement('option');
       o.value = k.id;
@@ -127,37 +131,15 @@ export function createToolbar(state, deps) {
       kindSel.append(o);
     }
     kindSel.value = state.kind;
-    let revertingKind = false;
+    // Guard unsaved work when swapping masks (author ask) — through the
+    // painter's one switch door, which the Masks panel uses too.
     kindSel.addEventListener('change', async () => {
-      if (revertingKind) return;
-      const target = kindSel.value;
-      // Guard unsaved work when swapping effects (author ask): the mask you were
-      // on stays in memory either way, but remind so it isn't forgotten.
-      if (state.dirtySinceSave) {
-        const suffix = PAINTABLE_KINDS.find((k) => k.id === target)?.suffixes[0] ?? target;
-        const choice = await confirmModal(
-          'Unsaved painting',
-          `Save your changes before switching to ${suffix}? Your masks stay in memory either way — Save writes them all to the scene at once.`,
-          [
-            { action: 'save', label: '💾 Save & switch', accent: '167,255,196' },
-            { action: 'switch', label: 'Switch without saving', accent: '143,214,255' },
-            { action: 'cancel', label: 'Cancel', accent: '255,196,120' },
-          ]
-        );
-        if (choice === 'cancel') {
-          revertingKind = true;
-          kindSel.value = state.kind; // put the dropdown back
-          revertingKind = false;
-          return;
-        }
-        if (choice === 'save') await save();
-      }
-      state.kind = target;
-      layerFor(state.kind);
-      markFull(activeKey());
-      state.refreshToolbar?.();
-      ensureSeeded(state.kind);
+      await switchKind(kindSel.value);
+      kindSel.value = state.kind; // a cancelled switch puts the dropdown back
     });
+    // THE MASKS PANEL (2026-11-01) — every mask, whether it's working, one click to paint it.
+    const masksBtn = button('☰ Masks', () => toggleMaskList(), '143,214,255');
+    masksBtn.title = 'Show every mask Map Shine can use, which ones this floor has, and switch between them (M).';
 
     const modeSeg = segmented(
       [
@@ -244,7 +226,7 @@ export function createToolbar(state, deps) {
     }
 
     const top = row();
-    top.append(label('Mask'), kindSel, modeSeg.el, outdoorsWrap);
+    top.append(label('Mask'), kindSel, masksBtn, modeSeg.el, outdoorsWrap);
     const mid = row();
     mid.append(sizeR.el, strengthR.el, hardR.el);
 
@@ -313,6 +295,7 @@ export function createToolbar(state, deps) {
       legendItem('Ctrl+Z', 'undo'),
       legendItem('S', 'snap'),
       legendItem('V', 'clean view'),
+      legendItem('M', 'masks'),
       legendItem('Esc', 'cancel / exit')
     );
 
@@ -329,7 +312,9 @@ export function createToolbar(state, deps) {
       opacityR.sync();
       kindSel.value = state.kind;
       const isOutdoors = state.kind === 'outdoors';
-      modeSeg.el.style.display = isOutdoors ? 'none' : '';
+      // 'inline-flex', not '': clearing the inline display dropped the segment
+      // to `block` and stacked Spray/Paint/Erase vertically (found live, 2026-11-01).
+      modeSeg.el.style.display = isOutdoors ? 'none' : 'inline-flex';
       outdoorsWrap.style.display = isOutdoors ? 'flex' : 'none';
       // The file row: what this layer can do, and why not when it can't.
       const { info, loading } = fileSupportFor();
@@ -359,6 +344,12 @@ export function createToolbar(state, deps) {
       // a stray click. The opacity is the appearance; this is the state.
       saveBtn.disabled = !state.dirtySinceSave;
       saveBtn.style.cursor = state.dirtySinceSave ? 'pointer' : 'default';
+      masksBtn.style.background = `rgba(143,214,255,${state.maskListOpen ? 0.34 : 0.16})`;
+      // Centred as always, unless the open Masks panel would sit under its left
+      // edge — then just far enough right to clear it.
+      const halfBar = Math.ceil((bar.offsetWidth || 0) / 2);
+      bar.style.left = state.maskListOpen ? `max(50%, ${MASK_LIST_BOX.right + 12 + halfBar}px)` : '50%';
+      state.refreshMaskList?.(); // the panel follows the layer, the floor and the save state
     };
     state.refreshToolbar();
     return bar;

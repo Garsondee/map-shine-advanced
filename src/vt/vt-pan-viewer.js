@@ -14877,6 +14877,22 @@ async function startVtPanViewerUnserialized({
         // mutated, on every wind rebake, so this subsystem needs the CURRENT
         // one on every poll, never the one that existed at construction time.
         getWindHandle: () => windHandle,
+        // WIND AND RAIN ON THE SURFACE (2026-11-01) — the SAME eased snapshot the
+        // rain and the wind dial are drawn from. Snow and hail barely mark water.
+        getWeather: () => {
+          const env = lastEnvSnapshot?.env;
+          if (!env) return null;
+          const w = env.weather ?? {};
+          const kind = w.precipKind ?? 'rain';
+          const kindGain = kind === 'rain' ? 1 : kind === 'hail' ? 0.8 : 0.15;
+          const flow = windFlowVector(env.wind?.directionDeg ?? 0);
+          return {
+            wind01: Number.isFinite(env.wind?.speed01) ? env.wind.speed01 : 0,
+            windDir: [flow.x, flow.y],
+            rain01: (Number.isFinite(w.precip01) ? w.precip01 : 0) * kindGain,
+            temperature01: Number.isFinite(w.temperature01) ? w.temperature01 : 0.5,
+          };
+        },
         // THE DEPTH-AUTHORITY GATE (2026-08-15) — composed exactly like
         // specular's/window's own `resolveExpectedDepth` below, resolved by
         // ITEM ID rather than by elevation: water has real drawn geometry of

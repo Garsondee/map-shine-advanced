@@ -1005,6 +1005,40 @@ export const WATER_DRY_DISCARD_REACH_PX = 448;
  *   and `waterSimTexNode` are NEVER null (unlike `bodyTexNode`) — see their own
  *   `args.flowPackTexture`/`args.waterSimTexture` doc.
  */
+/** Index of refraction of water. */
+export const WATER_IOR = 1.333;
+
+/**
+ * How the sun crosses the water (2026-11-01; author: "Think about how the volume
+ * of water would refract light at different times of day"). Pure, so a Node test
+ * can pin it.
+ *  - transmitted: the share of direct sun the surface lets in (1 − Schlick
+ *    Fresnel at the sun's incidence): 0.98 at noon, ~0.36 at a 5° sun.
+ *  - cosRefracted: Snell — sin θt = cos(elevation) / 1.333, so even a grazing
+ *    sun enters at no more than ~48.6° from vertical.
+ *  - extraPath: 1/cos θt − 1, the longer slant path to the bed than at noon.
+ *  - sunShare: the key's share of the daylight (key / (key + fill)).
+ *  - causticGate: the key's strength (clouds and night included) × transmitted,
+ *    normalised so a clear high sun is 1.
+ * @param {{keyDir: number[], keyStrength: number, fillStrength?: number}} sky
+ */
+export function waterSunThroughWater(sky) {
+  const d = Array.isArray(sky?.keyDir) ? sky.keyDir : [0, 0, 1];
+  const sinE = Math.min(1, Math.max(0, d[2] ?? 1));
+  const cosE = Math.hypot(d[0] ?? 0, d[1] ?? 0);
+  const az = cosE > 1e-5 ? [d[0] / cosE, d[1] / cosE] : [1, 0];
+  const sinT = Math.min(1, cosE / WATER_IOR);
+  const cosRefracted = Math.sqrt(Math.max(1e-4, 1 - sinT * sinT));
+  const F0 = 0.02;
+  const fresnel = F0 + (1 - F0) * Math.pow(1 - sinE, 5);
+  const transmitted = 1 - fresnel;
+  const key = Math.max(0, Number(sky?.keyStrength) || 0);
+  const fill = Math.max(0, Number(sky?.fillStrength) || 0);
+  const sunShare = key + fill > 1e-6 ? key / (key + fill) : 0;
+  const causticGate = Math.min(1, key) * (transmitted / (1 - F0));
+  return { azX: az[0], azY: az[1], cosRefracted, extraPath: 1 / cosRefracted - 1, transmitted, sunShare, causticGate };
+}
+
 export function buildWaterSurfaceMaterial({
   THREE,
   maskTexture,
@@ -1293,6 +1327,29 @@ export function buildWaterSurfaceMaterial({
   const uFlowDir = uniform(vec2(flow0[0], flow0[1]));
   const uFoam = uniform(float(foam));
   const uWindRipple = uniform(float(windRipple));
+  // WEATHER ON THE SURFACE + THE SUN THROUGH THE VOLUME (2026-11-01) — pushed
+  // per frame by `setWeather` / `setSky` (see `water-field.js#buildRainRings`'s
+  // section and `waterSunThroughWater`).
+  // ONE mat4, four columns (this file's uniform budget is frozen — sixteen
+  // per-frame floats in one binding, not nine separate ones):
+  //   0 (wind 0..1, rain 0..1, air temperature 0..1, steam amount)
+  //   1 (wind direction x, y — toward; downwind drift x, y in world px)
+  //   2 (sun azimuth x, y, cos of the refracted sun angle, steam spread px)
+  //   3 (sunlight transmitted at the surface, sun's share of the daylight,
+  //      extra slant path below the surface, caustic gate)
+  const weatherInit = new THREE.Matrix4().fromArray([0, 0, 0.5, 0, 1, 0, 0, 0, 1, 0, 1, 70, 1, 0, 0, 0]);
+  const uWaterWeather = uniform(weatherInit);
+  const weatherCol = (i) => uWaterWeather.element(i);
+  const uWind01 = weatherCol(0).x;
+  const uRain01 = weatherCol(0).y;
+  const uTemperature01 = weatherCol(0).z;
+  const uSteam = weatherCol(0).w;
+  const uWindDir = weatherCol(1).xy;
+  const uWindDriftPx = weatherCol(1).zw;
+  const uSunCaustic = weatherCol(2);
+  const uSteamSpreadPx = weatherCol(2).w;
+  const uSunWater = weatherCol(3);
+  const weatherEl = uWaterWeather.value.elements;
   // THE BODY PACK's OWN SIZE IN TEXELS — for the smooth (C2) reconstruction
   // that stops its ~21-world-px grid from creasing every steep read downstream
   // (`water-sampling.js`). Seeded at the real grid the caller has, and re-pushed
@@ -1310,7 +1367,8 @@ export function buildWaterSurfaceMaterial({
   // sharp-edged rather than smooth).
   const uWaterSimTexSize = uniform(vec2(waterSimTexSize?.[0] ?? 1, waterSimTexSize?.[1] ?? 1));
   const uChop = uniform(float(chop));
-  const uTurbidity = uniform(float(WATER_TIER2_TURBIDITY));
+  // A constant, not a uniform: nothing ever wrote it (2026-11-01).
+  const uTurbidity = float(WATER_TIER2_TURBIDITY);
   // ── TIER 4 (2026-08-16) ─────────────────────────────────────────────────
   const uSwashFoam = uniform(float(swashFoam));
   const uBreakFoam = uniform(float(breakFoam));
@@ -1846,6 +1904,8 @@ export function buildWaterSurfaceMaterial({
     domainOffset: vec2(0, 0),
     flowWarp: vec2(0, 0),
     causticBrightness: float(0),
+    rainSplash: null,
+    rainRough: null,
   };
   if (activeTier >= 2) {
     field = buildWaterSurfaceField({
@@ -1905,6 +1965,11 @@ export function buildWaterSurfaceMaterial({
       windHandle,
       windStrengthField,
       uWindRipple,
+      uWind01,
+      uWindDir,
+      uWindDriftPx,
+      uRain01,
+      uSunCaustic,
     });
   }
 
@@ -2021,6 +2086,10 @@ export function buildWaterSurfaceMaterial({
       // what separates a visible rung from the flat 0.0084 wash this shipped
       // as; `water-light.js`'s header carries the measurement.
       slopeXY: field.slope,
+      // Spray and sub-pixel capillaries the normal is too coarse to carry: a
+      // breeze takes the mirror off, rain dulls it to a sheen.
+      roughnessBoost: uWind01.mul(float(0.05)).add((field.rainRough ?? float(0)).mul(float(0.2))),
+      rippleSlopeXY: field.rainSlope ?? null,
     });
   }
 
@@ -2503,9 +2572,55 @@ export function buildWaterSurfaceMaterial({
     });
   }
   const foamDrawn = foamTexture ? (breakSpecks ? max(foamTexture, breakSpecks) : foamTexture) : null;
-  const totalFoam = min(foamDrawn ?? max(field.foam.mul(crestPatch), waterSimFoamStructured), float(1)).mul(
+  const totalFoamBase = min(foamDrawn ?? max(field.foam.mul(crestPatch), waterSimFoamStructured), float(1)).mul(
     foamSharpnessFactor
   );
+  // ── STEAM (2026-11-01) — wisps off warm water (see WATER_PARAMS.steam). A
+  // world-anchored, slowly evolving fbm, cut into wisps, drifting downwind with
+  // the same CPU-integrated drift the wind ripples ride. Coverage reads the shore
+  // SDF a little UPWIND, so the plume leans past the downwind bank. Drawn as a
+  // mix toward pale vapour in BOTH meshes (multiply by 1-a, add colour x a), so it
+  // sits over the water and the bank alike and is lit with the scene.
+  let steamAlpha = float(0);
+  if (activeTier >= 2 && bodyTexNode) {
+    const TSLn = THREE.TSL;
+    const tSecS = (timeMsNode ?? float(0)).mul(float(1 / 1000));
+    const wxy = vec2(positionWorld.x, positionWorld.y);
+    const lean = uWindDir.mul(uSteamSpreadPx.mul(float(0.8)).mul(clamp(uWind01.mul(float(2)), float(0), float(1))));
+    const upwind = wxy.sub(lean);
+    const upU = upwind.x.sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
+    const upV = upwind.y.sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
+    const sdfUp = texture(bodyTexture, vec2(clamp(upU, 0, 1), clamp(upV, 0, 1))).r;
+    const sdfHere = bodyTexNode.r;
+    const coverage = max(
+      float(1).sub(smoothstep(float(-30), max(uSteamSpreadPx, float(1)), sdfUp)),
+      float(1).sub(smoothstep(float(-30), max(uSteamSpreadPx.mul(float(0.4)), float(1)), sdfHere))
+    );
+    const drift = uWindDriftPx.mul(float(0.6)).add(vec2(tSecS.mul(float(3)), tSecS.mul(float(-5))));
+    // Stretched downwind: a breeze draws the wisps out into streaks.
+    const p0 = wxy.sub(drift);
+    const stretch = clamp(uWind01.mul(float(1.5)), float(0), float(0.65));
+    const sp = p0.sub(uWindDir.mul(dot(p0, uWindDir).mul(stretch))).div(float(130));
+    const n1 = TSLn.mx_fractal_noise_float(vec3(sp.x, sp.y, tSecS.mul(float(0.06))), 4, 2.0, 0.55);
+    const n2 = TSLn.mx_fractal_noise_float(
+      vec3(sp.x.mul(float(3.1)).add(float(5.3)), sp.y.mul(float(3.1)), tSecS.mul(float(0.18))),
+      3,
+      2.0,
+      0.6
+    );
+    // Thin and translucent: a wide, soft cut, then squared so only the cores
+    // build up — steam is a veil with brighter threads, never a cloud bank.
+    const wispRaw = smoothstep(float(-0.3), float(0.8), n1.add(n2.mul(float(0.7))));
+    const wisp = wispRaw.mul(wispRaw);
+    // Cold air shows more of it (a winter dawn), warm air less; wind tears it thin.
+    const cold = float(1.25).sub(uTemperature01.mul(float(0.75)));
+    const torn = float(1).sub(clamp(uWind01.mul(float(0.9)), float(0), float(0.7)));
+    steamAlpha = clamp(wisp.mul(coverage).mul(uSteam).mul(cold).mul(torn).mul(float(0.7)), float(0), float(0.6)).mul(
+      inRect
+    );
+  }
+  // Rain's impact specks ride the foam's own white (2026-11-01).
+  const totalFoam = field.rainSplash ? max(totalFoamBase, field.rainSplash.mul(float(0.45))) : totalFoamBase;
 
   // ── TIER 4: CAUSTICS' OWN AUTHOR-FACING GAIN ─────────────────────────────
   // `field.causticBrightness` already carries the calibrated
@@ -2527,7 +2642,24 @@ export function buildWaterSurfaceMaterial({
   // same physical fact). Deliberately the RAW sample, not `sunShadowFactor`
   // (which `shadowResponse` can soften) — "suppress ALL caustics" reads as
   // unconditional, not a dial shared with glint's own artistic softness.
-  const causticExcess = field.causticBrightness.mul(causticGain).mul(specular.sunVis);
+  // THE SUN THROUGH THE VOLUME (2026-11-01): a caustic is DIRECT sun focused by
+  // the surface, so it needs the sun up and unclouded (`uSunWater.w`: the key's
+  // strength × what the surface lets in), and open sky above (the same outdoors
+  // gate the reflection uses) — before this it shone under roofs and at night.
+  const causticExcess = field.causticBrightness
+    .mul(causticGain)
+    .mul(specular.sunVis)
+    .mul(uSunWater.w)
+    .mul(specular.outdoors ?? float(1));
+  // The bed's DIRECT light: only the transmitted share of the sun gets in, and a
+  // low sun's refracted ray crosses more water on its way down (1/cos θt − 1
+  // extra path), so at golden hour the bed falls dark while the surface takes the
+  // light as glint. Only the sun's share of the daylight is touched, and only
+  // where the sun reaches.
+  const sunShareHere = uSunWater.y.mul(specular.sunVis);
+  const sunBedFactor = float(1)
+    .sub(sunShareHere)
+    .add(sunShareHere.mul(uSunWater.x).mul(exp(sigma.negate().mul(depth01).mul(uSunWater.z))));
 
   // ============================================================================
   // TIER 5 — REFRACTION (C5, Water-Testament.md §2.5) — landed 2026-08-23
@@ -2735,9 +2867,13 @@ export function buildWaterSurfaceMaterial({
       float(WATER_TIER5_FRINGE_SPECULAR_HI),
       specularLuma
     );
-    const fringeUv = vec2(uCapturedTexelUv.x, float(0)).mul(
-      float(1).sub(refractResolved ? refractResolved.z : fringeSuppress)
-    );
+    // A choppy or rain-pocked surface has no coherent prism edge: its glitter
+    // moves faster than the one-frame-stale capture, and fringing it scatters
+    // rainbow specks (2026-11-01, wind lab). The fringe is a calm-water effect.
+    const fringeCalm = float(1).sub(clamp(uWind01.mul(float(1.6)).add(uRain01.mul(float(1.5))), float(0), float(1)));
+    const fringeUv = vec2(uCapturedTexelUv.x, float(0))
+      .mul(float(1).sub(refractResolved ? refractResolved.z : fringeSuppress))
+      .mul(fringeCalm);
     const refractRNode = texture(capturedTexture, tapUv.add(fringeUv));
     const refractGNode = texture(capturedTexture, tapUv);
     const refractBNode = texture(capturedTexture, tapUv.sub(fringeUv));
@@ -2897,6 +3033,8 @@ export function buildWaterSurfaceMaterial({
   // (no volume above it to refract through) or the underside of foam (which
   // scatters, it does not focus).
   const absorbColor = bedTransmit
+    .mul(float(1).sub(steamAlpha))
+    .mul(sunBedFactor)
     .mul(float(1).sub(wetBand))
     .mul(foamHide)
     .mul(foamLift)
@@ -2996,6 +3134,8 @@ export function buildWaterSurfaceMaterial({
     .mul(foamHide)
     .add(foamGlow.mul(float(0.85)))
     .add(reflection)
+    .mul(float(1).sub(steamAlpha))
+    .add(vec3(0.94, 0.95, 0.97).mul(steamAlpha))
     .mul(notOccluded);
   inscatterMaterial.colorNode = vec4(inscatterFinalColor, 1);
   configureShared(inscatterMaterial);
@@ -3580,9 +3720,35 @@ export function buildWaterSurfaceMaterial({
     setViewCentre(cx, cy) {
       specular.setViewCentre(cx, cy);
     },
-    /** The whole sky, in one call — see `water-light.js#setSky`. */
+    /** The whole sky, in one call — see `water-light.js#setSky`. Also derives
+     * how the sun crosses the water (`waterSunThroughWater`). */
     setSky(sky) {
       specular.setSky(sky);
+      const w = waterSunThroughWater(sky);
+      weatherEl[8] = w.azX;
+      weatherEl[9] = w.azY;
+      weatherEl[10] = w.cosRefracted;
+      weatherEl[12] = w.transmitted;
+      weatherEl[13] = w.sunShare;
+      weatherEl[14] = w.extraPath;
+      weatherEl[15] = w.causticGate;
+    },
+    /** Wind and rain on the surface (2026-11-01). `windDir` = unit vector the
+     * wind blows toward; `driftPx` = the CPU-integrated downwind offset. */
+    setSteam(v) {
+      weatherEl[3] = Math.max(0, v);
+    },
+    setSteamSpreadPx(v) {
+      weatherEl[11] = Math.max(0, v);
+    },
+    setWeather({ wind01 = 0, windDir = [1, 0], driftPx = [0, 0], rain01 = 0, temperature01 = 0.5 } = {}) {
+      weatherEl[0] = Math.max(0, wind01);
+      weatherEl[1] = Math.min(1, Math.max(0, rain01));
+      weatherEl[2] = Math.min(1, Math.max(0, temperature01));
+      weatherEl[4] = windDir[0];
+      weatherEl[5] = windDir[1];
+      weatherEl[6] = driftPx[0];
+      weatherEl[7] = driftPx[1];
     },
     setSunGlint(v) {
       specular.setSunGlint(v);

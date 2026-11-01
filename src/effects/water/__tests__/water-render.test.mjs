@@ -50,6 +50,7 @@
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 import { buildWorldSpaceOutdoorsGate } from '../../lighting/environmental-light.js';
 import {
+  waterSunThroughWater,
   buildWaterSurfaceMaterial,
   WATER_DEFAULT_TIER,
   WATER_PRESENCE_EDGE0,
@@ -896,5 +897,35 @@ export function run(t) {
     // the ladder (tiers 0-3's own neutral stubs feed it the same way they
     // feed the two real meshes).
     ok(`tier ${tier}: still returns a debug material`, !!built[tier].debugMaterial);
+  }
+  // ── THE SUN THROUGH THE VOLUME (2026-11-01) — Snell + Fresnel, pure ─────
+  {
+    const at = (elevDeg, key = 1, fill = 0.4) => {
+      const e = (elevDeg * Math.PI) / 180;
+      return waterSunThroughWater({ keyDir: [Math.cos(e), 0, Math.sin(e)], keyStrength: key, fillStrength: fill });
+    };
+    const noon = at(90);
+    const low = at(5);
+    ok(
+      'sun through water: a high sun crosses straight down (cos θt = 1, no extra path)',
+      Math.abs(noon.cosRefracted - 1) < 1e-6 && noon.extraPath < 1e-6
+    );
+    ok(
+      'sun through water: a 5° sun is bent to ~48° from vertical (Snell, n = 1.333), never flatter',
+      Math.abs((Math.acos(low.cosRefracted) * 180) / Math.PI - 48.3) < 0.5
+    );
+    ok(
+      'sun through water: the surface lets in 98% of a high sun and well under half of a 5° one (Fresnel)',
+      Math.abs(noon.transmitted - 0.98) < 1e-6 && low.transmitted < 0.45
+    );
+    ok(
+      'sun through water: a clear high sun opens the caustic gate fully; a set sun or a clouded key closes it',
+      Math.abs(noon.causticGate - 1) < 1e-6 && at(90, 0).causticGate === 0 && at(0).causticGate < 0.05
+    );
+    ok('sun through water: the sun’s share is key / (key + fill)', Math.abs(noon.sunShare - 1 / 1.4) < 1e-6);
+    ok(
+      'sun through water: the azimuth is the key’s horizontal direction, unit length',
+      Math.abs(Math.hypot(low.azX, low.azY) - 1) < 1e-6 && low.azX > 0.99
+    );
   }
 }

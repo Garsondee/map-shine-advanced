@@ -240,6 +240,116 @@ export const WATER_TIER2_FOAM = 1;
  * channel. 1 is a visible-but-not-overpowering starting point. */
 export const WATER_TIER2_WIND_RIPPLE = 1;
 
+// ── WEATHER ON THE SURFACE (2026-11-01, water lab) ─────────────────────────
+// Author: "Pay special attention to how wind and rain would change the look of
+// the waters surface." Until now wind only DARKENED the water (turbidity) and
+// rain did nothing at all. Real water answers both through its SHAPE, which is
+// what the glint, the sky sheen, refraction and the caustics all read:
+//   wind  — short capillary ripples whose crests lie ACROSS the wind, travelling
+//           downwind, steeper where the local wind (gusts, shelter) is stronger;
+//           the swell itself steepens. Calm water is a mirror; a breeze breaks
+//           one broad glint into a field of glitter (cat's paws in the gusts).
+//   rain  — every drop throws a ring that expands and dies in about a second,
+//           plus a bright impact speck; heavy rain roughens the whole surface,
+//           dulls the mirror and breaks up the caustic net.
+
+/** Wind ripple wavelength, as a fraction of `waveScalePx` (88 px → ~23 px). */
+export const WATER_WIND_RIPPLE_SCALE = 0.26;
+/** Ripple slope (rise/run) at a local wind strength of 1. */
+export const WATER_WIND_RIPPLE_SLOPE = 0.5;
+/** How much the swell steepens at a local wind strength of 1 (×(1 + gain)). */
+export const WATER_WIND_CHOP_GAIN = 0.9;
+/** Rain-ring lattices (world px). Three staggered, SIMILAR cell sizes so no grid reads
+ * while every ring stays raindrop-sized: at ~1.5 cm per world px (5 ft grid of
+ * 100 px) a drop's ring spreads 10-20 cm, i.e. a largest radius of ~8-12 px. */
+export const WATER_RAIN_RING_CELLS_PX = Object.freeze([17, 21, 26]);
+/** Ring front speed as a fraction of its cell per second. */
+export const WATER_RAIN_RING_SPEED = 0.55;
+/** Ring crest half-width (world px) — wide enough not to alias at play zoom. */
+export const WATER_RAIN_RING_WIDTH_PX = 1.7;
+/** Ring slope at full rain, before the age decay. */
+export const WATER_RAIN_RING_SLOPE = 0.75;
+/** Fraction of lattice cells that drop in one cycle at full rain. */
+export const WATER_RAIN_RING_DENSITY = 0.55;
+
+/**
+ * Rain rings — stateless expanding ripples, one drop per lattice cell per cycle
+ * (a hash decides whether this cycle's drop falls, so density follows `rain01`
+ * live). Each ring is a travelling wave packet `exp(−x²)·sin(πkx)` around the
+ * front; the returned slope is its analytic radial derivative, so it lights
+ * exactly like the swell does. Rings fade before the cell edge, so one cell
+ * lookup per lattice is enough.
+ *
+ * @param {*} TSL
+ * @param {{worldXY: *, tSec: *, rain01: *}} args
+ * @returns {{slope: *, splash: *}} slope vec2 (rise/run); splash 0..1 impact specks.
+ */
+export function buildRainRings(TSL, { worldXY, tSec, rain01 }) {
+  const { vec2, vec3, float, floor, fract, dot, exp, length, max, smoothstep, sin, cos, step } = TSL;
+  const hash = (p, salt) => {
+    // Hoskins' hash12 — no large-argument sin, stable in fp32 across the map.
+    let p3 = fract(vec3(p.x, p.y, p.x).mul(float(0.1031)).add(float(salt)));
+    p3 = p3.add(dot(p3, vec3(p3.y, p3.z, p3.x).add(float(33.33))));
+    return fract(p3.x.add(p3.y).mul(p3.z));
+  };
+  const k = float(Math.PI * 1.25);
+  let slope = vec2(0, 0);
+  let splash = float(0);
+  WATER_RAIN_RING_CELLS_PX.forEach((cellPx, i) => {
+    const p = worldXY.div(float(cellPx)).add(vec2(i * 0.37, i * 0.61));
+    const id = floor(p);
+    const f = fract(p);
+    const h1 = hash(id, 0.11 + i);
+    const h2 = hash(id, 0.53 + i);
+    const h3 = hash(id, 0.97 + i);
+    const period = float(1.15).add(h3.mul(float(1.3)));
+    const cyc = tSec.div(period).add(h1);
+    const age = fract(cyc).mul(period);
+    const hOn = hash(id.add(vec2(floor(cyc), floor(cyc).mul(float(1.7)))), 0.29 + i);
+    const on = step(hOn, rain01.mul(float(WATER_RAIN_RING_DENSITY)));
+    const centre = vec2(0.5, 0.5).add(vec2(h1, h2).sub(float(0.5)).mul(float(0.16)));
+    const d = f.sub(centre).mul(float(cellPx));
+    const r0 = max(length(d), float(1e-3));
+    // Never a perfect circle: a real ring is dented by the drop's own wobble and
+    // the surface it lands on — a per-drop squash plus a low lobe wobble.
+    const ang = TSL.atan(d.y, d.x);
+    const ph = h2.mul(float(6.2832));
+    const r = r0.mul(
+      float(1)
+        .add(sin(ang.mul(float(2)).add(ph)).mul(float(0.09)))
+        .add(sin(ang.mul(float(3)).add(ph.mul(float(1.7)))).mul(float(0.06)))
+    );
+    const front = age.mul(float(cellPx * WATER_RAIN_RING_SPEED));
+    const x = r.sub(front).div(float(WATER_RAIN_RING_WIDTH_PX));
+    // Drop size varies: a ring's strength is random per drop (0.35..1).
+    const dropAmp = float(0.7).add(
+      hash(id.add(vec2(floor(cyc).mul(float(2.3)), floor(cyc))), 0.71 + i).mul(float(0.3))
+    );
+    const env = exp(x.mul(x).negate())
+      .mul(dropAmp)
+      .mul(exp(age.mul(float(-2.4))))
+      .mul(float(1).sub(smoothstep(float(cellPx * 0.3), float(cellPx * 0.46), r)));
+    const dg = cos(k.mul(x))
+      .mul(k)
+      .sub(x.mul(float(2)).mul(sin(k.mul(x))));
+    slope = slope.add(
+      d.div(r).mul(
+        env
+          .mul(dg)
+          .mul(on)
+          .mul(float(WATER_RAIN_RING_SLOPE / WATER_RAIN_RING_WIDTH_PX))
+      )
+    );
+    splash = max(
+      splash,
+      on
+        .mul(float(1).sub(smoothstep(float(0.04), float(0.2), age)))
+        .mul(float(1).sub(smoothstep(float(1.2), float(3.2), r)))
+    );
+  });
+  return { slope, splash };
+}
+
 /**
  * TIER 3's WAVE STEEPNESS — the scale factor from the raw noise channels to a
  * surface SLOPE (rise over run), and therefore the single control over how
@@ -942,6 +1052,19 @@ export function buildWaterSurfaceField({
   // its `.node()` method.
   windHandle = null,
   uWindRipple = null,
+  // WEATHER ON THE SURFACE (2026-11-01) — see `buildRainRings`'s section.
+  // `uWind01` is the scene's ambient wind (used where no wind handle samples a
+  // local strength), `uWindDir` the unit direction it blows TOWARD, `uWindDriftPx`
+  // a CPU-integrated downwind offset (a uniform direction × unbounded time would
+  // jump the whole surface on every wind shift), `uRain01` the eased rain.
+  // `uSunCaustic` = (sun azimuth x, y, cos of the refracted sun angle, unused):
+  // a low sun's light crosses the water slanted, stretching the net along it.
+  // Every one `null` = the pre-weather surface, byte for byte.
+  uWind01 = null,
+  uWindDir = null,
+  uWindDriftPx = null,
+  uRain01 = null,
+  uSunCaustic = null,
 }) {
   const {
     vec2,
@@ -1207,7 +1330,7 @@ export function buildWaterSurfaceField({
   // this onto an independent channel would decorrelate two things physics
   // couples, for no saving. Shoaling amplifies BOTH `shoaledY`/`shoaledZ`
   // identically, so that pairing survives tier 4 exactly as tier 2 built it.
-  const slope = uChop ? vec2(shoaledY, shoaledZ).mul(uChop) : vec2(0, 0);
+  let slope = uChop ? vec2(shoaledY, shoaledZ).mul(uChop) : vec2(0, 0);
 
   // ── WIND-DRIVEN RIPPLE (mythica-machina-press#18) ───────────────────────
   // "Gusts sweep visible dark ripple patches across open water; glassy-calm
@@ -1246,8 +1369,8 @@ export function buildWaterSurfaceField({
   // glitters, so this reads `shoaledY`/`shoaledZ` directly rather than
   // `slope`.
   let windRipple = float(0);
+  let windStrength = null;
   if (windHandle) {
-    let windStrength;
     if (windStrengthField) {
       const r = windStrengthField.uRect;
       const spanX = max(r.z.sub(r.x), float(1));
@@ -1282,7 +1405,36 @@ export function buildWaterSurfaceField({
     })();
   }
 
-  // ⚠️ TIER 4 — CAUSTICS, REBUILT 2026-08-27 AS A WORLEY F2−F1 CELL-EDGE NET.
+  // ── WEATHER ON THE SURFACE (2026-11-01) — see `buildRainRings`'s section ──
+  // Local wind (gusts, shelter) where the handle samples it, else the ambient.
+  // Ripples live in the wind's own frame: crests ACROSS the wind (short along
+  // it, long across it), carried downwind by the CPU-integrated drift — the
+  // ONE drift that is safe here, since it is uniform across space (the header
+  // above on why a per-pixel direction × time is not).
+  let rainSplash = float(0);
+  let rainRough = float(0);
+  let rainSlope = null;
+  if (uWindDir && uWind01) {
+    const windAmt = TSL.clamp(windStrength ?? uWind01, 0, 1.5);
+    const along = dot(worldXY, uWindDir);
+    const across = dot(worldXY, vec2(uWindDir.y.negate(), uWindDir.x));
+    const rippleLen = max(uWaveScalePx.mul(float(WATER_WIND_RIPPLE_SCALE)), float(6));
+    const drift = uWindDriftPx ? dot(uWindDriftPx, uWindDir) : float(0);
+    const rc = vec2(along.sub(drift).div(rippleLen.mul(float(0.7))), across.div(rippleLen.mul(float(1.7))));
+    const rn = mx_fractal_noise_vec3(vec3(rc.x, rc.y, tSec.mul(float(0.9))), 2, 2.0, 0.5);
+    const gust = TSL.pow(windAmt, float(1.3)).mul(float(WATER_WIND_RIPPLE_SLOPE)).mul(windRippleNode);
+    const rippleSlope = uWindDir.mul(rn.y).add(vec2(uWindDir.y.negate(), uWindDir.x).mul(rn.z.mul(float(0.45))));
+    slope = slope
+      .mul(float(1).add(windAmt.mul(float(WATER_WIND_CHOP_GAIN))))
+      .add(rippleSlope.mul(gust).mul(insideWater));
+  }
+  if (uRain01) {
+    const rings = buildRainRings(TSL, { worldXY, tSec, rain01: uRain01 });
+    rainSlope = rings.slope.mul(insideWater);
+    slope = slope.add(rainSlope);
+    rainSplash = rings.splash.mul(insideWater);
+    rainRough = uRain01;
+  }
   //
   // ============================================================================
   // WHY THE JACOBIAN-FOCUS VERSION OF THIS BLOCK WAS REPLACED, NOT RETUNED
@@ -1370,7 +1522,17 @@ export function buildWaterSurfaceField({
     const waveWarpCapScale = min(float(1), causticWaveWarpCapNode.div(max(waveWarpLen, float(1e-4))));
     const waveWarp = waveWarpRaw.mul(waveWarpCapScale);
 
-    const netCellPreOrganic = worldXY.add(domainOffset).div(cellPx).add(waveWarp);
+    // THE SUN THROUGH THE VOLUME (2026-11-01): light entering at a low sun is bent
+    // (Snell) but still crosses the water slanted, so the net it focuses on the bed
+    // is stretched along the sun's azimuth by 1/cos(refracted angle): 1 at noon,
+    // ~1.5 at a 5° sun. Stretching the DOMAIN (compressing it along the azimuth)
+    // keeps every line's width; only its length grows.
+    let netPoint = worldXY.add(domainOffset);
+    if (uSunCaustic) {
+      const sunH = vec2(uSunCaustic.x, uSunCaustic.y);
+      netPoint = netPoint.add(sunH.mul(dot(netPoint, sunH).mul(uSunCaustic.z.sub(float(1)))));
+    }
+    const netCellPreOrganic = netPoint.div(cellPx).add(waveWarp);
 
     // ============================================================================
     // ROUND 4 (2026-08-27) — ORGANIC SHAPE + GENUINE EVOLUTION, not a
@@ -1653,14 +1815,32 @@ export function buildWaterSurfaceField({
     } else {
       combinedNet = buildCombinedNet(null);
     }
-    causticBrightness = combinedNet.mul(float(WATER_CAUSTICS_MAX)).mul(chopGate).mul(shoalBoost).mul(insideWater);
+    // A rain-pocked surface scatters the light it would have focused: the net
+    // loses most of its contrast in a downpour.
+    const rainBreak = float(1).sub(rainRough.mul(float(0.7)));
+    causticBrightness = combinedNet
+      .mul(float(WATER_CAUSTICS_MAX))
+      .mul(chopGate)
+      .mul(shoalBoost)
+      .mul(insideWater)
+      .mul(rainBreak);
   }
 
   // `windRipple` is exactly `float(0)` (a compile-time literal, not a live
   // zero) whenever `windHandle` is omitted — `.add()` on it is a genuine
   // no-op, so an unwired caller gets byte-identical `turbidity` to before
   // this rung existed.
-  return { foam, turbidity: turbidity.add(windRipple), slope, domainOffset, causticBrightness, flowWarp };
+  return {
+    foam,
+    turbidity: turbidity.add(windRipple),
+    slope,
+    domainOffset,
+    causticBrightness,
+    flowWarp,
+    rainSplash,
+    rainRough,
+    rainSlope,
+  };
 }
 
 // waterCausticsCpu (the Jacobian-focus CPU twin) was REMOVED 2026-08-27 along

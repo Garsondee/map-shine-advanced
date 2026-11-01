@@ -335,6 +335,9 @@ export function createWaterSurfaceSubsystem({
   // rebake, so passing the CURRENT one by value at construction time would
   // freeze this subsystem on the startup (pre-bake) handle forever.
   getWindHandle = null,
+  // WIND AND RAIN ON THE SURFACE (2026-11-01) — a getter for the eased weather:
+  // `{ wind01, windDir: [x, y] (toward), rain01 }`, or null. Unwired = calm, dry.
+  getWeather = null,
 }) {
   // Default-off shape matching every other effect seam: an un-wired caller
   // (the torture fixture) renders exactly as it did before water existed.
@@ -343,6 +346,11 @@ export function createWaterSurfaceSubsystem({
   // No wind field at all — the SAME "unwired caller behaves exactly as
   // before this existed" contract every other optional seam here follows.
   getWindHandle ??= () => null;
+  getWeather ??= () => null;
+  // The downwind offset the ripples are carried by, integrated here so a wind
+  // shift turns the ripples rather than jumping them (see water-field.js).
+  const windDrift = [0, 0];
+  let lastWeatherMs = null;
   // Fails OPEN — matches `buildWaterSurfaceMaterial`'s own `uExpectedDepth`
   // default (0) for an unwired caller: with no resolver at all (the torture
   // fixture, a caller predating this migration), water renders exactly as it
@@ -1165,6 +1173,29 @@ export function createWaterSurfaceSubsystem({
       }
     }
 
+    // WIND AND RAIN, pushed every frame (2026-11-01). Ripples travel downwind at
+    // ~1.2 px/s per 1% of wind — a fresh breeze moves them about a grid square a second.
+    {
+      const wx = getWeather();
+      const nowMs = Number(timeMsNode?.value);
+      const dtSec =
+        Number.isFinite(nowMs) && lastWeatherMs != null
+          ? Math.min(0.25, Math.max(0, (nowMs - lastWeatherMs) / 1000))
+          : 0;
+      if (Number.isFinite(nowMs)) lastWeatherMs = nowMs;
+      const wind01 = Number.isFinite(wx?.wind01) ? wx.wind01 : 0;
+      const dir = Array.isArray(wx?.windDir) ? wx.windDir : [1, 0];
+      windDrift[0] = (windDrift[0] + dir[0] * wind01 * 120 * dtSec) % 1e5;
+      windDrift[1] = (windDrift[1] + dir[1] * wind01 * 120 * dtSec) % 1e5;
+      surface.setWeather?.({
+        wind01,
+        windDir: dir,
+        driftPx: windDrift,
+        rain01: Number.isFinite(wx?.rain01) ? wx.rain01 : 0,
+        temperature01: Number.isFinite(wx?.temperature01) ? wx.temperature01 : 0.5,
+      });
+    }
+
     // THE LOOK PARAMS, pushed every frame. Cheap (three uniform writes against
     // a cached key) and it must NOT ride the bake gate below: a slider drag
     // changes no geometry and produces no new bake, so gating these on the
@@ -1259,6 +1290,8 @@ export function createWaterSurfaceSubsystem({
           p.shoreFoamVariation,
           p.breakSpray,
           p.windRipple,
+          p.steam,
+          p.steamSpreadPx,
         ].join('|');
     if (key !== lastParamsKey) {
       lastParamsKey = key;
@@ -1333,6 +1366,8 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.foamTexturePx)) surface.setFoamTexturePx(p.foamTexturePx);
       if (Number.isFinite(p.shoreFoamVariation)) surface.setShoreFoamVariation(p.shoreFoamVariation);
       if (Number.isFinite(p.breakSpray)) surface.setBreakSpray(p.breakSpray);
+      if (Number.isFinite(p.steam)) surface.setSteam?.(p.steam);
+      if (Number.isFinite(p.steamSpreadPx)) surface.setSteamSpreadPx?.(p.steamSpreadPx);
       debugChannel = Number.isFinite(state.debugChannel) ? Math.max(0, Math.round(state.debugChannel)) : 0;
       surface.setDebugChannel(debugChannel);
       enabled = state.enabled !== false;

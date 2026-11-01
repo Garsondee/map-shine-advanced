@@ -358,6 +358,11 @@ export function buildWaterSunVisibility(TSL, { positionWorld, sunShadowTexture =
  *   setSkySheen:(v:number)=>void, outdoorsGateCompiled:boolean,
  *   normalCompiled:boolean}}
  */
+/** Rain-ring sky rim per unit of ring slope (see `rippleSlopeXY`). */
+export const RIPPLE_SHEEN_RIM = 0.42;
+/** Extra brightness on the sun-facing side of a ring, per unit slope. */
+export const RIPPLE_SHEEN_SUNSIDE = 0.5;
+
 export function buildWaterSpecular({
   TSL,
   positionWorld,
@@ -379,6 +384,15 @@ export function buildWaterSpecular({
   // the one shadow tap first and hands it in, rather than this building a
   // second copy of it (one signal, one register).
   sunVisibility = null,
+  // WEATHER (2026-11-01) — extra roughness from rain and wind too fine for the
+  // normal to carry (spray, sub-pixel capillaries). `null` = none.
+  roughnessBoost = null,
+  // RAIN RINGS, READ FROM STRAIGHT ABOVE (2026-11-01). Looking down, water
+  // mirrors ~2% of the sky, so a ring that only tilts the normal is invisible
+  // outside the sun's glint. What the eye actually catches is each ring's crest
+  // picking up the brighter sky toward the horizon: a thin sky-lit rim, brighter
+  // on the sun's side. `null` = no rings.
+  rippleSlopeXY = null,
 }) {
   const { vec2, vec3, float, uniform, clamp, max, dot, normalize, sqrt, mix } = TSL;
 
@@ -420,7 +434,12 @@ export function buildWaterSpecular({
   // ROUGHNESS, from ONE global glossiness dial rather than a decoded material
   // channel — water has no per-texel material mask at this rung, only depth
   // and presence. Floored the same way specular floors its own.
-  const roughness = clamp(float(1).sub(uGlossiness), float(WATER_MIN_ROUGHNESS), float(1));
+  const roughnessBase = float(1).sub(uGlossiness);
+  const roughness = clamp(
+    roughnessBoost ? roughnessBase.add(roughnessBoost) : roughnessBase,
+    float(WATER_MIN_ROUGHNESS),
+    float(1)
+  );
   const alpha = roughness.mul(roughness);
   const alphaSq = max(alpha.mul(alpha), float(1e-8));
 
@@ -548,10 +567,21 @@ export function buildWaterSpecular({
   const outdoorsNode =
     typeof buildOutdoorsGate === 'function' ? buildOutdoorsGate(TSL, { uOutdoorsRect, outdoorsTexNode }) : null;
   const outdoors = outdoorsNode ?? float(0);
-  const reflection = mix(vec3(0, 0, 0), sunSpec.add(skySpec), outdoors);
+  let rippleSheen = vec3(0, 0, 0);
+  if (rippleSlopeXY) {
+    const keyH = vec2(uKeyDir.x, uKeyDir.y);
+    const keyHn = keyH.div(max(TSL.length(keyH), float(1e-4)));
+    const rim = TSL.length(rippleSlopeXY).mul(float(RIPPLE_SHEEN_RIM));
+    const lit = max(dot(rippleSlopeXY, keyHn), float(0)).mul(float(RIPPLE_SHEEN_SUNSIDE));
+    rippleSheen = uFillColor.mul(uFillStrength).mul(rim).add(uKeyColor.mul(uKeyStrength).mul(lit).mul(sunShadowFactor));
+  }
+  const reflection = mix(vec3(0, 0, 0), sunSpec.add(skySpec).add(rippleSheen), outdoors);
 
   return {
     reflection,
+    /** The outdoors gate the reflection is masked by (0 indoors). Caustics reuse
+     * it: no open sky, no direct sun to focus (2026-11-01). */
+    outdoors,
     /** 1 = this pixel sees the sun, 0 = fully shadowed — the SAME cast-shadow
      * sample the sun disc above is already gated by (`sunShadowFactor`'s own
      * unresponse-weighted half), exposed RAW (not softened by

@@ -915,6 +915,30 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Break spray',
     help: 'Tiny one- and two-pixel flecks of foam that jitter where the current drives into a hard edge — a pier, a rock, a wall — and get carried away downstream. Soft, gradually painted shores never spray. 0 turns it off.',
   },
+  // ── STEAM (2026-11-01, water lab) — for hot springs. The author's next map is a
+  // Japanese onsen; warm water breathes drifting wisps that thicken in cold air and
+  // at night, thin out and lean downwind in a breeze, and spill a little past the
+  // bank. Lit by the scene like everything else (lanterns light it at night).
+  steam: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0,
+    category: 'Look',
+    label: 'Steam',
+    help: 'Wisps of steam rising off warm water — a hot spring, a geothermal pool, a cold dawn over a warm lake. Thickest in cold air and at night, thinned and pushed downwind by the wind, drifting a little way past the bank. 0 = none.',
+  },
+  steamSpreadPx: {
+    type: 'float',
+    min: 0,
+    max: 400,
+    step: 2,
+    default: 70,
+    category: 'Look',
+    label: 'Steam spread',
+    help: 'How far past the waterline the steam drifts, in canvas pixels (further downwind in a breeze).',
+  },
 });
 
 /**
@@ -1636,16 +1660,23 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
  * drifted since. It costs a few lines and buys the only property a named look
  * actually needs.
  *
- * ⚠️ NOT THE SPECIES TABLE. `docs/holy/Water-Testament.md` §3.2 (W3) specifies
- * pond/lake/river/ocean as DATA ROWS over one engine, with their own precedence
- * rules against saved scenes — a real subsystem with a real design. This is not
- * an early draft of it and must not grow into one: these are author-approved
- * LOOKS, the way a colour-grade preset is, and W3's rows will arrive beside
- * them rather than by mutating this object.
+ * THE LADDER (2026-11-01, water lab — author: "create presets so that anything
+ * from shallow bond water to open ocean can be rendered in the same system").
+ * Every body below is one engine and one param set: a still garden pond, a murky
+ * farm pond, a mountain stream, a country river, the author's own town river, a
+ * lake, tropical shallows and the open ocean, then three Japanese hot springs
+ * (clear rotenburo, milky sulphur nigori-yu, rust-red iron kinsen) for the
+ * author's onsen map. Each was judged on the water bench (a grey void pond, river
+ * and rock-ringed pool) at dawn, noon and night, in wind and rain.
+ *
+ * The ladder is written as overrides over ONE literal anchor
+ * (`pollutedTownRiver`, itself a complete literal), never over WATER_PARAMS'
+ * live defaults — so every preset is still complete and still a fixed anchor: a
+ * default moving later changes none of them.
  *
  * @type {Record<string, object>}
  */
-export const WATER_PRESETS = Object.freeze({
+const WATER_PRESETS_TOWN = Object.freeze({
   /**
    * The author's own tuning for a large polluted medieval town river, dialled
    * in live on their map and handed over 2026-08-17 with *"these are the best
@@ -1769,7 +1800,276 @@ export const WATER_PRESETS = Object.freeze({
     foamTexturePx: 26,
     shoreFoamVariation: 0.85,
     breakSpray: 1,
+    // NEW (2026-11-01) — no steam on a town river.
+    steam: 0,
+    steamSpreadPx: 70,
   },
+});
+
+/** The ladder's shared base: the author's river, complete and literal (above). */
+const ANCHOR = WATER_PRESETS_TOWN.pollutedTownRiver;
+const still = { flowEnabled: false, flowSpeedPx: 0, swashFoam: 0, breakFoam: 0, foamTrail: 0, breakSpray: 0 };
+const ladder = (o) => Object.freeze({ ...ANCHOR, ...o });
+
+export const WATER_PRESETS = Object.freeze({
+  /** A still, spring-fed garden pond: clear to a shallow pebble bed, a mirror in calm air. */
+  gardenPond: ladder({
+    ...still,
+    depth: 0.22,
+    pollution: 0.08,
+    tint: '#3c6e5a',
+    opacity: 0.45,
+    absorption: 1.8,
+    inscatter: 0.25,
+    sunGlint: 1.4,
+    skySheen: 1.6,
+    glossiness: 0.911,
+    foam: 0,
+    windRipple: 0.8,
+    waveScalePx: 70,
+    chop: 0.1,
+    depthScalePx: 140,
+    wetBandPx: 14,
+    wetStrength: 0.25,
+    foamPatchiness: 0.95,
+    caustics: 0.5,
+    refractStrengthPx: 90,
+    shoreFoam: 0.06,
+    shoreFoamWidthPx: 10,
+    shoreFoamSwashPx: 2,
+  }),
+  /** A farm or lily pond: still, green-brown with silt, the bed lost a hand's depth down. */
+  murkyPond: ladder({
+    ...still,
+    depth: 0.4,
+    pollution: 0.55,
+    tint: '#36421c',
+    opacity: 0.5,
+    absorption: 4.5,
+    inscatter: 0.35,
+    sunGlint: 1.2,
+    skySheen: 1.4,
+    glossiness: 0.9,
+    foam: 0,
+    windRipple: 0.9,
+    waveScalePx: 80,
+    chop: 0.08,
+    depthScalePx: 160,
+    wetBandPx: 18,
+    wetStrength: 0.3,
+    foamPatchiness: 0.95,
+    caustics: 0.15,
+    refractStrengthPx: 60,
+    shoreFoam: 0.04,
+    shoreFoamWidthPx: 8,
+    shoreFoamSwashPx: 2,
+  }),
+  /** A shallow, fast mountain stream: clear, bright caustics, white water at every rock. */
+  mountainStream: ladder({
+    depth: 0.18,
+    pollution: 0.05,
+    tint: '#4a7a70',
+    opacity: 0.5,
+    absorption: 1.5,
+    inscatter: 0.2,
+    glossiness: 0.88,
+    foam: 0.55,
+    flowEnabled: true,
+    flowSpeedPx: 160,
+    waveScalePx: 55,
+    chop: 0.55,
+    depthScalePx: 60,
+    foamPatchiness: 0.4,
+    swashFoam: 0.6,
+    breakFoam: 1,
+    foamTrail: 0.9,
+    caustics: 0.55,
+    refractStrengthPx: 160,
+    shoreFoam: 0.8,
+    breakSpray: 1.4,
+  }),
+  /** A clean lowland river: green, steady, the bed visible only in the shallows. */
+  countryRiver: ladder({
+    depth: 0.45,
+    pollution: 0.35,
+    tint: '#2f4a32',
+    opacity: 0.35,
+    absorption: 4,
+    inscatter: 0.3,
+    foam: 0.5,
+    flowSpeedPx: 70,
+    waveScalePx: 90,
+    chop: 0.3,
+    depthScalePx: 180,
+    caustics: 0.5,
+    shoreFoam: 0.6,
+    breakSpray: 0.7,
+    foamPatchiness: 0.7,
+  }),
+  /** The author's own tuning (above), kept under its documented name. */
+  pollutedTownRiver: ANCHOR,
+  /** A deep lake: slow drift, wind-driven chop, dark blue-green in the middle. */
+  lake: ladder({
+    depth: 0.75,
+    pollution: 0.3,
+    tint: '#1f4a5a',
+    opacity: 0.6,
+    absorption: 5,
+    inscatter: 0.14,
+    foam: 0.35,
+    windRipple: 1.3,
+    flowSpeedPx: 12,
+    waveScalePx: 140,
+    chop: 0.35,
+    depthScalePx: 500,
+    foamPatchiness: 0.8,
+    swashFoam: 0.5,
+    breakFoam: 0.4,
+    foamTrail: 0.4,
+    caustics: 0.4,
+    shoreFoam: 0.5,
+    breakSpray: 0.5,
+  }),
+  /** Tropical shallows: turquoise over white sand, strong caustics, lapping surf. */
+  tropicalShallows: ladder({
+    depth: 0.3,
+    pollution: 0,
+    tint: '#2fb5b0',
+    opacity: 0.55,
+    absorption: 1.4,
+    inscatter: 0.45,
+    foam: 0.5,
+    flowSpeedPx: 18,
+    waveScalePx: 120,
+    chop: 0.35,
+    depthScalePx: 600,
+    swashFoam: 1,
+    breakFoam: 0.6,
+    foamTrail: 0.5,
+    foamPatchiness: 0.6,
+    caustics: 0.6,
+    causticScale: 0.55,
+    refractStrengthPx: 200,
+    shoreFoam: 1.2,
+    shoreFoamWidthPx: 40,
+    shoreFoamSwashPx: 20,
+    breakSpray: 1,
+  }),
+  /** The open ocean: deep navy, long swell, whitecaps in the wind, heavy surf on the shore. */
+  openOcean: ladder({
+    depth: 1,
+    pollution: 0.15,
+    tint: '#0b3150',
+    opacity: 1,
+    absorption: 7,
+    inscatter: 0.12,
+    glossiness: 0.86,
+    foam: 1,
+    windRipple: 1.6,
+    flowSpeedPx: 40,
+    waveScalePx: 380,
+    chop: 0.7,
+    depthScalePx: 1200,
+    foamPatchiness: 0.5,
+    foamPatchSizePx: 1400,
+    swashFoam: 1,
+    breakFoam: 1,
+    foamTrail: 1,
+    caustics: 0,
+    refractStrengthPx: 80,
+    shoreFoam: 1.5,
+    shoreFoamWidthPx: 60,
+    shoreFoamSwashPx: 30,
+    breakSpray: 1.5,
+  }),
+  /**
+   * An outdoor Japanese hot spring (rotenburo): clear, faintly turquoise water over
+   * a pale stone bed, dead still, wet dark rocks round the rim and steam breathing
+   * off it — thickest on a cold dawn or at night.
+   */
+  hotSpringClear: ladder({
+    ...still,
+    depth: 0.25,
+    pollution: 0.05,
+    tint: '#5fb3a8',
+    opacity: 0.5,
+    absorption: 1.6,
+    inscatter: 0.35,
+    sunGlint: 1.2,
+    skySheen: 1.5,
+    glossiness: 0.911,
+    foam: 0,
+    windRipple: 0.6,
+    waveScalePx: 60,
+    chop: 0.08,
+    depthScalePx: 120,
+    wetBandPx: 30,
+    wetStrength: 0.35,
+    foamPatchiness: 0.95,
+    caustics: 0.35,
+    refractStrengthPx: 80,
+    shoreFoam: 0.05,
+    shoreFoamWidthPx: 8,
+    shoreFoamSwashPx: 1,
+    steam: 0.5,
+    steamSpreadPx: 80,
+  }),
+  /** Milky sulphur water (nigori-yu): opaque pale blue-white, no bed, heavy steam. */
+  hotSpringMilky: ladder({
+    ...still,
+    depth: 0.35,
+    pollution: 0,
+    tint: '#cfe3e0',
+    opacity: 0.9,
+    absorption: 3,
+    inscatter: 0.85,
+    sunGlint: 1,
+    skySheen: 1.2,
+    glossiness: 0.9,
+    foam: 0,
+    windRipple: 0.6,
+    waveScalePx: 60,
+    chop: 0.06,
+    depthScalePx: 60,
+    wetBandPx: 30,
+    wetStrength: 0.35,
+    foamPatchiness: 0.95,
+    caustics: 0,
+    refractStrengthPx: 20,
+    shoreFoam: 0.05,
+    shoreFoamWidthPx: 8,
+    shoreFoamSwashPx: 1,
+    steam: 0.75,
+    steamSpreadPx: 90,
+  }),
+  /** Iron-rich red water (kinsen, as at Arima): opaque rust-brown, steaming. */
+  hotSpringIron: ladder({
+    ...still,
+    depth: 0.4,
+    pollution: 0.7,
+    tint: '#7a3a12',
+    opacity: 0.9,
+    absorption: 6,
+    inscatter: 0.6,
+    sunGlint: 1,
+    skySheen: 1.2,
+    glossiness: 0.9,
+    foam: 0,
+    windRipple: 0.6,
+    waveScalePx: 60,
+    chop: 0.06,
+    depthScalePx: 60,
+    wetBandPx: 30,
+    wetStrength: 0.4,
+    foamPatchiness: 0.95,
+    caustics: 0,
+    refractStrengthPx: 20,
+    shoreFoam: 0.05,
+    shoreFoamWidthPx: 8,
+    shoreFoamSwashPx: 1,
+    steam: 0.7,
+    steamSpreadPx: 80,
+  }),
 });
 
 /**

@@ -416,6 +416,8 @@ export function createFogLookUniforms(TSL) {
     uMemorySaturation: uniform(float(0.7)),
     /** How visible grid lines stay over remembered ground (0..1); never over unexplored black. */
     uMemoryGrid: uniform(float(0.3)),
+    /** How bright remembered ground is drawn (the Fog of War card; `EXPLORED_DIM_FACTOR` before it). */
+    uMemoryDim: uniform(float(0.35)),
     /** The reveal fade: the share of the gap to full sight closed this frame (pushed from real time). */
     uRevealRate: uniform(float(1)),
     /** Set by the host BEFORE any fog material is built (they read them at build time): the reveal
@@ -563,6 +565,38 @@ export function buildVisionRevealHistoryMaterial({
   material.depthWrite = false;
   material.fragmentNode = vec4(next, float(0), float(0), float(1));
   return material;
+}
+
+/**
+ * THE MEMORY STAMP (2026-11-02) — draws one token's SAVED coverage (`foundry/fog-memory-persistence.js`)
+ * into the explored buffer, MAX-blended, so loading memory only ever adds. `uStoredRect` is the world rect
+ * the record was saved over; it is mapped onto the buffer's current rect, so a resized scene still lines up.
+ * Swap `memoryTexNode.value` between draws to stamp several tokens with one material.
+ * @returns {{material: *, memoryTexNode: *, uStoredRect: *}}
+ */
+export function buildVisionMemoryStampMaterial({ THREE, placeholderTexture, uExploredRect }) {
+  const { uv, float, vec2, vec4, mix, texture, uniform, select } = THREE.TSL;
+  const uStoredRect = uniform(THREE.TSL.vec4(0, 0, 1, 1));
+  const worldX = mix(uExploredRect.x, uExploredRect.z, uv().x);
+  const worldY = mix(uExploredRect.y, uExploredRect.w, uv().y);
+  const su = worldX.sub(uStoredRect.x).div(uStoredRect.z.sub(uStoredRect.x));
+  const sv = worldY.sub(uStoredRect.y).div(uStoredRect.w.sub(uStoredRect.y));
+  const inside = su.greaterThanEqual(0).and(su.lessThanEqual(1)).and(sv.greaterThanEqual(0)).and(sv.lessThanEqual(1));
+  const memoryTexNode = texture(placeholderTexture);
+  const cover = select(inside, memoryTexNode.sample(vec2(su, sv)).r, float(0));
+  const material = new THREE.NodeMaterial();
+  material.transparent = true;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.MaxEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.MaxEquation;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = vec4(cover, float(0), float(0), cover);
+  return { material, memoryTexNode, uStoredRect };
 }
 
 /** A plain copy quad (history B → A), so consumers always read one fixed texture. */
@@ -921,7 +955,7 @@ export function buildVisionExploredDimMaterial({
     const grey = dot(snapshotColor, vec3(0.2126, 0.7152, 0.0722));
     const faded = mix(vec3(grey, grey, grey), snapshotColor, look.uMemorySaturation);
     const mistLift = float(1).add(look.uMist.mul(field.b.mul(2).sub(1)));
-    outColor = faded.mul(float(dimFactor)).mul(mistLift).mul(float(1).sub(v).mul(e));
+    outColor = faded.mul(look.uMemoryDim).mul(mistLift).mul(float(1).sub(v).mul(e));
   } else {
     const shouldDim = isExplored.and(revealed.not());
     outColor = select(shouldDim, snapshotColor.mul(float(dimFactor)), vec3(0, 0, 0));
@@ -999,6 +1033,7 @@ export function buildVisionSnapshotPublishMaterial({
   uViewRect,
   uExploredRect,
   storeUnlit = false,
+  exploredTexture = null,
 }) {
   const { texture, uv, float, vec3, vec4, select, mix, vec2, step, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
@@ -1023,7 +1058,13 @@ export function buildVisionSnapshotPublishMaterial({
   const mask = texture(maskTexture).sample(screenUv);
   const illum = texture(illumTexture).sample(screenUv);
   const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
-  const shouldWrite = revealed.and(onScreen.greaterThan(float(0.5)));
+  // REMEMBERED GROUND REFILLS ITS COLOUR (2026-11-02): memory reloaded from a token's saved coverage
+  // (`foundry/fog-memory-persistence.js`) arrives without colour, so any remembered texel on screen takes
+  // the map's own art again — what Foundry's fog shows in explored areas too. Only with `storeUnlit`
+  // (plain art): a lit store would freeze tonight's darkness into it.
+  const remembered =
+    exploredTexture && storeUnlit ? texture(exploredTexture).sample(uv()).r.greaterThan(float(0.02)) : null;
+  const shouldWrite = (remembered ? revealed.or(remembered) : revealed).and(onScreen.greaterThan(float(0.5)));
 
   // LIT, NOT RAW ALBEDO — `captureMapOnlySnapshot()` re-renders the SAME
   // materials `geometry.world` uses, which output raw albedo; the

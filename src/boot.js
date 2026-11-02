@@ -114,6 +114,8 @@ import {
   registerGridDefaultsSettings,
   readGridDefaults,
   writeGridDefaults,
+  fogOfWarDefaults,
+  clearSceneFogMemory,
   registerForceDefaultsSettings,
   isForcingDefaults,
   writeForceDefaults,
@@ -369,6 +371,7 @@ import {
   getVtPanViewerCritterStatus,
   setVtPanViewerSunHour,
   sweepVtPanViewerTimeOfDay,
+  resetVtPanViewerFogMemory,
   setVtPanViewerTimeRate,
   setVtPanViewerTimeMode,
   getVtPanViewerTimeDialState,
@@ -614,6 +617,9 @@ import {
   // GRID (2026-11-02) — MSA's own subtle grid look, world-wide (effects/grid/grid.js).
   GRID,
   GRID_PARAMS,
+  // FOG OF WAR (2026-11-02) — the look of MSA's fog, world-wide (effects/vision/fog-of-war.js).
+  FOG_OF_WAR,
+  FOG_OF_WAR_PARAMS,
   buildCascadeReadout,
   projectCascadeRenderState,
 } from './effects/index.js';
@@ -2848,6 +2854,8 @@ function install() {
   let parallaxReadout = { enabled: false, params: null };
   // GRID: `enabledFromProfile: 'low'` — MSA's grid look is the default for everyone, so it seeds ON.
   let gridReadout = { enabled: true, params: null };
+  // FOG OF WAR: `enabledFromProfile: 'low'` — the painted fog is the default for everyone, so it seeds ON.
+  let fogOfWarReadout = { enabled: true, params: null };
   /** Depth-of-field READOUT — same seed posture as bloom's own, above, and
    * for the identical reason: the manifest already says `enabledFromProfile:
    * 'low'`, so a `false` seed would misrepresent the window between
@@ -3314,6 +3322,12 @@ function install() {
     gridReadout = buildCascadeReadout(resolved);
   });
 
+  // FOG OF WAR (2026-11-02) — read by the viewer's fog field every frame (`getFogOfWarRenderState`): every
+  // value is a uniform, so `apply` only refreshes the readout.
+  effectRegistry.register(FOG_OF_WAR, (resolved) => {
+    fogOfWarReadout = buildCascadeReadout(resolved);
+  });
+
   // PARALLAX (2026-10-28) — applied by the viewer's per-frame mesh transforms from `getParallaxRenderState`,
   // so `apply` only refreshes the readout: nothing is rebuilt, nothing is recompiled.
   effectRegistry.register(PARALLAX, (resolved) => {
@@ -3488,6 +3502,18 @@ function install() {
     if (reason) log.warn(`Grid: ${reason} — drawing the shipped defaults`);
     layers.paramLayers = [worldParams, gridLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('grid', layers);
+  }
+
+  /** Transient, in-memory Fog of War tuning (MapShine.setFogOfWar / the card), on top of the WORLD values. */
+  const fogOfWarLiveOverride = {};
+
+  /** Re-resolve the Fog of War's cascade: like the Grid, ONE world setting (`foundry/world-effect-defaults.js`). */
+  function reapplyFogOfWar() {
+    const layers = deriveEffectLayers('fogOfWar', (key) => readSetting(MODULE_ID, key));
+    const { params: worldParams, reason } = fogOfWarDefaults.read();
+    if (reason) log.warn(`Fog of War: ${reason} — drawing the shipped defaults`);
+    layers.paramLayers = [worldParams, fogOfWarLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('fogOfWar', layers);
   }
 
   /** Transient, in-memory Parallax tuning (MapShine.setParallax / the card). Mirrors `tableLiveOverride`. */
@@ -3709,6 +3735,7 @@ function install() {
     ['table', () => reapplyTable()],
     ['parallax', () => reapplyParallax()],
     ['grid', () => reapplyGrid()],
+    ['fog of war', () => reapplyFogOfWar()],
     ['depth of field', () => reapplyDof()],
     ['clouds', () => reapplyClouds()],
     ['cloud tops', () => reapplyCloudTops()],
@@ -5786,6 +5813,48 @@ function install() {
     return { ...gridLiveOverride };
   };
 
+  // MapShine.setFogOfWar — the console tuner AND the card's write path, the World way (mirrors setGrid):
+  //   MapShine.setFogOfWar({ edgeSoftness: 0.5, ink: 0.8, revealSec: 0.6 })
+  MapShine.setFogOfWar = (partial = {}) => {
+    const p = partial ?? {};
+    const gm = globalThis.game?.user?.isGM === true;
+    if (typeof p.enabled === 'boolean') {
+      const v = p.enabled ? 'on' : 'off';
+      const writes = gm
+        ? [
+            writeSetting(MODULE_ID, effectEnableKey('fogOfWar', 'gm'), v),
+            writeSetting(MODULE_ID, effectEnableKey('fogOfWar', 'player'), 'auto'),
+          ]
+        : [writeSetting(MODULE_ID, effectEnableKey('fogOfWar', 'player'), v)];
+      Promise.all(writes)
+        .then(() => reapplyFogOfWar())
+        .catch((err) => log.error('fog of war enable write/reapply failed:', err));
+    }
+    const worldPatch = {};
+    for (const k of Object.keys(FOG_OF_WAR_PARAMS)) {
+      if (k in p) {
+        fogOfWarLiveOverride[k] = p[k];
+        worldPatch[k] = p[k];
+      }
+    }
+    if (Object.keys(worldPatch).length > 0) {
+      if (gm) {
+        fogOfWarDefaults.write(worldPatch).then(
+          (result) => {
+            if (!result.ok) log.warn(`fog of war world values not saved: ${result.reason}`);
+          },
+          (err) => log.error('fog of war world write failed:', err)
+        );
+      }
+      try {
+        reapplyFogOfWar();
+      } catch (err) {
+        log.error('fog of war reapply (setFogOfWar) failed:', err);
+      }
+    }
+    return { ...fogOfWarLiveOverride };
+  };
+
   // MapShine.setParallax — the console tuner AND the card's write path (mirrors MapShine.setTable exactly):
   //   MapShine.setParallax({ enabled: true, floorHeightPct: 2, glideSec: 1.2 })
   MapShine.setParallax = (partial = {}) => {
@@ -6189,6 +6258,8 @@ function install() {
   const getParallaxRenderState = () => projectCascadeRenderState(parallaxReadout);
   // GRID'S render-state seam — same shape again.
   const getGridRenderState = () => projectCascadeRenderState(gridReadout);
+  // FOG OF WAR'S render-state seam — same shape again.
+  const getFogOfWarRenderState = () => projectCascadeRenderState(fogOfWarReadout);
   // DEPTH OF FIELD's render-state seam — same shape as bloom's own, above.
   // perfTier ADDED 2026-08-30, same fix; DELEGATES the same way.
   // U6 READ TRACKING (mythica-machina-press#194) — wrapped HERE, the real
@@ -15378,6 +15449,19 @@ function install() {
       readout.enabled ? 'on · this look on every scene in the world' : "off · each scene's own Foundry grid",
   });
 
+  // FOG OF WAR'S card (2026-11-02) — how MSA draws the fog: the soft inked edge, the reveal fade, and
+  // remembered ground. World values, like the Grid. Off draws plain (still smoothed) fog.
+  registerSimpleEffectCard('fogOfWar', {
+    icon: 'eye',
+    title: 'Fog of War',
+    accVar: '--c-system',
+    schema: FOG_OF_WAR_PARAMS,
+    fohKeys: ['edgeSoftness', 'ink', 'revealSec', 'memoryBrightness'],
+    getReadout: () => fogOfWarReadout,
+    setValue: (patch) => MapShine.setFogOfWar(patch),
+    status: (readout) => (readout.enabled ? 'on · this fog on every scene in the world' : 'off · plain fog'),
+  });
+
   // PARALLAX'S card (2026-10-28) — real depth between the floors. An opt-in look (`enabledFromProfile:
   // 'extreme'`): the GM turns it on here. It works alone; with the Table on, the recess deepens to hold the building.
   registerSimpleEffectCard('parallax', {
@@ -17242,6 +17326,8 @@ function install() {
         getFoundryGrid: () => readFoundryGrid(globalThis.canvas),
         // GRID (effects/grid/grid.js): on = MSA's look on Foundry's grid geometry, off = Foundry's own style.
         getGridRenderState,
+        // FOG OF WAR (effects/vision/fog-of-war.js): the fog's look, read by the soft fog field every frame.
+        getFogOfWarRenderState,
         setFoundryGridOwnership: (owned) => {
           msaDrawsSceneOutline = !!owned?.outline;
           return setFoundryGridOwnership(globalThis.canvas, {
@@ -20221,6 +20307,36 @@ function install() {
         });
       } catch (err) {
         log.error('grid world settings registration failed:', err);
+      }
+
+      // THE FOG OF WAR'S WORLD VALUES (foundry/world-effect-defaults.js) — as the Grid's just above.
+      try {
+        fogOfWarDefaults.register({
+          onChange: () => {
+            for (const k of Object.keys(fogOfWarLiveOverride)) delete fogOfWarLiveOverride[k];
+            reapplyFogOfWar();
+          },
+        });
+      } catch (err) {
+        log.error('fog of war world settings registration failed:', err);
+      }
+
+      // FOG MEMORY RESET (2026-11-02): Foundry's own "Reset Fog" reaches every client as the server's
+      // `resetFog` socket event (client/documents/collections/fog-explorations.mjs). MSA's explored memory
+      // forgets the scene too, and a GM's client wipes the per-token memory flags
+      // (foundry/fog-memory-persistence.js) so a reload does not bring it back.
+      try {
+        globalThis.game?.socket?.on?.('resetFog', (payload) => {
+          const sceneId = payload?.sceneId ?? null;
+          if (!sceneId || sceneId === globalThis.canvas?.scene?.id) resetVtPanViewerFogMemory();
+          const scene = (sceneId && globalThis.game?.scenes?.get?.(sceneId)) || globalThis.canvas?.scene;
+          clearSceneFogMemory(scene).then(
+            (r) => r.reason && log.warn(`fog memory reset: ${r.reason}`),
+            (err) => log.error('fog memory reset failed:', err)
+          );
+        });
+      } catch (err) {
+        log.error('fog memory reset listener failed to install:', err);
       }
 
       // FORCE DEFAULTS (foundry/force-defaults.js): the GM flipping it re-resolves every effect on every client.

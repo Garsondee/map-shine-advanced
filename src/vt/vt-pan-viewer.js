@@ -325,6 +325,19 @@ import {
   // see token-activity.js's own header.
   collectActiveTokenPoints,
 } from '../foundry/index.js';
+// FOG MEMORY (2026-11-02): which tokens remember, and their token-flag records (through the foundry
+// zone's door); the codec turns the explored coverage into a small WebP and back.
+import {
+  fogMemoryKey,
+  tokenIdsOfKey,
+  readFogMemory,
+  shouldSaveFogMemory,
+  writeFogMemory,
+  makeFogMemoryRecord,
+  mergeCoverageMax,
+  fogMemorySize,
+} from '../foundry/index.js';
+import { greyFromRgba, rgbaFromGrey, hasCoverage, encodeCoverage, decodeCoverage } from './fog-memory-codec.js';
 import { engageFoundryFallback, clearFoundryFallback } from '../diag/render-fallback.js';
 import {
   OCCLUSION_MODES,
@@ -393,6 +406,8 @@ import {
   fogSoftStepUv,
   buildVisionRevealHistoryMaterial,
   buildVisionCopyMaterial,
+  buildVisionMemoryStampMaterial,
+  resolveFogOfWarLook,
   VISION_GATE_BUILD_TAG,
   decideFogGating,
   REVEAL_ILLUMINATION_THRESHOLD,
@@ -1481,6 +1496,8 @@ async function startVtPanViewerUnserialized({
   setFoundryGridOwnership = null,
   // GRID (effects/grid/grid.js): `{enabled, params}` — on draws MSA's look on Foundry's grid geometry.
   getGridRenderState = null,
+  // FOG OF WAR (effects/vision/fog-of-war.js): `{enabled, params}` — the fog's look (edge, ink, reveal, memory).
+  getFogOfWarRenderState = null,
   getDofRenderState,
   getCloudsRenderState,
   getCloudTopsRenderState,
@@ -3555,9 +3572,8 @@ async function startVtPanViewerUnserialized({
     /** Set by a snapshot publish tick: the next gate pass also MAX-writes the soft coverage into the
      *  explored buffer (`buildVisionCoveragePublishMaterial`), from the field it has just built. */
     let fogCoveragePending = false;
-    /** The fade band at the edge of sight, as a share of a grid square, and its limits in screen px:
-     *  never under ~2 px (the antialiasing floor), never so wide a close zoom washes a room out. */
-    const FOG_FEATHER_GRID = 0.32;
+    /** The fade band's limits in screen px (its width is the Fog of War card's `edgeSoftness`): never
+     *  under ~2 px (the antialiasing floor), never so wide a close zoom washes a room out. */
     const FOG_FEATHER_MIN_PX = 2.5;
     const FOG_FEATHER_MAX_PX = 140;
     /** The world rect the explored buffer covers, pushed to the gate shader.
@@ -4616,6 +4632,7 @@ async function startVtPanViewerUnserialized({
         uViewRect: envLight.uViewRect,
         uExploredRect: uVisionExploredRect,
         storeUnlit: true,
+        exploredTexture: visionMask.exploredTexture,
       })
     );
     // THE SOFT FOG FIELD (2026-11-02) — see `vision-mask-render.js`'s "THE SOFT FOG FIELD". Three plain
@@ -4663,8 +4680,195 @@ async function startVtPanViewerUnserialized({
     /** Real time of the last reveal-fade step (`perfNowMs`, not the game clock: a paused game must
      *  still finish revealing what a token can see). */
     let fogRevealLastMs = 0;
-    /** Seconds for the reveal fade to close ~63% of the way to full sight. */
-    const FOG_REVEAL_TAU_SEC = 0.32;
+    /** The ink and mist clock: seconds scaled by the card's `motion`, so a change of speed never jumps. */
+    let fogDriftSec = 0;
+    let fogDriftLastMs = 0;
+    // ── FOG MEMORY PERSISTENCE (2026-11-02) ─────────────────────────────────────────────────────────
+    // The author: a reload forgot every place a token had seen; *"Each scene must carry that memory for each
+    // player controlled token."* The explored buffer holds the memory of ONE set of tokens (those whose sight
+    // is on screen: `fogMemoryKey`). When the set changes, the old set's memory is saved and the buffer is
+    // rebuilt from the new set's saved records; while it holds, it is captured every few seconds and saved
+    // only when something new was seen. Records are token flags (`foundry/fog-memory-persistence.js`).
+    /** Capture cadence, and the stored raster's longest side. */
+    const FOG_MEMORY_CAPTURE_EVERY_MS = 6000;
+    const FOG_MEMORY_MAX_DIM = 1024;
+    /** After a GM reset, saves wait this long, so a client still holding old memory cannot write it back. */
+    const FOG_MEMORY_RESET_QUIET_MS = 4000;
+    /** The token set whose memory the explored buffer holds ('' = none), and the scene it belongs to. */
+    let fogMemoryKeyNow = '';
+    let fogMemorySceneId = null;
+    /** Bumps on every set change or reset, so a load still decoding for an old set is dropped. */
+    let fogMemoryGeneration = 0;
+    /** Decoded records waiting to be drawn into the explored buffer (in `renderFogField`). */
+    const fogMemoryStamps = [];
+    /** Serialises captures, encodes and writes. */
+    let fogMemoryChain = Promise.resolve();
+    let fogMemoryLastCaptureMs = 0;
+    let fogMemoryQuietUntilMs = 0;
+    /** The last raster saved for the current set, to skip writes when nothing new was seen. */
+    let fogMemoryLastSaved = null;
+    let fogMemorySaves = 0;
+    let fogMemoryLoads = 0;
+    let fogMemoryLastBytes = 0;
+    let fogMemoryLastError = null;
+    const fogMemoryReadDesc = {
+      resolvedW: 256,
+      resolvedH: 256,
+      screenSized: false,
+      type: THREE.UnsignedByteType,
+      colorSpace: THREE.NoColorSpace,
+      filter: 'linear',
+      depth: false,
+    };
+    const fogMemoryReadTarget = allocator.create('vision.fogMemoryRead', fogMemoryReadDesc);
+    const fogMemoryCopyQuad = new THREE.QuadMesh(
+      buildVisionCopyMaterial({ THREE, sourceTexture: visionMask.exploredTarget.texture })
+    );
+    const fogMemoryPlaceholder = new THREE.DataTexture(new Uint8Array(4), 1, 1);
+    fogMemoryPlaceholder.needsUpdate = true;
+    const fogMemoryStamp = buildVisionMemoryStampMaterial({
+      THREE,
+      placeholderTexture: fogMemoryPlaceholder,
+      uExploredRect: uVisionExploredRect,
+    });
+    const fogMemoryStampQuad = new THREE.QuadMesh(fogMemoryStamp.material);
+
+    /** A token of the scene the memory belongs to (not necessarily the one on canvas now). */
+    function fogMemoryToken(tokenId) {
+      const scene = globalThis.game?.scenes?.get?.(fogMemorySceneId) ?? null;
+      return scene?.tokens?.get?.(tokenId) ?? null;
+    }
+
+    /**
+     * Copy the explored buffer down to the stored size and start reading it back. The GPU work is queued
+     * NOW, so a clear that follows in the same frame cannot reach what is read.
+     * @returns {Promise<{grey: Uint8Array, w: number, h: number, rect: number[]}>}
+     */
+    function fogMemoryCapture() {
+      const rect = [...visionMask.getExploredRect()];
+      const { w, h } = fogMemorySize(rect, FOG_MEMORY_MAX_DIM);
+      if (fogMemoryReadTarget.width !== w || fogMemoryReadTarget.height !== h) {
+        fogMemoryReadDesc.resolvedW = w;
+        fogMemoryReadDesc.resolvedH = h;
+        allocator.resize(fogMemoryReadTarget, w, h, fogMemoryReadDesc);
+      }
+      const prevAuto = renderer.autoClearColor;
+      renderer.autoClearColor = false;
+      renderer.setRenderTarget(fogMemoryReadTarget);
+      fogMemoryCopyQuad.render(renderer);
+      renderer.setRenderTarget(null);
+      renderer.autoClearColor = prevAuto;
+      return renderer
+        .readRenderTargetPixelsAsync(fogMemoryReadTarget, 0, 0, w, h)
+        .then((px) => ({ grey: greyFromRgba(px, w, h), w, h, rect }));
+    }
+
+    /** Did `next` see anything `prev` had not (by more than a whisker)? */
+    function fogMemoryGrew(prev, next) {
+      if (!prev || prev.w !== next.w || prev.h !== next.h) return hasCoverage(next.grey);
+      const a = prev.grey;
+      const b = next.grey;
+      for (let i = 0; i < b.length; i++) if (b[i] > a[i] + 8) return true;
+      return false;
+    }
+
+    /** Save a captured raster onto every token of `tokenIds` this client may write, MAX-merged with what is stored. */
+    async function fogMemoryPersist(snap, tokenIds) {
+      for (const id of tokenIds) {
+        const doc = fogMemoryToken(id);
+        if (!shouldSaveFogMemory(doc)) continue;
+        const grey = snap.grey.slice();
+        const old = readFogMemory(doc);
+        if (old && old.w === snap.w && old.h === snap.h && old.rect.every((v, i) => v === snap.rect[i])) {
+          mergeCoverageMax(grey, await decodeCoverage(old.data, old.w, old.h));
+        }
+        const data = await encodeCoverage(grey, snap.w, snap.h);
+        const res = await writeFogMemory(doc, makeFogMemoryRecord({ rect: snap.rect, w: snap.w, h: snap.h, data }));
+        if (!res.ok) throw new Error(res.reason);
+        fogMemorySaves++;
+        fogMemoryLastBytes = data.length;
+      }
+    }
+
+    /** Capture now and save onto `tokenIds` if anything new was seen (`force` saves regardless). */
+    function fogMemorySave(tokenIds, { force = false } = {}) {
+      if (tokenIds.length === 0 || perfNowMs() < fogMemoryQuietUntilMs) return;
+      if (!tokenIds.some((id) => shouldSaveFogMemory(fogMemoryToken(id)))) return;
+      const gen = fogMemoryGeneration;
+      const capture = fogMemoryCapture();
+      fogMemoryChain = fogMemoryChain
+        .then(() => capture)
+        .then(async (snap) => {
+          const sameSet = gen === fogMemoryGeneration;
+          if (!force && sameSet && !fogMemoryGrew(fogMemoryLastSaved, snap)) return;
+          await fogMemoryPersist(snap, tokenIds);
+          if (sameSet) fogMemoryLastSaved = snap;
+          fogMemoryLastError = null;
+        })
+        .catch((err) => {
+          fogMemoryLastError = String(err?.message ?? err);
+          log.warn('fog memory save failed', { err: fogMemoryLastError });
+        });
+    }
+
+    /** Decode the saved records of `tokenIds` and queue them to be drawn into the (cleared) explored buffer. */
+    function fogMemoryLoad(tokenIds, gen) {
+      for (const id of tokenIds) {
+        const rec = readFogMemory(fogMemoryToken(id));
+        if (!rec) continue;
+        fogMemoryChain = fogMemoryChain
+          .then(() => decodeCoverage(rec.data, rec.w, rec.h))
+          .then((grey) => {
+            if (gen !== fogMemoryGeneration) return;
+            const tex = new THREE.DataTexture(rgbaFromGrey(grey), rec.w, rec.h);
+            tex.magFilter = THREE.LinearFilter;
+            tex.minFilter = THREE.LinearFilter;
+            tex.needsUpdate = true;
+            fogMemoryStamps.push({ tex, rect: rec.rect, gen });
+          })
+          .catch((err) => {
+            fogMemoryLastError = String(err?.message ?? err);
+            log.warn('fog memory load failed', { err: fogMemoryLastError });
+          });
+      }
+    }
+
+    /**
+     * Per gated frame: follow the set of tokens in sight. A new set saves the old one's memory, clears the
+     * buffer and loads the new set's; an unchanged set is captured every few seconds.
+     */
+    function syncFogMemory(sources) {
+      const key = fogMemoryKey(sources);
+      const sceneId = globalThis.canvas?.scene?.id ?? null;
+      if (key !== fogMemoryKeyNow || sceneId !== fogMemorySceneId) {
+        if (sceneId === fogMemorySceneId) fogMemorySave(tokenIdsOfKey(fogMemoryKeyNow));
+        fogMemoryKeyNow = key;
+        fogMemorySceneId = sceneId;
+        fogMemoryGeneration++;
+        for (const s of fogMemoryStamps.splice(0)) s.tex.dispose();
+        fogMemoryLastSaved = null;
+        fogMemoryLastCaptureMs = perfNowMs();
+        exploredClearPending = true;
+        fogMemoryLoad(tokenIdsOfKey(key), fogMemoryGeneration);
+        return;
+      }
+      const now = perfNowMs();
+      if (now - fogMemoryLastCaptureMs >= FOG_MEMORY_CAPTURE_EVERY_MS) {
+        fogMemoryLastCaptureMs = now;
+        fogMemorySave(tokenIdsOfKey(key));
+      }
+    }
+
+    /** GM "Reset Fog": forget this scene's memory on this client (the GM's client also clears the flags). */
+    function resetFogMemory() {
+      visionMask.resetExploration();
+      fogMemoryGeneration++;
+      for (const s of fogMemoryStamps.splice(0)) s.tex.dispose();
+      fogMemoryLastSaved = null;
+      fogMemoryQuietUntilMs = perfNowMs() + FOG_MEMORY_RESET_QUIET_MS;
+      return { ok: true };
+    }
+
     const fogCoveragePublishQuad = new THREE.QuadMesh(
       buildVisionCoveragePublishMaterial({
         THREE,
@@ -10245,6 +10449,8 @@ async function startVtPanViewerUnserialized({
           sources: sourcesForMask,
           gate: gating.gate,
         });
+        // FOG MEMORY (2026-11-02): the explored buffer belongs to the tokens in sight; follow them.
+        if (gating.gate && visionDraw.explored?.camera) syncFogMemory(visionRead.sources);
         renderer.setRenderTarget(visionDraw.target);
         const prevVisionClear = renderer.getClearColor(new THREE.Color());
         const prevVisionAlpha = renderer.getClearAlpha();
@@ -11035,10 +11241,25 @@ async function startVtPanViewerUnserialized({
       const fh = visionMask.softTargets.resolve.height;
       const gridPx = Number(globalThis.canvas?.dimensions?.size) || 100;
       const pxPerWorld = Math.min(fw / spanX, fh / spanY);
-      const featherPx = Math.min(FOG_FEATHER_MAX_PX, Math.max(FOG_FEATHER_MIN_PX, FOG_FEATHER_GRID * gridPx * pxPerWorld));
+      // THE FOG OF WAR CARD (effects/vision/fog-of-war.js): every knob is a uniform, nothing recompiles.
+      const look = resolveFogOfWarLook(getFogOfWarRenderState?.() ?? null, gridPx);
+      const featherPx = Math.min(FOG_FEATHER_MAX_PX, Math.max(FOG_FEATHER_MIN_PX, look.featherGrid * gridPx * pxPerWorld));
       fogLook.uStepH.value.set(fogSoftStepUv(featherPx, fw), 0);
       fogLook.uStepV.value.set(0, fogSoftStepUv(featherPx, fh));
-      fogLook.uTime.value = uGlobalTimeMs.value / 1000;
+      fogLook.uInk.value = look.ink;
+      fogLook.uInkCellPx.value = look.inkCellPx;
+      fogLook.uMist.value = look.mist;
+      fogLook.uMistCellPx.value = look.mistCellPx;
+      fogLook.uMemorySaturation.value = look.memorySaturation;
+      fogLook.uMemoryGrid.value = look.memoryGrid;
+      fogLook.uMemoryDim.value = look.memoryDim;
+      {
+        const nowMs = perfNowMs();
+        const dt = fogDriftLastMs > 0 ? Math.min(0.25, Math.max(0, (nowMs - fogDriftLastMs) / 1000)) : 0;
+        fogDriftLastMs = nowMs;
+        fogDriftSec += dt * look.motion;
+        fogLook.uTime.value = fogDriftSec;
+      }
       const prevAuto = renderer.autoClearColor;
       // Each quad covers its whole target, so no clear: the draw IS the write.
       renderer.autoClearColor = false;
@@ -11053,11 +11274,28 @@ async function startVtPanViewerUnserialized({
         const now = perfNowMs();
         const dt = fogRevealLastMs > 0 ? Math.min(0.25, Math.max(0, (now - fogRevealLastMs) / 1000)) : 0.25;
         fogRevealLastMs = now;
-        fogLook.uRevealRate.value = 1 - Math.exp(-dt / FOG_REVEAL_TAU_SEC);
+        const tau = resolveFogOfWarLook(getFogOfWarRenderState?.() ?? null, 100).revealTauSec;
+        fogLook.uRevealRate.value = tau > 1e-3 ? 1 - Math.exp(-dt / tau) : 1;
         renderer.setRenderTarget(visionMask.revealTargets.next);
         fogRevealHistoryQuad.render(renderer);
         renderer.setRenderTarget(visionMask.revealTargets.current);
         fogRevealCopyQuad.render(renderer);
+      }
+      // FOG MEMORY: saved coverage loaded for the tokens now in sight, once the buffer's clear has run.
+      if (fogMemoryStamps.length > 0 && !exploredClearPending) {
+        renderer.setRenderTarget(visionMask.exploredTarget);
+        for (const stamp of fogMemoryStamps.splice(0)) {
+          if (stamp.gen === fogMemoryGeneration) {
+            fogMemoryStamp.memoryTexNode.value = stamp.tex;
+            fogMemoryStamp.uStoredRect.value.set(stamp.rect[0], stamp.rect[1], stamp.rect[2], stamp.rect[3]);
+            fogMemoryStampQuad.render(renderer);
+            fogMemoryLoads++;
+          }
+          stamp.tex.dispose();
+        }
+        fogMemoryStamp.memoryTexNode.value = fogMemoryPlaceholder;
+        // Remembered ground arrives without colour: take the next snapshot tick now, so what is on screen fills in.
+        lastSnapshotPublishAt = 0;
       }
       if (fogCoveragePending) {
         fogCoveragePending = false;
@@ -29297,6 +29535,12 @@ async function startVtPanViewerUnserialized({
        * clock owns it). NONE of them writes `game.time` — see day-clock.js. */
       setTimeOfDay,
       sweepTimeOfDay,
+      resetFogMemory,
+      /** Save the current tokens' fog memory now (tests, and a GM's "save before I switch scenes"). */
+      flushFogMemory: () => {
+        fogMemorySave(tokenIdsOfKey(fogMemoryKeyNow), { force: true });
+        return fogMemoryChain;
+      },
       setTimeRate,
       setTimeMode,
       /** Remove the `pauseGame`/`updateWorldTime` listeners — teardown only. */
@@ -29940,6 +30184,16 @@ async function startVtPanViewerUnserialized({
         owningVision: visionOwnershipEnabled,
         // Is the present keeping its grade out of the fog (2026-10-27)?
         fogHold: gradePresent.fogHoldCompiled(),
+        // FOG MEMORY (2026-11-02): whose memory the buffer holds, and whether saving and loading run.
+        fogMemory: {
+          key: fogMemoryKeyNow,
+          sceneId: fogMemorySceneId,
+          saves: fogMemorySaves,
+          loads: fogMemoryLoads,
+          lastBytes: fogMemoryLastBytes,
+          pendingStamps: fogMemoryStamps.length,
+          lastError: fogMemoryLastError,
+        },
         // ...and the rasteriser runs regardless, so its numbers are real even
         // while `owningVision` is false. That is deliberate: the cost and the
         // pool health are observable BEFORE the flag is ever flipped.
@@ -32387,6 +32641,18 @@ export function setVtPanViewerSunLatitude(latitudeDeg) {
  * @param {number} [overMs] - ease over this many ms (the Remote's own Fade
  *   Time selector); omitted keeps day-clock's own fixed default walk rate.
  */
+/** GM "Reset Fog" on this client: forget the explored memory (see the viewer's FOG MEMORY PERSISTENCE). */
+export function resetVtPanViewerFogMemory() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.resetFogMemory();
+}
+
+/** Save the tokens-in-sight fog memory now; resolves when the write has landed. */
+export function flushVtPanViewerFogMemory() {
+  if (!_active) return Promise.resolve({ skipped: true, reason: 'viewer not started' });
+  return _active.flushFogMemory();
+}
+
 export function sweepVtPanViewerTimeOfDay(hour, overMs) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.sweepTimeOfDay(hour, overMs);

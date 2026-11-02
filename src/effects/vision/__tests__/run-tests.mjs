@@ -16,6 +16,7 @@ import { run as runVisionMask } from './vision-mask.test.mjs';
 import { run as runDoorLeafOcclusion } from './door-leaf-occlusion.test.mjs';
 import { run as runPlayerVisionModes } from './player-vision-modes.test.mjs';
 import { run as runFogField } from './fog-field.test.mjs';
+import { run as runFogCardMemory } from './fog-card-memory.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -49,6 +50,7 @@ const suites = [
   ['door-leaf-occlusion', runDoorLeafOcclusion],
   ['player-vision-modes', runPlayerVisionModes],
   ['fog-field', runFogField],
+  ['fog-card-memory', runFogCardMemory],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

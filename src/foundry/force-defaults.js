@@ -17,6 +17,7 @@
 
 import { registerSettings, readSetting, writeSetting } from './settings-adapter.js';
 import { clearGridDefaults } from './grid-defaults-persistence.js';
+import { fogOfWarDefaults } from './world-effect-defaults.js';
 
 export const FORCE_DEFAULTS_NAMESPACE = 'map-shine-advanced';
 /** The world setting's key. */
@@ -122,9 +123,12 @@ export async function resetWorldEffectSettings() {
   }
   const result = await resetAllEffectSettings({
     scenes: game.scenes ?? [],
+    // The world-valued cards (Grid, Fog of War) go back to their shipped look with everything else.
     clearGrid: async () => {
       const r = await clearGridDefaults();
       if (!r.ok) throw new Error(r.reason);
+      const f = await fogOfWarDefaults.clear();
+      if (!f.ok) throw new Error(f.reason);
     },
   });
   return result.ok

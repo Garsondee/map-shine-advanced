@@ -63,6 +63,8 @@ export {
   setVtPanViewerWindGustiness,
   setVtPanViewerSunHour,
   sweepVtPanViewerTimeOfDay,
+  resetVtPanViewerFogMemory,
+  flushVtPanViewerFogMemory,
   setVtPanViewerTimeRate,
   setVtPanViewerTimeMode,
   getVtPanViewerTimeDialState,

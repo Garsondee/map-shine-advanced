@@ -688,3 +688,18 @@ export {
   captureFoundryLayer,
   playFoundryTransition,
 } from './transition-bridge.js';
+// FOG OF WAR (2026-11-02): the card's world values, and each player token's saved fog memory.
+export { createWorldEffectDefaults, fogOfWarDefaults, parseWorldEffectDefaults } from './world-effect-defaults.js';
+export {
+  FOG_MEMORY_FLAG,
+  clearSceneFogMemory,
+  readFogMemory,
+  tokenIdFromSourceId,
+  fogMemoryKey,
+  tokenIdsOfKey,
+  shouldSaveFogMemory,
+  writeFogMemory,
+  makeFogMemoryRecord,
+  mergeCoverageMax,
+  fogMemorySize,
+} from './fog-memory-persistence.js';

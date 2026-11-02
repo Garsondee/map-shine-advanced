@@ -338,8 +338,14 @@ export function buildTokenContactShadowMaterial(
   material.blendSrcAlpha = THREE.ZeroFactor;
   material.blendDstAlpha = THREE.OneFactor;
 
-  // Grow the token's own quad about its centre by the shadow's reach.
-  const pad = float(1).add(u.shadowSize.mul(2));
+  // Grow the token's own quad about its centre by TWICE the shadow's reach.
+  // The blur's real support is wider than `reach` (the outer taps sit at 0.9
+  // reach, and each tap is a mip whose texels are a third of it), so a quad
+  // grown by `reach` alone cut the halo off while it was still visible, a
+  // hard square along the four sides (author, live, 2026-11-02; measured:
+  // still darkening at 15 world px, 0 at the 18 px quad edge).
+  const margin = u.shadowSize.mul(2);
+  const pad = float(1).add(margin.mul(2));
   material.positionNode = vec3(uCenter.add(positionLocal.xy.sub(uCenter).mul(pad)), positionLocal.z);
 
   material.colorNode = Fn(() => {
@@ -354,9 +360,16 @@ export function buildTokenContactShadowMaterial(
     // The reach in art uv, and a mip whose texels are a third of it.
     const reach = u.shadowSize;
     const lod = TSL.log2(TSL.max(float(1), uTexWidth.mul(uUvScale.x).mul(reach).div(3)));
+    // Past the art's own border the alpha must fall away SMOOTHLY, over about
+    // the blur's width, as a blurred zero-padded image would. A hard step(0..1)
+    // mask here made every tap fall off a cliff at the square's border, and a
+    // ring token touches that border mid-side: the halo showed straight cuts
+    // top/bottom/left/right (author, live, 2026-11-02; measured: -12 levels
+    // inside 3 world px).
     const cover = (p) => {
-      const inside = TSL.step(0, p.x).mul(TSL.step(0, p.y)).mul(TSL.step(p.x, 1)).mul(TSL.step(p.y, 1));
-      return texture(tex, p.clamp(0, 1).mul(uUvScale)).level(lod).a.mul(inside);
+      const out = TSL.max(TSL.max(p.negate(), p.sub(1)), vec2(0)).length();
+      const fade = float(1).sub(TSL.smoothstep(0, reach.mul(0.6), out));
+      return texture(tex, p.clamp(0, 1).mul(uUvScale)).level(lod).a.mul(fade);
     };
     const acc = float(0).toVar();
     let wsum = 0;
@@ -384,7 +397,13 @@ export function buildTokenContactShadowMaterial(
     const mask = texture(visionMaskTexture, centreUv);
     const revealed = TSL.step(0.5, TSL.max(mask.r, mask.b));
 
-    const dark = s.mul(u.shadow).mul(uAlpha).mul(float(1).sub(isToken)).mul(atOrBelow).mul(revealed);
+    // Belt and braces: reach exactly zero before the quad's own border, so no
+    // shadow size or token shape can ever show a straight cut.
+    const q = uv();
+    const toBorder = TSL.min(TSL.min(q.x, q.y), TSL.min(float(1).sub(q.x), float(1).sub(q.y)));
+    const edgeFade = TSL.smoothstep(0, reach.mul(0.5).div(pad), toBorder);
+
+    const dark = s.mul(edgeFade).mul(u.shadow).mul(uAlpha).mul(float(1).sub(isToken)).mul(atOrBelow).mul(revealed);
     return vec4(vec3(float(1).sub(dark)), 1);
   })();
   return { material, uCenter, uAlpha, uTokenDepth };

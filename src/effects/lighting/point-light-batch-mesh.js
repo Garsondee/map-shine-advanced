@@ -660,7 +660,9 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
         const stride = ITEM_SIZES.aAnim + ITEM_SIZES.aWind; // 8 — speedRaw/reverseSign/seed/intensityRaw | x/y/windExposure/windResponse
         const raw = new Float32Array(nextCapacity * stride);
         const interleaved = new THREE.InterleavedBuffer(raw, stride);
-        interleaved.setUsage(THREE.DynamicDrawUsage);
+        // Static usage (frame-rate round, 2026-11-02): see the header's 'steady state writes zero bytes' - a DYNAMIC
+        // attribute is re-sent by three's WebGPU backend on every render call whatever its version, which defeated it.
+        // reconcile() flags needsUpdate exactly when it rewrites a span.
         // BOTH names resolve to the SAME raw array — writeMergedValueSpan's
         // own `arrays.aAnim === arrays.aWind` check is how it detects this
         // and switches to single-pass stride-8 writes instead of two
@@ -679,7 +681,6 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
         // names resolve to the SAME raw array — writeLightSpanGeometry's `aPenEdge === aLocalUnit`.
         const raw = new Float32Array(nextCapacity * LOCAL_STRIDE);
         const interleaved = new THREE.InterleavedBuffer(raw, LOCAL_STRIDE);
-        interleaved.setUsage(THREE.DynamicDrawUsage);
         arrays.aLocalUnit = raw;
         arrays.aPenEdge = raw;
         arrays.aPenCorner = raw;
@@ -691,7 +692,6 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
       const arr = new Float32Array(nextCapacity * itemSize);
       arrays[name] = arr;
       const attr = new THREE.BufferAttribute(arr, itemSize);
-      attr.setUsage(THREE.DynamicDrawUsage);
       geometry.setAttribute(name, attr);
     }
   }
@@ -829,15 +829,30 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
       }
     }
     const fans = new Map();
+    /** The member's fan, triangulated into its own reusable scratch (once per frame at most). */
+    const fanFor = (m) => {
+      let fan = fans.get(m.sourceId);
+      if (fan === undefined) {
+        let scratch = fanScratch.get(m.sourceId);
+        if (!scratch) scratch = new Float32Array(INITIAL_FAN_SCRATCH_VERTICES * 3);
+        fan = triangulateLightFan(m.shapePoints, m.x, m.y, m.radius, scratch);
+        fanScratch.set(m.sourceId, fan.array);
+        fans.set(m.sourceId, fan);
+      }
+      return fan;
+    };
     const bucketMembers = new Array(members.length);
     for (let i = 0; i < members.length; i++) {
       const m = members[i];
-      let scratch = fanScratch.get(m.sourceId);
-      if (!scratch) scratch = new Float32Array(INITIAL_FAN_SCRATCH_VERTICES * 3);
-      const fan = triangulateLightFan(m.shapePoints, m.x, m.y, m.radius, scratch);
-      fanScratch.set(m.sourceId, fan.array);
-      fans.set(m.sourceId, fan);
-      bucketMembers[i] = { sourceId: m.sourceId, vertexCount: fan.vertexCount };
+      // The bucket only needs each member's VERTEX COUNT here. A fan is a pure function of (x, y, radius, shapePoints), so
+      // a member that has not moved since its geometry was written has the count it was written with - triangulating it
+      // again every frame (frame-rate round, 2026-11-02: ~0.2 ms a frame on Big Bank) produced the same number.
+      const prev = lastPlacement.get(m.sourceId);
+      const vertexCount =
+        prev !== undefined && prev.vertexCount !== undefined && !placementChanged(m.sourceId, m)
+          ? prev.vertexCount
+          : fanFor(m).vertexCount;
+      bucketMembers[i] = { sourceId: m.sourceId, vertexCount };
     }
 
     const { rebuilt, grew, spans, totalVertexCount, capacity } = bucket.reconcile(bucketMembers);
@@ -848,11 +863,17 @@ export function createBatchedLightMesh({ THREE, channel, shared, flags }) {
     for (const m of members) {
       const span = spans.get(m.sourceId);
       if (rebuilt || placementChanged(m.sourceId, m)) {
-        const fan = fans.get(m.sourceId);
+        const fan = fanFor(m);
         const pen = writeLightPenumbraVertices(fan.normalized, m.radius, penScratch.get(m.sourceId) ?? null);
         penScratch.set(m.sourceId, pen.array);
         writeLightSpanGeometry(arrays, span.start, fan.vertexCount, fan.array, m.x, m.y, m.radius, pen.array);
-        lastPlacement.set(m.sourceId, { x: m.x, y: m.y, radius: m.radius, shapePoints: m.shapePoints });
+        lastPlacement.set(m.sourceId, {
+          x: m.x,
+          y: m.y,
+          radius: m.radius,
+          shapePoints: m.shapePoints,
+          vertexCount: fan.vertexCount,
+        });
         anyGeometryWrite = true;
       }
       if (rebuilt || valuesChanged(m.sourceId, m)) {

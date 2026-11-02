@@ -199,6 +199,7 @@ export function buildGradePresentMaterial({
   fogHold,
   lampGlowTexture = null,
   lensUvGuard = null,
+  directSrgb = false,
 }) {
   const TSL = THREE.TSL;
   // THE LAMP GLOW (2026-11-01) — the coloration buffer (lamps' coloured light, 0 where
@@ -657,7 +658,13 @@ export function buildGradePresentMaterial({
         look,
       });
     }
-    material.fragmentNode = vec4(finalRgb, presentTexNode.a);
+    // THE CANVAS ENCODE (2026-11-02, frame-rate round). three's default `outputColorSpace` is sRGB while the
+    // working space is linear, so a draw to the canvas is drawn into a half-float frame buffer and then
+    // run through a SECOND full-screen "output" pass that does exactly this encode. `directSrgb` does the
+    // same encode here with the same node three's output pass uses (`renderOutput(None, sRGB)`), and the
+    // viewer sets the renderer's output space to linear, so the present is one draw straight into the canvas.
+    const presentOut = vec4(finalRgb, presentTexNode.a);
+    material.fragmentNode = directSrgb ? TSL.renderOutput(presentOut, THREE.NoToneMapping, THREE.SRGBColorSpace) : presentOut;
     material.needsUpdate = true;
   }
 

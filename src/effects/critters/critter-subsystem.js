@@ -376,6 +376,15 @@ export function createCritterSubsystem({
     skips: 0,
     truncated: false,
   };
+  /**
+   * The finished fields of the floors just left, by the same key `syncZone` already trusts (floor, mask version,
+   * sensitivity, margin). Going Ground → Underground → Ground rebuilt Ground's field (a hash of the grid and a distance
+   * transform, ~35 ms of a 238 ms frame on Big Bank) for a mask nobody touched. A few entries only: a field is up to
+   * 516² cells.
+   * @type {Map<string, {signature: number, field: object|null}>}
+   */
+  const zoneFieldsByKey = new Map();
+  const ZONE_FIELDS_KEPT = 4;
   /** One record per engine kind, built lazily the first time its population is non-zero. */
   const slots = new Map();
   let hasContent = false;
@@ -422,6 +431,17 @@ export function createCritterSubsystem({
     const floorChanged = !zone.key.startsWith(`${state.floorIndex ?? 0}|`);
     if (!floorChanged && nowMs - zone.builtAtMs < MIN_FIELD_REBUILD_MS) return zone.field;
 
+    const kept = grid ? zoneFieldsByKey.get(key) : undefined;
+    if (kept) {
+      zone.key = key;
+      zone.builtAtMs = nowMs;
+      zone.field = kept.field;
+      zone.signature = kept.signature;
+      zone.skips += 1;
+      zone.truncated = false;
+      zoneDirty = true; // the shared zone buffer still holds the floor that was just shown
+      return zone.field;
+    }
     zone.key = key;
     zone.builtAtMs = nowMs;
     if (!grid) {
@@ -443,6 +463,8 @@ export function createCritterSubsystem({
     zone.field = field ? { ...field, signature } : null;
     zone.truncated = false;
     zoneDirty = true;
+    zoneFieldsByKey.set(key, { signature, field: zone.field });
+    while (zoneFieldsByKey.size > ZONE_FIELDS_KEPT) zoneFieldsByKey.delete(zoneFieldsByKey.keys().next().value);
     if (field) {
       log.info(
         `${group}: floor ${state.floorIndex ?? 0} painted zone → ${field.zones.length} zone(s), ` +
@@ -789,6 +811,7 @@ export function createCritterSubsystem({
       slots.clear();
       zone.field = null;
       zone.key = '';
+      zoneFieldsByKey.clear();
       hasContent = false;
     },
   };

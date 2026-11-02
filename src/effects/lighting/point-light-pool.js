@@ -367,8 +367,10 @@ function setLightPenumbraGeometry(THREE, geometry, array) {
   for (let o = 0; o < array.length; o += PENUMBRA_FLOATS) {
     for (let k = 0; k < PENUMBRA_FLOATS; k++) array[o + k] = NEUTRAL_PENUMBRA[k];
   }
+  // NOT `DynamicDrawUsage` (frame-rate round, 2026-11-02): three's WebGPU backend re-sends a dynamic attribute on EVERY
+  // render call (`Attributes.update`: `usage === DynamicDrawUsage`), version bump or not - ~146 vertex uploads a frame
+  // in a still Big Bank scene. The writer flags `needsUpdate` whenever it rewrites `array`, which is all this needs.
   const buffer = new THREE.InterleavedBuffer(array, PENUMBRA_FLOATS);
-  buffer.setUsage(THREE.DynamicDrawUsage);
   bindPenumbraAttributes(THREE, geometry, buffer, 0);
   return buffer;
 }
@@ -390,6 +392,63 @@ export function applyLightFootprint(mesh, light) {
   mesh.position.set(light.x, light.y, 0);
   mesh.rotation.z = Number.isFinite(light.ellipseAngleRad) ? light.ellipseAngleRad : 0;
   mesh.scale.set(along, light.radius, 1);
+}
+
+/** Revert flag: localStorage `msa.offFloorLightGuard` = '0' and reload tests every light against the shown floor's
+ * walls and windows again, whatever level it belongs to (see `offShownFloor` in `update()`). */
+const OFF_FLOOR_GUARD = (() => {
+  try {
+    return globalThis.localStorage?.getItem('msa.offFloorLightGuard') !== '0';
+  } catch (_) {
+    return true;
+  }
+})();
+const NO_SEGMENTS = Object.freeze([]);
+
+/**
+ * Does this light belong to a level other than the floor MSA shows? Only when BOTH are known: a light with no
+ * level (a synthetic source, an old world) and a frame with no identified floor are treated as on the shown floor,
+ * which is exactly the behaviour before this test existed.
+ * @param {{levelId?: string|null}} light @param {string|null} currentFloorId @returns {boolean}
+ */
+export function isLightOffShownFloor(light, currentFloorId) {
+  return currentFloorId != null && light?.levelId != null && light.levelId !== currentFloorId;
+}
+
+/** A footprint can poke a little past its nominal radius (numerical slack in the clipped polygon). */
+export const LIGHT_CULL_RADIUS_SLACK = 1.1;
+/** World px of extra room on every side of the view. */
+export const LIGHT_CULL_MARGIN_PX = 32;
+/** Revert flag: localStorage `msa.lightCull` = '0' and reload draws every light every frame again. */
+const LIGHT_CULL_ENABLED = (() => {
+  try {
+    return globalThis.localStorage?.getItem('msa.lightCull') !== '0';
+  } catch (_) {
+    return true;
+  }
+})();
+
+/**
+ * THE OFF-SCREEN CULL (frame-rate round, 2026-11-02). Both meshes of every per-light entry are built with
+ * `frustumCulled = false` (their geometry is rewritten in place), so before this every light was submitted every
+ * frame - ~40 us of three per-draw CPU each, twice (illumination + coloration) - whether or not it could reach the
+ * screen. A light adds nothing outside its own footprint, so a footprint that misses the view rect draws nothing.
+ *
+ * The footprint is the unit-radius local geometry `triangulateLightFan` writes, scaled by `mesh.scale` and rotated
+ * about `mesh.position`: it always lies inside the circle of radius `max(scale.x, scale.y)` about the position.
+ * Reading the FINAL transform means a light another system has moved (floor parallax) is tested where it is drawn.
+ * `LIGHT_CULL_RADIUS_SLACK` and `LIGHT_CULL_MARGIN_PX` keep the test conservative: it may keep a light it could
+ * have dropped, never the reverse.
+ *
+ * @param {{position:{x:number,y:number}, scale:{x:number,y:number}}} mesh
+ * @param {{x:number,y:number,z:number,w:number}} view - world rect as (minX, minY, maxX, maxY)
+ * @returns {boolean} true when the footprint can touch the view
+ */
+export function lightFootprintTouchesView(mesh, view) {
+  const r = Math.max(Math.abs(mesh.scale.x), Math.abs(mesh.scale.y)) * LIGHT_CULL_RADIUS_SLACK + LIGHT_CULL_MARGIN_PX;
+  const x = mesh.position.x;
+  const y = mesh.position.y;
+  return !(x + r < view.x || x - r > view.z || y + r < view.y || y - r > view.w);
 }
 
 /**
@@ -466,7 +525,7 @@ function createLightEntry({
   // and lightMeshes' own doc for why this exists (the device-lost fix).
   const scratchArray = new Float32Array(INITIAL_LIGHT_FAN_VERTICES * 3);
   const positionAttribute = new THREE.BufferAttribute(scratchArray, 3);
-  positionAttribute.setUsage(THREE.DynamicDrawUsage); // hints the backend: this buffer's DATA changes often
+  // Static usage on purpose: `update()` flags `needsUpdate` when it rewrites the fan (see `setLightPenumbraGeometry`).
   geometry.setAttribute('position', positionAttribute);
   // SOFT WALL EDGES (light-penumbra.js) — the same pre-allocate-once discipline, neutral until the
   // light's first shape write.
@@ -993,6 +1052,11 @@ export function createPointLightPool({
    * whole reason this exists is so `findAperturesForLight`'s own per-light
    * cap never drops something with no trace. */
   const apertureGoboReadout = { totalFound: 0, dropped: 0, litLights: 0, enabled: false };
+  /** THE OFF-SCREEN CULL's last frame (see `lightFootprintTouchesView`): per-light entries seen / dropped from the draw. */
+  const lightCullReadout = { enabled: false, considered: 0, culled: 0 };
+  /** Last frame: why each per-light (unbatched) light could not join a bucket. Every per-light entry is its own
+   * material, so its own shader build the first time it draws — this says which rule put it there. */
+  const perLightWhy = { aperture: 0, window: 0, cookie: 0, falloff: 0, batchingOff: 0 };
 
   /** THE BATCHING READOUT (S2.5) — bucket/member counts as of the LAST
    * `update()` call, mutated in place (mirrors `apertureGoboReadout`'s own
@@ -1425,6 +1489,14 @@ export function createPointLightPool({
     // by the SAME floor value — one read, both consumers, never two floor
     // values disagreeing about which is "current" this frame.
     const currentFloorId = currentFloor?.id ?? null;
+    // THE OFF-SCREEN CULL's view, read once per frame (`lightFootprintTouchesView`). A rect that is not yet
+    // sized (the warm-up draws before the first view exists) means "draw everything", never "draw nothing".
+    const cullRect = LIGHT_CULL_ENABLED ? (envLight.uViewRect?.value ?? null) : null;
+    const cullView = cullRect && cullRect.z > cullRect.x && cullRect.w > cullRect.y ? cullRect : null;
+    lightCullReadout.enabled = LIGHT_CULL_ENABLED;
+    lightCullReadout.considered = 0;
+    lightCullReadout.culled = 0;
+    for (const k in perLightWhy) perLightWhy[k] = 0;
 
     // WALL-CLIP CACHE INVALIDATION ON WALL EDIT (2026-08-15 — see
     // `lastSeenWallStructureVersion`'s own declaration for the full
@@ -2048,6 +2120,14 @@ export function createPointLightPool({
       // type/quality. In practice constant per source (Foundry → 'foundry',
       // candles → 'inverseSquare'), but keyed here for correctness.
       const falloffModel = light.falloffModel ?? 'foundry';
+      // A LIGHT OF A LEVEL MSA IS NOT SHOWING YET (FPS round, 2026-11-02). For a few hundred ms of every level
+      // switch Foundry has already drawn the new level's lights while MSA still shows the old floor, so the
+      // aperture and window tests below would run against the OLD floor's walls and windows. Measured on Big
+      // Bank: 26 of the Underground's 51 lights found a Ground window "in reach", left their buckets, and built
+      // 24 private material pairs in one frame (a 690 ms freeze); a few frames later the floor committed, every
+      // one of them batched, and the 24 entries were never drawn again. Such a light gets no apertures and no
+      // window reach until its own floor is the one shown (there are no right walls to test it against yet).
+      const offShownFloor = OFF_FLOOR_GUARD && isLightOffShownFloor(light, currentFloorId);
       // APERTURE GOBO ASSIGNMENT — a cheap CPU pass per light
       // (`aperture-gobo.js#findAperturesForLight`), computed BEFORE the
       // rebuild check below because `apertureCount` is itself part of that
@@ -2066,7 +2146,7 @@ export function createPointLightPool({
         totalFound,
       } = findAperturesForLight(
         { x: light.x, y: light.y, radius: light.radius },
-        apertureWallSegments,
+        offShownFloor ? NO_SEGMENTS : apertureWallSegments,
         maxAperturesPerLight,
         maxApertureDistancePx,
         apertureWallFrames
@@ -2079,7 +2159,7 @@ export function createPointLightPool({
       // a window in reach is never batched (its lookup texture is per-light).
       let windowReachCount = 0;
       let windowReachTexture = null;
-      if (windowReachOn && createWindowReachTexture && windowReachSegments.length > 0) {
+      if (!offShownFloor && windowReachOn && createWindowReachTexture && windowReachSegments.length > 0) {
         let wc = windowReachCache.get(light.sourceId);
         if (!wc) {
           wc = {
@@ -2143,6 +2223,13 @@ export function createPointLightPool({
       const canBatch =
         pointLightBatchingEnabled &&
         canBatchLight({ apertureCount, windowReachCount, falloffModel, cookiePattern: light.cookiePattern });
+      if (!canBatch) {
+        if (!pointLightBatchingEnabled) perLightWhy.batchingOff += 1;
+        else if (apertureCount > 0) perLightWhy.aperture += 1;
+        else if (windowReachCount > 0) perLightWhy.window += 1;
+        else if (light.cookiePattern) perLightWhy.cookie += 1;
+        else perLightWhy.falloff += 1;
+      }
       if (canBatch) {
         // A light that batches THIS frame but had a per-light entry from a
         // PREVIOUS frame (its own apertureCount just dropped to 0 — the only
@@ -2406,7 +2493,6 @@ export function createPointLightPool({
         if (array !== entry.scratchArray) {
           entry.scratchArray = array;
           entry.positionAttribute = new THREE.BufferAttribute(array, 3);
-          entry.positionAttribute.setUsage(THREE.DynamicDrawUsage);
           entry.geometry.setAttribute('position', entry.positionAttribute);
         } else {
           entry.positionAttribute.needsUpdate = true; // same buffer, new contents — re-upload, don't reallocate
@@ -2620,6 +2706,17 @@ export function createPointLightPool({
       // (still in vt-pan-viewer.js, deferred to extraction step 5) report the
       // true coloured/colourless split.
       entry.lastHasColor = light.hasColor;
+      // OFF-SCREEN CULL — only a light that has already drawn once is dropped, so a pan can never be the first draw
+      // of a light's pipeline (a late compile there is exactly the hitch this must not add). The first frame a
+      // light exists it draws wherever it stands; every later frame it draws only if it can touch the view.
+      lightCullReadout.considered += 1;
+      if (cullView !== null && entry.hasDrawn === true && !lightFootprintTouchesView(entry.mesh, cullView)) {
+        entry.mesh.visible = false;
+        entry.colorationMesh.visible = false;
+        lightCullReadout.culled += 1;
+      } else {
+        entry.hasDrawn = true;
+      }
     }
     for (const [id, entry] of lightMeshes) {
       if (!seen.has(id)) {
@@ -2827,6 +2924,8 @@ export function createPointLightPool({
    * getWallClipCacheStats above and depth-proxy-material-pool.js. */
   function getMeshPoolStats() {
     return {
+      lightCull: { ...lightCullReadout },
+      perLightWhy: { ...perLightWhy },
       lightMeshes: { hits: lightMeshHits, misses: lightMeshMisses, size: lightMeshes.size },
       illumBuckets: { hits: illumBucketHits, misses: illumBucketMisses, size: illumBuckets.size },
       colorBuckets: { hits: colorBucketHits, misses: colorBucketMisses, size: colorBuckets.size },

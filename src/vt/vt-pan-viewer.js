@@ -2092,6 +2092,21 @@ async function startVtPanViewerUnserialized({
       renderer.backend.trackTimestamp = false;
     }
 
+    // THE PRESENT ENCODES sRGB ITSELF (frame-rate round, 2026-11-02). three's default `outputColorSpace` is sRGB
+    // against a linear working space, so every draw to the canvas went into a half-float frame buffer first and
+    // then through a second full-screen "output" pass that only applied the sRGB encode. The present draws once,
+    // so its shader now ends in that same encode (grade-present.js "THE CANVAS ENCODE") and the renderer is told
+    // the canvas is linear, which makes three draw straight into it. Revert flag: localStorage
+    // `msa.presentDirectSrgb` = '0' and reload.
+    const presentDirectSrgb = (() => {
+      try {
+        return globalThis.localStorage?.getItem('msa.presentDirectSrgb') !== '0';
+      } catch (_) {
+        return true;
+      }
+    })();
+    if (presentDirectSrgb) renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+
     /**
      * THE READINESS REGISTRY (vt/settle.js) — every subsystem that can still be
      * busy after the loading screen would otherwise lift registers here.
@@ -8791,6 +8806,7 @@ async function startVtPanViewerUnserialized({
       lampGlowTexture: sceneColoration.texture,
       // The lens's own Table guard, so the present's lens-warped mask reads match the lens to the pixel.
       lensUvGuard: tableSubsystem.lensGuard,
+      directSrgb: presentDirectSrgb,
     });
     // INITIAL STATE (2026-08-27) — a fresh viewer's `internalScale` may
     // ALREADY be below 1.0 at this point (a player's persisted setting can
@@ -9583,7 +9599,14 @@ async function startVtPanViewerUnserialized({
         view?.floorIndex ?? 0
       );
       profiler?.begin(Z.presentBlit);
-      (debugQuad ?? presentQuad).render(renderer); // three's own fullscreen path — carries its own camera
+      if (debugQuad && presentDirectSrgb) {
+        // The debug view's material has no encode of its own: let three's output pass do it, as it always did.
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        debugQuad.render(renderer);
+        renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+      } else {
+        (debugQuad ?? presentQuad).render(renderer); // three's own fullscreen path — carries its own camera
+      }
       profiler?.end(Z.presentBlit);
     }
     // light.accumulate — ambient/exterior light PLUS point-light illumination

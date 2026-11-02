@@ -29,6 +29,9 @@ const expansions = new WeakMap();
 let hits = 0;
 let misses = 0;
 
+/** Every browser MSA runs in is little-endian; the byte loop stays for anything that is not. */
+const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+
 /**
  * @param {ArrayLike<number>} data - one byte per cell, row 0 first.
  * @param {number} w @param {number} h - the grid's dimensions.
@@ -45,13 +48,23 @@ export function expandGridToRgba(data, w, h, fallbackByte) {
   misses++;
   const n = w * h;
   const rgba = new Uint8Array(n * 4);
-  for (let i = 0; i < n; i++) {
-    const v = data[i] ?? fallbackByte;
-    const o = i * 4;
-    rgba[o] = v;
-    rgba[o + 1] = v;
-    rgba[o + 2] = v;
-    rgba[o + 3] = 255;
+  if (LITTLE_ENDIAN) {
+    // One 32-bit store per cell instead of four byte stores (frame-rate round, 2026-11-02: this loop was 30% of a
+    // 95 ms level-switch commit task). Same bytes in memory: R=G=B=v, A=255.
+    const px = new Uint32Array(rgba.buffer);
+    for (let i = 0; i < n; i++) {
+      const v = (data[i] ?? fallbackByte) & 0xff;
+      px[i] = (0xff000000 | (v << 16) | (v << 8) | v) >>> 0;
+    }
+  } else {
+    for (let i = 0; i < n; i++) {
+      const v = data[i] ?? fallbackByte;
+      const o = i * 4;
+      rgba[o] = v;
+      rgba[o + 1] = v;
+      rgba[o + 2] = v;
+      rgba[o + 3] = 255;
+    }
   }
   expansions.set(data, { w, h, fallback: fallbackByte, rgba });
   return rgba;

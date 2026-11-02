@@ -588,7 +588,12 @@ export function readActiveLightSources(darkness01, { wallClipCache = null, floor
         },
         darkness01
       );
-      if (snap) lights.push(snap);
+      if (snap) {
+        // The level this light belongs to, so the pool can tell a light of a level MSA is not showing yet
+        // (the moments of a level switch between Foundry's redraw and MSA's commit) from one it is.
+        if (source.level?.id) snap.levelId = source.level.id;
+        lights.push(snap);
+      }
     }
     return { lights, source: 'scene', reason: null, seenSourceIds, wallClipHits, wallClipMisses };
   } catch (err) {

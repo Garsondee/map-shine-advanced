@@ -66,8 +66,46 @@ export function registerSettings(namespace, descriptors, options = {}) {
  * @param {string} namespace @param {string} key @returns {unknown}
  */
 export function readSetting(namespace, key) {
-  return game.settings.get(namespace, key);
+  const settings = game.settings;
+  const id = `${namespace}.${key}`;
+  const reg = settings.settings instanceof Map ? settings.settings.get(id) : undefined;
+  // Unregistered, or a host without the registry (a test double): Foundry's own answer, and its own loud error.
+  if (reg === undefined) return settings.get(namespace, key);
+  if (reg.scope === 'client') {
+    const store = settings.storage?.get?.('client');
+    if (typeof store?.getItem !== 'function') return settings.get(namespace, key);
+    // Foundry's `get` is `new Setting({key, value: localStorage.getItem(id) ?? default}).value`: the raw string and the
+    // default are its only inputs, so a hit on both is exactly the value it would build.
+    const raw = store.getItem(id);
+    const hit = readCache.get(id);
+    if (hit !== undefined && hit.raw === raw && hit.def === reg.default) return hit.value;
+    const value = settings.get(namespace, key);
+    if (isPlainValue(value)) readCache.set(id, { raw, def: reg.default, value });
+    else readCache.delete(id);
+    return value;
+  }
+  // World / user scope: a saved Setting is a cheap lookup in Foundry's own `get`. An UNSAVED one builds a document per call.
+  const store = settings.storage?.get?.(reg.scope);
+  const user = reg.scope === 'user' ? game.userId : null;
+  if (typeof store?.getSetting !== 'function' || store.getSetting(id, user)) return settings.get(namespace, key);
+  const hit = readCache.get(id);
+  if (hit !== undefined && hit.absent === true && hit.def === reg.default) return hit.value;
+  const value = settings.get(namespace, key);
+  if (isPlainValue(value)) readCache.set(id, { absent: true, def: reg.default, value });
+  return value;
 }
+
+/**
+ * THE READ CACHE (frame-rate round, 2026-11-02). Foundry v14's `game.settings.get` constructs a `Setting` DataModel
+ * (clean + validate) on every call for a client-scope setting, and for a world setting nobody saved. The engine reads
+ * settings from the frame loop, so a still Big Bank scene spent ~2% of its main thread building documents to read the same
+ * few values (profile, leaf-shed profile, roof reveal radius). Only primitives are cached: for an object Foundry builds a
+ * fresh copy per call and a shared one could be mutated by a caller. A stale value is not possible: a client setting is
+ * re-checked against the raw localStorage string on every read, an unsaved world setting against "no document yet".
+ * @type {Map<string, {raw?: string|null, absent?: boolean, def: unknown, value: unknown}>}
+ */
+const readCache = new Map();
+const isPlainValue = (v) => v === null || (typeof v !== 'object' && typeof v !== 'function');
 
 /**
  * Write a setting (persists per its scope: `client` = this browser, `world` =

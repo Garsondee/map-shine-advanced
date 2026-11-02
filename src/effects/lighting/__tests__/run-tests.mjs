@@ -38,6 +38,8 @@ import { run as runCanopyLight } from './canopy-light.test.mjs';
 import { run as runLightShape } from './light-shape.test.mjs';
 import { run as runLightEdge } from './light-edge.test.mjs';
 import { run as runLightPenumbra } from './light-penumbra.test.mjs';
+import { run as runLightCull } from './light-cull.test.mjs';
+import { run as runOffFloorLight } from './off-floor-light.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -71,6 +73,8 @@ const suites = [
   ['light-shape', runLightShape],
   ['light-edge', runLightEdge],
   ['light-penumbra', runLightPenumbra],
+  ['light-cull', runLightCull],
+  ['off-floor-light', runOffFloorLight],
   ['illum-clear-sky', runIllumClearSky],
   ['point-light-illumination', runPointLightIllumination],
   ['point-light-coloration', runPointLightColoration],

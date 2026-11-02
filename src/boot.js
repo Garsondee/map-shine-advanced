@@ -6820,6 +6820,16 @@ function install() {
    * comparing buffers.
    */
   let fireSpawnCache = { floorIndex: null, signature: 0, version: -1, sensitivity: null, cloud: null };
+  /**
+   * ONE ENTRY PER FLOOR (frame-rate round, 2026-11-02). The two caches above hold only the floor last shown, so going
+   * Ground → Underground → Ground re-derived the painted fire of Ground from scratch — the same grid, the same
+   * version, the same sensitivity — inside the first frame after the commit (a 195 ms frame on Big Bank, about a
+   * quarter of it this). The validity key is unchanged (floor, signature, version, sensitivity); this only keeps the
+   * entry of the floor just left, so a floor that comes back and has not changed is served from here.
+   * @type {Map<number, object>}
+   */
+  const fireSpawnCacheByFloor = new Map();
+  const fireMaskCacheByFloor = new Map();
   const getFireSpawnCloud = (floorIndex) => {
     let grid = null;
     try {
@@ -6849,10 +6859,17 @@ function install() {
       fireSpawnBakeSkips += 1;
       return fireSpawnCache.cloud;
     }
+    const kept = fireSpawnCacheByFloor.get(floorIndex);
+    if (kept && kept.signature === signature && kept.version === version && kept.sensitivity === sensitivity) {
+      fireSpawnBakeSkips += 1;
+      fireSpawnCache = kept;
+      return kept.cloud;
+    }
     fireSpawnBakeRuns += 1;
     const extracted = extractFireSpawnPoints(grid, { threshold: sensitivity * FIRE_SPAWN_TO_PAINT_THRESHOLD_RATIO });
     const cloud = { ...extracted, signature };
     fireSpawnCache = { floorIndex, signature, version, sensitivity, cloud };
+    fireSpawnCacheByFloor.set(floorIndex, fireSpawnCache);
     log.info(`fire: painted region on floor ${floorIndex} yielded ${extracted.count} spawn point(s)`);
     return cloud;
   };
@@ -6884,6 +6901,12 @@ function install() {
       fireMaskBakeSkips += 1;
       return fireMaskCache.fires;
     }
+    const kept = fireMaskCacheByFloor.get(floorIndex);
+    if (kept && kept.signature === signature && kept.version === version && kept.sensitivity === sensitivity) {
+      fireMaskBakeSkips += 1;
+      fireMaskCache = kept;
+      return kept.fires;
+    }
     fireMaskBakeRuns += 1;
     // `rescueThreshold` is the SPAWN cloud's own threshold, derived through the
     // very ratio a few lines up that keeps the two in lockstep as the one
@@ -6908,6 +6931,7 @@ function install() {
       rescueThreshold: sensitivity * FIRE_SPAWN_TO_PAINT_THRESHOLD_RATIO,
     });
     fireMaskCache = { floorIndex, signature, version, sensitivity, fires, nearestLabel, spec };
+    fireMaskCacheByFloor.set(floorIndex, fireMaskCache);
     // Positions ride along, not just the count (2026-08-12) — a live report of
     // "two painted fireplaces, cohesion collapses them together" is otherwise
     // unanswerable without a console dump: this line alone says whether

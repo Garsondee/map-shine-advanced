@@ -500,6 +500,32 @@ export function run(t) {
       sub.getStatus().fieldBuilds === 3 && spy.engines[0].setZoneCalls.length >= 3
     );
   }
+  // The floor just left is kept: going there and back with nothing painted costs no rebuild, but the zone buffer
+  // (which holds the floor that was shown meanwhile) is rewritten; a real paint change still rebuilds.
+  {
+    const { sub, spy, renderState } = harness('smellyFlies');
+    const builds = () => sub.getStatus().fieldBuilds;
+    const floorA = discGrid();
+    const floorB = discGrid({ cx: 40, cy: 30, r: 5 });
+    renderState.maskGrid = floorA;
+    renderState.maskVersion = 5;
+    sub.sync(RENDERER, 1000, 0.016, RECT, DAY);
+    renderState.floorIndex = 1;
+    renderState.maskGrid = floorB;
+    sub.sync(RENDERER, 1010, 0.016, RECT, DAY);
+    t.ok('two floors, two builds', builds() === 2);
+    const writes = spy.zoneBuffers[0].writes.length;
+    renderState.floorIndex = 0;
+    renderState.maskGrid = floorA;
+    sub.sync(RENDERER, 1020, 0.016, RECT, DAY);
+    t.ok('coming back to an untouched floor builds nothing', builds() === 2);
+    t.ok('…but rewrites the zone buffer, which held the other floor', spy.zoneBuffers[0].writes.length === writes + 1);
+    t.ok('…and hands the engine that floor’s field again', spy.engines[0].setZoneCalls.at(-1).field.cols > 0);
+    renderState.maskGrid = discGrid({ cx: 10, cy: 10, r: 4 });
+    renderState.maskVersion = 6;
+    sub.sync(RENDERER, 2000, 0.016, RECT, DAY);
+    t.ok('a changed mask on that floor still rebuilds', builds() === 3);
+  }
   {
     const { sub, spy, renderState } = harness('smellyFlies');
     sub.sync(RENDERER, 1000, 0.016, RECT, DAY);

@@ -55,4 +55,23 @@ export function run(t) {
   // Plain arrays work too (the authority may serve either).
   const plain = expandGridToRgba([1, 2, 3, 4], 2, 2, 0);
   ok('a plain array expands the same way', plain[8] === 3 && plain[15] === 255);
+
+  // The 32-bit store path (frame-rate round, 2026-11-02) must equal the plain byte loop exactly: every byte value,
+  // then a random grid with a short tail that falls back.
+  const reference = (data, w, h, fb) => {
+    const out = new Uint8Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const v = data[i] ?? fb;
+      out.set([v, v, v, 255], i * 4);
+    }
+    return out;
+  };
+  const every = Uint8Array.from({ length: 256 }, (_, i) => i);
+  const e1 = expandGridToRgba(every, 16, 16, 0);
+  ok('all 256 byte values expand exactly as the byte loop does', reference(every, 16, 16, 0).every((v, i) => v === e1[i]));
+  let s = 12345;
+  const rand = () => ((s = (Math.imul(s, 1103515245) + 12345) >>> 0) >>> 24);
+  const big = Uint8Array.from({ length: 300 * 200 - 37 }, rand);
+  const e2 = expandGridToRgba(big, 300, 200, 131);
+  ok('a random 300x200 grid with a short tail matches the byte loop', reference(big, 300, 200, 131).every((v, i) => v === e2[i]));
 }

@@ -16722,8 +16722,11 @@ async function startVtPanViewerUnserialized({
     /** Vegetation shadow coverage gain — see the umbra note in the shadow branch. 1/0.74: the lowest core
      * cover measured (17:00 on the shadow bench) reaches full. */
     const VEG_SHADOW_CORE_GAIN = 1.35;
-    /** How far past a plant's painted edge its pivot still applies (its quad's transparent margin). */
-    const VEG_PIVOT_DILATE_PX = 120;
+    /** How far either side of the seam between two plants their two moves are mixed (2026-11-02). Measured
+     * with a fold meter on the JHH and Deep Forest canopies at gale: the old one-texel seam folded shadow
+     * triangles from 2x the shipped sway dials; with this band none fold up to 2x and at most one in
+     * ~21k at 3x. Wider = safer seams, narrower = more of each plant stays rigid. */
+    const VEG_PIVOT_BLEND_PX = 120;
     /** Probes along a plant's move when it nears an indoor/outdoor boundary (per edge point). */
     const VEG_WALL_PROBE_STEPS = 8;
     /** How far short of the boundary a plant that would reach it stops (world px). */
@@ -16949,7 +16952,8 @@ async function startVtPanViewerUnserialized({
       let pivotWeight = float(0);
       let pivotRadiusPx = float(1);
       if (pivot) {
-        const ps = texture(pivot.texture, pivot.artUv);
+        // `sample`: a pivot read already taken by the caller (the two-body hand-over passes each body's own).
+        const ps = pivot.sample ?? texture(pivot.texture, pivot.artUv);
         pivotWeight = ps.a;
         pivotXY = pivot.uFrame.xy.add(pivot.uFrame.zw.mul(ps.x)).add(pivot.uFrameV.mul(ps.y));
         pivotRadiusPx = max(ps.z.mul(pivot.uTexelPx), float(1));
@@ -17665,6 +17669,8 @@ async function startVtPanViewerUnserialized({
           : uv().mul(uUvScale);
         pivot = {
           texture: pivotMap.texture,
+          // The second-nearest body and the nearest one's weight (null on a map built before it existed).
+          texture2: pivotMap.texture2 ?? null,
           artUv,
           uFrame: uniform(vec4(c00.x, c00.y, c10.x - c00.x, c10.y - c00.y)),
           uFrameV: uniform(vec2(c01.x - c00.x, c01.y - c00.y)),
@@ -17721,7 +17727,7 @@ async function startVtPanViewerUnserialized({
       // throw, so this stays a build-time-constant geometry that never
       // rebuilds as the sun moves.
       material.positionNode = Fn(() => {
-        const displace = buildVegetationSwayDisplacementNode({
+        const swayArgs = {
           motion: {
             uSwayAmount,
             uSwayFrequency,
@@ -17746,7 +17752,26 @@ async function startVtPanViewerUnserialized({
           asShadow,
           rotationLiftEnabled,
           pivot,
-        });
+        };
+        // TWO BODIES, ONE HAND-OVER (2026-11-02, author: "The current way of distorting trees/bushes is
+        // causing shadows to self intersect and double in value"). Near the seam between two plants the
+        // sway is worked out for EACH of them, as if this vertex belonged to it, and the two finished moves
+        // are mixed by the map's weight (`effects/vegetation-render.js#buildVegetationPivotMap`). A plant's
+        // core has weight 1 and moves rigidly; a seam stretches by the two plants' difference over the band
+        // instead of folding a triangle over itself, which the shadow drew twice.
+        let displace;
+        if (pivot?.texture2) {
+          const nearest = texture(pivot.texture, pivot.artUv);
+          const next = texture(pivot.texture2, pivot.artUv);
+          const own = buildVegetationSwayDisplacementNode({ ...swayArgs, pivot: { ...pivot, sample: nearest } });
+          const other = buildVegetationSwayDisplacementNode({
+            ...swayArgs,
+            pivot: { ...pivot, sample: vec4(next.x, next.y, next.z, nearest.w) },
+          });
+          displace = { xy: mix(other.xy, own.xy, next.w), liftY: mix(other.liftY, own.liftY, next.w) };
+        } else {
+          displace = buildVegetationSwayDisplacementNode(swayArgs);
+        }
         const displaced = positionLocal
           .add(vec3(displace.xy.x, displace.xy.y, float(0)))
           .add(vec3(0, 1, 0).mul(displace.liftY));
@@ -20690,20 +20715,30 @@ async function startVtPanViewerUnserialized({
             if (vegCoverageGrid) {
               const artW = Math.hypot(corners[1].x - corners[0].x, corners[1].y - corners[0].y);
               const texelPx = artW / Math.max(1, vegCoverageGrid.w);
+              // Every texel takes its nearest plant (no edge where the pivots stop) and, near a seam, the
+              // next plant too — see `buildVegetationPivotMap`'s "NO SEAM A TRIANGLE CAN FOLD ACROSS".
               const built = buildVegetationPivotMap(vegCoverageGrid, {
                 maxRadiusTexels: Math.max(2, VEG_PIVOT_MAX_RADIUS_PX / Math.max(1e-3, texelPx)),
-                dilateTexels: Math.max(1, Math.ceil(VEG_PIVOT_DILATE_PX / Math.max(1e-3, texelPx))),
+                dilateTexels: Infinity,
+                blendTexels: Math.max(1, Math.ceil(VEG_PIVOT_BLEND_PX / Math.max(1e-3, texelPx))),
               });
-              // Half float: a 32-bit float texture is not filterable on WebGPU without an optional feature.
-              const half = new Uint16Array(built.data.length);
-              for (let i = 0; i < half.length; i++) half[i] = THREE.DataUtils.toHalfFloat(built.data[i]);
-              const pivotTex = new THREE.DataTexture(half, built.w, built.h, THREE.RGBAFormat, THREE.HalfFloatType);
-              pivotTex.minFilter = THREE.LinearFilter;
-              pivotTex.magFilter = THREE.LinearFilter;
-              pivotTex.flipY = false;
-              pivotTex.needsUpdate = true;
-              vegPivotMap = { texture: pivotTex, corners, texelPx };
+              // Half float, NEAREST: each texel names whole bodies, and a filtered read would invent a pivot
+              // between two of them (the hand-over is the weight in `texture2`'s alpha, not the filter).
+              const toPivotTexture = (data) => {
+                const half = new Uint16Array(data.length);
+                for (let i = 0; i < half.length; i++) half[i] = THREE.DataUtils.toHalfFloat(data[i]);
+                const tex = new THREE.DataTexture(half, built.w, built.h, THREE.RGBAFormat, THREE.HalfFloatType);
+                tex.minFilter = THREE.NearestFilter;
+                tex.magFilter = THREE.NearestFilter;
+                tex.flipY = false;
+                tex.needsUpdate = true;
+                return tex;
+              };
+              const pivotTex = toPivotTexture(built.data);
+              const pivotTex2 = toPivotTexture(built.second);
+              vegPivotMap = { texture: pivotTex, texture2: pivotTex2, corners, texelPx };
               entry.pivotTexture = pivotTex;
+              entry.pivotTexture2 = pivotTex2;
             }
             const vegCoverageMask = vegCoverageGrid
               ? buildCoverageCellMask({

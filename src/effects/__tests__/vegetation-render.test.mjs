@@ -1071,4 +1071,52 @@ export function run(t) {
       buildVegetationPivotMap({ w: 4, h: 4, data: new Uint8Array(16) }).bodies === 0
     );
   }
+  // ── NO SEAM A TRIANGLE CAN FOLD ACROSS (2026-11-02) ─────────────────────
+  // Two bushes on one row; every texel takes its nearest bush and, near the seam, the other one too.
+  {
+    const w = 60;
+    const h = 20;
+    const data = new Uint8Array(w * h);
+    for (let y = 6; y < 14; y++) for (let x = 0; x < w; x++) if (x < 12 || x >= 48) data[y * w + x] = 255;
+    const blendTexels = 10;
+    const p = buildVegetationPivotMap({ w, h, data }, { maxRadiusTexels: 40, dilateTexels: Infinity, blendTexels });
+    const at = (arr, x, y) => Array.from(arr.slice((y * w + x) * 4, (y * w + x) * 4 + 4));
+    ok('pivot map: two separate bushes are two bodies', p.bodies === 2);
+    ok(
+      'pivot map: with an unbounded dilation every texel has a pivot (no edge where the pivots stop)',
+      Array.from({ length: w * h }, (_, i) => p.data[i * 4 + 3]).every((a) => a === 1)
+    );
+    const left = at(p.data, 3, 10)[0];
+    const right = at(p.data, 56, 10)[0];
+    ok(
+      "pivot map: a bush's core is all its own (weight 1, the second body is itself)",
+      at(p.second, 3, 10)[3] === 1 && at(p.second, 3, 10)[0] === left && at(p.second, 56, 10)[3] === 1
+    );
+    const seam = at(p.second, 29, 10);
+    ok(
+      'pivot map: on the seam the two bushes share the weight (~0.5) and the second body is the other bush',
+      Math.abs(seam[3] - 0.5) < 0.1 && at(p.data, 29, 10)[0] === left && seam[0] === right
+    );
+    // The fold-free bound: the two bodies move by dA and dB, a texel moves by w*own + (1-w)*other. Across the
+    // row the move may change by no more than |dA - dB| x (smoothstep's 1.5 peak) / (2 x blend) per texel.
+    const dA = 1;
+    const dB = -1;
+    const moveAt = (x) => {
+      const own = at(p.data, x, 10)[0] === left ? dA : dB;
+      const other = at(p.second, x, 10)[0] === left ? dA : dB;
+      const wt = at(p.second, x, 10)[3];
+      return wt * own + (1 - wt) * other;
+    };
+    let steepest = 0;
+    for (let x = 0; x < w - 1; x++) steepest = Math.max(steepest, Math.abs(moveAt(x + 1) - moveAt(x)));
+    ok(
+      `pivot map: across a seam the move changes smoothly, never in one jump (steepest ${steepest.toFixed(3)} per texel)`,
+      steepest <= (1.5 * Math.abs(dA - dB)) / (2 * blendTexels) + 0.02 && moveAt(0) === dA && moveAt(w - 1) === dB
+    );
+    const noBlend = buildVegetationPivotMap({ w, h, data }, { maxRadiusTexels: 40, dilateTexels: Infinity });
+    ok(
+      'pivot map: blendTexels 0 keeps the hard seam (weight 1 everywhere)',
+      Array.from({ length: w * h }, (_, i) => noBlend.second[i * 4 + 3]).every((a) => a === 1)
+    );
+  }
 }

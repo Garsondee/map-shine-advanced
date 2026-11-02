@@ -1052,6 +1052,38 @@ const VEGETATION_TIER_PLANS = Object.freeze([
 // bodies, not one giant rotating plate. Texels near a plant inherit the nearest
 // plant's pivot (a short dilation), so the transparent margin of its triangles
 // moves with it; the linear filter blends pivots smoothly where two meet.
+//
+// ⭐ NO SEAM A TRIANGLE CAN FOLD ACROSS (2026-11-02, author: "The current way of
+// distorting trees/bushes is causing shadows to self intersect and double in
+// value"). The map above changed pivot over ONE coarse texel (~10 px) between two
+// bodies, and from pivot to "no pivot" (each vertex its own body) at the end of the
+// dilation. The mesh has a vertex every ~60-75 px, so one triangle could have a
+// corner on each side: two neighbouring bodies swaying out of phase pull its corners
+// apart or push them through each other, and at gale (or stronger dials) the
+// triangle turns inside out — drawn twice. The canopy hides it (its art is
+// transparent there), but the shadow reads its pivot half a throw from the art it
+// draws (`vegetationShadowShift`), so the seams cut straight through the shadow and
+// the overlap darkens twice. Two changes:
+//  - `dilateTexels: Infinity` — every texel takes its NEAREST plant (a Voronoi of
+//    the canopies), so there is no pivot/no-pivot edge at all, and a plant's shadow
+//    out on bare ground moves with the plant that casts it.
+//  - `blendTexels` — every texel also records its SECOND-nearest body and a weight
+//    that hands over from one to the other across a band either side of the seam.
+//    The sway is evaluated for BOTH bodies and the two finished displacements are
+//    mixed by that weight (`vt-pan-viewer.js#buildVegetationMaterial`). A body's
+//    core keeps weight 1, so a plant still moves as one rigid body; across a seam
+//    the stretch is (difference of the two bodies' moves) ÷ (band width), so no
+//    triangle folds while the two moves differ by less than about the band. It is
+//    the DISPLACEMENTS that are mixed, never the pivots: a pivot slid between two
+//    plants reads the sway's phase at every point in between, and the phase turns
+//    over ~6 sway cycles across one 500 px clump cell — measured with the fold meter,
+//    blurring the pivots folded MORE triangles than the hard seam did.
+
+/** Hermite ease on [0, 1], clamped (GLSL `smoothstep(0, 1, t)`): a C1 hand-over, so no crease at the band's ends. */
+const smoothstep01 = (t) => {
+  const c = Math.min(1, Math.max(0, t));
+  return c * c * (3 - 2 * c);
+};
 
 /**
  * Build the pivot map for one canopy image from its coarse alpha grid.
@@ -1060,17 +1092,24 @@ const VEGETATION_TIER_PLANS = Object.freeze([
  * @param {object} [opts]
  * @param {number} [opts.alphaThreshold=96] - a texel at or above this is canopy.
  * @param {number} [opts.maxRadiusTexels=12] - a blob wider than this is split into several bodies.
- * @param {number} [opts.dilateTexels=4] - how far past a plant its pivot reaches.
+ * @param {number} [opts.dilateTexels=4] - how far past a plant its pivot reaches (Infinity: everywhere,
+ *   each texel taking its nearest plant).
+ * @param {number} [opts.blendTexels=0] - how far either side of the seam between two bodies their
+ *   displacements are mixed. 0 = no second body (the hard seam).
  * @param {number} [opts.minTexels=2] - specks smaller than this are left to the dilation.
- * @returns {{data: Float32Array, w: number, h: number, bodies: number}} RGBA per texel:
- *   R,G = the pivot's uv, B = the body's radius in texels, A = 1 where a pivot was assigned.
+ * @returns {{data: Float32Array, second: Float32Array, w: number, h: number, bodies: number}} RGBA per
+ *   texel. `data`: R,G = the nearest body's pivot uv, B = its radius in texels, A = 1 where a pivot was
+ *   assigned. `second`: R,G,B = the same for the second-nearest body (the nearest again where there is
+ *   none within the band), A = the nearest body's weight, 0.5 on the seam rising to 1 at `blendTexels`.
+ *   Sample both with NEAREST filtering: a filtered read would mix two different bodies' pivots.
  */
 export function buildVegetationPivotMap(grid, opts = {}) {
-  const { alphaThreshold = 96, maxRadiusTexels = 12, dilateTexels = 4, minTexels = 2 } = opts;
+  const { alphaThreshold = 96, maxRadiusTexels = 12, dilateTexels = 4, blendTexels = 0, minTexels = 2 } = opts;
   const w = Math.max(0, grid?.w | 0);
   const h = Math.max(0, grid?.h | 0);
   const out = new Float32Array(w * h * 4);
-  if (!w || !h || !grid?.data || grid.data.length < w * h) return { data: out, w, h, bodies: 0 };
+  const second = new Float32Array(w * h * 4);
+  if (!w || !h || !grid?.data || grid.data.length < w * h) return { data: out, second, w, h, bodies: 0 };
   const src = grid.data;
   const label = new Int32Array(w * h).fill(-1);
   const stack = new Int32Array(w * h);
@@ -1161,31 +1200,72 @@ export function buildVegetationPivotMap(grid, opts = {}) {
       owner[i] = base + assign[k];
     });
   }
-  // Dilate: every texel within `dilateTexels` of a plant takes the nearest plant's pivot (BFS rings).
-  let frontier = [];
-  for (let i = 0; i < w * h; i++) if (owner[i] >= 0) frontier.push(i);
-  for (let ring = 0; ring < dilateTexels && frontier.length; ring++) {
-    const next = [];
-    for (const i of frontier) {
-      const x = i % w;
-      const y = (i / w) | 0;
-      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1]) {
-        if (j >= 0 && owner[j] < 0) {
-          owner[j] = owner[i];
-          next.push(j);
-        }
-      }
-    }
-    frontier = next;
+  // Dilate: every texel within `dilateTexels` of a plant takes the nearest plant's pivot, and (within the
+  // blend band) the second-nearest body's too. One breadth-first pass from every plant's own texels at
+  // once; a texel accepts at most two DIFFERENT bodies, each at the first (= shortest) step it arrives.
+  const n = w * h;
+  const near1 = new Int32Array(n).fill(-1);
+  const near2 = new Int32Array(n).fill(-1);
+  const dist1 = new Int32Array(n);
+  const dist2 = new Int32Array(n);
+  const blend = Math.max(0, blendTexels);
+  // A queue entry is (texel, body); its distance is that texel's dist1 or dist2, whichever body it is.
+  const qTexel = new Int32Array(2 * n);
+  const qBody = new Int32Array(2 * n);
+  let qHead = 0;
+  let qTail = 0;
+  const band2 = 2 * blend;
+  const visit = (j, b, d) => {
+    const n1 = near1[j];
+    if (n1 < 0) {
+      if (d > dilateTexels) return;
+      near1[j] = b;
+      dist1[j] = d;
+    } else if (n1 !== b && near2[j] < 0 && d - dist1[j] <= band2) {
+      near2[j] = b;
+      dist2[j] = d;
+    } else return;
+    qTexel[qTail] = j;
+    qBody[qTail++] = b;
+  };
+  for (let i = 0; i < n; i++) {
+    if (owner[i] < 0) continue;
+    near1[i] = owner[i];
+    qTexel[qTail] = i;
+    qBody[qTail++] = owner[i];
   }
-  for (let i = 0; i < w * h; i++) {
-    const o = owner[i];
+  while (qHead < qTail) {
+    const i = qTexel[qHead];
+    const b = qBody[qHead++];
+    const d = (near1[i] === b ? dist1[i] : dist2[i]) + 1;
+    const x = i % w;
+    if (x > 0) visit(i - 1, b, d);
+    if (x < w - 1) visit(i + 1, b, d);
+    if (i >= w) visit(i - w, b, d);
+    if (i < n - w) visit(i + w, b, d);
+  }
+  const bodyU = new Float32Array(bodies.length);
+  const bodyV = new Float32Array(bodies.length);
+  const bodyR = new Float32Array(bodies.length);
+  bodies.forEach(([u, v, r], k) => {
+    bodyU[k] = u;
+    bodyV[k] = v;
+    bodyR[k] = r;
+  });
+  for (let i = 0; i < n; i++) {
+    const o = near1[i];
     if (o < 0) continue;
-    const [u, v, r] = bodies[o];
-    out[i * 4] = u;
-    out[i * 4 + 1] = v;
-    out[i * 4 + 2] = r;
+    out[i * 4] = bodyU[o];
+    out[i * 4 + 1] = bodyV[o];
+    out[i * 4 + 2] = bodyR[o];
     out[i * 4 + 3] = 1;
+    // The nearest body's weight: 0.5 on the seam (the two are equally near), easing to 1 a band away. The
+    // step distance difference grows by 2 per texel across the seam, so the band is 2 x blend steps.
+    const o2 = near2[i] < 0 ? o : near2[i];
+    second[i * 4] = bodyU[o2];
+    second[i * 4 + 1] = bodyV[o2];
+    second[i * 4 + 2] = bodyR[o2];
+    second[i * 4 + 3] = o2 === o || blend <= 0 ? 1 : 0.5 + 0.5 * smoothstep01((dist2[i] - dist1[i]) / band2);
   }
-  return { data: out, w, h, bodies: bodies.length };
+  return { data: out, second, w, h, bodies: bodies.length };
 }

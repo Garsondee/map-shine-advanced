@@ -386,6 +386,13 @@ import {
   buildVisionGateMaterial,
   buildVisionExploredDimMaterial,
   buildVisionSnapshotPublishMaterial,
+  buildVisionSoftResolveMaterial,
+  buildVisionSoftBlurMaterial,
+  buildVisionCoveragePublishMaterial,
+  createFogLookUniforms,
+  fogSoftStepUv,
+  buildVisionRevealHistoryMaterial,
+  buildVisionCopyMaterial,
   VISION_GATE_BUILD_TAG,
   decideFogGating,
   REVEAL_ILLUMINATION_THRESHOLD,
@@ -3542,6 +3549,17 @@ async function startVtPanViewerUnserialized({
     // create() renders nothing useful until its first resize() call, and (see
     // reallocateScreenSizedTargets below) had none at all until 2026-08-15.
     const visionMask = createVisionMaskSubsystem({ THREE, allocator, resolvedW: internalW, resolvedH: internalH });
+    /** THE FOG LOOK (2026-11-02) — the soft fog field's live knobs, shared by every fog material
+     *  (`vision-mask-render.js#createFogLookUniforms`). Pushed in `renderFogField`. */
+    const fogLook = createFogLookUniforms(THREE.TSL);
+    /** Set by a snapshot publish tick: the next gate pass also MAX-writes the soft coverage into the
+     *  explored buffer (`buildVisionCoveragePublishMaterial`), from the field it has just built. */
+    let fogCoveragePending = false;
+    /** The fade band at the edge of sight, as a share of a grid square, and its limits in screen px:
+     *  never under ~2 px (the antialiasing floor), never so wide a close zoom washes a room out. */
+    const FOG_FEATHER_GRID = 0.32;
+    const FOG_FEATHER_MIN_PX = 2.5;
+    const FOG_FEATHER_MAX_PX = 140;
     /** The world rect the explored buffer covers, pushed to the gate shader.
      *  Kept in lockstep with `visionMask.setExploredRect` — two copies of one
      *  rect is exactly how a sampling offset gets born, so both are written
@@ -4535,6 +4553,10 @@ async function startVtPanViewerUnserialized({
     } catch {
       // No matchMedia (a test harness): the glide plays.
     }
+    // THE REVEAL FADE's inputs, on the shared look before any fog material reads it (they bake it in).
+    fogLook.revealTexture = visionMask.revealTargets.current.texture;
+    fogLook.uViewRect = envLight.uViewRect;
+    fogLook.uExploredRect = uVisionExploredRect;
     const visionGateQuad = new THREE.QuadMesh(
       buildVisionGateMaterial({
         THREE,
@@ -4543,6 +4565,8 @@ async function startVtPanViewerUnserialized({
         threshold: REVEAL_ILLUMINATION_THRESHOLD,
         doorFogProgress: uDoorFogProgress,
         extraRevealed: tableSubsystem.revealedOutsideScene,
+        softTexture: visionMask.softTexture,
+        look: fogLook,
       })
     );
     // THE EXPLORED-DIM QUAD (finishes slice 3) — a SECOND fullscreen pass,
@@ -4570,6 +4594,8 @@ async function startVtPanViewerUnserialized({
         uExploredRect: uVisionExploredRect,
         dimFactor: EXPLORED_DIM_FACTOR,
         extraRevealed: tableSubsystem.revealedOutsideScene,
+        softTexture: visionMask.softTexture,
+        look: fogLook,
       })
     );
     // THE SNAPSHOT PUBLISH QUAD — a plain screen-space `QuadMesh`, SAME
@@ -4590,6 +4616,65 @@ async function startVtPanViewerUnserialized({
         uViewRect: envLight.uViewRect,
         uExploredRect: uVisionExploredRect,
         storeUnlit: true,
+      })
+    );
+    // THE SOFT FOG FIELD (2026-11-02) — see `vision-mask-render.js`'s "THE SOFT FOG FIELD". Three plain
+    // fullscreen quads (resolve, blur H, blur V + noise) drawn by `renderFogField` at the head of the gate
+    // pass, and the coverage publish that records the field into the explored buffer.
+    const fogSoftResolveQuad = new THREE.QuadMesh(
+      buildVisionSoftResolveMaterial({
+        THREE,
+        maskTexture: visionMask.texture,
+        illumTexture: sceneIllum.texture,
+        threshold: REVEAL_ILLUMINATION_THRESHOLD,
+        extraRevealed: tableSubsystem.revealedOutsideScene,
+      })
+    );
+    const fogSoftBlurHQuad = new THREE.QuadMesh(
+      buildVisionSoftBlurMaterial({ THREE, inputTexture: visionMask.softTargets.resolve.texture, uStep: fogLook.uStepH })
+    );
+    const fogSoftBlurVQuad = new THREE.QuadMesh(
+      buildVisionSoftBlurMaterial({
+        THREE,
+        inputTexture: visionMask.softTargets.blurH.texture,
+        uStep: fogLook.uStepV,
+        look: fogLook,
+        uViewRect: envLight.uViewRect,
+      })
+    );
+    const fogRevealHistoryQuad = new THREE.QuadMesh(
+      buildVisionRevealHistoryMaterial({
+        THREE,
+        historyTexture: visionMask.revealTargets.current.texture,
+        softTexture: visionMask.softTexture,
+        maskTexture: visionMask.texture,
+        illumTexture: sceneIllum.texture,
+        threshold: REVEAL_ILLUMINATION_THRESHOLD,
+        uViewRect: envLight.uViewRect,
+        uExploredRect: uVisionExploredRect,
+        uRate: fogLook.uRevealRate,
+        look: fogLook,
+        extraRevealed: tableSubsystem.revealedOutsideScene,
+      })
+    );
+    const fogRevealCopyQuad = new THREE.QuadMesh(
+      buildVisionCopyMaterial({ THREE, sourceTexture: visionMask.revealTargets.next.texture })
+    );
+    /** Real time of the last reveal-fade step (`perfNowMs`, not the game clock: a paused game must
+     *  still finish revealing what a token can see). */
+    let fogRevealLastMs = 0;
+    /** Seconds for the reveal fade to close ~63% of the way to full sight. */
+    const FOG_REVEAL_TAU_SEC = 0.32;
+    const fogCoveragePublishQuad = new THREE.QuadMesh(
+      buildVisionCoveragePublishMaterial({
+        THREE,
+        softTexture: visionMask.softTexture,
+        maskTexture: visionMask.texture,
+        illumTexture: sceneIllum.texture,
+        threshold: REVEAL_ILLUMINATION_THRESHOLD,
+        uViewRect: envLight.uViewRect,
+        uExploredRect: uVisionExploredRect,
+        look: fogLook,
       })
     );
     // No one-time initial rect push needed any more (2026-08-02): each slot's
@@ -8487,6 +8572,10 @@ async function startVtPanViewerUnserialized({
         uExploredRect: uVisionExploredRect,
         threshold: REVEAL_ILLUMINATION_THRESHOLD,
         extraRevealed: tableSubsystem.revealedOutsideScene,
+        // THE SOFT FOG FIELD (2026-11-02): the hold fades with the same field as the gate.
+        softTexture: visionMask.softTexture,
+        uViewRect: envLight.uViewRect,
+        look: fogLook,
       },
       // The lamps' coloured glow, so a Look's colourise can keep lamplight white.
       lampGlowTexture: sceneColoration.texture,
@@ -10221,7 +10310,9 @@ async function startVtPanViewerUnserialized({
           // NEVER auto-clear: this buffer accumulates for the whole session.
           const prevExpAuto = renderer.autoClearColor;
           renderer.autoClearColor = false;
-          if (visionDraw.drawn > 0) renderer.render(visionDraw.scene, exploredDraw.camera);
+          // The sight fans are NO LONGER drawn here (2026-11-02): rasterised at world resolution they were a
+          // hard staircase that stuck out past the live edge as a grey sawtooth. The buffer's R is now the
+          // soft visibility itself, MAX-written by `fogCoveragePublishQuad` on each snapshot tick.
           renderer.autoClearColor = prevExpAuto;
           renderer.setRenderTarget(null);
         }
@@ -10270,6 +10361,8 @@ async function startVtPanViewerUnserialized({
               renderer.autoClearColor = false;
               visionSnapshotPublishQuad.render(renderer);
               renderer.autoClearColor = prevSnapAuto;
+              // The coverage half of this tick runs in the gate pass, from that frame's fresh soft field.
+              fogCoveragePending = true;
               renderer.setRenderTarget(null);
               snapshotPublishCount++;
               lastSnapshotError = null;
@@ -10928,6 +11021,54 @@ async function startVtPanViewerUnserialized({
      * same thing — the first would leave the previous frame's fog on screen.
      * The only skip is when MSA does not own vision at all.
      */
+    /**
+     * THE SOFT FOG FIELD (2026-11-02): resolve → blur H → blur V into the vision subsystem's three soft
+     * targets, then (on a snapshot tick) the coverage publish into the explored buffer. Every fog consumer
+     * after this reads the same field, so the gate, the memory quad and the present agree on one edge.
+     * The band is world-scaled (a share of a grid square), so it sits on the map, not on the glass.
+     */
+    function renderFogField() {
+      const r = envLight.uViewRect.value;
+      const spanX = Math.max(1e-3, Math.abs(r.z - r.x));
+      const spanY = Math.max(1e-3, Math.abs(r.w - r.y));
+      const fw = visionMask.softTargets.resolve.width;
+      const fh = visionMask.softTargets.resolve.height;
+      const gridPx = Number(globalThis.canvas?.dimensions?.size) || 100;
+      const pxPerWorld = Math.min(fw / spanX, fh / spanY);
+      const featherPx = Math.min(FOG_FEATHER_MAX_PX, Math.max(FOG_FEATHER_MIN_PX, FOG_FEATHER_GRID * gridPx * pxPerWorld));
+      fogLook.uStepH.value.set(fogSoftStepUv(featherPx, fw), 0);
+      fogLook.uStepV.value.set(0, fogSoftStepUv(featherPx, fh));
+      fogLook.uTime.value = uGlobalTimeMs.value / 1000;
+      const prevAuto = renderer.autoClearColor;
+      // Each quad covers its whole target, so no clear: the draw IS the write.
+      renderer.autoClearColor = false;
+      renderer.setRenderTarget(visionMask.softTargets.resolve);
+      fogSoftResolveQuad.render(renderer);
+      renderer.setRenderTarget(visionMask.softTargets.blurH);
+      fogSoftBlurHQuad.render(renderer);
+      renderer.setRenderTarget(visionMask.softTargets.field);
+      fogSoftBlurVQuad.render(renderer);
+      // THE REVEAL FADE: step the world-space history toward this frame's sight, then copy it back.
+      {
+        const now = perfNowMs();
+        const dt = fogRevealLastMs > 0 ? Math.min(0.25, Math.max(0, (now - fogRevealLastMs) / 1000)) : 0.25;
+        fogRevealLastMs = now;
+        fogLook.uRevealRate.value = 1 - Math.exp(-dt / FOG_REVEAL_TAU_SEC);
+        renderer.setRenderTarget(visionMask.revealTargets.next);
+        fogRevealHistoryQuad.render(renderer);
+        renderer.setRenderTarget(visionMask.revealTargets.current);
+        fogRevealCopyQuad.render(renderer);
+      }
+      if (fogCoveragePending) {
+        fogCoveragePending = false;
+        // MAX blend, never cleared here: memory only grows (a reset clears it in the vision block).
+        renderer.setRenderTarget(visionMask.exploredTarget);
+        fogCoveragePublishQuad.render(renderer);
+      }
+      renderer.autoClearColor = prevAuto;
+      renderer.setRenderTarget(null);
+    }
+
     function runVisionGatePass() {
       // THE FOG HOLD follows ownership: while this gate draws, the present
       // keeps its grade out of the fog (`grade-present.js#fogHoldActive`).
@@ -10936,6 +11077,7 @@ async function startVtPanViewerUnserialized({
       if (!visionOwnershipEnabled || !visionGateQuad) return;
       try {
         profiler?.begin(Z.visionGate);
+        renderFogField();
         renderer.setRenderTarget(sceneLit);
         const prevGateAutoClear = renderer.autoClearColor;
         // MUST NOT CLEAR: this multiplies into a fully-composited scene. A

@@ -58,6 +58,11 @@ import { triangulateLightFan } from '../lighting/point-light-illumination.js';
  */
 const NO_RADIUS_NORMALISATION = 1;
 
+/** The longest side of the two remembered-fog buffers, texels. 3072 x 3072 RGBA8 is ~38 MB each, the most a square map spends. */
+const EXPLORED_MAX_DIM = 3072;
+/** The shortest either side may get, so a thin map still has a usable buffer. */
+const EXPLORED_MIN_DIM = 256;
+
 /**
  * Build the material that stamps the SIGHT (FOV) polygon into R.
  *
@@ -322,6 +327,399 @@ export function sampleExploredNode({
 }
 
 /**
+ * ─────────────────────────────────────────────────────────────────────────
+ * THE SOFT FOG FIELD (2026-11-02). The author: the fog's *"blackness
+ * especially, is very low resolution, ugly and cheap looking with badly AA'd
+ * edges"*, with *"lighter grey jagged internal artefacts around edges"*.
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * Two causes, both measured in a private Foundry before this was built:
+ *  1. Every fog decision was a per-pixel BOOLEAN on a NEAREST mask, so each
+ *     edge was a hard one-pixel staircase (and a bigger one wherever the
+ *     render scale ran below native).
+ *  2. The remembered ("explored") buffer is world-space and coarser than the
+ *     screen. Its fans were rasterised hard and then thresholded, so its
+ *     outline stair-stepped up to half a texel PAST the live sight edge, and
+ *     the dim memory showed through there as a pale grey sawtooth.
+ *
+ * The cure is one smooth field, built once a frame and read by every fog
+ * consumer (the gate, the memory quad, the present's hold, the coverage
+ * publish), so they all agree on one edge:
+ *
+ *   resolve (full res)  — the reveal rule as a 0..1 value per pixel
+ *   blur H, blur V (half res, Gaussian, jittered taps) — the soft field R,
+ *     plus two slow world-space noises: G = ink (eats into the fade band),
+ *     B = mist (drifts over remembered ground)
+ *
+ * ⚠️ LAW 7 STILL HOLDS, BY CONSTRUCTION. A blurred mask reads above 0.5 a
+ * little OUTSIDE a reflex corner of the revealed shape, so the field alone
+ * could leak a sliver. It never stands alone: `fogVisibility` multiplies by
+ * the exact hard rule (`buildRevealedNode`), and only remaps the part of the
+ * field ABOVE 0.5, which a straight edge reaches exactly AT the polygon. So
+ * the fade lies wholly inside what is already revealed: it can darken a
+ * visible pixel, never brighten a hidden one. The ink noise only raises the
+ * threshold (erodes), never lowers it.
+ */
+
+/** Gaussian taps EACH SIDE of the centre in each blur pass (13 per pass). */
+export const FOG_SOFT_TAPS = 6;
+/** Sigma of the blur kernel, in taps. */
+const FOG_SOFT_SIGMA_TAPS = 3;
+/** A lit pixel inside light perception counts fully from this many times the reveal threshold. */
+const FOG_LIT_SOFT_SPAN = 2.5;
+/** The reveal fade's history is this many times coarser than the explored buffer (it shapes a fade, not an edge). */
+const REVEAL_HISTORY_DIVISOR = 3;
+/** The share of the frame, at each edge, over which newly recorded memory fades out (see the coverage publish). */
+const FOG_SCREEN_EDGE_FADE = 0.06;
+
+/** The kernel's weights, centre first (index = |tap|), normalised over all 2*TAPS+1 taps. */
+export function fogSoftWeights(taps = FOG_SOFT_TAPS, sigma = FOG_SOFT_SIGMA_TAPS) {
+  const raw = [];
+  for (let k = 0; k <= taps; k++) raw.push(Math.exp(-(k * k) / (2 * sigma * sigma)));
+  const sum = raw[0] + 2 * raw.slice(1).reduce((a, b) => a + b, 0);
+  return raw.map((w) => w / sum);
+}
+
+/**
+ * The step between blur taps, in UV of the full frame, for a fade band
+ * `featherPx` screen pixels wide. A Gaussian blur of a step edge, read through
+ * `fogBandT`, climbs from 0 at the edge to ~0.95 at two sigmas, so the band
+ * is two sigmas wide.
+ * @param {number} featherPx @param {number} framePx - the frame's width (or height) in the same pixels.
+ */
+export function fogSoftStepUv(featherPx, framePx) {
+  const sigmaPx = Math.max(0.5, featherPx) / 2;
+  return sigmaPx / FOG_SOFT_SIGMA_TAPS / Math.max(1, framePx);
+}
+
+/**
+ * The fog look's live knobs, shared by every fog material. Values are pushed
+ * by the viewer each frame; nothing here rebuilds a shader.
+ * @param {*} TSL
+ */
+export function createFogLookUniforms(TSL) {
+  const { uniform, float, vec2 } = TSL;
+  return {
+    /** Per-tap UV offset of the horizontal / vertical blur. */
+    uStepH: uniform(vec2(1 / 2048, 0)),
+    uStepV: uniform(vec2(0, 1 / 2048)),
+    /** Seconds, for the slow drift of ink and mist. */
+    uTime: uniform(float(0)),
+    /** How far the ink noise eats into the fade band, 0 (a clean gradient) .. 1. */
+    uInk: uniform(float(0.6)),
+    /** World px per ink cell, and per mist cell. */
+    uInkCellPx: uniform(float(90)),
+    uMistCellPx: uniform(float(520)),
+    /** How much the mist lifts and lowers remembered ground, 0..1. */
+    uMist: uniform(float(0.14)),
+    /** Colour kept in remembered ground (1 = full colour, 0 = grey). */
+    uMemorySaturation: uniform(float(0.7)),
+    /** How visible grid lines stay over remembered ground (0..1); never over unexplored black. */
+    uMemoryGrid: uniform(float(0.3)),
+    /** The reveal fade: the share of the gap to full sight closed this frame (pushed from real time). */
+    uRevealRate: uniform(float(1)),
+    /** Set by the host BEFORE any fog material is built (they read them at build time): the reveal
+     *  fade's history texture and the two rects that place it. Null leaves the fade out. */
+    revealTexture: null,
+    uViewRect: null,
+    uExploredRect: null,
+  };
+}
+
+/**
+ * THE RESOLVE — the reveal rule as a value, full resolution, into a LINEAR
+ * target the blur then reads with bilinear taps (so no tap ever skips a pixel).
+ * Light perception counts by how lit it is, so the torch-lit edge of what a
+ * token can see fades into the dark instead of stopping on a contour line.
+ * @param {object} args
+ * @returns {*} a NodeMaterial for a fullscreen quad.
+ */
+export function buildVisionSoftResolveMaterial({ THREE, maskTexture, illumTexture, threshold, extraRevealed = null }) {
+  const { texture, uv, float, vec4, max, smoothstep, step, select } = THREE.TSL;
+  const mask = texture(maskTexture).sample(uv());
+  const illum = texture(illumTexture).sample(uv());
+  const luminance = max(max(illum.r, illum.g), illum.b);
+  const lit = smoothstep(float(threshold), float(threshold * FOG_LIT_SOFT_SPAN), luminance);
+  let soft = max(step(float(0.5), mask.r), step(float(0.5), mask.b).mul(lit));
+  if (extraRevealed) soft = max(soft, select(extraRevealed(uv()), float(1), float(0)));
+  const material = new THREE.NodeMaterial();
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.fragmentNode = vec4(soft, float(0), float(0), float(1));
+  return material;
+}
+
+/**
+ * ONE BLUR PASS of the soft field (13 Gaussian taps along `uStep`). The taps
+ * are jittered per pixel by up to half a step (interleaved gradient noise), so
+ * a wide band, whose taps sit several pixels apart, dissolves into fine grain
+ * instead of showing thirteen contour lines.
+ *
+ * With `look` + `uViewRect` this is the SECOND pass, and also writes the two
+ * world-space noises the consumers share (see the field's header): computing
+ * them here, at half resolution, costs one pass instead of four.
+ * @param {object} args
+ * @returns {*} a NodeMaterial for a fullscreen quad.
+ */
+export function buildVisionSoftBlurMaterial({ THREE, inputTexture, uStep, look = null, uViewRect = null }) {
+  const { texture, uv, float, vec2, vec3, vec4, fract, dot, screenCoordinate, mix, smoothstep, mx_noise_float } =
+    THREE.TSL;
+  const weights = fogSoftWeights();
+  const jitter = fract(float(52.9829189).mul(fract(dot(screenCoordinate.xy, vec2(0.06711056, 0.00583715))))).sub(0.5);
+  const src = texture(inputTexture);
+  let sum = src.sample(uv()).r.mul(weights[0]);
+  for (let k = 1; k <= FOG_SOFT_TAPS; k++) {
+    const off = uStep.mul(float(k).add(jitter.mul(0.5)));
+    sum = sum.add(
+      src
+        .sample(uv().add(off))
+        .r.add(src.sample(uv().sub(off)).r)
+        .mul(weights[k])
+    );
+  }
+  let ink = float(0);
+  let mist = float(0.5);
+  if (look && uViewRect) {
+    const world = vec2(mix(uViewRect.x, uViewRect.z, uv().x), mix(uViewRect.y, uViewRect.w, uv().y));
+    const t = look.uTime;
+    // INK: two octaves of slow noise in world space, so it sticks to the map while the camera pans and
+    // only breathes, never crawls. Remapped to 0..1 and shaped so most of the edge is touched a little
+    // and some of it a lot: a wash, not a fringe.
+    const pInk = world.div(look.uInkCellPx);
+    const n1 = mx_noise_float(vec3(pInk.x, pInk.y, t.mul(0.07)));
+    const n2 = mx_noise_float(vec3(pInk.x.mul(2.31).add(17.1), pInk.y.mul(2.31).sub(3.7), t.mul(0.13)));
+    ink = smoothstep(float(0.18), float(0.82), n1.mul(0.65).add(n2.mul(0.35)).mul(0.5).add(0.5));
+    // MIST: one large, slower octave drifting on a gentle diagonal.
+    const pMist = world.div(look.uMistCellPx).add(vec2(t.mul(0.011), t.mul(-0.007)));
+    mist = mx_noise_float(vec3(pMist.x, pMist.y, t.mul(0.025)))
+      .mul(0.5)
+      .add(0.5)
+      .clamp(0, 1);
+  }
+  const material = new THREE.NodeMaterial();
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.fragmentNode = vec4(sum, ink, mist, float(1));
+  return material;
+}
+
+/**
+ * THE REVEAL FADE (2026-11-02) — ground that comes into sight fades in over a
+ * moment instead of popping, so a walking token's view creeps forward like
+ * light. A small WORLD-space buffer (so panning never re-fades anything) holds
+ * how long each place has been in sight, eased toward the current visibility:
+ *
+ *   history' = history + (vNow - history) * rate      while on screen, rising only
+ *   history' = vNow                                   where vNow fell (hiding is instant)
+ *
+ * Consumers show `min(v, history)`, so this can only DELAY a reveal, never
+ * extend one (Law 7), and anything leaving sight is gone at once — a fade-out
+ * would show a token that has already stepped out of view.
+ *
+ * Off screen the buffer is left alone: the last thing known there is kept, so
+ * panning back to ground still in sight does not fade it in again.
+ * @param {object} args
+ * @param {*} args.uRate - a float uniform, the share of the gap closed this frame (1 - exp(-dt/tau)).
+ * @returns {*} a NodeMaterial for a fullscreen quad bound to the NEXT history target.
+ */
+export function buildVisionRevealHistoryMaterial({
+  THREE,
+  historyTexture,
+  softTexture,
+  maskTexture,
+  illumTexture,
+  threshold,
+  uViewRect,
+  uExploredRect,
+  uRate,
+  look,
+  extraRevealed = null,
+}) {
+  const { uv, float, vec2, vec4, mix, min, select, texture } = THREE.TSL;
+  const worldX = mix(uExploredRect.x, uExploredRect.z, uv().x);
+  const worldY = mix(uExploredRect.y, uExploredRect.w, uv().y);
+  const screenU = worldX.sub(uViewRect.x).div(uViewRect.z.sub(uViewRect.x));
+  const screenV = worldY.sub(uViewRect.y).div(uViewRect.w.sub(uViewRect.y));
+  const onScreen = screenU
+    .greaterThanEqual(0)
+    .and(screenU.lessThanEqual(1))
+    .and(screenV.greaterThanEqual(0))
+    .and(screenV.lessThanEqual(1));
+  const { vPlain } = sampleFogVisibility({
+    THREE,
+    softTexture,
+    maskTexture,
+    illumTexture,
+    threshold,
+    screenUV: vec2(screenU, screenV),
+    look,
+    extraRevealed,
+  });
+  const prev = texture(historyTexture).sample(uv()).r;
+  const eased = min(prev.add(vPlain.sub(prev).mul(uRate)), vPlain);
+  const next = select(onScreen, eased, prev);
+  const material = new THREE.NodeMaterial();
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.fragmentNode = vec4(next, float(0), float(0), float(1));
+  return material;
+}
+
+/** A plain copy quad (history B → A), so consumers always read one fixed texture. */
+export function buildVisionCopyMaterial({ THREE, sourceTexture }) {
+  const { uv, texture } = THREE.TSL;
+  const material = new THREE.NodeMaterial();
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.fragmentNode = texture(sourceTexture).sample(uv());
+  return material;
+}
+
+/** How far into the reveal fade a screen uv is (1 when there is no history buffer). */
+function sampleRevealHistory(THREE, look, screenUV) {
+  if (!look.revealTexture || !look.uViewRect || !look.uExploredRect) return null;
+  const { texture, mix, vec2, float, select } = THREE.TSL;
+  const r = look.uViewRect;
+  const e = look.uExploredRect;
+  const worldX = mix(r.x, r.z, screenUV.x);
+  const worldY = mix(r.y, r.w, screenUV.y);
+  const hu = worldX.sub(e.x).div(e.z.sub(e.x));
+  const hv = worldY.sub(e.y).div(e.w.sub(e.y));
+  // Outside the scene rect (the Table's padding) there is no history: never hold anything back there.
+  const inside = hu.greaterThanEqual(0).and(hu.lessThanEqual(1)).and(hv.greaterThanEqual(0)).and(hv.lessThanEqual(1));
+  return select(inside, texture(look.revealTexture).sample(vec2(hu.clamp(0, 1), hv.clamp(0, 1))).r, float(1));
+}
+
+/** The field's fade band: 0 at the revealed edge (field 0.5), 1 once fully inside. */
+function fogBandT(TSL, soft) {
+  return soft.sub(0.5).mul(2).clamp(0, 1);
+}
+
+/**
+ * Let the ink eat into a 0..1 band: raises the threshold where the noise is
+ * high, never lowers it (so it can only hide), and leaves 1 at 1.
+ */
+function inkErode(TSL, t, ink, amount) {
+  const { float, max } = TSL;
+  const bite = ink.mul(amount);
+  return t
+    .sub(bite)
+    .div(max(float(1).sub(bite), float(1e-3)))
+    .clamp(0, 1);
+}
+
+/**
+ * THE FOG AT ONE SCREEN UV — what every consumer reads. `v` is how visible the
+ * pixel is now (0..1, zero wherever the hard rule says hidden), `vPlain` the
+ * same without the ink (what memory records), `field` the raw sample (for its
+ * ink and mist).
+ * @param {object} args
+ * @returns {{v:*, vPlain:*, field:*, revealed:*}}
+ */
+export function sampleFogVisibility({
+  THREE,
+  softTexture,
+  maskTexture,
+  illumTexture,
+  threshold,
+  screenUV,
+  look,
+  extraRevealed = null,
+}) {
+  const { texture, float, select, smoothstep } = THREE.TSL;
+  const TSL = THREE.TSL;
+  const field = texture(softTexture).sample(screenUV);
+  const mask = texture(maskTexture).sample(screenUV);
+  const illum = texture(illumTexture).sample(screenUV);
+  const revealed = buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed, screenUV });
+  const hard = select(revealed, float(1), float(0));
+  const t = fogBandT(TSL, field.r);
+  const vPlain = smoothstep(float(0), float(1), t).mul(hard);
+  let v = smoothstep(float(0), float(1), inkErode(TSL, t, field.g, look.uInk)).mul(hard);
+  // THE REVEAL FADE: only ever lowers `v` (see `buildVisionRevealHistoryMaterial`).
+  const history = sampleRevealHistory(THREE, look, screenUV);
+  if (history) v = TSL.min(v, history);
+  return { v, vPlain, field, revealed };
+}
+
+/**
+ * How REMEMBERED a pixel is (0..1): the explored buffer's coverage — the soft
+ * visibility it was published from, so its edge is as smooth as the live one —
+ * through the same ink, so the edge of the known world breathes too.
+ * @param {object} args - `field` from {@link sampleFogVisibility} at the same uv.
+ * @returns {*} a float node.
+ */
+export function sampleFogMemory({ THREE, exploredTexture, uViewRect, uExploredRect, screenUV, field, look }) {
+  const { texture, float, smoothstep, mix, vec2, select } = THREE.TSL;
+  const worldX = mix(uViewRect.x, uViewRect.z, screenUV.x);
+  const worldY = mix(uViewRect.y, uViewRect.w, screenUV.y);
+  const eu = worldX.sub(uExploredRect.x).div(uExploredRect.z.sub(uExploredRect.x));
+  const ev = worldY.sub(uExploredRect.y).div(uExploredRect.w.sub(uExploredRect.y));
+  // Outside the scene rect nothing was ever recorded: clamp-to-edge would smear the border texel outward.
+  const inside = eu.greaterThanEqual(0).and(eu.lessThanEqual(1)).and(ev.greaterThanEqual(0)).and(ev.lessThanEqual(1));
+  const coverage = texture(exploredTexture).sample(vec2(eu.clamp(0, 1), ev.clamp(0, 1))).r;
+  const e = smoothstep(float(0), float(1), inkErode(THREE.TSL, coverage, field.g, look.uInk));
+  return select(inside, e, float(0));
+}
+
+/**
+ * THE COVERAGE PUBLISH — a fullscreen quad bound to the explored buffer that
+ * MAX-writes the plain soft visibility of every on-screen texel into R. This
+ * replaces drawing the sight fans into that buffer: fans rasterised at world
+ * resolution are a hard staircase (cause 2 in the field's header), this is the
+ * same smooth edge the player sees. MAX, so memory only ever grows.
+ * @param {object} args
+ * @returns {*} a NodeMaterial for a fullscreen quad bound to the explored buffer.
+ */
+export function buildVisionCoveragePublishMaterial({
+  THREE,
+  softTexture,
+  maskTexture,
+  illumTexture,
+  threshold,
+  uViewRect,
+  uExploredRect,
+  look,
+}) {
+  const { uv, float, vec2, vec4, mix, min, smoothstep } = THREE.TSL;
+  const worldX = mix(uExploredRect.x, uExploredRect.z, uv().x);
+  const worldY = mix(uExploredRect.y, uExploredRect.w, uv().y);
+  const screenU = worldX.sub(uViewRect.x).div(uViewRect.z.sub(uViewRect.x));
+  const screenV = worldY.sub(uViewRect.y).div(uViewRect.w.sub(uViewRect.y));
+  // Only what is on screen can be remembered (the colour comes from this frame's picture), and a hard
+  // cut there left dead-straight edges in memory wherever sight ran past the frame. Fade out over the
+  // outer few percent instead: the edge of a glance is remembered faintly, and MAX fills it in later.
+  const edgeU = min(screenU, float(1).sub(screenU));
+  const edgeV = min(screenV, float(1).sub(screenV));
+  const onScreen = smoothstep(float(0), float(FOG_SCREEN_EDGE_FADE), edgeU).mul(
+    smoothstep(float(0), float(FOG_SCREEN_EDGE_FADE), edgeV)
+  );
+  const { vPlain } = sampleFogVisibility({
+    THREE,
+    softTexture,
+    maskTexture,
+    illumTexture,
+    threshold,
+    screenUV: vec2(screenU, screenV),
+    look,
+  });
+  const cover = vPlain.mul(onScreen);
+  const material = new THREE.NodeMaterial();
+  material.transparent = true;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.MaxEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.MaxEquation;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = vec4(cover, float(0), float(0), cover);
+  return material;
+}
+
+/**
  * Build the FULLSCREEN GATE — one MULTIPLY quad that finishes the reveal rule
  * over the whole composited frame.
  *
@@ -376,6 +774,8 @@ export function buildVisionGateMaterial({
   threshold,
   doorFogProgress = null,
   extraRevealed = null,
+  softTexture = null,
+  look = null,
 }) {
   const { texture, uv, float, vec4, select } = THREE.TSL;
 
@@ -389,7 +789,21 @@ export function buildVisionGateMaterial({
   const doorProgress = doorFogProgress ? doorFogProgress.clamp(0, 1) : float(1);
   const wasFloorRevealed = mask.g.greaterThan(float(0.5));
   const revealFactor = select(wasFloorRevealed, float(1), doorProgress);
-  const factor = select(revealed, revealFactor, float(0));
+  // THE SOFT FIELD (2026-11-02): how visible, not whether — zero wherever the hard rule says hidden.
+  const visible =
+    softTexture && look
+      ? sampleFogVisibility({
+          THREE,
+          softTexture,
+          maskTexture,
+          illumTexture,
+          threshold,
+          screenUV: uv(),
+          look,
+          extraRevealed,
+        }).v
+      : select(revealed, float(1), float(0));
+  const factor = visible.mul(revealFactor);
 
   const material = new THREE.NodeMaterial();
   material.transparent = true;
@@ -458,8 +872,10 @@ export function buildVisionExploredDimMaterial({
   dimFactor,
   extraRevealed = null,
   memoryLight = null,
+  softTexture = null,
+  look = null,
 }) {
-  const { texture, uv, float, vec3, vec4, select, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
+  const { texture, uv, float, vec3, vec4, select, dot, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
   const mask = texture(maskTexture).sample(uv());
   const illum = texture(illumTexture).sample(uv());
@@ -473,7 +889,11 @@ export function buildVisionExploredDimMaterial({
     screenUV: uv(),
     exploredSnapshotTexture,
   });
-  const storedColor = texture(exploredSnapshotTexture).sample(bufferUv).rgb;
+  // The snapshot is cleared to (0,0,0,0) and written with alpha 1, so a bilinear read across the edge of what
+  // was seen averages real colour with that black. Divide the coverage back out and the edge keeps the map's
+  // own colour instead of a dark halo a texel wide.
+  const snap = texture(exploredSnapshotTexture).sample(bufferUv);
+  const storedColor = snap.rgb.div(snap.a.max(float(0.001))).min(float(1));
   // RELIT BY THE CURRENT TIME OF DAY (2026-10-28). The snapshot holds plain map
   // colour (`buildVisionSnapshotPublishMaterial`'s `storeUnlit`); the light on
   // it is today's ambient, so memory dims and warms with the sky like the rest
@@ -481,8 +901,31 @@ export function buildVisionExploredDimMaterial({
   // Only the ambient: a torch lit now in a room nobody can see must not show.
   const snapshotColor = memoryLight ? sRGBTransferEOTF(sRGBTransferOETF(storedColor).mul(memoryLight)) : storedColor;
 
-  const shouldDim = isExplored.and(revealed.not());
-  const outColor = select(shouldDim, snapshotColor.mul(float(dimFactor)), vec3(0, 0, 0));
+  let outColor;
+  if (softTexture && look) {
+    // THE SOFT FIELD (2026-11-02): the gate left `live x v`; add `memory x (1 - v) x e`, so live ground
+    // fades into memory and memory fades into black, each over the field's band instead of a staircase.
+    const { v, field } = sampleFogVisibility({
+      THREE,
+      softTexture,
+      maskTexture,
+      illumTexture,
+      threshold,
+      screenUV: uv(),
+      look,
+      extraRevealed,
+    });
+    const e = sampleFogMemory({ THREE, exploredTexture, uViewRect, uExploredRect, screenUV: uv(), field, look });
+    // REMEMBERED, NOT SEEN: a little of the colour drains out, and a slow mist lifts and lowers it, so
+    // memory reads as memory at a glance (the Look still grades it in the present).
+    const grey = dot(snapshotColor, vec3(0.2126, 0.7152, 0.0722));
+    const faded = mix(vec3(grey, grey, grey), snapshotColor, look.uMemorySaturation);
+    const mistLift = float(1).add(look.uMist.mul(field.b.mul(2).sub(1)));
+    outColor = faded.mul(float(dimFactor)).mul(mistLift).mul(float(1).sub(v).mul(e));
+  } else {
+    const shouldDim = isExplored.and(revealed.not());
+    outColor = select(shouldDim, snapshotColor.mul(float(dimFactor)), vec3(0, 0, 0));
+  }
 
   const material = new THREE.NodeMaterial();
   material.transparent = true;
@@ -693,6 +1136,20 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
   const renderTarget = allocator.create(rtName, rtDesc);
 
   /**
+   * THE SOFT FOG FIELD's three targets (see `buildVisionSoftBlurMaterial`): the
+   * resolve at full size, the two blur passes at half size. LINEAR, unlike the
+   * mask: these are the presentation of the rule, read with bilinear taps.
+   * Screen-sized, resized with the mask.
+   */
+  const half = (n) => Math.max(1, Math.ceil(n / 2));
+  const softResolveDesc = { ...rtDesc, filter: 'linear' };
+  const softHDesc = { ...rtDesc, filter: 'linear', resolvedW: half(resolvedW), resolvedH: half(resolvedH) };
+  const softDesc = { ...softHDesc };
+  const softResolveTarget = allocator.create(`${rtName}.softResolve`, softResolveDesc);
+  const softHTarget = allocator.create(`${rtName}.softH`, softHDesc);
+  const softTarget = allocator.create(`${rtName}.soft`, softDesc);
+
+  /**
    * THE EXPLORED-AREA BUFFER (slice 3) — WORLD space, never cleared.
    *
    * ⚠️ WORLD-SPACE, NOT SCREEN-SPACE, AND THAT IS THE WHOLE DIFFICULTY. The
@@ -716,6 +1173,8 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     resolvedW: 2048,
     resolvedH: 2048,
     screenSized: false,
+    // Sized from the scene rect by `setExploredRect` (up to EXPLORED_MAX_DIM), so it is the named fog exception.
+    allowWorldScale: true,
     type: THREE.UnsignedByteType,
     colorSpace: THREE.NoColorSpace,
     // LINEAR here, unlike the live mask's NEAREST: the explored boundary is a
@@ -768,6 +1227,8 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     resolvedW: 2048,
     resolvedH: 2048,
     screenSized: false,
+    allowWorldScale: true, // as `exploredRtDesc`: sized by `setExploredRect`
+    // (kept on the descriptor so `allocator.resize` accepts the larger size)
     type: THREE.UnsignedByteType,
     colorSpace: THREE.NoColorSpace,
     // LINEAR: this holds real remembered colour, not a boolean — a blocky
@@ -777,6 +1238,15 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     depth: false,
   };
   const exploredSnapshotTarget = allocator.create(`${rtName}.exploredSnapshot`, exploredSnapshotRtDesc);
+
+  /**
+   * THE REVEAL FADE's history, ping-pong (`buildVisionRevealHistoryMaterial`): world space over the
+   * explored rect, a third of the explored buffer's size (it only shapes a fade, never an edge).
+   * LINEAR, R only in use. `next` is drawn from `current`, then copied back, so consumers read one texture.
+   */
+  const revealDesc = { ...exploredRtDesc, resolvedW: 512, resolvedH: 512 };
+  const revealCurrentTarget = allocator.create(`${rtName}.revealHistory`, revealDesc);
+  const revealNextTarget = allocator.create(`${rtName}.revealHistoryNext`, { ...revealDesc });
 
   /** The world rect the explored buffer covers, as [x0,y0,x1,y1]. */
   let exploredRect = [0, 0, 1, 1];
@@ -1016,6 +1486,33 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     const next = [rect.minX, rect.minY, rect.maxX, rect.maxY];
     if (next.every((v, i) => v === exploredRect[i]) && exploredCamera) return;
     exploredRect = next;
+    // RESOLUTION FOLLOWS THE SCENE (2026-10-31). The author: previously explored areas were *"very very low
+    // resolution"*. A fixed 2048² square squeezed a 10,000 x 8,000 px map to ~5 world px per texel (and
+    // stretched it, since the scene is not square). Give the buffers the scene's own shape instead, one texel
+    // per world px at most, capped so a huge map cannot spend more than ~75 MB across the two buffers.
+    {
+      const w = Math.max(1, rect.maxX - rect.minX);
+      const h = Math.max(1, rect.maxY - rect.minY);
+      const k = Math.min(1, EXPLORED_MAX_DIM / Math.max(w, h));
+      const tw = Math.max(EXPLORED_MIN_DIM, Math.round(w * k));
+      const th = Math.max(EXPLORED_MIN_DIM, Math.round(h * k));
+      if (tw !== exploredRtDesc.resolvedW || th !== exploredRtDesc.resolvedH) {
+        for (const desc of [exploredRtDesc, exploredSnapshotRtDesc]) {
+          desc.resolvedW = tw;
+          desc.resolvedH = th;
+        }
+        allocator.resize(exploredTarget, tw, th, exploredRtDesc);
+        allocator.resize(exploredSnapshotTarget, tw, th, exploredSnapshotRtDesc);
+      }
+      const rw = Math.max(64, Math.round(tw / REVEAL_HISTORY_DIVISOR));
+      const rh = Math.max(64, Math.round(th / REVEAL_HISTORY_DIVISOR));
+      if (rw !== revealDesc.resolvedW || rh !== revealDesc.resolvedH) {
+        revealDesc.resolvedW = rw;
+        revealDesc.resolvedH = rh;
+        allocator.resize(revealCurrentTarget, rw, rh, revealDesc);
+        allocator.resize(revealNextTarget, rw, rh, { ...revealDesc });
+      }
+    }
     // Ortho over the world rect. Y is NOT flipped: MSA's world space is
     // Foundry pixel space with +Y down, the same convention the light meshes
     // use (`point-light-pool.js` positions with raw Foundry coords), so top =
@@ -1061,9 +1558,25 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     rtDesc.resolvedW = w;
     rtDesc.resolvedH = h;
     allocator.resize(renderTarget, w, h, rtDesc);
+    softResolveDesc.resolvedW = w;
+    softResolveDesc.resolvedH = h;
+    allocator.resize(softResolveTarget, w, h, softResolveDesc);
+    for (const [target, desc] of [
+      [softHTarget, softHDesc],
+      [softTarget, softDesc],
+    ]) {
+      desc.resolvedW = half(w);
+      desc.resolvedH = half(h);
+      allocator.resize(target, desc.resolvedW, desc.resolvedH, desc);
+    }
   }
 
   function dispose() {
+    allocator.dispose(softResolveTarget);
+    allocator.dispose(revealCurrentTarget);
+    allocator.dispose(revealNextTarget);
+    allocator.dispose(softHTarget);
+    allocator.dispose(softTarget);
     for (const [, entry] of pool) disposeEntry(entry);
     pool.clear();
     clearFloorMeshes();
@@ -1125,6 +1638,17 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     // `probeMapOnlyGrid`) and this getter is the one door it reads through.
     get exploredSnapshotTarget() {
       return exploredSnapshotTarget;
+    },
+    /** The explored buffer itself, for the coverage publish to bind (its R is now soft coverage). */
+    get exploredTarget() {
+      return exploredTarget;
+    },
+    /** The soft fog field's targets, in draw order (resolve → blur H → blur V). */
+    softTargets: { resolve: softResolveTarget, blurH: softHTarget, field: softTarget },
+    /** The reveal fade's history pair (`buildVisionRevealHistoryMaterial`): draw `next` from `current`, copy back. */
+    revealTargets: { current: revealCurrentTarget, next: revealNextTarget },
+    get softTexture() {
+      return softTarget.texture;
     },
     dispose,
     getInfo,

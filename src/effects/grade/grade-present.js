@@ -64,7 +64,12 @@ import {
 import { HEAT_TAP_Y_FREQ } from '../temperature/temperature-model.js';
 // THE FOG HOLD (2026-10-27) — the vision gate's own reveal test, re-asked here
 // so the grade never reaches into the fog (see `setFogHoldActive`).
-import { sampleVisionRevealFactor, sampleExploredNode } from '../vision/vision-mask-render.js';
+import {
+  sampleVisionRevealFactor,
+  sampleExploredNode,
+  sampleFogVisibility,
+  sampleFogMemory,
+} from '../vision/vision-mask-render.js';
 // THE LENS WARP (2026-11-02) — post.lens runs BEFORE this draw, so the picture arrives already bowed;
 // every screen-position mask here is read through the lens's own warp so it lands on the same pixels.
 import { lensWarpUv } from '../lens-render.js';
@@ -299,7 +304,7 @@ export function buildGradePresentMaterial({
    * came out brown, and remembered ground brightened only where `_Outdoors`
    * was white. With the hold on, each pixel asks the gate's own question:
    *   revealed now          → graded, as before
-   *   explored, not visible → exactly what the gate left (the dim memory)
+   *   explored, not visible → what the gate left (the dim memory), given the same Look (2026-11-02)
    *   never explored        → solid black, bloom's spill included
    * Same compile-time shape as `sharpenActive`: off (MSA not owning vision)
    * means not one node of it exists.
@@ -365,6 +370,31 @@ export function buildGradePresentMaterial({
      * `lensWarpCompiled`): the lens's own warp, or the same uv when the lens is off. */
     const sourceUvAt = (screenUv) =>
       lensWarpCompiled ? lensWarpUv(TSL, screenUv, uLensDistortion, lensUvGuard) : screenUv;
+    /** THE SOFT FOG at a (mask-space) uv (2026-11-02): `v` how visible now, `e` how remembered — the same
+     * field the gate faded the frame with (`vision-mask-render.js`, "THE SOFT FOG FIELD"). Null without one. */
+    const softFog = fogHoldActive && fogHold?.softTexture && fogHold?.look;
+    const fogAt = (maskUv) => {
+      const { v, field } = sampleFogVisibility({
+        THREE,
+        softTexture: fogHold.softTexture,
+        maskTexture: fogHold.maskTexture,
+        illumTexture: fogHold.illumTexture,
+        threshold: fogHold.threshold,
+        screenUV: maskUv,
+        look: fogHold.look,
+        extraRevealed: fogHold.extraRevealed ?? null,
+      });
+      const e = sampleFogMemory({
+        THREE,
+        exploredTexture: fogHold.exploredTexture,
+        uViewRect,
+        uExploredRect: fogHold.uExploredRect,
+        screenUV: maskUv,
+        field,
+        look: fogHold.look,
+      });
+      return { v, e };
+    };
     const screenSourceUv = sourceUvAt(uv());
     /** Rebuild the complete pre-vision image at an arbitrary screen UV. V2's
      * lens distortion and chromatic aberration refract the already graded
@@ -388,28 +418,40 @@ export function buildGradePresentMaterial({
       const gradedEnv = buildGradeNode(TSL, sampledLit, uEnv);
       const afterEnv = outdoorsAt ? mix(sampledLit, gradedEnv, outdoorsAt) : sampledLit;
       // ARTISTIC grade + the whole-frame TAIL (tone map + LUT).
-      const gradedLook = buildGradeNode(TSL, afterEnv, uArt, {
-        toneMapping: currentToneMapping,
-        lutTexture: lutTexNode,
-        lutStrength: uArt.lutStrength,
-        lampGlow: lampGlowTexNode ? lampGlowTexNode.sample(maskUv).rgb : null,
-      });
-      // VIGNETTE (2026-11-01) — the artistic grade's one spatial op: the frame's
-      // corners darken by up to `vignette` (grade-ops.js#vignetteFactor mirrors it).
-      // A zero amount multiplies by exactly 1.
-      // ZONE EXPOSURE (2026-11-01) — interiors and exteriors exposed separately, across
-      // the same _Outdoors gate the environmental grade uses (grade-ops.js#zoneExposureMul).
-      // Both at 0 stops multiplies by exactly 1.
-      const zoneT = outdoorsAt ?? float(1);
-      const zoneStops = mix(uArt.exposureInside, uArt.exposureOutside, zoneT);
-      const zonedLook = gradedLook.mul(TSL.pow(float(2), zoneStops));
-      const vigD = sampleUv.sub(vec2(0.5, 0.5)).length().mul(Math.SQRT2);
-      const vigK = float(1).sub(uArt.vignette.mul(TSL.smoothstep(float(0.45), float(1.05), vigD)));
-      const gradedArt = zonedLook.mul(vigK);
-      // STYLIZE remains before the personal viewing-device optics.
-      const styled = buildStylizeNode(gradedArt, currentStyle);
-      const shot = styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+      // The artistic grade + zone exposure + vignette + stylize, as a function of the lamp-glow
+      // sample so the fog hold below can build the REMEMBERED ground's copy without it.
+      const artShot = (lampGlow) => {
+        const gradedLook = buildGradeNode(TSL, afterEnv, uArt, {
+          toneMapping: currentToneMapping,
+          lutTexture: lutTexNode,
+          lutStrength: uArt.lutStrength,
+          lampGlow,
+        });
+        // VIGNETTE (2026-11-01) — the artistic grade's one spatial op: the frame's
+        // corners darken by up to `vignette` (grade-ops.js#vignetteFactor mirrors it).
+        // A zero amount multiplies by exactly 1.
+        // ZONE EXPOSURE (2026-11-01) — interiors and exteriors exposed separately, across
+        // the same _Outdoors gate the environmental grade uses (grade-ops.js#zoneExposureMul).
+        // Both at 0 stops multiplies by exactly 1.
+        const zoneT = outdoorsAt ?? float(1);
+        const zoneStops = mix(uArt.exposureInside, uArt.exposureOutside, zoneT);
+        const zonedLook = gradedLook.mul(TSL.pow(float(2), zoneStops));
+        const vigD = sampleUv.sub(vec2(0.5, 0.5)).length().mul(Math.SQRT2);
+        const vigK = float(1).sub(uArt.vignette.mul(TSL.smoothstep(float(0.45), float(1.05), vigD)));
+        const gradedArt = zonedLook.mul(vigK);
+        // STYLIZE remains before the personal viewing-device optics.
+        const styled = buildStylizeNode(gradedArt, currentStyle);
+        return styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+      };
+      const shot = artShot(lampGlowTexNode ? lampGlowTexNode.sample(maskUv).rgb : null);
       if (!fogHoldActive) return shot;
+      if (softFog) {
+        // THE SOFT HOLD (2026-11-02): live fades into memory, memory into black, over the field's band.
+        // Memory is scaled by how remembered it is, which also takes bloom's spill out of the unknown.
+        const fog = fogAt(maskUv);
+        const memoryShot = lampGlowTexNode ? artShot(null) : shot;
+        return mix(memoryShot.mul(fog.e), shot, fog.v);
+      }
       // THE FOG HOLD — see `fogHoldActive`. Asked at the SAME uv the picture
       // was sampled at, so frost refraction and heat ripple move the fog's
       // edge with the image instead of shearing it off — and through the
@@ -430,7 +472,13 @@ export function buildGradePresentMaterial({
         screenUV: maskUv,
         exploredSnapshotTexture: fogHold.exploredSnapshotTexture ?? null,
       });
-      return select(revealed, shot, select(isExplored, sampledLit, vec3(0, 0, 0)));
+      // EXPLORED, NOT VISIBLE (2026-11-02): the remembered ground gets the SAME Look as the live
+      // picture - colourise, one-colour, saturation, tint, tone map, LUT - or a Look reads as a lit
+      // island in an un-looked grey fog. The dim memory is what is graded (the gate already dimmed
+      // it), so memory stays darker than live ground. Lamp glow is left out: a lamp burning in a
+      // room nobody can see must not keep its colour or show through the memory.
+      const memoryShot = lampGlowTexNode ? artShot(null) : shot;
+      return select(revealed, shot, select(isExplored, memoryShot, vec3(0, 0, 0)));
     };
     // THE HEAT WARP: for each hot fire, a column of rising shimmer above it (screen up), strongest just over the flame and fading out
     // by `reach` radii; two octaves of slow noise pushed upward make the picture ripple.
@@ -569,9 +617,18 @@ export function buildGradePresentMaterial({
       } else if (gridShape) {
         gridAlpha = buildFoundryGridAlpha(TSL, { canvasXY, u: uGrid, type: Number(parts[0]), style: Number(parts[1]) });
       }
+      // UNDER THE FOG (2026-11-02): the lines stay full where the token sees, fade to a ghost over
+      // remembered ground and are gone in the unknown — graph paper over the black read as cheap.
+      let outlineAlpha = outlineCompiled ? buildSceneOutlineAlpha(TSL, { canvasXY, u: uGrid }) : null;
+      if (softFog) {
+        const fog = fogAt(screenSourceUv);
+        const keep = fog.v.add(float(1).sub(fog.v).mul(fog.e).mul(fogHold.look.uMemoryGrid));
+        if (gridAlpha) gridAlpha = gridAlpha.mul(keep);
+        if (outlineAlpha) outlineAlpha = outlineAlpha.mul(keep);
+      }
       finalRgb = compositeFoundryOverlay(TSL, finalRgb, {
         gridAlpha,
-        outlineAlpha: outlineCompiled ? buildSceneOutlineAlpha(TSL, { canvasXY, u: uGrid }) : null,
+        outlineAlpha,
         u: uGrid,
         look,
       });

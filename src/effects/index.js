@@ -216,6 +216,14 @@ export {
   buildVisionGateMaterial,
   buildVisionExploredDimMaterial,
   buildVisionSnapshotPublishMaterial,
+  // THE SOFT FOG FIELD (2026-11-02) - one smooth visibility field every fog consumer reads.
+  buildVisionSoftResolveMaterial,
+  buildVisionSoftBlurMaterial,
+  buildVisionCoveragePublishMaterial,
+  createFogLookUniforms,
+  fogSoftStepUv,
+  buildVisionRevealHistoryMaterial,
+  buildVisionCopyMaterial,
   // THE SHARED REVEAL QUERY (mythica-machina-press#386) — the SAME rule
   // buildVisionGateMaterial's own whole-frame gate already enforces, made
   // callable by an effect OUTSIDE this file for the first time (closing #49

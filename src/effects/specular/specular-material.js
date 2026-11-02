@@ -208,6 +208,44 @@ export function outdoorGlintResponse(sky) {
   return { gain: 1 - (1 - SPECULAR_OVERCAST_GLINT) * overcast, broaden: overcast };
 }
 
+/** Camera speed, in view-widths per second, that counts as a FULL pan flare. */
+export const PAN_FULL_SPEED = 1.2;
+/** How long the flare takes to settle after the camera stops (seconds, 1/e). */
+export const PAN_RELEASE_SEC = 0.35;
+/** A jump larger than this many view-widths in one frame is a teleport (scene
+ * change, "jump to token"), not a pan — it must not flash every highlight. */
+export const PAN_TELEPORT_VIEWS = 2;
+
+/**
+ * THE PAN FLARE'S MOTION STATE — eased camera speed and direction, from the
+ * view centre the subsystem already pushes every frame and the SHARED clock
+ * (never a private clock: `time/one-clock`). Rises at once, settles over
+ * PAN_RELEASE_SEC, so a pan brightens the metal and a stop lets it calm.
+ *
+ * @param {{cx:number, cy:number, tMs:number, dirX:number, dirY:number, amount:number}|null} prev
+ * @param {{cx:number, cy:number, viewSpan:number, tMs:number}} now
+ * @returns {{cx:number, cy:number, tMs:number, dirX:number, dirY:number, amount:number}}
+ */
+export function easePanMotion(prev, now) {
+  const next = { cx: now.cx, cy: now.cy, tMs: now.tMs, dirX: prev?.dirX ?? 1, dirY: prev?.dirY ?? 0, amount: 0 };
+  if (!prev || !Number.isFinite(now.tMs) || !Number.isFinite(prev.tMs)) return next;
+  const dt = (now.tMs - prev.tMs) / 1000;
+  if (!(dt > 0)) return { ...next, amount: prev.amount ?? 0, dirX: prev.dirX, dirY: prev.dirY };
+  const dx = now.cx - prev.cx;
+  const dy = now.cy - prev.cy;
+  const span = Math.max(1, now.viewSpan);
+  const dist = Math.hypot(dx, dy);
+  const decayed = (prev.amount ?? 0) * Math.exp(-dt / PAN_RELEASE_SEC);
+  if (dist / span > PAN_TELEPORT_VIEWS) return { ...next, amount: 0 };
+  const target = clamp01(dist / span / dt / PAN_FULL_SPEED);
+  if (dist > 1e-6) {
+    next.dirX = dx / dist;
+    next.dirY = dy / dist;
+  }
+  next.amount = Math.max(target, decayed);
+  return next;
+}
+
 /** @param {number} x @returns {number} */
 function clamp01(x) {
   const n = Number(x);

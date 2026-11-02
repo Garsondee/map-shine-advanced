@@ -54,7 +54,8 @@ import {
   SPECULAR_DEFAULT_ISLAND_SPREAD,
   SPECULAR_DEFAULT_TIER,
 } from './specular-render.js';
-import { keyLightDirection, outdoorGlintResponse } from './specular-material.js';
+import { keyLightDirection, outdoorGlintResponse, easePanMotion } from './specular-material.js';
+import { buildSpecularShapeMap } from './specular-shape.js';
 import { buildSpecularIslandPack } from './specular-islands.js';
 import { buildTileMotionPositionNode, buildTileMotionMaskUvNode } from '../tile-motion-nodes.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
@@ -110,7 +111,7 @@ export function createSpecularTileSurfaceSubsystem({
   // subsystem, which the viewer passes the identical value to — but never
   // read here; see `window-tile-surface-subsystem.js`'s own identical
   // parameter for the full reasoning.
-  createMaskTexture: _createMaskTexture,
+  createMaskTexture,
   createPackTexture,
   illumTexture,
   depthTexture = null,
@@ -164,6 +165,7 @@ export function createSpecularTileSurfaceSubsystem({
       THREE,
       maskTexture: entry.maskTexture,
       islandPackTexture: entry.islandPackTexture,
+      shapeTexture: entry.shapeTexture,
       illumTexture,
       depthTexture,
       uViewRect,
@@ -224,6 +226,24 @@ export function createSpecularTileSurfaceSubsystem({
       // The pack's own 1×1 placeholder — global parallax `(1,0)`, matching
       // the floor subsystem's identical fallback — until the bake below runs.
       entry.islandPackTexture ??= createPackTexture(new Uint8Array([191, 128, 0, 0]), 1, 1);
+      // THE SHAPE MAP (2026-11-02, round 2) — baked BEFORE the build below, so
+      // the material compiles its shape path against a real texture; a decode
+      // with no bytes keeps a flat 1×1 (slope 0) rather than no texture at all.
+      entry.shapeTexture?.dispose?.();
+      entry.shapeTexture = null;
+      if (entry.pendingBytes) {
+        try {
+          const shape = buildSpecularShapeMap({
+            rgba: entry.pendingBytes.data,
+            width: entry.pendingBytes.width,
+            height: entry.pendingBytes.height,
+          });
+          entry.shapeTexture = createMaskTexture(shape.data, shape.w, shape.h, 'linear');
+        } catch (err) {
+          log.error(`specular shape bake failed for tile ${entry.id} — flat shape:`, err);
+        }
+      }
+      entry.shapeTexture ??= createMaskTexture(new Uint8Array([128, 128, 0, 128]), 1, 1, 'linear');
       entry.tileMotionBag = getItemTileMotion(item) ?? null;
       entry.builtForTier = resolveTier();
       disposeMesh(entry);
@@ -268,8 +288,10 @@ export function createSpecularTileSurfaceSubsystem({
     disposeMesh(entry);
     entry.maskTexture?.dispose?.();
     entry.islandPackTexture?.dispose?.();
+    entry.shapeTexture?.dispose?.();
     entry.maskTexture = null;
     entry.islandPackTexture = null;
+    entry.shapeTexture = null;
     entry.pendingBytes = null;
   }
 
@@ -292,6 +314,8 @@ export function createSpecularTileSurfaceSubsystem({
 
   let lastParamsKey = '';
   let lastSkyKey = '';
+  /** `easePanMotion`'s running state, shared by every tile (one camera). */
+  let panMotion = null;
 
   /**
    * Make sure an entry exists for this item and that its mask is loading (or
@@ -436,6 +460,15 @@ export function createSpecularTileSurfaceSubsystem({
 
     const items = typeof getSpecularMaskItems === 'function' ? (getSpecularMaskItems(floorIndex) ?? []) : [];
     const seen = new Set();
+    // THE PAN FLARE — one eased camera speed for every tile, on the shared clock.
+    if (viewRect) {
+      panMotion = easePanMotion(panMotion, {
+        cx: (viewRect.minX + viewRect.maxX) / 2,
+        cy: (viewRect.minY + viewRect.maxY) / 2,
+        viewSpan: viewRect.maxX - viewRect.minX,
+        tMs: Number(timeMsNode?.value),
+      });
+    }
     for (const item of items) {
       seen.add(item.id);
       const entry = trackItem(item);
@@ -460,6 +493,7 @@ export function createSpecularTileSurfaceSubsystem({
       // floor subsystem's own comment).
       if (viewRect && entry.built) {
         entry.built.setViewCentre((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
+        if (panMotion) entry.built.setPanMotion(panMotion);
       }
     }
     parkUnseen(seen);
@@ -474,7 +508,7 @@ export function createSpecularTileSurfaceSubsystem({
         const dir = keyLightDirection(sky.key);
         const skyGlint = outdoorGlintResponse(sky);
         for (const entry of entries.values()) {
-          entry.built?.setSunDir(dir[0], dir[1]);
+          entry.built?.setSunDir(dir[0], dir[1], dir[2]);
           entry.built?.setSkyGlint?.(skyGlint);
         }
       }
@@ -513,6 +547,11 @@ export function createSpecularTileSurfaceSubsystem({
       p.glintFocus,
       p.hotCore,
       p.colourResponse,
+      p.cameraGlint,
+      p.reflectionBend,
+      p.sparkle,
+      p.sparkleSizePx,
+      p.panFlare,
       JSON.stringify(layerParams),
     ].join('|');
     if (key !== lastParamsKey) {
@@ -546,6 +585,11 @@ export function createSpecularTileSurfaceSubsystem({
         if (Number.isFinite(p.glintFocus)) b.setGlintFocus(p.glintFocus);
         if (Number.isFinite(p.hotCore)) b.setHotCore(p.hotCore);
         if (Number.isFinite(p.colourResponse)) b.setColourResponse(p.colourResponse);
+        if (Number.isFinite(p.cameraGlint)) b.setCameraGlint(p.cameraGlint);
+        if (Number.isFinite(p.reflectionBend)) b.setReflectionBend(p.reflectionBend);
+        if (Number.isFinite(p.sparkle)) b.setSparkle(p.sparkle);
+        if (Number.isFinite(p.sparkleSizePx)) b.setSparkleSizePx(p.sparkleSizePx);
+        if (Number.isFinite(p.panFlare)) b.setPanFlare(p.panFlare);
         if (Number.isFinite(p.pulse)) b.setPulse(p.pulse);
         if (Number.isFinite(p.sunBias)) b.setSunBias(p.sunBias);
         for (let i = 0; i < layerParams.length; i++) {

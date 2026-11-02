@@ -66,7 +66,14 @@ export function run(t) {
   const deferred = SPECULAR.deferredRungs.length;
   ok('tier 0 exists — the coarse pin (Effects.md Law 1)', SPECULAR.tiers[0]?.n === 0);
   ok('tier 0 is named for what it does, not for a technique', SPECULAR.tiers[0]?.name === 'presence');
-  ok('built + deferred describe one whole ladder, nothing dropped', built + deferred === 11);
+  // 11 → 10 (2026-11-02): the deferred 'sparkle' rung was BUILT inside tier 1
+  // ('shimmer', round 2 of the metal work), not as a rung of its own — so it
+  // left the deferred list without adding a tier. Nothing was dropped.
+  ok('built + deferred describe one whole ladder, nothing dropped', built + deferred === 10);
+  ok(
+    'sparkle is no longer claimed as unbuilt',
+    !SPECULAR.deferredRungs.some((r) => r.name === 'sparkle') && /sparkle/.test(SPECULAR.tiers[1].adds)
+  );
   const allNames = [...SPECULAR.tiers.map((x) => x.name), ...SPECULAR.deferredRungs.map((x) => x.name)];
   ok('no rung is claimed twice', new Set(allNames).size === allNames.length);
   ok(

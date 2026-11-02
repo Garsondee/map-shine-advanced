@@ -46,6 +46,7 @@ import {
   SPECULAR_LAYER_COUNT,
 } from '../../src/effects/specular/specular-render.js';
 import { buildSpecularIslandPack } from '../../src/effects/specular/specular-islands.js';
+import { buildSpecularShapeMap } from '../../src/effects/specular/specular-shape.js';
 import { SPECULAR_DEBUG_CHANNELS } from '../../src/effects/specular/specular.js';
 import { buildWorldSpaceOutdoorsGate } from '../../src/effects/lighting/environmental-light.js';
 import { computeCameraFrustum, QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../src/scene/world-quad.js';
@@ -131,6 +132,8 @@ const solidTex = (r, g, b, a) => makeTex(new Uint8Array([r, g, b, a]), 1, 1);
 
 let maskTexture = solidTex(0, 0, 0, 255);
 let islandPackTexture = makeTex(new Uint8Array([191, 128, 0, 0]), 1, 1, true);
+// Flat shape (slope 0, height 0, convexity 0.5) until a mask bakes one.
+let shapeTexture = makeTex(new Uint8Array([128, 128, 0, 128]), 1, 1);
 // The screen-space light buffer — W×H, rewritten per shot (row 0 = view top).
 const illumData = new Uint8Array(W * H * 4);
 const illumTexture = makeTex(illumData, W, H);
@@ -179,6 +182,10 @@ function adoptMask({ texture: tex, data, width, height, rect, label, islandSprea
   world = rect;
   surface.setMaskUvBounds({ minU: 0, minV: 0, maxU: 1, maxV: 1 });
   setQuad(world);
+  const shape = buildSpecularShapeMap({ rgba: data, width, height });
+  shapeTexture?.dispose?.();
+  shapeTexture = makeTex(shape.data, shape.w, shape.h);
+  surface.setShapeTexture(shapeTexture);
   let islandReport = null;
   try {
     const pack = buildSpecularIslandPack({ rgba: data, width, height, spread: islandSpread });
@@ -619,6 +626,35 @@ async function stats({ channel = 'shimmer', illum = { kind: 'flat', level: 0.6 }
   };
 }
 
+/**
+ * A CAMERA PAN as a strip of frames — the round-2 features only exist in
+ * motion. Renders `frames` shots with the view centre moving from `from` to
+ * `to`, optionally with the pan flare pushed as if the camera were moving.
+ * @param {{name?: string, from: number[], to: number[], frames?: number, scale?: number,
+ *   illum?: object, flare?: number, timeMs?: number}} args
+ */
+async function pan({ name = 'pan', from, to, frames = 5, scale = 1, illum, flare = 0, timeMs = 0 }) {
+  await ready;
+  const dx = to[0] - from[0];
+  const dy = to[1] - from[1];
+  surface.setPanMotion({ dirX: dx, dirY: dy, amount: flare });
+  const out = [];
+  for (let i = 0; i < frames; i++) {
+    const f = frames === 1 ? 0 : i / (frames - 1);
+    const r = await shot({
+      name: `${name}-${i}`,
+      cx: from[0] + dx * f,
+      cy: from[1] + dy * f,
+      scale,
+      illum,
+      timeMs,
+    });
+    out.push(r.saved?.path ?? r.name);
+  }
+  surface.setPanMotion({ dirX: 1, dirY: 0, amount: 0 });
+  return out;
+}
+
 async function savePng(canvas, file) {
   const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
   const r = await fetch(`/__lab/artifact?run=${encodeURIComponent(RUN)}&file=${encodeURIComponent(file)}`, {
@@ -715,6 +751,8 @@ const ready = (async () => {
     THREE,
     maskTexture,
     islandPackTexture,
+    // `?noshape=1` builds the round-1 graph (shape path compiled out) — for A/B size and cost.
+    shapeTexture: query.get('noshape') ? null : shapeTexture,
     illumTexture,
     depthTexture: null,
     uViewRect,
@@ -747,6 +785,17 @@ window.specLab = {
   scan,
   bench,
   stats,
+  pan,
+  /** WGSL size of the live material + first-draw (compile) time, for the GPU budget. */
+  async shaderCost() {
+    await ready;
+    const t0 = performance.now();
+    await renderRaw('off');
+    await renderer.backend.device.queue.onSubmittedWorkDone();
+    const firstDrawMs = performance.now() - t0;
+    const sh = await renderer.debug.getShaderAsync(scene, camera, mesh);
+    return { vsChars: sh.vertexShader.length, fsChars: sh.fragmentShader.length, firstDrawMs: Math.round(firstDrawMs) };
+  },
   state,
   view,
   edgeReport,

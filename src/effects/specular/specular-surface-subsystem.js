@@ -45,7 +45,13 @@ import {
   SPECULAR_DEFAULT_ISLAND_SPREAD,
   SPECULAR_DEFAULT_TIER,
 } from './specular-render.js';
-import { keyLightDirection, describeSpecularMapping, outdoorGlintResponse } from './specular-material.js';
+import {
+  keyLightDirection,
+  describeSpecularMapping,
+  outdoorGlintResponse,
+  easePanMotion,
+} from './specular-material.js';
+import { buildSpecularShapeMap } from './specular-shape.js';
 import { buildSpecularIslandPack } from './specular-islands.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
@@ -144,6 +150,12 @@ export function createSpecularSurfaceSubsystem({
   /** The neutral pack, kept so a slot with no pack of its own can fall back to it. */
   const placeholderPackTexture = islandPackTexture;
   const placeholderMaskTexture = maskTexture;
+  /** The flat shape (slope 0, convexity 0.5) — what a slot binds until its own
+   * shape map bakes, and what an unbound surface reads (2026-11-02, round 2). */
+  const placeholderShapeTexture = createMaskTexture(new Uint8Array([128, 128, 0, 128]), 1, 1, 'linear');
+  let shapeTexture = placeholderShapeTexture;
+  /** `easePanMotion`'s running state — the pan flare's eased camera speed. */
+  let panMotion = null;
   let maskInfo = null;
   let islandInfo = null;
   /** Mirrors the value last pushed to `surface.setIslandBakeStatus`, so the
@@ -231,6 +243,7 @@ export function createSpecularSurfaceSubsystem({
       THREE,
       maskTexture,
       islandPackTexture,
+      shapeTexture,
       illumTexture,
       depthTexture,
       uViewRect,
@@ -304,6 +317,20 @@ export function createSpecularSurfaceSubsystem({
       // touch what is being drawn).
       target.packTexture?.dispose?.();
       target.packTexture = createPackTexture(pack.data, pack.w, pack.h);
+      // THE SHAPE MAP rides the same bytes and the same moment, but does not
+      // depend on the island spread, so a spread re-bake leaves it alone.
+      if (!target.shapeTexture) {
+        const shape = buildSpecularShapeMap({
+          rgba: target.pendingBytes.data,
+          width: target.pendingBytes.width,
+          height: target.pendingBytes.height,
+        });
+        target.shapeTexture = createMaskTexture(shape.data, shape.w, shape.h, 'linear');
+      }
+      if (target === activeSlot) {
+        shapeTexture = target.shapeTexture;
+        surface.setShapeTexture(shapeTexture);
+      }
       target.bakedSpread = spread;
       if (target === activeSlot) {
         islandPackTexture = target.packTexture;
@@ -543,6 +570,8 @@ export function createSpecularSurfaceSubsystem({
     // per-object motion on this floor's mask.
     islandPackTexture = slot.packTexture ?? placeholderPackTexture;
     surface.setIslandPackTexture(islandPackTexture);
+    shapeTexture = slot.shapeTexture ?? placeholderShapeTexture;
+    surface.setShapeTexture(shapeTexture);
     islandInfo = slot.islandInfo;
     islandBakeStatus = slot.bakeStatus;
     surface.setIslandBakeStatus(islandBakeStatus);
@@ -562,8 +591,10 @@ export function createSpecularSurfaceSubsystem({
     // the bound textures).
     maskTexture = placeholderMaskTexture;
     islandPackTexture = placeholderPackTexture;
+    shapeTexture = placeholderShapeTexture;
     surface.setMaskTexture(maskTexture);
     surface.setIslandPackTexture(islandPackTexture);
+    surface.setShapeTexture(shapeTexture);
     refreshVisibility();
   }
 
@@ -571,6 +602,7 @@ export function createSpecularSurfaceSubsystem({
   function disposeSlot(slot) {
     slot.maskTexture?.dispose?.();
     slot.packTexture?.dispose?.();
+    slot.shapeTexture?.dispose?.();
     slot.pendingBytes = null;
   }
 
@@ -730,6 +762,14 @@ export function createSpecularSurfaceSubsystem({
     if (viewRect) {
       surface.setViewCentre((viewRect.minX + viewRect.maxX) / 2, (viewRect.minY + viewRect.maxY) / 2);
       lastViewRect = viewRect;
+      // THE PAN FLARE — eased camera speed on the shared clock.
+      panMotion = easePanMotion(panMotion, {
+        cx: (viewRect.minX + viewRect.maxX) / 2,
+        cy: (viewRect.minY + viewRect.maxY) / 2,
+        viewSpan: viewRect.maxX - viewRect.minX,
+        tMs: Number(timeMsNode?.value),
+      });
+      surface.setPanMotion(panMotion);
     }
 
     // THE SUN'S AZIMUTH — one unit vector, the only route its direction has
@@ -741,7 +781,7 @@ export function createSpecularSurfaceSubsystem({
       if (skyKey !== lastSkyKey) {
         lastSkyKey = skyKey;
         const dir = keyLightDirection(sky.key);
-        surface.setSunDir(dir[0], dir[1]);
+        surface.setSunDir(dir[0], dir[1], dir[2]);
         surface.setSkyGlint(outdoorGlintResponse(sky));
       }
     }
@@ -787,6 +827,11 @@ export function createSpecularSurfaceSubsystem({
       p.glintFocus,
       p.hotCore,
       p.colourResponse,
+      p.cameraGlint,
+      p.reflectionBend,
+      p.sparkle,
+      p.sparkleSizePx,
+      p.panFlare,
       JSON.stringify(layerParams),
     ].join('|');
     if (key === lastParamsKey) return;
@@ -816,6 +861,11 @@ export function createSpecularSurfaceSubsystem({
     if (Number.isFinite(p.glintFocus)) surface.setGlintFocus(p.glintFocus);
     if (Number.isFinite(p.hotCore)) surface.setHotCore(p.hotCore);
     if (Number.isFinite(p.colourResponse)) surface.setColourResponse(p.colourResponse);
+    if (Number.isFinite(p.cameraGlint)) surface.setCameraGlint(p.cameraGlint);
+    if (Number.isFinite(p.reflectionBend)) surface.setReflectionBend(p.reflectionBend);
+    if (Number.isFinite(p.sparkle)) surface.setSparkle(p.sparkle);
+    if (Number.isFinite(p.sparkleSizePx)) surface.setSparkleSizePx(p.sparkleSizePx);
+    if (Number.isFinite(p.panFlare)) surface.setPanFlare(p.panFlare);
     if (Number.isFinite(p.pulse)) surface.setPulse(p.pulse);
     if (Number.isFinite(p.sunBias)) surface.setSunBias(p.sunBias);
 

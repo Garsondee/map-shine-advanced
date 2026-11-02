@@ -415,6 +415,11 @@ export const SPECULAR_DEFAULT_MIRROR_DEPTH = 0.6;
 export const SPECULAR_DEFAULT_GLINT_FOCUS = 2;
 export const SPECULAR_DEFAULT_HOT_CORE = 0.4;
 export const SPECULAR_DEFAULT_COLOUR_RESPONSE = 1;
+export const SPECULAR_DEFAULT_CAMERA_GLINT = 1;
+export const SPECULAR_DEFAULT_REFLECTION_BEND = 1;
+export const SPECULAR_DEFAULT_SPARKLE = 1;
+export const SPECULAR_DEFAULT_SPARKLE_SIZE_PX = 7;
+export const SPECULAR_DEFAULT_PAN_FLARE = 0.5;
 /** World px over which the LIGHT's own gradient is read for relief's key
  * direction indoors — wide enough to see a lamp's falloff, narrow enough that
  * two lamps either side of a statue still light opposite flanks. */
@@ -436,6 +441,28 @@ const TROUGH_RETURN = 0.45;
 const CHROME_MIRROR_GAIN = 0.8;
 const CHROME_FOCUS_GAIN = 1;
 const CHROME_GLINT_GAIN = 0.4;
+/** ROUND 2 (2026-11-02) — the pan features. Tuned in the lab on the Bank tiles. */
+/** Eye height in view-widths — MUST equal water's (`WATER_TIER3_VIEWER_HEIGHT`,
+ * pinned by a test) so metal and water highlights move by one geometry. */
+export const SPECULAR_EYE_HEIGHT = 1;
+/** A lamp's assumed height for the camera highlight (vertical part of its unit
+ * vector): the light buffer knows where a lamp is, not how high. ~37°. */
+const LAMP_ELEVATION_Z = 0.85;
+const CAMERA_GLINT_SHININESS = 160;
+const CAMERA_GLINT_GAIN = 2.5;
+/** World px of reflection offset per unit slope at bend 1. */
+const BEND_PX = 220;
+/** Extra parallax on a fully tilted flank at bend 1. */
+const BEND_PARALLAX = 1.2;
+const SPARKLE_MIN_SCREEN_PX = 3;
+const SPARKLE_JITTER = 0.2;
+const SPARKLE_RADIUS = 0.2;
+const SPARKLE_FACET_TILT = 1.2;
+const SPARKLE_SHININESS = 60;
+const SPARKLE_DENSITY = 0.55;
+const SPARKLE_GAIN = 14;
+/** Brightness added to camera-keyed highlights at full pan speed and flare 1. */
+const PAN_FLARE_GAIN = 0.6;
 /** The most of the lit floor under the metal that darkening may take. */
 const MIRROR_MAX_DARKEN = 0.85;
 
@@ -732,6 +759,12 @@ export function buildSpecularSurfaceMaterial({
   glintFocus = SPECULAR_DEFAULT_GLINT_FOCUS,
   hotCore = SPECULAR_DEFAULT_HOT_CORE,
   colourResponse = SPECULAR_DEFAULT_COLOUR_RESPONSE,
+  shapeTexture = null,
+  cameraGlint = SPECULAR_DEFAULT_CAMERA_GLINT,
+  reflectionBend = SPECULAR_DEFAULT_REFLECTION_BEND,
+  sparkle = SPECULAR_DEFAULT_SPARKLE,
+  sparkleSizePx = SPECULAR_DEFAULT_SPARKLE_SIZE_PX,
+  panFlare = SPECULAR_DEFAULT_PAN_FLARE,
   tier = SPECULAR_DEFAULT_TIER,
 }) {
   const TSL = THREE.TSL;
@@ -770,6 +803,8 @@ export function buildSpecularSurfaceMaterial({
     dFdx,
     dFdy,
     length,
+    normalize,
+    sqrt,
     mx_worley_noise_float,
     mx_noise_float,
     mx_hsvtorgb,
@@ -836,7 +871,15 @@ export function buildSpecularSurfaceMaterial({
   const uViewCentre = uniform(vec2(0, 0));
   /** The sun's azimuth as a unit XY vector. From the sky handle, never derived
    * from the hour here (`env/one-sun`). */
-  const uSunDir = uniform(vec2(1, 0));
+  // xy = the horizontal unit vector toward the sun; z = the 3-vector's own
+  // vertical component (sin elevation), for the camera highlight (2026-11-02).
+  const uSunDir = uniform(vec3(1, 0, 0.5));
+  // THE PAN LOOK (2026-11-02, round 2) — x camera highlight, y reflection bend,
+  // z sparkle, w pan flare. Packed: this file is at the uniform-budget cap.
+  const uPanLook = uniform(vec4(cameraGlint, reflectionBend, sparkle, panFlare));
+  // THE PAN STATE, pushed per frame by the subsystem: xy the camera's travel
+  // direction (unit), z how fast (0..1, eased), w sparkle size in map px.
+  const uPanState = uniform(vec4(1, 0, 0, sparkleSizePx));
   /** The crop's extent in mask-UV space. THE ENTIRE mask lookup — see `maskUv`. */
   const uMaskUvBounds = uniform(vec4(0, 0, 1, 1));
   /** STAGE 3 (2026-08-05) — `computeTieSafeExpectedDepth`'s result for THIS
@@ -1125,7 +1168,7 @@ export function buildSpecularSurfaceMaterial({
     // draws (nothing here touches the composite below this rung).
     if (!plan.sunSkyEnabled) return float(1);
     const perp = vec2(L.uGrain.y.negate(), L.uGrain.x);
-    const d = abs(dot(uSunDir, perp));
+    const d = abs(dot(uSunDir.xy, perp));
     const bias = mix(float(SUN_BIAS_MIN), float(1), clamp(d, 0, 1));
     return mix(float(1), bias, outdoors.mul(uSunBias));
   }
@@ -1133,7 +1176,7 @@ export function buildSpecularSurfaceMaterial({
   /** One full shimmer layer: its own parallax depth, seamless blob field, soft
    * window, sun bias. @param {object} L @returns {*} */
   function shimmerLayer(L) {
-    const p = worldUv.sub(parallaxBase.mul(L.uParallaxDepth)).add(drift);
+    const p = worldUv.sub(parallaxBase.mul(L.uParallaxDepth).mul(bendParallax)).add(drift).add(bendOffset);
     const { e, spreadMul } = blobExponent(p, L);
     return softWindow(e, L, spreadMul).mul(sunGrainBias(L)).mul(L.uLayerStrength);
   }
@@ -1285,6 +1328,43 @@ export function buildSpecularSurfaceMaterial({
   // debug material's own `cellular`/`shimmer` channels (below) call it
   // separately and are deliberately left ungated — see that call's own
   // comment.
+  // ── THE SHAPE (2026-11-02, round 2) — the mask's broad form ─────────────
+  // `specular-shape.js` bakes the blurred height's slope once per mask; here it
+  // is turned from MASK axes into WORLD axes through the quad's own affine
+  // derivatives (so a rotated or flipped tile still bends the right way), and
+  // it feeds the bent reflections, the camera highlight and the sparkle. No
+  // shape texture (an older caller) or below the shimmer tier → compiled out.
+  // Top level, ON PURPOSE: derivatives need uniform control flow, and the
+  // shimmer below reads these from inside its presence `If`.
+  const dWorldX = dFdx(positionWorld.x);
+  const dWorldY = dFdy(positionWorld.y);
+  const safeDiv = (d) => abs(d).lessThan(float(1e-6)).select(float(1e-6), d);
+  const uvPerWorldX = dFdx(maskUv).div(safeDiv(dWorldX)).toVar('specUvPerWorldX');
+  const uvPerWorldY = dFdy(maskUv).div(safeDiv(dWorldY)).toVar('specUvPerWorldY');
+  const shapeEnabled = plan.shimmerEnabled && !!shapeTexture;
+  const shapeTexNode = shapeEnabled ? texture(shapeTexture, maskUv) : null;
+  const shapeSlopeW = (
+    shapeEnabled
+      ? (() => {
+          const sMask = shapeTexNode.rg.mul(float(2)).sub(vec2(1, 1));
+          const ax = uvPerWorldX.div(max(length(uvPerWorldX), float(1e-9)));
+          const ay = uvPerWorldY.div(max(length(uvPerWorldY), float(1e-9)));
+          return vec2(dot(sMask, ax), dot(sMask, ay));
+        })()
+      : vec2(0, 0)
+  ).toVar('specShapeSlope');
+  // REFLECTION BEND: a curved mirror shows the world displaced by its own
+  // slope, and the displacement grows as the eye moves — so each layer is
+  // offset by the slope and its parallax is quickened on the steep flanks.
+  // Reflections then curve around coins and domes and swirl as you pan.
+  const bendOffset = shapeSlopeW
+    .mul(uPanLook.y.mul(float(BEND_PX)))
+    .div(patternScale)
+    .toVar('specBendOffset');
+  const bendParallax = float(1)
+    .add(length(shapeSlopeW).mul(uPanLook.y).mul(float(BEND_PARALLAX)))
+    .toVar('specBendPar');
+
   const shimmer = plan.shimmerEnabled
     ? Fn(() => {
         const out = float(0).toVar('specShimmerGated');
@@ -1564,13 +1644,8 @@ export function buildSpecularSurfaceMaterial({
   // body compiles OUT (JS-time) rather than darkening every metal pixel flat.
   const reliefTaps = [];
   const metalBodyEnabled = plan.shimmerEnabled;
-  const { reliefLit, reliefShade } = metalBodyEnabled
+  const { reliefLit, reliefShade, heightGrad, keyDir } = metalBodyEnabled
     ? (() => {
-        const dWorldX = dFdx(positionWorld.x);
-        const dWorldY = dFdy(positionWorld.y);
-        const safeDiv = (d) => abs(d).lessThan(float(1e-6)).select(float(1e-6), d);
-        const uvPerWorldX = dFdx(maskUv).div(safeDiv(dWorldX));
-        const uvPerWorldY = dFdy(maskUv).div(safeDiv(dWorldY));
         const heightAt = (dx, dy) => {
           const node = texture(maskTexture, maskUv.add(uvPerWorldX.mul(dx)).add(uvPerWorldY.mul(dy))).level(float(0));
           reliefTaps.push(node);
@@ -1605,23 +1680,102 @@ export function buildSpecularSurfaceMaterial({
         const lampDir = lightGrad.div(max(lightGradLen, float(1e-5)));
         const keyDir2 = lampDir
           .mul(lampConfidence)
-          .add(uSunDir.mul(outdoors))
+          .add(uSunDir.xy.mul(outdoors))
           .add(vec2(RELIEF_DEFAULT_KEY[0], RELIEF_DEFAULT_KEY[1]).mul(float(0.25)));
         const keyDir = keyDir2.div(max(length(keyDir2), float(1e-5))).toVar('specReliefKey');
         // > 0 on the flank that faces the light (height falls toward it).
         const facing = dot(heightGrad, keyDir).negate().mul(float(4)).toVar('specReliefFacing');
         const reliefLit = clamp(facing, float(0), float(1));
         const reliefShade = clamp(facing.negate(), float(0), float(1));
-        return { reliefLit, reliefShade };
+        return { reliefLit, reliefShade, heightGrad, keyDir };
       })()
-    : { reliefLit: float(0), reliefShade: float(0) };
+    : { reliefLit: float(0), reliefShade: float(0), heightGrad: vec2(0, 0), keyDir: vec2(0, -1) };
+
+  const maskMax = max(max(maskSample.r, maskSample.g), maskSample.b).toVar('specMaskMax');
+
+  // ── THE EYE — highlights that travel as the camera moves (round 2) ──────
+  // The same eye water's sun glint uses (`water-light.js`: above the view
+  // centre at one view-width × SPECULAR_EYE_HEIGHT), so a pan moves the gold's
+  // highlights and the sea's glints by the same geometry.
+  const halfVec = (() => {
+    if (!shapeEnabled) return vec3(0, 0, 1);
+    const eye = vec3(uViewCentre.x, uViewCentre.y, viewSpanX.mul(float(SPECULAR_EYE_HEIGHT)));
+    const viewDir = normalize(eye.sub(vec3(positionWorld.x, positionWorld.y, float(0))));
+    // The key, lifted off the ground: the sun at its real elevation outdoors,
+    // a lamp at LAMP_ELEVATION_Z indoors (the light buffer has no height).
+    const keyZ = mix(float(LAMP_ELEVATION_Z), max(uSunDir.z, float(0.05)), outdoors);
+    const keyXY = keyDir.mul(sqrt(max(float(1).sub(keyZ.mul(keyZ)), float(0))));
+    return normalize(normalize(vec3(keyXY.x, keyXY.y, keyZ)).add(viewDir));
+  })().toVar('specHalfVec');
+
+  // PAN FLARE: the subsystem eases the camera's speed into uPanState.z; while
+  // the view moves, every camera-keyed highlight brightens a little.
+  const flareAmt = clamp(uPanState.z.mul(uPanLook.w), float(0), float(1)).toVar('specFlareAmt');
+  const flareGain = float(1).add(flareAmt.mul(float(PAN_FLARE_GAIN)));
+
+  // CAMERA HIGHLIGHT: Blinn-Phong on the shape normal (plus a little of the
+  // fine relief), so a dome's hotspot slides across it and pinches at the rim
+  // as the eye passes. Flat metal faces straight up and stays dark here — this
+  // lives only where the mask has FORM, which is what makes it read as a
+  // reflection rather than a pattern.
+  const camSpec = (
+    shapeEnabled
+      ? pow(
+          max(dot(normalize(vec3(shapeSlopeW.add(heightGrad.mul(float(0.35))).negate(), float(1))), halfVec), float(0)),
+          float(CAMERA_GLINT_SHININESS)
+        )
+      : float(0)
+  ).toVar('specCamSpec');
+
+  // SPARKLE: one soft point per world cell on bright paint, each cell a tiny
+  // facet tilted at random. Which facets flash depends on the HALF VECTOR, and
+  // so on the camera — a parked view is calm, a pan glitters (V2 shipped a
+  // world-lattice sparkle that aliased and defaulted it off; this one's cell is
+  // never smaller than SPARKLE_MIN_SCREEN_PX screen pixels and fades as it is
+  // forced wider). The point stretches along the pan direction with the flare.
+  const sparkleTerm = (() => {
+    if (!shapeEnabled) return float(0);
+    const pxPerScreen = abs(dWorldX);
+    const cellSize = max(uPanState.w, pxPerScreen.mul(float(SPARKLE_MIN_SCREEN_PX))).toVar('specSparkleCell');
+    const cellUv = vec2(positionWorld.x, positionWorld.y).div(cellSize);
+    const cell = floor(cellUv);
+    const jitter = vec2(hash12(cell.add(vec2(3.1, 7.7))), hash12(cell.add(vec2(5.3, 1.9))))
+      .sub(vec2(0.5, 0.5))
+      .mul(float(SPARKLE_JITTER));
+    const off = fract(cellUv).sub(vec2(0.5, 0.5)).sub(jitter);
+    const dir = uPanState.xy;
+    const along = dot(off, dir).div(float(1).add(flareAmt));
+    const across = dot(off, vec2(dir.y.negate(), dir.x));
+    const r2 = along
+      .mul(along)
+      .add(across.mul(across))
+      .div(float(SPARKLE_RADIUS * SPARKLE_RADIUS));
+    const dotShape = exp(r2.mul(float(-3)));
+    const tilt = vec2(hash12(cell.add(vec2(11.7, 2.3))), hash12(cell.add(vec2(8.9, 13.1))))
+      .sub(vec2(0.5, 0.5))
+      .mul(float(SPARKLE_FACET_TILT));
+    const facetN = normalize(vec3(shapeSlopeW.negate().add(tilt), float(1)));
+    const flash = pow(max(dot(facetN, halfVec), float(0)), float(SPARKLE_SHININESS));
+    const live = step(hash12(cell.add(vec2(17.9, 4.4))), float(SPARKLE_DENSITY));
+    // Glitter lives where the metal is BUSY — coin heaps, engraving, chased
+    // edges — not on a smooth dome, where lone points read as dust (lab, round
+    // 2). The fine relief gradient is that busyness, already computed.
+    const busy = smoothstep(float(0.04), float(0.3), length(heightGrad));
+    const eligible = smoothstep(float(0.5), float(0.85), maskMax).mul(busy.mul(float(0.85)).add(float(0.15)));
+    const footprintFade = clamp(uPanState.w.div(cellSize), float(0.35), float(1));
+    return flash.mul(dotShape).mul(live).mul(eligible).mul(footprintFade);
+  })().toVar('specSparkle');
 
   // ── MIRROR — polished metal returns little diffuse light ─────────────────
   // What it does not reflect toward the eye reads DARK, which is the contrast
   // that separates chrome and gold from paint that merely glows. Darkens the
   // lit floor under the metal (premultiplied blend, `alpha` below) between
   // reflections; the glints ride on top additively.
-  const reflectWeight = smoothstep(float(0.02), float(SHIMMER_REF_PEAK), shimmer);
+  // The camera highlight and the sparkle are reflections too: never darken under them.
+  const reflectWeight = max(
+    smoothstep(float(0.02), float(SHIMMER_REF_PEAK), shimmer),
+    smoothstep(float(0.02), float(0.4), camSpec.mul(uPanLook.x))
+  );
   // ── METAL BY COLOUR — one mask, several metals ─────────────────────────
   // Author (2026-11-02): *"reproduce different metallic responses based on
   // colour."* The painted hue already says which metal; its saturation and
@@ -1630,7 +1784,6 @@ export function buildSpecularSurfaceMaterial({
   // Bank's steel coin purses read dull grey under one shared response). Dark
   // neutral paint is iron/pewter: satin, shallow. Saturated paint (gold,
   // copper, brass) keeps the tuned response. Weights, so mixed paint blends.
-  const maskMax = max(max(maskSample.r, maskSample.g), maskSample.b);
   const maskSat = maskMax.sub(min(min(maskSample.r, maskSample.g), maskSample.b)).div(max(maskMax, float(1e-4)));
   const neutralW = float(1).sub(smoothstep(float(0.12), float(0.35), maskSat));
   const chromeW = neutralW
@@ -1717,6 +1870,7 @@ export function buildSpecularSurfaceMaterial({
     .mul(float(SHIMMER_REF_PEAK))
     .mul(skyGain)
     .mul(float(1).add(chromeW.mul(float(CHROME_GLINT_GAIN))))
+    .mul(flareGain)
     .toVar('specFocused');
   const tintLuma = dot(tint, vec3(LUMA_709[0], LUMA_709[1], LUMA_709[2]));
   // The core pales toward a WARM white — half way between the metal's own
@@ -1756,7 +1910,33 @@ export function buildSpecularSurfaceMaterial({
     .mul(coverage)
     .toVar('specTrough');
 
-  const shine = sheen.add(glint).add(relief).add(troughColour).toVar('specShine');
+  // The camera highlight and the sparkle: the pale highlight colour, the same
+  // light response, strength, cloud term and flare as the glint.
+  // Gold reflects GOLD: the metal's colour across the hotspot, paling only at
+  // its very peak (the first draft was pale throughout and read as white wash).
+  const camGlint = mix(tint, paleTint, smoothstep(float(0.5), float(1), camSpec))
+    .mul(camSpec.mul(uPanLook.x).mul(float(CAMERA_GLINT_GAIN)))
+    .mul(shineResponse)
+    .mul(uStrength)
+    .mul(coverage)
+    .mul(skyGain)
+    .mul(flareGain)
+    .toVar('specCamGlint');
+  const sparkleRgb = mix(paleTint, vec3(tintLuma, tintLuma, tintLuma), float(0.5))
+    .mul(sparkleTerm.mul(uPanLook.z).mul(float(SPARKLE_GAIN)))
+    .mul(shineResponse)
+    .mul(uStrength)
+    .mul(coverage)
+    .mul(skyGain)
+    .mul(flareGain)
+    .toVar('specSparkleRgb');
+
+  const shine = sheen
+    .add(glint)
+    .add(relief)
+    .add(troughColour)
+    .add(ceilingCompress(camGlint.add(sparkleRgb), uGlintCeiling))
+    .toVar('specShine');
 
   /** @param {*} material */
   function configureShared(material) {
@@ -1957,6 +2137,8 @@ export function buildSpecularSurfaceMaterial({
      * swap reaches them (a tap left on the old mask lights the old floor's
      * shapes on the new floor's metal). */
     reliefTapNodes: reliefTaps,
+    /** Whether this build reads a shape map (tier ≥ 1 and one was passed). */
+    shapeEnabled,
     packTexNode,
     layerCount: SPECULAR_LAYER_COUNT,
     /** The ladder rung this exact material was built for — see
@@ -1999,10 +2181,14 @@ export function buildSpecularSurfaceMaterial({
       uExpectedDepth.value = Number.isFinite(depth) ? depth : 0;
     },
     /** The sun's azimuth, as ONE unit vector — the only route its direction has
-     * into this effect. @param {number} dirX @param {number} dirY */
-    setSunDir(dirX, dirY) {
+     * into this effect — plus, optionally, the key 3-vector's vertical part
+     * (`keyLightDirection(sky.key)[2]`) for the camera highlight.
+     * @param {number} dirX @param {number} dirY @param {number} [dirZ] */
+    setSunDir(dirX, dirY, dirZ) {
       const len = Math.hypot(dirX, dirY);
-      if (len > 1e-6) uSunDir.value.set(dirX / len, dirY / len);
+      const z = Number.isFinite(dirZ) ? Math.min(1, Math.max(0, dirZ)) : uSunDir.value.z;
+      if (len > 1e-6) uSunDir.value.set(dirX / len, dirY / len, z);
+      else uSunDir.value.z = z;
     },
     /** Foundry's readability floor for THIS frame — `ambient.darkness` pulled
      * toward black by `darknessRealism01`, i.e. exactly `illumAboveFloor`'s
@@ -2112,6 +2298,32 @@ export function buildSpecularSurfaceMaterial({
     },
     setHotCore(v) {
       uGlintLook.value.x = Math.min(1, Math.max(0, v));
+    },
+    /** The baked shape map (`specular-shape.js`), per mask. */
+    setShapeTexture(tex) {
+      if (shapeTexNode) shapeTexNode.value = tex;
+    },
+    setCameraGlint(v) {
+      uPanLook.value.x = Math.max(0, v);
+    },
+    setReflectionBend(v) {
+      uPanLook.value.y = Math.max(0, v);
+    },
+    setSparkle(v) {
+      uPanLook.value.z = Math.max(0, v);
+    },
+    setPanFlare(v) {
+      uPanLook.value.w = Math.min(1, Math.max(0, v));
+    },
+    setSparkleSizePx(v) {
+      uPanState.value.w = Math.max(1, v);
+    },
+    /** The camera's eased motion, pushed per frame by the subsystem.
+     * @param {{dirX: number, dirY: number, amount: number}} m */
+    setPanMotion(m) {
+      const len = Math.hypot(m?.dirX ?? 0, m?.dirY ?? 0);
+      if (len > 1e-6) uPanState.value.set(m.dirX / len, m.dirY / len, uPanState.value.z, uPanState.value.w);
+      uPanState.value.z = Number.isFinite(m?.amount) ? Math.min(1, Math.max(0, m.amount)) : 0;
     },
     setColourResponse(v) {
       uGlintLook.value.w = Math.min(1, Math.max(0, v));

@@ -204,6 +204,61 @@ export const SPECULAR_PARAMS = Object.freeze({
     label: 'Metal by colour',
     help: 'Lets the colour you painted decide the KIND of metal, not just its tint. Bright grey/white paint becomes polished steel or silver — the most mirror-like: tighter, brighter glints and darker reflections. Dark grey paint becomes iron or pewter — a soft satin. Gold, copper, brass and other coloured paint keep the normal response. 0 treats every metal the same way.',
   },
+  // ── ROUND 2: ALIVE IN A PAN (2026-11-02, mmp-9nb) ────────────────────────
+  // Author: *"make metal look more interesting/dynamic/animated during camera
+  // pans."* All four read a SHAPE map baked once from the same mask
+  // (`specular-shape.js`); the header of `SPECULAR_EYE_HEIGHT` in
+  // specular-render.js carries the design.
+  cameraGlint: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Motion',
+    label: 'Moving highlight',
+    help: "A real highlight that travels over the metal's shape as the camera moves: it slides across a gold dome, runs round a shield's rim and slips off a coin's edge as you pan past, the way a polished object catches the light when you walk by it. It only appears where your mask has form (raised, rounded paint), so flat plates stay calm. 0 turns it off.",
+  },
+  reflectionBend: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Motion',
+    label: 'Curved reflections',
+    help: 'Bends the moving shimmer around the shape of each object, the way a reflection curves over a curved mirror, and makes it swirl faster on steep sides as you pan. Coins, pots and domes then reflect differently from flat plates. 0 lets the shimmer slide in straight lines as it used to.',
+  },
+  sparkle: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Look',
+    label: 'Sparkle',
+    help: 'Tiny bright glints on busy, bright metal — coin heaps, jewellery, engraved and chased edges — that flash as the CAMERA moves, not on a timer: a still view stays calm, a pan glitters. Smooth domes and plates get very little. 0 turns it off.',
+  },
+  sparkleSizePx: {
+    type: 'float',
+    min: 2,
+    max: 40,
+    step: 0.5,
+    default: 7,
+    category: 'Detail',
+    label: 'Sparkle size',
+    help: 'How far apart the sparkle points are, in map pixels (each point is a little smaller than this). Zoomed far out they are never smaller than a few screen pixels, so they cannot fizz or shimmer as noise.',
+  },
+  panFlare: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.5,
+    category: 'Motion',
+    label: 'Pan flare',
+    help: 'While the camera is moving, the moving highlight and the sparkle brighten a little and the sparkle points stretch along the direction of travel; when you stop, they settle back over about a third of a second. 0 turns it off; keep it gentle — it is the most "effect-like" of these.',
+  },
   patternScalePx: {
     type: 'float',
     min: 512,
@@ -897,7 +952,10 @@ export const SPECULAR = Object.freeze({
         'pewter into broad soft shapes. Pure ALU on tier 0 fetch. This is where it stops being a flat sheen. ' +
         'Plus the METAL BODY (2026-11-02): mirror depth darkens the metal between its reflections (premultiplied ' +
         'blend) and edge relief lights the mask own bevels from the real light direction (4 mask + 4 light taps); ' +
-        'both compile out below this tier, where there are no glints to stand against.',
+        'both compile out below this tier, where there are no glints to stand against. ROUND 2 (2026-11-02): a ' +
+        'shape map baked once per mask drives a camera-aware highlight (same eye as water), reflections bent ' +
+        'round each object, a camera-keyed sparkle (the old deferred sparkle rung, footprint-aware) and a gentle ' +
+        'pan flare.',
     }),
     Object.freeze({
       n: 2,
@@ -947,13 +1005,6 @@ export const SPECULAR = Object.freeze({
         'Per-island pattern scale, phase and grain angle, on top of the parallax that landed at tier 3. The ' +
         'author chose parallax alone first, deliberately — one property, the one that reads as separate ' +
         'surfaces rather than as separate textures.',
-    }),
-    Object.freeze({
-      name: 'sparkle',
-      note:
-        'Footprint-aware glint: count microfacets per pixel from fwidth(worldPos) and blend between discrete ' +
-        'twinkle and a roughness-widened smooth lobe, so sparkle RESOLVES with zoom instead of aliasing the ' +
-        'way V2 fixed world lattice did (its own sparkle shipped defaulted OFF for exactly that reason).',
     }),
     Object.freeze({
       name: 'weather',

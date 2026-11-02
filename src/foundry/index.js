@@ -99,6 +99,12 @@ export {
 // Foundry's own black outline round the map: hidden while the Table's brass frames it instead.
 export { isSceneOutline, setSceneOutlineVisible } from './scene-outline.js';
 export { readFoundryGrid, setFoundryGridOwnership } from './scene-grid.js';
+export {
+  registerGridDefaultsSettings,
+  readGridDefaults,
+  writeGridDefaults,
+  parseGridDefaults,
+} from './grid-defaults-persistence.js';
 
 // The drag GHOST — Foundry moves a clone of a dragged token, not the token; these
 // hand that clone to collectTokens and say when one appears or goes away.

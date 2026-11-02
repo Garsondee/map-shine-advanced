@@ -6,6 +6,7 @@
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runFoundryGridRender } from './foundry-grid-render.test.mjs';
+import { run as runGrid } from './grid.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -34,7 +35,10 @@ const t = {
   },
 };
 
-const suites = [['foundry-grid-render', runFoundryGridRender]];
+const suites = [
+  ['foundry-grid-render', runFoundryGridRender],
+  ['grid', runGrid],
+];
 for (const [name, fn] of suites) {
   const before = failed;
   await fn(t);

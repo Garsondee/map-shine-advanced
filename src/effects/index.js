@@ -488,6 +488,8 @@ export { buildTemperatureNoiseData, TEMPERATURE_NOISE_SIZE } from './temperature
 // TABLE (2026-10-27) — the scene recessed in a brass-rimmed velvet games table
 // (effects/table/): the card's params, the pure ray model, and the world-pass subsystem.
 export { TABLE, TABLE_PARAMS } from './table/table.js';
+// GRID (2026-11-02) — MSA's own subtle, day-and-night grid look (effects/grid/grid.js).
+export { GRID, GRID_PARAMS, GRID_LINE_STYLES, resolveGridLook } from './grid/grid.js';
 export { tableEyeHeight, tableTopHeightPx, traceTablePixel, resolveTableFrame } from './table/table-model.js';
 export { createTableSubsystem } from './table/table-subsystem.js';
 

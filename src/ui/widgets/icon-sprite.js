@@ -69,6 +69,7 @@ export const ICONS = Object.freeze({
   warn: '<path d="M12 3.5 22 20H2Z"/><path d="M12 9.5v5M12 17.2v.6"/>',
   lock: '<rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7"/>',
   frame: '<path d="M7 3.5v17M17 3.5v17M3.5 7h17M3.5 17h17"/>',
+  grid: '<rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M9.33 4v16M14.67 4v16M4 9.33h16M4 14.67h16"/>',
   reset: '<path d="M4 12a8 8 0 1 0 2.3-5.7M6 3.5v3.2h3.2"/>',
   health: '<path d="M3 12h4l2-5 3.5 10 2.5-7 1.5 2H21"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/>',

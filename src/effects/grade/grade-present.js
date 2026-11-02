@@ -74,6 +74,7 @@ import {
   writeFoundryGridUniforms,
   foundryGridShapeKey,
   buildFoundryGridAlpha,
+  buildGridLookAlpha,
   buildSceneOutlineAlpha,
   compositeFoundryOverlay,
 } from '../grid/foundry-grid-render.js';
@@ -559,11 +560,20 @@ export function buildGradePresentMaterial({
       const world = vec2(uViewRect.x.add(screenSourceUv.x.mul(spanX)), uViewRect.y.add(screenSourceUv.y.mul(spanY)));
       const eye = uGrid.plane.xy;
       const canvasXY = eye.add(world.sub(eye).div(uGrid.plane.z));
-      const [type, style] = gridShape ? gridShape.split(':').map(Number) : [0, 0];
+      // `gridShape` is `type:style` (Foundry's own style) or `look:type:lineStyle` (MSA's Grid look).
+      const parts = gridShape ? gridShape.split(':') : [];
+      const look = parts[0] === 'look';
+      let gridAlpha = null;
+      if (look) {
+        gridAlpha = buildGridLookAlpha(TSL, { canvasXY, u: uGrid, type: Number(parts[1]), lineStyle: parts[2] });
+      } else if (gridShape) {
+        gridAlpha = buildFoundryGridAlpha(TSL, { canvasXY, u: uGrid, type: Number(parts[0]), style: Number(parts[1]) });
+      }
       finalRgb = compositeFoundryOverlay(TSL, finalRgb, {
-        gridAlpha: gridShape ? buildFoundryGridAlpha(TSL, { canvasXY, u: uGrid, type, style }) : null,
+        gridAlpha,
         outlineAlpha: outlineCompiled ? buildSceneOutlineAlpha(TSL, { canvasXY, u: uGrid }) : null,
         u: uGrid,
+        look,
       });
     }
     material.fragmentNode = vec4(finalRgb, presentTexNode.a);
@@ -782,19 +792,32 @@ export function buildGradePresentMaterial({
     /**
      * Draw Foundry's grid and outline this frame (`foundry/scene-grid.js#readFoundryGrid`'s `grid` and
      * `outline`; null = draw none). A new grid type/style, or the outline appearing/going, rebuilds.
-     * @param {{grid:object|null, outline:object|null, pxPerCanvas:number, clip?:object|null, plane?:object|null}} a
+     * With `look` (MSA's Grid effect, `effects/grid/grid.js#resolveGridLook`) the lines are drawn in that
+     * look on Foundry's grid geometry instead of in Foundry's own style; a new line pattern rebuilds,
+     * every other look value is a uniform write.
+     * @param {{grid:object|null, outline:object|null, pxPerCanvas:number, clip?:object|null, plane?:object|null, look?:object|null}} a
      * @returns {{grid:boolean, outline:boolean}} what this draw now draws — a grid it cannot draw
      *   (an unknown type/style) comes back false, so the caller leaves it to Foundry.
      */
-    setFoundryOverlay: ({ grid = null, outline = null, pxPerCanvas = 1, clip = null, plane = null } = {}) => {
-      const shape = grid ? foundryGridShapeKey(grid.type, grid.style) : null;
+    setFoundryOverlay: ({
+      grid = null,
+      outline = null,
+      pxPerCanvas = 1,
+      clip = null,
+      plane = null,
+      look = null,
+    } = {}) => {
+      let shape = grid ? foundryGridShapeKey(grid.type, grid.style) : null;
+      // The look draws any grid type Foundry has, whatever Foundry's own line style. (A grid whose style
+      // brings a module's own shader never arrives here: foundry/scene-grid.js leaves it to Foundry.)
+      if (grid && look && foundryGridShapeKey(grid.type, 0)) shape = `look:${grid.type}:${look.lineStyle}`;
       const wantOutline = !!outline;
       if (shape !== gridShape || wantOutline !== outlineCompiled) {
         gridShape = shape;
         outlineCompiled = wantOutline;
         rebuildFragment();
       }
-      writeFoundryGridUniforms(uGrid, { grid: shape ? grid : null, outline, pxPerCanvas, clip, plane });
+      writeFoundryGridUniforms(uGrid, { grid: shape ? grid : null, outline, pxPerCanvas, clip, plane, look });
       return { grid: !!shape, outline: wantOutline };
     },
     foundryOverlayCompiled: () => ({ grid: gridShape, outline: outlineCompiled }),

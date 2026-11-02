@@ -546,6 +546,7 @@ import {
   // header for why the autofocus/motion/light-burn MATHS is imported
   // separately from the material builders (pure functions, no THREE).
   buildLensCompositeMaterial,
+  resolveGridLook,
   buildLightBurnAccumulateMaterial,
   lensTierPlan,
   computeAutoFocusAmount,
@@ -1463,6 +1464,8 @@ async function startVtPanViewerUnserialized({
   // what Foundry would draw, and hide/show Foundry's own PIXI copies. Omitted ⇒ Foundry keeps drawing them.
   getFoundryGrid = null,
   setFoundryGridOwnership = null,
+  // GRID (effects/grid/grid.js): `{enabled, params}` — on draws MSA's look on Foundry's grid geometry.
+  getGridRenderState = null,
   getDofRenderState,
   getCloudsRenderState,
   getCloudTopsRenderState,
@@ -9182,6 +9185,9 @@ async function startVtPanViewerUnserialized({
      * brass frames the map instead).
      */
     let foundryOverlayFailed = false;
+    /** The Grid look resolved from its params, recomputed only when the cascade hands a new params object. */
+    let gridLookFor = undefined;
+    let gridLook = null;
     function syncFoundryOverlay() {
       if (!getFoundryGrid || foundryOverlayFailed) return;
       try {
@@ -9197,7 +9203,13 @@ async function startVtPanViewerUnserialized({
         // Parallax scales every floor about the view centre (parallax-subsystem.js#update's `eye`).
         const eye = { x: (r.x + r.z) / 2, y: (r.y + r.w) / 2 };
         const board = read.outline?.sceneRect ?? null;
+        const gridState = getGridRenderState?.() ?? null;
         const drawn = gradePresent.setFoundryOverlay({
+          look: gridState?.enabled
+            ? gridLookFor === gridState.params
+              ? gridLook
+              : ((gridLookFor = gridState.params), (gridLook = resolveGridLook(gridState.params)))
+            : null,
           grid: read.grid,
           // With the Table on the outline is not drawn — by alpha 0, not by leaving it out, so turning the
           // Table on or off is a uniform write and never a present rebuild (seconds of black, live).

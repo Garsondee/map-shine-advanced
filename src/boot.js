@@ -111,6 +111,9 @@ import {
   setSceneOutlineVisible,
   readFoundryGrid,
   setFoundryGridOwnership,
+  registerGridDefaultsSettings,
+  readGridDefaults,
+  writeGridDefaults,
 } from './foundry/index.js';
 // THE TOKEN-VISION DIAGNOSTIC — see its own module header, and the
 // `token-vision` report registration below.
@@ -600,6 +603,9 @@ import {
   // PARALLAX (2026-10-28) — real depth between the floors (effects/parallax/).
   PARALLAX,
   PARALLAX_PARAMS,
+  // GRID (2026-11-02) — MSA's own subtle grid look, world-wide (effects/grid/grid.js).
+  GRID,
+  GRID_PARAMS,
   buildCascadeReadout,
   projectCascadeRenderState,
 } from './effects/index.js';
@@ -2821,6 +2827,8 @@ function install() {
   let tableReadout = { enabled: false, params: null };
   // PARALLAX: `enabledFromProfile: 'extreme'` (an opt-in look), so it seeds OFF like the Table.
   let parallaxReadout = { enabled: false, params: null };
+  // GRID: `enabledFromProfile: 'low'` — MSA's grid look is the default for everyone, so it seeds ON.
+  let gridReadout = { enabled: true, params: null };
   /** Depth-of-field READOUT — same seed posture as bloom's own, above, and
    * for the identical reason: the manifest already says `enabledFromProfile:
    * 'low'`, so a `false` seed would misrepresent the window between
@@ -3281,6 +3289,12 @@ function install() {
       tableReadout.enabled && (tableReadout.params?.privateOffBoard ?? TABLE_PARAMS.privateOffBoard.default) === true,
   });
 
+  // GRID (2026-11-02) — drawn by the viewer's present from `getGridRenderState`, so `apply` only
+  // refreshes the readout: a new value is a uniform write, a new line pattern one present rebuild.
+  effectRegistry.register(GRID, (resolved) => {
+    gridReadout = buildCascadeReadout(resolved);
+  });
+
   // PARALLAX (2026-10-28) — applied by the viewer's per-frame mesh transforms from `getParallaxRenderState`,
   // so `apply` only refreshes the readout: nothing is rebuilt, nothing is recompiled.
   effectRegistry.register(PARALLAX, (resolved) => {
@@ -3440,6 +3454,21 @@ function install() {
     const { params: sceneParams } = readSceneEffectParams('table');
     layers.paramLayers = [sceneParams, tableLiveOverride].filter(Boolean);
     effectRegistry.resolveAndApply('table', layers);
+  }
+
+  /** Transient, in-memory Grid tuning (MapShine.setGrid / the card), on top of the WORLD values. */
+  const gridLiveOverride = {};
+
+  /**
+   * Re-resolve the Grid's cascade. Unlike every other card its values are not a scene flag but ONE
+   * world setting (`foundry/grid-defaults-persistence.js`): the grid looks the same on every map.
+   */
+  function reapplyGrid() {
+    const layers = deriveEffectLayers('grid', (key) => readSetting(MODULE_ID, key));
+    const { params: worldParams, reason } = readGridDefaults();
+    if (reason) log.warn(`Grid: ${reason} — drawing the shipped defaults`);
+    layers.paramLayers = [worldParams, gridLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('grid', layers);
   }
 
   /** Transient, in-memory Parallax tuning (MapShine.setParallax / the card). Mirrors `tableLiveOverride`. */
@@ -3660,6 +3689,7 @@ function install() {
     ['temperature effects', () => reapplyTemperatureEffects()],
     ['table', () => reapplyTable()],
     ['parallax', () => reapplyParallax()],
+    ['grid', () => reapplyGrid()],
     ['depth of field', () => reapplyDof()],
     ['clouds', () => reapplyClouds()],
     ['cloud tops', () => reapplyCloudTops()],
@@ -5631,6 +5661,51 @@ function install() {
     return { ...tableLiveOverride };
   };
 
+  // MapShine.setGrid — the console tuner AND the card's write path. A GM's change is the WORLD's: the
+  // on/off goes to the table-default (GM) switch, the values to the world setting, so every scene and
+  // every client follow. A player can only switch it for themselves.
+  //   MapShine.setGrid({ widthPx: 1.2, nightOpacity: 0.1 })
+  MapShine.setGrid = (partial = {}) => {
+    const p = partial ?? {};
+    const gm = globalThis.game?.user?.isGM === true;
+    if (typeof p.enabled === 'boolean') {
+      const v = p.enabled ? 'on' : 'off';
+      const writes = gm
+        ? [
+            writeSetting(MODULE_ID, effectEnableKey('grid', 'gm'), v),
+            // The GM's own client override would otherwise outvote the table default on their screen.
+            writeSetting(MODULE_ID, effectEnableKey('grid', 'player'), 'auto'),
+          ]
+        : [writeSetting(MODULE_ID, effectEnableKey('grid', 'player'), v)];
+      Promise.all(writes)
+        .then(() => reapplyGrid())
+        .catch((err) => log.error('grid enable write/reapply failed:', err));
+    }
+    const worldPatch = {};
+    for (const k of Object.keys(GRID_PARAMS)) {
+      if (k in p) {
+        gridLiveOverride[k] = p[k];
+        worldPatch[k] = p[k];
+      }
+    }
+    if (Object.keys(worldPatch).length > 0) {
+      if (gm) {
+        writeGridDefaults(worldPatch).then(
+          (result) => {
+            if (!result.ok) log.warn(`grid world values not saved: ${result.reason}`);
+          },
+          (err) => log.error('grid world write failed:', err)
+        );
+      }
+      try {
+        reapplyGrid();
+      } catch (err) {
+        log.error('grid reapply (setGrid) failed:', err);
+      }
+    }
+    return { ...gridLiveOverride };
+  };
+
   // MapShine.setParallax — the console tuner AND the card's write path (mirrors MapShine.setTable exactly):
   //   MapShine.setParallax({ enabled: true, floorHeightPct: 2, glideSec: 1.2 })
   MapShine.setParallax = (partial = {}) => {
@@ -6032,6 +6107,8 @@ function install() {
   const getTableRenderState = () => projectCascadeRenderState(tableReadout);
   // PARALLAX'S render-state seam — same shape again.
   const getParallaxRenderState = () => projectCascadeRenderState(parallaxReadout);
+  // GRID'S render-state seam — same shape again.
+  const getGridRenderState = () => projectCascadeRenderState(gridReadout);
   // DEPTH OF FIELD's render-state seam — same shape as bloom's own, above.
   // perfTier ADDED 2026-08-30, same fix; DELEGATES the same way.
   // U6 READ TRACKING (mythica-machina-press#194) — wrapped HERE, the real
@@ -15135,6 +15212,20 @@ function install() {
     },
   });
 
+  // GRID'S card (2026-11-02) — MSA's own grid look, ON by default. Its values are the WORLD's: one edit
+  // restyles the grid on every scene. Off hands the look back to the scene's own Foundry grid settings.
+  registerSimpleEffectCard('grid', {
+    icon: 'grid',
+    title: 'Grid',
+    accVar: '--c-system',
+    schema: GRID_PARAMS,
+    fohKeys: ['widthPx', 'dayOpacity', 'nightOpacity', 'lineStyle'],
+    getReadout: () => gridReadout,
+    setValue: (patch) => MapShine.setGrid(patch),
+    status: (readout) =>
+      readout.enabled ? 'on · this look on every scene in the world' : "off · each scene's own Foundry grid",
+  });
+
   // PARALLAX'S card (2026-10-28) — real depth between the floors. An opt-in look (`enabledFromProfile:
   // 'extreme'`): the GM turns it on here. It works alone; with the Table on, the recess deepens to hold the building.
   registerSimpleEffectCard('parallax', {
@@ -16997,6 +17088,8 @@ function install() {
         // (lens-warped, on Parallax's plane, over the fog like Foundry's interface group) and hides
         // Foundry's PIXI copies while it does; teardown hands them back.
         getFoundryGrid: () => readFoundryGrid(globalThis.canvas),
+        // GRID (effects/grid/grid.js): on = MSA's look on Foundry's grid geometry, off = Foundry's own style.
+        getGridRenderState,
         setFoundryGridOwnership: (owned) => {
           msaDrawsSceneOutline = !!owned?.outline;
           return setFoundryGridOwnership(globalThis.canvas, {
@@ -19965,6 +20058,19 @@ function install() {
       // THE LOOKS LIBRARY SETTING (2026-11-01) — same placement as the scene
       // presets just above. Unlike them it DOES need an onChange: every open
       // Remote shows the library, so a second GM's save must repaint it.
+      // THE GRID'S WORLD VALUES (foundry/grid-defaults-persistence.js): a GM's save restyles the grid on
+      // every client — this client's own unsaved tuning gives way to what was stored.
+      try {
+        registerGridDefaultsSettings({
+          onChange: () => {
+            for (const k of Object.keys(gridLiveOverride)) delete gridLiveOverride[k];
+            reapplyGrid();
+          },
+        });
+      } catch (err) {
+        log.error('grid world settings registration failed:', err);
+      }
+
       try {
         registerLooksSettings({
           onChange: () => {

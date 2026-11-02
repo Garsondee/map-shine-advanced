@@ -95,6 +95,13 @@ export function createFoundryGridUniforms(TSL) {
     /** The plane the grid lies on: (eyeX, eyeY, scale) — Parallax draws a floor scaled by `scale`
      * about the eye, so canvas px = eye + (world − eye) / scale. (0, 0, 1) = unmoved. */
     plane: uniform(vec3(0, 0, 1)),
+    /** MSA's look (`effects/grid/grid.js`): (width output px, fade-below px), (day, night) opacity, the
+     * two inks (display space) and the switch-over luminance. Unused by Foundry's own styles. */
+    look: uniform(vec2(1, 28)),
+    lookOpacity: uniform(vec2(0.34, 0.16)),
+    lookDarkInk: uniform(vec3(0.11, 0.09, 0.07)),
+    lookLightInk: uniform(vec3(0.94, 0.9, 0.82)),
+    lookPivot: uniform(float(0.32)),
   };
 }
 
@@ -108,8 +115,17 @@ export function createFoundryGridUniforms(TSL) {
  * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} [a.clip] - overrides the grid's own
  *   clip rect (the Table keeps lines on the board).
  * @param {{x:number,y:number,scale:number}|null} [a.plane] - Parallax's eye and the grid floor's scale.
+ * @param {ReturnType<typeof import('./grid.js').resolveGridLook>|null} [a.look] - MSA's look (null =
+ *   Foundry's own style).
  */
-export function writeFoundryGridUniforms(u, { grid, outline, pxPerCanvas, clip = null, plane = null }) {
+export function writeFoundryGridUniforms(u, { grid, outline, pxPerCanvas, clip = null, plane = null, look = null }) {
+  if (look) {
+    u.look.value.set(look.widthPx, look.fadeBelowPx);
+    u.lookOpacity.value.set(look.dayOpacity, look.nightOpacity);
+    u.lookDarkInk.value.set(look.darkInk[0], look.darkInk[1], look.darkInk[2]);
+    u.lookLightInk.value.set(look.lightInk[0], look.lightInk[1], look.lightInk[2]);
+    u.lookPivot.value = look.pivot;
+  }
   const px = Number.isFinite(pxPerCanvas) && pxPerCanvas > 0 ? pxPerCanvas : 1;
   u.pxPerCanvas.value = px;
   const s = plane && Number.isFinite(plane.scale) && plane.scale > 1e-4 ? plane.scale : 1;
@@ -156,14 +172,112 @@ export function writeFoundryGridUniforms(u, { grid, outline, pxPerCanvas, clip =
  * @returns {*} float node, 0..1.
  */
 export function buildFoundryGridAlpha(TSL, { canvasXY, u, type, style }) {
-  const { float, vec2, vec3, floor, abs, min, max, clamp, select, atan, cos, sin, dot, length } = TSL;
+  const { float, vec2, floor, abs, min, max, select, length } = TSL;
+  const thickness = u.thickness;
+  const { isSquare, lineCoverage, nearestVertex, edgeDistance, edgeOffset } = gridGeometry(TSL, type, u.resolution);
+
+  // DRAW_GRID_FUNCTION
+  const S = FOUNDRY_GRID_STYLES;
+  const point = canvasXY.sub(u.origin).div(u.size); // vGridCoord
+  let coverage;
+  if (style === S.POINT_SQUARE) {
+    const o = abs(nearestVertex(point).sub(point));
+    coverage = lineCoverage(max(o.x, o.y), thickness);
+  } else if (style === S.POINT_DIAMOND) {
+    const o = abs(nearestVertex(point).sub(point));
+    coverage = lineCoverage(o.x.add(o.y).mul(SQRT1_2), thickness);
+  } else if (style === S.POINT_ROUND) {
+    coverage = lineCoverage(length(point.sub(nearestVertex(point))), thickness);
+  } else if (style === S.LINE_SOLID) {
+    coverage = lineCoverage(edgeDistance(point), thickness);
+  } else {
+    const off = edgeOffset(point);
+    let ox = off.x;
+    let oz = off.z;
+    if (style === S.LINE_DASHED && !isSquare) {
+      const padding = thickness.mul((1 - SQRT1_3) * 0.5);
+      ox = ox.add(padding);
+      oz = oz.add(padding.mul(2));
+    }
+    const dy = off.y;
+    const intervals = oz.mul(0.5).div(thickness);
+    // `intervals < 0.5` is a runtime choice in Foundry's shader too (it rides the thickness uniform);
+    // both sides are evaluated here, so the unused one is kept finite.
+    const interval = thickness.mul(intervals.div(max(floor(intervals.add(0.5)), 1)).mul(2));
+    const dx = ox.sub(floor(ox.div(interval).add(0.5)).mul(interval));
+    const patterned =
+      style === S.LINE_DOTTED
+        ? lineCoverage(length(vec2(dx, dy)), thickness)
+        : min(lineCoverage(dx, thickness), lineCoverage(dy, thickness));
+    coverage = select(intervals.lessThan(0.5), lineCoverage(dy, thickness), patterned);
+  }
+  return select(insideClip(canvasXY, u), coverage.mul(u.alpha), float(0));
+}
+
+/** `masks.canvas`: is a canvas-px position inside the clip rect? */
+function insideClip(canvasXY, u) {
+  return canvasXY.x
+    .greaterThanEqual(u.clip.x)
+    .and(canvasXY.x.lessThan(u.clip.z))
+    .and(canvasXY.y.greaterThanEqual(u.clip.y))
+    .and(canvasXY.y.lessThan(u.clip.w));
+}
+
+/**
+ * MSA's own grid look (`effects/grid/grid.js`): its coverage at a canvas-px position, on Foundry's grid
+ * geometry. Lines are `look.x` OUTPUT px wide whatever the zoom; dashes and dots are sized to the
+ * square (6 dashes, 10 dots an edge, centred on the corners so a crossing reads as a mark); the whole
+ * grid fades out once a square is smaller than `look.y` px. Colour is the composite's job (ink chosen
+ * from the picture under the line).
+ * @param {*} TSL
+ * @param {{canvasXY:*, u:ReturnType<typeof createFoundryGridUniforms>, type:number, lineStyle:string}} a
+ * @returns {*} float node, 0..1.
+ */
+export function buildGridLookAlpha(TSL, { canvasXY, u, type, lineStyle }) {
+  const { float, vec2, floor, abs, max, clamp, select, length, smoothstep } = TSL;
+  const res = u.resolution; // output px per grid unit = one square's size on screen
+  const { lineCoverage, edgeDistance, edgeOffset } = gridGeometry(TSL, type, res);
+  const point = canvasXY.sub(u.origin).div(u.size);
+  const width = u.look.x.div(res); // grid units
+  let coverage;
+  if (lineStyle === 'dashed' || lineStyle === 'dotted') {
+    const off = edgeOffset(point);
+    const period = off.z.div(lineStyle === 'dashed' ? 6 : 10);
+    const dx = off.x.sub(floor(off.x.div(period).add(0.5)).mul(period));
+    if (lineStyle === 'dashed') {
+      const along = clamp(period.mul(0.25).sub(abs(dx)).mul(res).add(0.5), 0, 1); // dash = half a period
+      coverage = lineCoverage(off.y, width).mul(along);
+    } else {
+      const radius = max(width.mul(0.9), float(0.75).div(res)); // never under a 1.5 px dot
+      coverage = clamp(
+        radius
+          .sub(length(vec2(dx, off.y)))
+          .mul(res)
+          .add(0.5),
+        0,
+        1
+      );
+    }
+  } else {
+    coverage = lineCoverage(edgeDistance(point), width);
+  }
+  const fadeAt = max(u.look.y, float(1e-3));
+  const fade = select(u.look.y.lessThanEqual(0), float(1), smoothstep(fadeAt.mul(0.55), fadeAt, res));
+  return select(insideClip(canvasXY, u), coverage.mul(fade), float(0));
+}
+
+/**
+ * Foundry's grid GEOMETRY (`GridShader`'s anti-aliased line coverage and its square/hex distance
+ * functions), with the grid type fixed at build time. Shared by Foundry's own styles and MSA's look.
+ * @param {*} TSL @param {number} type - `FOUNDRY_GRID_TYPES`. @param {*} resolution - output px per grid unit.
+ */
+function gridGeometry(TSL, type, resolution) {
+  const { float, vec2, vec3, floor, abs, min, max, clamp, select, atan, cos, sin, dot } = TSL;
   const PI = Math.PI;
   const T = FOUNDRY_GRID_TYPES;
   const isSquare = type === T.SQUARE;
   const isColumns = type === T.HEXODDQ || type === T.HEXEVENQ;
   const isEven = type === T.HEXEVENR || type === T.HEXEVENQ;
-  const thickness = u.thickness;
-  const resolution = u.resolution;
 
   // ANTIALIASED_STEP_FUNCTION / LINE_COVERAGE_FUNCTION (alignment 0.5).
   const antialiasedStep = (edge, x) => clamp(x.sub(edge).mul(resolution).add(0.5), 0, 1);
@@ -247,48 +361,7 @@ export function buildFoundryGridAlpha(TSL, { canvasXY, u, type, style }) {
     return vec3(dot(d, vec2(n.y.negate(), n.x)).add(0.5 * SQRT1_3), float(0.5).sub(dot(d, n)), SQRT1_3);
   };
 
-  // DRAW_GRID_FUNCTION
-  const S = FOUNDRY_GRID_STYLES;
-  const point = canvasXY.sub(u.origin).div(u.size); // vGridCoord
-  let coverage;
-  if (style === S.POINT_SQUARE) {
-    const o = abs(nearestVertex(point).sub(point));
-    coverage = lineCoverage(max(o.x, o.y), thickness);
-  } else if (style === S.POINT_DIAMOND) {
-    const o = abs(nearestVertex(point).sub(point));
-    coverage = lineCoverage(o.x.add(o.y).mul(SQRT1_2), thickness);
-  } else if (style === S.POINT_ROUND) {
-    coverage = lineCoverage(length(point.sub(nearestVertex(point))), thickness);
-  } else if (style === S.LINE_SOLID) {
-    coverage = lineCoverage(edgeDistance(point), thickness);
-  } else {
-    const off = edgeOffset(point);
-    let ox = off.x;
-    let oz = off.z;
-    if (style === S.LINE_DASHED && !isSquare) {
-      const padding = thickness.mul((1 - SQRT1_3) * 0.5);
-      ox = ox.add(padding);
-      oz = oz.add(padding.mul(2));
-    }
-    const dy = off.y;
-    const intervals = oz.mul(0.5).div(thickness);
-    // `intervals < 0.5` is a runtime choice in Foundry's shader too (it rides the thickness uniform);
-    // both sides are evaluated here, so the unused one is kept finite.
-    const interval = thickness.mul(intervals.div(max(floor(intervals.add(0.5)), 1)).mul(2));
-    const dx = ox.sub(floor(ox.div(interval).add(0.5)).mul(interval));
-    const patterned =
-      style === S.LINE_DOTTED
-        ? lineCoverage(length(vec2(dx, dy)), thickness)
-        : min(lineCoverage(dx, thickness), lineCoverage(dy, thickness));
-    coverage = select(intervals.lessThan(0.5), lineCoverage(dy, thickness), patterned);
-  }
-  // `masks.canvas`: nothing outside the clip rect.
-  const inside = canvasXY.x
-    .greaterThanEqual(u.clip.x)
-    .and(canvasXY.x.lessThan(u.clip.z))
-    .and(canvasXY.y.greaterThanEqual(u.clip.y))
-    .and(canvasXY.y.lessThan(u.clip.w));
-  return select(inside, coverage.mul(u.alpha), float(0));
+  return { isSquare, lineCoverage, nearestVertex, edgeDistance, edgeOffset };
 }
 
 /**
@@ -334,15 +407,26 @@ export function buildSceneOutlineAlpha(TSL, { canvasXY, u }) {
  * @param {*} linearRgb - vec3 node.
  * @param {{gridAlpha:*|null, outlineAlpha:*|null, u:ReturnType<typeof createFoundryGridUniforms>}} a
  */
-export function compositeFoundryOverlay(TSL, linearRgb, { gridAlpha, outlineAlpha, u }) {
-  const { float, vec3, clamp, mix, select, sRGBTransferOETF, sRGBTransferEOTF } = TSL;
+export function compositeFoundryOverlay(TSL, linearRgb, { gridAlpha, outlineAlpha, u, look = false }) {
+  const { float, vec3, clamp, mix, select, dot, smoothstep, sRGBTransferOETF, sRGBTransferEOTF } = TSL;
   let display = sRGBTransferOETF(clamp(linearRgb, 0, 1));
   let total = float(0);
   if (outlineAlpha) {
     display = display.mul(float(1).sub(outlineAlpha));
     total = total.add(outlineAlpha);
   }
-  if (gridAlpha) {
+  if (gridAlpha && look) {
+    // MSA's look: the ink is chosen from the picture under the line — dark ink on bright ground, pale
+    // ink on dark ground, crossing over smoothly round the pivot, each with its own opacity.
+    const lum = dot(display, vec3(0.2126, 0.7152, 0.0722));
+    // A NARROW crossover: blended halfway, the two inks make a mid-tone about as bright as the ground
+    // at the pivot, and the line vanishes there (seen live on a lamp-lit night interior).
+    const bright = smoothstep(u.lookPivot.sub(0.04), u.lookPivot.add(0.04), lum);
+    const ink = mix(u.lookLightInk, u.lookDarkInk, bright);
+    const a = gridAlpha.mul(mix(u.lookOpacity.y, u.lookOpacity.x, bright));
+    display = mix(display, ink, a);
+    total = total.add(a);
+  } else if (gridAlpha) {
     display = mix(display, u.color, gridAlpha);
     total = total.add(gridAlpha);
   }

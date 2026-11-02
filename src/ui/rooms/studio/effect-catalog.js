@@ -71,6 +71,7 @@ export const EFFECT_GROUP = Object.freeze({
 
   table: 'table',
   parallax: 'table',
+  grid: 'table',
   uiWindowShadow: 'table',
 });
 

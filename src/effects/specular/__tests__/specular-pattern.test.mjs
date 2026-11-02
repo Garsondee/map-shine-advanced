@@ -14,6 +14,8 @@
  * V2's mislabelled controls, because those are exactly the claims that would be
  * silently wrong if the transcription drifted.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   hash12,
   anisotropicBlob,
@@ -25,12 +27,12 @@ import {
   reinhardCeilingRgb,
   incidentFromIllumRgb,
   steepenIncidentRgb,
+  shineLightResponse,
   SUN_BIAS_MIN,
   CELL_SCALE_DULL,
   CELL_SCALE_BRIGHT,
   SPECULAR_SHEEN_CEILING,
   SPECULAR_GLINT_CEILING,
-  SPECULAR_INCIDENT_STEEPNESS,
 } from '../specular-pattern.js';
 // The composite's own default gain — imported, not hand-typed, so the
 // tonemap-survival test below tracks whatever `specular-render.js` actually
@@ -461,6 +463,11 @@ export function run(t) {
   // hold for ANY steepness, the shape actually suppresses the middle of the
   // range, hue survives, and anything at or above full brightness is a
   // complete no-op.
+  // `steepenIncidentRgb` is the knee-1 form, kept for these claims only; the
+  // shipped curve is `shineLightResponse` (tested below). Pinned to its own
+  // documented original steepness (3): at ROUND 25's default of 2 a half-lit
+  // room lands exactly ON the 0.25 bound, which says nothing about the shader.
+  const SPECULAR_INCIDENT_STEEPNESS = 3;
   ok(
     'true black is still exactly black, for any steepness',
     steepenIncidentRgb([0, 0, 0], LUMA_709, SPECULAR_INCIDENT_STEEPNESS).every((v) => v === 0)
@@ -519,4 +526,45 @@ export function run(t) {
   // 2026-08-31 ("specular looks good with the 200 constant") — no scenario
   // like this one is meaningful to assert against any more, since "well-lit
   // ambient" and "unlit" now produce the same reading by design.
+
+  // ══════════════════════════════════════════════════════════════════════
+  // DARKNESS SUPPRESSES THE SHINE (ROUND 25, 2026-11-02). Author: "In
+  // darkness the specular highlight needs to be suppressed… I still want
+  // shiny but in darker areas we need much darker shiny effects."
+  // `shineLightResponse` is the multiplier per unit of light, so it is the
+  // shine's brightness RELATIVE TO the surface it sits on: it must fall as the
+  // light falls (ROUND 24's knee of 0.01 held it flat — metal glowed in the
+  // dark), never to a hard zero, and leave full light where it was approved.
+  // Lights are gamma-space illum, as the lab's ladder and `buf:scene.illum`.
+  const lightLuma = (illum) => incidentFromIllumRgb([illum, illum, illum])[0];
+  const relShine = (illum) => shineLightResponse(lightLuma(illum)) / shineLightResponse(lightLuma(1));
+  ok('a dim area (illum 0.25) keeps under 15% of full-light shine per unit light', relShine(0.25) < 0.15);
+  ok('near-dark (illum 0.15) keeps under 6%', relShine(0.15) < 0.06);
+  ok('…but never a hard zero — darker shine, not no shine', relShine(0.15) > 0);
+  ok(
+    'a moderately lit area (illum 0.5) is still clearly shiny (30–60% of full)',
+    relShine(0.5) > 0.3 && relShine(0.5) < 0.6
+  );
+  let rising = true;
+  for (let l = 0.05; l <= 1.0001; l += 0.05) if (relShine(l + 0.05) + 1e-9 < relShine(l)) rising = false;
+  ok('the shine share rises with light everywhere — darker never shines relatively more', rising);
+  ok(
+    'full light matches what ROUND 24 shipped (knee 0.01, steepness 10.5, gain 0.23) within 2%',
+    Math.abs(
+      shineLightResponse(1) / shineLightResponse(1, { knee: 0.01, steepness: 10.5, softness: 0.66, gain: 0.23 }) - 1
+    ) < 0.02
+  );
+  // The twin is only worth its assertions while the shader still computes the
+  // same curve: the soft knee and the `kneeT^(S−1) × gain` response.
+  const renderSrc = readFileSync(fileURLToPath(new URL('../specular-render.js', import.meta.url)), 'utf8');
+  ok(
+    'the shader still blends a hard knee with 1 − exp(−t) by the softness',
+    /mix\(\s*min\(kneeRaw, float\(1\)\),\s*float\(1\)\.sub\(exp\(kneeRaw\.negate\(\)\)\),\s*clamp\(uKneeSoftness/.test(
+      renderSrc
+    )
+  );
+  ok(
+    'the shader still raises it to (steepness − 1) and applies the gain',
+    /pow\(kneeT, max\(uIncidentSteepness\.sub\(float\(1\)\), float\(0\)\)\)\)\s*\.mul\(uIncidentGain\)/.test(renderSrc)
+  );
 }

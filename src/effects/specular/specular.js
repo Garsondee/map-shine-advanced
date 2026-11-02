@@ -310,7 +310,8 @@ export const SPECULAR_PARAMS = Object.freeze({
     // LOWERED 36.75 → 16.55 (ROUND 23, 2026-09-09) — new live-tuned
     // defaults; see SPECULAR_INCIDENT_STEEPNESS's own header
     // (specular-pattern.js).
-    default: 10.5, // LOWERED 16.55 → 10.5 (ROUND 24, 2026-10-17)
+    // LOWERED 16.55 → 10.5 (ROUND 24, 2026-10-17).
+    default: 2, // LOWERED 10.5 → 2 with the knee raised to 0.5 (ROUND 25, 2026-11-02)
     category: 'Response',
     label: 'Light response',
     // NEW (2026-08-03, ROUND 17) — exposes `SPECULAR_INCIDENT_STEEPNESS`
@@ -324,7 +325,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // 1 goes further and BOOSTS dim areas above what the raw light alone
     // would give, which is a legitimate way to force the shine to punch
     // through while you diagnose what else might be dimming it.
-    help: "How sharply the shine fades through shadow and dim ambient light before it reaches the screen. At 1 the shine tracks the scene's own light exactly, with no extra fade. Above 1, dim areas lose their shine much faster than bright ones do — only candles, point lights and direct sun keep their full sparkle, and the default (3) is fairly aggressive about this. Below 1, dim areas are boosted ABOVE what the plain light level would give — turn this down toward 0.1 if the shine is barely visible anywhere and you want to confirm the effect is there at all before fine-tuning where it should and shouldn't show.",
+    help: "How sharply the shine fades through shadow and dim ambient light before it reaches the screen. At 1 the shine tracks the scene's own light exactly, with no extra fade. Above 1, dim areas lose their shine much faster than bright ones do — only candles, point lights and direct sun keep their full sparkle, and the default (2) makes the shine fade one step faster than the surface it sits on, so metal in the dark is a much dimmer glint rather than a glow. Below 1, dim areas are boosted ABOVE what the plain light level would give — turn this down toward 0.1 if the shine is barely visible anywhere and you want to confirm the effect is there at all before fine-tuning where it should and shouldn't show.",
   },
   // THE KNEE (2026-08-09) — pairs with `incidentSteepness` above: that one is
   // HOW SHARPLY shine falls off below the knee, this one is WHERE the knee is.
@@ -342,7 +343,9 @@ export const SPECULAR_PARAMS = Object.freeze({
     // RAISED 0.15 → 0.22 (ROUND 23, 2026-09-09) — new live-tuned defaults,
     // the first live-tuned value this control has shipped; see
     // SPECULAR_INCIDENT_KNEE's own header (specular-pattern.js).
-    default: 0.01, // LOWERED 0.22 → 0.01 = THE SCHEMA'S OWN MIN (ROUND 24, 2026-10-17)
+    // LOWERED 0.22 → 0.01 = THE SCHEMA'S OWN MIN (ROUND 24, 2026-10-17), which
+    // switched the darkness curve off; SPECULAR_INCIDENT_KNEE's ROUND 25 note.
+    default: 0.5, // RAISED 0.01 → 0.5 (ROUND 25, 2026-11-02)
     category: 'Response',
     label: 'Full-shine light level',
     help: 'How much light a surface needs before its metal shines at full strength. Low values mean even a single candle makes gold flash; high values mean only direct sunlight does. This is the control to reach for when metal looks right outdoors but stays dead indoors near lamps and candles — it moves where "brightly lit" begins, while "Light response" above decides how fast the shine dies away below that point. At 1 only a pure white, fully-lit pixel counts as bright, which is how this behaved before the control existed.',
@@ -368,7 +371,8 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 4,
     step: 0.01,
-    default: 0.23, // LOWERED 0.55 → 0.23 (ROUND 24, 2026-10-17)
+    // LOWERED 0.55 → 0.23 (ROUND 24, 2026-10-17).
+    default: 0.25, // RAISED 0.23 → 0.25 (ROUND 25, 2026-11-02): full light unchanged under the new knee
     category: 'Response',
     label: 'Lamp-light gain',
     help: 'A straight brightness multiplier on the shine that light produces, applied after the response curve. The blunt "all of this is too strong / too weak" dial. Separate from the main Strength control on purpose: this one only scales how much LIGHT-DRIVEN shine you get, so you can pull candle-lit metal back without changing how the effect reads outdoors at noon.',

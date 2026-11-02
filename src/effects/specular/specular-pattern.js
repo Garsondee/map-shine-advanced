@@ -722,8 +722,12 @@ export function steepenIncidentRgb(rgb, lumaWeights, steepness) {
  * ⚠️ LOWERED 36.75 → 16.55 (ROUND 23, 2026-09-09) — new live-tuned defaults;
  * still well past the original 3, the author's own dialled-in scene,
  * recorded exactly.
+ *
+ * ⚠️ LOWERED 10.5 → 2 (ROUND 25, 2026-11-02), WITH THE KNEE RAISED 0.01 → 0.5
+ * — read {@link SPECULAR_INCIDENT_KNEE}'s ROUND 25 note: the two only make
+ * sense as a pair, and the knee is what actually changed.
  */
-export const SPECULAR_INCIDENT_STEEPNESS = 10.5; // LOWERED 16.55 → 10.5 (ROUND 24, 2026-10-17)
+export const SPECULAR_INCIDENT_STEEPNESS = 2; // LOWERED 10.5 → 2 (ROUND 25, 2026-11-02)
 
 /**
  * THE KNEE — the incident-light level at which metal reaches its FULL shine.
@@ -783,8 +787,36 @@ export const SPECULAR_INCIDENT_STEEPNESS = 10.5; // LOWERED 16.55 → 10.5 (ROUN
  * the first live-tuned value this control has shipped; still just above the
  * author's own measured "ordinarily lit" reading of 0.115, the same posture
  * the original 0.15 argued for, moved slightly higher on a real scene.
+ *
+ * ⚠️ RAISED 0.01 → 0.5, STEEPNESS 10.5 → 2 (ROUND 25, 2026-11-02). Author:
+ * *"In darkness the specular highlight needs to be suppressed… I still want
+ * shiny but in darker areas we need much darker shiny effects."*
+ *
+ * ROUND 24's knee of 0.01 (the schema's minimum) had quietly switched the
+ * darkness curve OFF: `kneeRaw = luma / 0.01` clears 1 at a gamma-space light
+ * of ~0.1, so the response was flat — shine scaled with light exactly like the
+ * surface under it, all the way down into the dark. Flat is not enough, and the
+ * lab says why. Gold statue (Vault_Treasure_05), flat light, shine added over
+ * the surface's own display brightness ("share"):
+ *
+ *     light       0.15  0.25  0.35  0.50  0.65  1.00
+ *     ROUND 24    0.71  1.04  0.93  0.84  0.72  0.43
+ *     ROUND 25    0.09  0.16  0.24  0.40  0.53  0.42
+ *
+ * At ROUND 24 the shine was RELATIVELY BRIGHTEST in the dark — a lit floor and
+ * the tonemap compress a glint, a dark floor does not, so the same linear ratio
+ * reads as a glow at 0.25 and a sheen at 1.0. Steel was worst (share 3.3 at
+ * 0.25: the chrome gains). ROUND 25 makes the share RISE with light: full shine
+ * from an EOTF'd light luma of 0.5 (the knee; about 0.74 in the table's
+ * gamma-space units), linear below it (steepness 2 = one power of light beyond
+ * the surface's own), so the
+ * dim falloff of a lamp keeps a faint glint while the dark keeps almost none.
+ * Full light is unchanged (the gain below absorbs the softness term). Tried and
+ * rejected in the same lab: knee 0.3 / steepness 2.5 and 0.25 / 3.5 kill the
+ * shine outright below 0.35 (not "darker shiny" — no shine); 0.4 / 1.8 and
+ * 0.5 / 1.6 leave steel glowing at 0.25 (share 0.76).
  */
-export const SPECULAR_INCIDENT_KNEE = 0.01; // LOWERED 0.22 → 0.01 = THE SCHEMA'S OWN MIN (ROUND 24, 2026-10-17)
+export const SPECULAR_INCIDENT_KNEE = 0.5; // RAISED 0.01 → 0.5 (ROUND 25, 2026-11-02)
 
 /**
  * ============================================================================
@@ -826,8 +858,32 @@ export const SPECULAR_KNEE_SOFTNESS = 0.66; // RAISED 0.5 → 0.66 (ROUND 24, 20
  * outdoors at noon. Default `0.55`, i.e. a real reduction from the value the
  * author called "far too much" rather than a nominal one — the curve controls
  * around it are what let that be dialled back up per scene.
+ *
+ * RAISED 0.23 → 0.25 (ROUND 25, 2026-11-02): the ROUND 25 knee leaves the curve
+ * at 0.911 under full light (the softness term), where ROUND 24's sat at 1.
+ * `0.23 / 0.911` keeps full-light shine where the author already approved it.
  */
-export const SPECULAR_INCIDENT_GAIN = 0.23; // LOWERED 0.55 → 0.23 (ROUND 24, 2026-10-17)
+export const SPECULAR_INCIDENT_GAIN = 0.25; // RAISED 0.23 → 0.25 (ROUND 25, 2026-11-02)
+
+/**
+ * CPU twin of the shader's light → shine multiplier (`specular-render.js`,
+ * `shineResponse = incident × kneeT^(S−1) × gain × flicker`, flicker left out):
+ * how much of the shine the light at a pixel lets through, per unit of that
+ * light. Multiply by `incidentLuma` itself for the shine's actual brightness.
+ *
+ * @param {number} incidentLuma - EOTF'd light luma (`incidentFromIllumRgb`).
+ * @param {{knee?: number, steepness?: number, softness?: number, gain?: number}} [curve]
+ * @returns {number}
+ */
+export function shineLightResponse(incidentLuma, curve = {}) {
+  const knee = Math.max(curve.knee ?? SPECULAR_INCIDENT_KNEE, 1e-4);
+  const steepness = curve.steepness ?? SPECULAR_INCIDENT_STEEPNESS;
+  const softness = Math.min(Math.max(curve.softness ?? SPECULAR_KNEE_SOFTNESS, 0), 1);
+  const gain = curve.gain ?? SPECULAR_INCIDENT_GAIN;
+  const raw = Math.max(incidentLuma, 1e-6) / knee;
+  const kneeT = Math.min(raw, 1) * (1 - softness) + (1 - Math.exp(-raw)) * softness;
+  return Math.pow(kneeT, Math.max(steepness - 1, 0)) * gain;
+}
 
 /**
  * ============================================================================

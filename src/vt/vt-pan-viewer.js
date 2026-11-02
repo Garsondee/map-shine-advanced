@@ -17041,8 +17041,38 @@ async function startVtPanViewerUnserialized({
       rotationLiftEnabled,
       pivot = null,
     }) {
-      const { vec2, float, positionLocal, sin, cos, length, pow, max, min, mix, smoothstep, clamp, texture } =
+      const { vec2, vec4, float, positionLocal, sin, cos, length, pow, max, min, mix, smoothstep, clamp, texture } =
         THREE.TSL;
+      // TWO BODIES, ONE HAND-OVER (2026-11-02, author: "The current way of distorting trees/bushes is
+      // causing shadows to self intersect and double in value"). Near the seam between two plants the
+      // sway is worked out for EACH of them, as if this vertex belonged to it, and the two finished moves
+      // are mixed by the map's weight (`effects/vegetation-render.js#buildVegetationPivotMap`). A plant's
+      // core has weight 1 and moves rigidly; a seam stretches by the two plants' difference over the band
+      // instead of folding a triangle over itself, which the shadow drew twice. Lives HERE, not at a call
+      // site, so the canopy, its shadow and its depth proxy cannot pose the plant differently (2026-11-02,
+      // author: "when it distorts it leaves behind a gap of unrendered space" — the proxy had no pivot at
+      // all, so the ground it hid and the canopy that should cover it parted company in the wind).
+      if (pivot?.texture2 && !pivot.sample) {
+        const args = {
+          motion,
+          kind,
+          kindSwayMul,
+          kindClumpMul,
+          kindSwayFreqMul,
+          sceneMin,
+          sceneSize,
+          asShadow,
+          rotationLiftEnabled,
+        };
+        const nearest = texture(pivot.texture, pivot.artUv);
+        const next = texture(pivot.texture2, pivot.artUv);
+        const own = buildVegetationSwayDisplacementNode({ ...args, pivot: { ...pivot, sample: nearest } });
+        const other = buildVegetationSwayDisplacementNode({
+          ...args,
+          pivot: { ...pivot, sample: vec4(next.x, next.y, next.z, nearest.w) },
+        });
+        return { xy: mix(other.xy, own.xy, next.w), liftY: mix(other.liftY, own.liftY, next.w) };
+      }
       const worldXY = vec2(positionLocal.x, positionLocal.y);
       // ONE PLANT, ONE BODY (2026-11-01) — see `effects/vegetation-render.js#buildVegetationPivotMap`.
       // `motionXY` is where this vertex's plant is asked how the wind moves it: the plant's own pivot
@@ -17864,25 +17894,8 @@ async function startVtPanViewerUnserialized({
           rotationLiftEnabled,
           pivot,
         };
-        // TWO BODIES, ONE HAND-OVER (2026-11-02, author: "The current way of distorting trees/bushes is
-        // causing shadows to self intersect and double in value"). Near the seam between two plants the
-        // sway is worked out for EACH of them, as if this vertex belonged to it, and the two finished moves
-        // are mixed by the map's weight (`effects/vegetation-render.js#buildVegetationPivotMap`). A plant's
-        // core has weight 1 and moves rigidly; a seam stretches by the two plants' difference over the band
-        // instead of folding a triangle over itself, which the shadow drew twice.
-        let displace;
-        if (pivot?.texture2) {
-          const nearest = texture(pivot.texture, pivot.artUv);
-          const next = texture(pivot.texture2, pivot.artUv);
-          const own = buildVegetationSwayDisplacementNode({ ...swayArgs, pivot: { ...pivot, sample: nearest } });
-          const other = buildVegetationSwayDisplacementNode({
-            ...swayArgs,
-            pivot: { ...pivot, sample: vec4(next.x, next.y, next.z, nearest.w) },
-          });
-          displace = { xy: mix(other.xy, own.xy, next.w), liftY: mix(other.liftY, own.liftY, next.w) };
-        } else {
-          displace = buildVegetationSwayDisplacementNode(swayArgs);
-        }
+        // Two bodies near a plant seam: see that function's "TWO BODIES, ONE HAND-OVER".
+        const displace = buildVegetationSwayDisplacementNode(swayArgs);
         const displaced = positionLocal
           .add(vec3(displace.xy.x, displace.xy.y, float(0)))
           .add(vec3(0, 1, 0).mul(displace.liftY));
@@ -24466,6 +24479,11 @@ async function startVtPanViewerUnserialized({
                 sceneSize,
                 asShadow: false, // this proxy represents the CANOPY, never the shadow
                 rotationLiftEnabled: proxyRotationLiftEnabled,
+                // ONE PLANT, ONE BODY — the canopy's own pivot map, by reference (its frame uniforms
+                // follow a moved canopy in place). Without it this proxy swayed each vertex on its own
+                // while the canopy swayed whole plants: the ground under the proxy was hidden, the canopy
+                // had moved off it, and the gap showed the void (2026-11-02).
+                pivot: overlay.motion.pivot ?? null,
               });
               return positionLocal
                 .add(vec3(displace.xy.x, displace.xy.y, float(0)))

@@ -40,6 +40,7 @@ import { run as runWindGridTextures } from './wind-grid-textures.test.mjs';
 import { run as runUiShadowScan } from './ui-shadow-scan.test.mjs';
 import { run as runPipelineGovernor } from './pipeline-governor.test.mjs';
 import { run as runWeatherWarmPlan } from './weather-warm-plan.test.mjs';
+import { run as runVegetationProxyPose } from './vegetation-proxy-pose.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -108,6 +109,7 @@ const suites = [
   ['ui-shadow-scan', runUiShadowScan],
   ['pipeline-governor', runPipelineGovernor],
   ['weather-warm-plan', runWeatherWarmPlan],
+  ['vegetation-proxy-pose', runVegetationProxyPose],
 ];
 
 for (const [name, fn] of suites) {

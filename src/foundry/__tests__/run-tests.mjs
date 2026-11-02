@@ -27,6 +27,7 @@ import { run as runTimeAuthority } from './time-authority.test.mjs';
 import { run as runAlmanacDiagnostics } from './almanac-diagnostics.test.mjs';
 import { run as runCalendarInstall } from './calendar-install.test.mjs';
 import { run as runSceneOutline } from './scene-outline.test.mjs';
+import { run as runSceneGrid } from './scene-grid.test.mjs';
 import { run as runSceneEnvironment } from './scene-environment.test.mjs';
 import { run as runSceneLights } from './scene-lights.test.mjs';
 import { run as runSceneSyntheticLights } from './scene-synthetic-lights.test.mjs';
@@ -113,6 +114,7 @@ const suites = [
   ['almanac-diagnostics', runAlmanacDiagnostics],
   ['calendar-install', runCalendarInstall],
   ['scene-outline', runSceneOutline],
+  ['scene-grid', runSceneGrid],
   ['scene-environment', runSceneEnvironment],
   ['scene-lights', runSceneLights],
   ['scene-synthetic-lights', runSceneSyntheticLights],

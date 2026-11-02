@@ -105,7 +105,13 @@ import {
 } from './foundry/index.js';
 import { buildLiveSceneExport, sceneExportFilename } from './foundry/index.js';
 // THE TABLE'S PRIVACY (foundry/off-board-privacy.js): tokens on the velvet are the GM's, or their owner's.
-import { installOffBoardPrivacy, refreshOffBoardPrivacy, setSceneOutlineVisible } from './foundry/index.js';
+import {
+  installOffBoardPrivacy,
+  refreshOffBoardPrivacy,
+  setSceneOutlineVisible,
+  readFoundryGrid,
+  setFoundryGridOwnership,
+} from './foundry/index.js';
 // THE TOKEN-VISION DIAGNOSTIC — see its own module header, and the
 // `token-vision` report registration below.
 import { readTokenVisionDiagnostic } from './foundry/index.js';
@@ -3234,6 +3240,9 @@ function install() {
 
   /** Last outline miss reported, so a Foundry that draws no outline is told once, not on every draw. */
   let sceneOutlineMissLogged = false;
+  /** Is the viewer's present drawing Foundry's outline itself (`foundry/scene-grid.js`)? Then Foundry's
+   * own stays hidden whatever the Table says; the viewer flips this through `setFoundryGridOwnership`. */
+  let msaDrawsSceneOutline = false;
   /**
    * FOUNDRY'S BLACK OUTLINE ROUND THE MAP (`foundry/scene-outline.js`): hidden while the Table is on — the
    * brass frames the map instead, and the line cut a seam through every canopy Parallax lifts over the
@@ -3243,7 +3252,7 @@ function install() {
   function syncFoundrySceneOutline() {
     try {
       const tableOn = !!tableReadout?.enabled;
-      const r = setSceneOutlineVisible(globalThis.canvas, !tableOn);
+      const r = setSceneOutlineVisible(globalThis.canvas, !tableOn && !msaDrawsSceneOutline);
       if (!r.ok && tableOn && globalThis.canvas?.interface && !sceneOutlineMissLogged) {
         sceneOutlineMissLogged = true;
         log.warn(`Table: Foundry's scene outline was not hidden — ${r.reason}`);
@@ -16984,6 +16993,18 @@ function install() {
         // it DOES need — elapsed time, the viewer's own camera state — are
         // read directly inside runPostLensPass, not injected here).
         getLensRenderState,
+        // FOUNDRY'S GRID + OUTLINE (foundry/scene-grid.js, 2026-11-02): the viewer's present draws them
+        // (lens-warped, on Parallax's plane, over the fog like Foundry's interface group) and hides
+        // Foundry's PIXI copies while it does; teardown hands them back.
+        getFoundryGrid: () => readFoundryGrid(globalThis.canvas),
+        setFoundryGridOwnership: (owned) => {
+          msaDrawsSceneOutline = !!owned?.outline;
+          return setFoundryGridOwnership(globalThis.canvas, {
+            grid: !!owned?.grid,
+            outline: !!owned?.outline,
+            tableOn: !!tableReadout?.enabled,
+          });
+        },
         // DEPTH OF FIELD (effects/depth-of-field-render.js): same shape as
         // bloom's own seam just above — a whole-image screen effect needing
         // no scene data, so the torture-soak harness omits it the same way.

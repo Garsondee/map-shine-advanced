@@ -933,6 +933,12 @@ function disposeActive() {
   // requests are not queued behind them (loading audit L-10). Jobs already inside the worker
   // finish — they warm the persistent cache the next visit reads.
   _active.markTornDown?.();
+  // Foundry draws its grid and outline again the moment MSA stops presenting.
+  try {
+    _active.releaseFoundryGrid?.();
+  } catch (err) {
+    log.error('handing the grid back to Foundry failed — the grid may stay hidden until the next canvas draw:', err);
+  }
   dropQueuedJobs(_active.compressionOwner);
   // { capture: true } MUST match the addEventListener call exactly — the two
   // are treated as distinct registrations otherwise, and removal silently no-ops.
@@ -1453,6 +1459,10 @@ async function startVtPanViewerUnserialized({
   getVegetationRenderState,
   getBloomRenderState,
   getLensRenderState,
+  // FOUNDRY'S GRID + OUTLINE (2026-11-02): boot hands both halves of `foundry/scene-grid.js` — read
+  // what Foundry would draw, and hide/show Foundry's own PIXI copies. Omitted ⇒ Foundry keeps drawing them.
+  getFoundryGrid = null,
+  setFoundryGridOwnership = null,
   getDofRenderState,
   getCloudsRenderState,
   getCloudTopsRenderState,
@@ -8469,6 +8479,8 @@ async function startVtPanViewerUnserialized({
       },
       // The lamps' coloured glow, so a Look's colourise can keep lamplight white.
       lampGlowTexture: sceneColoration.texture,
+      // The lens's own Table guard, so the present's lens-warped mask reads match the lens to the pixel.
+      lensUvGuard: tableSubsystem.lensGuard,
     });
     // INITIAL STATE (2026-08-27) — a fresh viewer's `internalScale` may
     // ALREADY be below 1.0 at this point (a player's persisted setting can
@@ -9162,7 +9174,65 @@ async function startVtPanViewerUnserialized({
       return { r: raw[0], g: raw[1], b: raw[2], readAt: { x: px, y: py } };
     }
 
+    /**
+     * FOUNDRY'S GRID + OUTLINE, THIS FRAME (`effects/grid/foundry-grid-render.js`): read what Foundry
+     * would draw, hand it to the present on the plane of the viewed floor, and hide Foundry's PIXI copies
+     * of whatever the present now draws. A grid the present cannot draw (a module's own grid shader)
+     * stays Foundry's. With the Table on, lines stay on the board and the outline is not drawn (the
+     * brass frames the map instead).
+     */
+    let foundryOverlayFailed = false;
+    function syncFoundryOverlay() {
+      if (!getFoundryGrid || foundryOverlayFailed) return;
+      try {
+        const read = getFoundryGrid();
+        const r = envLight.uViewRect.value;
+        const spanX = r.z - r.x;
+        if (!read?.ok || !(spanX > 0)) {
+          gradePresent.setFoundryOverlay({});
+          return;
+        }
+        const tableOn = tableSubsystem.info().on === true;
+        const scale = parallaxSubsystem.isOn() ? parallaxSubsystem.floorScale(view?.floorIndex ?? 0) : 1;
+        // Parallax scales every floor about the view centre (parallax-subsystem.js#update's `eye`).
+        const eye = { x: (r.x + r.z) / 2, y: (r.y + r.w) / 2 };
+        const board = read.outline?.sceneRect ?? null;
+        const drawn = gradePresent.setFoundryOverlay({
+          grid: read.grid,
+          // With the Table on the outline is not drawn — by alpha 0, not by leaving it out, so turning the
+          // Table on or off is a uniform write and never a present rebuild (seconds of black, live).
+          outline: tableOn && read.outline ? { ...read.outline, canvasAlpha: 0, sceneAlpha: 0 } : read.outline,
+          pxPerCanvas: (drawBufW / spanX) * scale,
+          clip:
+            tableOn && board
+              ? { minX: board.x, minY: board.y, maxX: board.x + board.width, maxY: board.y + board.height }
+              : null,
+          plane: { x: eye.x, y: eye.y, scale },
+        });
+        setFoundryGridOwnership?.({
+          grid: !read.foreignShader && (drawn.grid || read.grid === null),
+          outline: true,
+        });
+      } catch (err) {
+        // Once, then Foundry keeps its own grid: a broken overlay must never take the lines away.
+        foundryOverlayFailed = true;
+        log.error('Foundry grid overlay failed — handing the grid and outline back to Foundry:', err);
+        try {
+          gradePresent.setFoundryOverlay({});
+          setFoundryGridOwnership?.({ grid: false, outline: false });
+        } catch (restoreErr) {
+          log.error('…and handing them back failed too:', restoreErr);
+        }
+      }
+    }
+
     function runPresentCompositePass() {
+      // THE LENS WARP (2026-11-02) — the present grades post.lens's output, so its screen-position reads
+      // follow the lens on exactly the frames the lens drew (grade-present.js#lensWarpCompiled).
+      const lensK = lensDrewDistortion;
+      lensDrewDistortion = null;
+      gradePresent.setLensWarp(lensK !== null, lensK ?? 0);
+      syncFoundryOverlay();
       // THE SUN-SHADOW DEBUG VIEW (author, 2026-07-26) — when a view is picked
       // it REPLACES the present entirely rather than blending over it: the
       // point is to see the shadow field alone, on white, with nothing else in
@@ -10846,6 +10916,9 @@ async function startVtPanViewerUnserialized({
      * frame's geometry/lighting/particle passes rewrite fresh regardless
      * of TAA/Lens state — instead of reprocessing Lens's own prior frame. */
     let lensLastOutputTexture = null;
+    /** The distortion `post.lens` drew with THIS frame, or null when it did not draw: the present reads
+     * (and clears) it, so its mask reads follow the lens only on frames the lens really bent. */
+    let lensDrewDistortion = null;
     function ensureLensOutputRTs() {
       if (lensOutputA && lensOutputB) return;
       lensOutputA = allocator.create('lens.outputA', describeSceneColor());
@@ -11311,6 +11384,7 @@ async function startVtPanViewerUnserialized({
       // own declaration: this is how NEXT frame's self-feedback guard knows
       // whether the chain was refreshed by someone else in between.
       lensLastOutputTexture = writeTarget.texture;
+      lensDrewDistortion = u.uDistortion.value;
       lensOutputWriteIndex = 1 - lensOutputWriteIndex;
     }
 
@@ -17254,7 +17328,11 @@ async function startVtPanViewerUnserialized({
             float(1)
           );
           const radialWeight = pivotXY
-            ? mix(radialWeightCell, clamp(length(worldXY.sub(pivotXY)).div(pivotRadiusPx), float(0), float(1)), pivotWeight)
+            ? mix(
+                radialWeightCell,
+                clamp(length(worldXY.sub(pivotXY)).div(pivotRadiusPx), float(0), float(1)),
+                pivotWeight
+              )
             : radialWeightCell;
           liftY = springLiftRaw.mul(radialWeight).mul(edgeFade);
         }
@@ -17326,7 +17404,13 @@ async function startVtPanViewerUnserialized({
           for (const o of origins) {
             for (let i = VEG_WALL_PROBE_STEPS; i >= 1; i--) {
               const t = i / VEG_WALL_PROBE_STEPS;
-              const crossed = smoothstep(float(0.3), float(0.6), maskAt(o.add(dir.mul(moveLen.mul(float(t))))).sub(restSide).abs());
+              const crossed = smoothstep(
+                float(0.3),
+                float(0.6),
+                maskAt(o.add(dir.mul(moveLen.mul(float(t)))))
+                  .sub(restSide)
+                  .abs()
+              );
               // Crossed at step i → allowed at most the step before it (minus a small gap).
               allowed = min(allowed, mix(float(1), float(Math.max(0, (i - 1) / VEG_WALL_PROBE_STEPS)), crossed));
             }
@@ -17972,7 +18056,11 @@ async function startVtPanViewerUnserialized({
               float(0.25),
               float(0.75),
               THREE.TSL.mx_noise_float(
-                THREE.TSL.vec3(worldXY.x.div(float(VEG_SHIMMER_PUFF_PX)), worldXY.y.div(float(VEG_SHIMMER_PUFF_PX)), shimmerT.mul(float(0.08)))
+                THREE.TSL.vec3(
+                  worldXY.x.div(float(VEG_SHIMMER_PUFF_PX)),
+                  worldXY.y.div(float(VEG_SHIMMER_PUFF_PX)),
+                  shimmerT.mul(float(0.08))
+                )
               )
                 .mul(float(0.5))
                 .add(float(0.5))
@@ -17980,9 +18068,17 @@ async function startVtPanViewerUnserialized({
             const airMoves = smoothstep(float(0.005), float(0.06), localSpeed);
             const breezeEverywhere = smoothstep(float(0.08), float(0.3), localSpeed);
             const shimmerFade = float(1).sub(smoothstep(float(0.4), float(0.9), galeness).mul(float(0.7)));
-            const shimmer01 = airMoves.mul(mix(puffs, float(1), breezeEverywhere)).mul(shimmerFade).mul(edgeFade);
-            const shimmerFoldFreePx = float(VEG_FLUTTER_FOLD_SAFETY).div(float(VEG_SHIMMER_SPACE_FREQ).mul(uFlutterScale));
-            const shimmerPx = min(float(VEG_SHIMMER_PX).mul(float(1).add(localSpeed.mul(float(1.5)))), shimmerFoldFreePx);
+            const shimmer01 = airMoves
+              .mul(mix(puffs, float(1), breezeEverywhere))
+              .mul(shimmerFade)
+              .mul(edgeFade);
+            const shimmerFoldFreePx = float(VEG_FLUTTER_FOLD_SAFETY).div(
+              float(VEG_SHIMMER_SPACE_FREQ).mul(uFlutterScale)
+            );
+            const shimmerPx = min(
+              float(VEG_SHIMMER_PX).mul(float(1).add(localSpeed.mul(float(1.5)))),
+              shimmerFoldFreePx
+            );
             const shimmerDir = shimmerVec.div(max(length(shimmerVec), float(1))); // |v| <= 1
             gatedUv.addAssign(shimmerDir.mul(shimmerPx.mul(shimmer01)).mul(uUvPerWorldPx));
             shimmerLight.assign(shimmerDir.x.mul(shimmer01));
@@ -18037,8 +18133,12 @@ async function startVtPanViewerUnserialized({
            * faint smooth smudge the author said they'd accept — for ONE fetch
            * per station, not a wider multi-tap. */
           const alphaAt = (at, lod) => {
-            const inX = max(step(float(0), at.x), uShadowEdgeClamp.x).mul(max(step(at.x, float(1)), uShadowEdgeClamp.y));
-            const inY = max(step(float(0), at.y), uShadowEdgeClamp.z).mul(max(step(at.y, float(1)), uShadowEdgeClamp.w));
+            const inX = max(step(float(0), at.x), uShadowEdgeClamp.x).mul(
+              max(step(at.x, float(1)), uShadowEdgeClamp.y)
+            );
+            const inY = max(step(float(0), at.y), uShadowEdgeClamp.z).mul(
+              max(step(at.y, float(1)), uShadowEdgeClamp.w)
+            );
             const uvc = vec2(at.x.clamp(0, 1), at.y.clamp(0, 1));
             const s = lod ? texture(tex).sample(uvc).level(lod) : texture(tex, uvc);
             return s.a.mul(inX).mul(inY);
@@ -18074,7 +18174,10 @@ async function startVtPanViewerUnserialized({
           // …and nearly as wide as the gap to the next station (`uShadowSmearLod` − 1), so its
           // trailing edge is still dark where the next one takes over (2026-11-01, author:
           // "There is a brighter penumbra edge between the long shadow and the round one").
-          const footLod = max(THREE.TSL.log2(max(uShadowSideBlur.x, float(1))), uShadowSmearLod.sub(float(1))).clamp(0, 6);
+          const footLod = max(THREE.TSL.log2(max(uShadowSideBlur.x, float(1))), uShadowSmearLod.sub(float(1))).clamp(
+            0,
+            6
+          );
           const startAt = base.sub(uShadowSmearUv.mul(uShadowSmearStart));
           let smeared = crossAt(startAt, footLod, max(uShadowPenumbraLod.sub(float(2.5)), footLod), 0.15);
           // ⚠️ THE STATIONS ARE JITTERED PER PIXEL (2026-11-01, author, after the same fix on
@@ -18093,7 +18196,13 @@ async function startVtPanViewerUnserialized({
           const sideLodAt = (t) =>
             THREE.TSL.log2(max(uShadowSideBlur.x.add(uShadowSideBlur.y.mul(t)), float(1))).clamp(0, 6);
           for (let s = 1; s <= smearTaps; s++) {
-            const t = s === smearTaps ? float(1) : smearDither.add(s - 0.5).div(smearTaps).clamp(0, 1);
+            const t =
+              s === smearTaps
+                ? float(1)
+                : smearDither
+                    .add(s - 0.5)
+                    .div(smearTaps)
+                    .clamp(0, 1);
             // `t` runs 0..1 over the part of the throw that lands; `tt` is where on the throw.
             const tt = uShadowSmearStart.add(float(1).sub(uShadowSmearStart).mul(t));
             const at = base.sub(uShadowSmearUv.mul(tt));
@@ -18104,7 +18213,8 @@ async function startVtPanViewerUnserialized({
             // `× t`): with the darkest station winning, a gap narrower than the blur leaves a
             // lighter seam between two copies — the bake's own STATION_BLUR_OVERLAP rule.
             const tapLod = max(uShadowSmearLod, sideLodAt(t));
-            const tapAlpha = s === smearTaps ? crossAt(at, tapLod, max(tapLod, uShadowPenumbraLod)) : alphaAt(at, tapLod);
+            const tapAlpha =
+              s === smearTaps ? crossAt(at, tapLod, max(tapLod, uShadowPenumbraLod)) : alphaAt(at, tapLod);
             // Taper the TIP (t→1), never the foot. A shadow fades out at its far
             // end as the penumbra swallows it; it does not fade where it meets
             // the thing casting it.
@@ -18113,7 +18223,10 @@ async function startVtPanViewerUnserialized({
             // the start station at full weight, and its nearest neighbour sat a whole gap down
             // the fade (~0.83), so the darkness stepped down exactly at the disc's edge. Held
             // across that gap, the shadow carries on past the disc and then fades to the tip.
-            const fadeT = t.sub(float(1 / smearTaps)).max(float(0)).div(float(1 - 1 / smearTaps));
+            const fadeT = t
+              .sub(float(1 / smearTaps))
+              .max(float(0))
+              .div(float(1 - 1 / smearTaps));
             const faded = tapAlpha.mul(float(1).sub(uShadowSmearTaper.mul(fadeT)));
             smeared = max(smeared, faded);
           }
@@ -20828,7 +20941,10 @@ async function startVtPanViewerUnserialized({
               {
                 const hostRank = depthAuthority.rankOf(item);
                 if (hostRank != null && shadowBuilt.shadow?.uExpectedDepth) {
-                  shadowBuilt.shadow.uExpectedDepth.value = computeTieSafeExpectedDepth(hostRank, depthAuthority.maxRank);
+                  shadowBuilt.shadow.uExpectedDepth.value = computeTieSafeExpectedDepth(
+                    hostRank,
+                    depthAuthority.maxRank
+                  );
                 }
               }
               scene.add(shadowMesh);
@@ -20841,20 +20957,14 @@ async function startVtPanViewerUnserialized({
               floorAttrUniforms,
               floorAttrItem,
               uExpectedDepth: canopyExpectedDepth,
-            } = buildVegetationMaterial(
-              loaded.tex,
-              item,
-              kind,
-              freshParams,
-              {
-                flutterEnabled: vegTier.flutterEnabled,
-                rotationLiftEnabled: vegTier.rotationLiftEnabled,
-                // The world→UV basis the fold-free flutter cap needs; re-pushed
-                // by `syncVegetationUvBasis` whenever this placement changes.
-                uvPerWorldBasis: state.placement,
-                pivotMap: vegPivotMap,
-              }
-            );
+            } = buildVegetationMaterial(loaded.tex, item, kind, freshParams, {
+              flutterEnabled: vegTier.flutterEnabled,
+              rotationLiftEnabled: vegTier.rotationLiftEnabled,
+              // The world→UV basis the fold-free flutter cap needs; re-pushed
+              // by `syncVegetationUvBasis` whenever this placement changes.
+              uvPerWorldBasis: state.placement,
+              pivotMap: vegPivotMap,
+            });
             const geometry = makeGeometry();
             const mesh = new THREE.Mesh(geometry, material);
             mesh.frustumCulled = false;
@@ -21038,7 +21148,10 @@ async function startVtPanViewerUnserialized({
         const [c00, c10, , c01] = computeQuadCorners(placement);
         motion.pivot.uFrame.value.set(c00.x, c00.y, c10.x - c00.x, c10.y - c00.y);
         motion.pivot.uFrameV.value.set(c01.x - c00.x, c01.y - c00.y);
-        motion.pivot.uTexelPx.value = Math.max(1e-3, Math.hypot(c10.x - c00.x, c10.y - c00.y) / Math.max(1, motion.pivot.gridW));
+        motion.pivot.uTexelPx.value = Math.max(
+          1e-3,
+          Math.hypot(c10.x - c00.x, c10.y - c00.y) / Math.max(1, motion.pivot.gridW)
+        );
       }
     }
 
@@ -27799,6 +27912,10 @@ async function startVtPanViewerUnserialized({
       THREE,
       renderer,
       canvas,
+      /** Give Foundry back its own grid and outline (disposeActive, first thing). */
+      releaseFoundryGrid() {
+        setFoundryGridOwnership?.({ grid: false, outline: false });
+      },
       compressionOwner,
       markTornDown() {
         viewerTornDown = true;

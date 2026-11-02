@@ -65,6 +65,18 @@ import { HEAT_TAP_Y_FREQ } from '../temperature/temperature-model.js';
 // THE FOG HOLD (2026-10-27) — the vision gate's own reveal test, re-asked here
 // so the grade never reaches into the fog (see `setFogHoldActive`).
 import { sampleVisionRevealFactor, sampleExploredNode } from '../vision/vision-mask-render.js';
+// THE LENS WARP (2026-11-02) — post.lens runs BEFORE this draw, so the picture arrives already bowed;
+// every screen-position mask here is read through the lens's own warp so it lands on the same pixels.
+import { lensWarpUv } from '../lens-render.js';
+// FOUNDRY'S GRID + OUTLINE (2026-11-02), drawn here, last, over the finished frame (that module's header).
+import {
+  createFoundryGridUniforms,
+  writeFoundryGridUniforms,
+  foundryGridShapeKey,
+  buildFoundryGridAlpha,
+  buildSceneOutlineAlpha,
+  compositeFoundryOverlay,
+} from '../grid/foundry-grid-render.js';
 
 const STYLE_NAMES_SAFE = new Set(STYLIZE_LOOK_NAMES);
 const PLAYER_VISION_MODE_NAMES_SAFE = new Set(PLAYER_VISION_GRADE_MODE_KEYS);
@@ -164,7 +176,9 @@ function writeGradeUniforms(u, params) {
  * @param {{maskTexture:*, illumTexture:*, exploredTexture:*, exploredSnapshotTexture?:*, uExploredRect:*, threshold:number, extraRevealed?:(uv:*)=>*}} [args.fogHold] -
  *   the vision gate's own inputs (`vision-mask-render.js`), so the present can
  *   keep the grade out of the fog. Omit → `setFogHoldActive` is a no-op.
- * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setStylize, setPlayerVisionMode, setPlayerVisionTokens, setLut, setPostUpscaleSharpenActive, setFogHoldActive, setTemperatureEffects, setTemperatureNoise, rebindLit, gateCompiled }}
+ * @param {((plainUv:*, warpedUv:*) => *)|null} [args.lensUvGuard] - the SAME guard the lens is built
+ *   with (`table-subsystem.js#lensGuard`), so `setLensWarp` follows the lens exactly, Table included.
+ * @returns {{ material, presentTexNode, setEnvGrade, setArtGrade, setStylize, setPlayerVisionMode, setPlayerVisionTokens, setLut, setPostUpscaleSharpenActive, setFogHoldActive, setTemperatureEffects, setTemperatureNoise, setLensWarp, setFoundryOverlay, rebindLit, gateCompiled }}
  */
 export function buildGradePresentMaterial({
   THREE,
@@ -178,6 +192,7 @@ export function buildGradePresentMaterial({
   temperatureNoiseTexture,
   fogHold,
   lampGlowTexture = null,
+  lensUvGuard = null,
 }) {
   const TSL = THREE.TSL;
   // THE LAMP GLOW (2026-11-01) — the coloration buffer (lamps' coloured light, 0 where
@@ -291,6 +306,30 @@ export function buildGradePresentMaterial({
   let fogHoldActive = false;
 
   /**
+   * THE LENS WARP — is it COMPILED IN (2026-11-02)? The author: *"there is some atmospheric CC which
+   * ends up being applied AFTER lens distortion"*. The grade is folded into this draw, and this draw
+   * runs after `post.lens`, which has already moved every pixel. Colour ops do not care where a pixel
+   * sits, but every SCREEN-POSITION read here does: the `_Outdoors` gate (environmental grade, zone
+   * exposure, heat ripple), the lamp glow, the fog hold, the heat haze's fires. Read at the plain
+   * screen UV they described the UNWARPED frame, so outdoor grading slid off the buildings it belongs
+   * to and the fog's black edge sat up to ~2.5% of the frame away from the fog it was holding,
+   * worst at the corners. With the warp on, each such read goes through `lensWarpUv` (the lens's own
+   * function and the Table's own guard): it asks about the place the colour actually came from.
+   * Compiled in the first frame the lens draws and kept from then on (`setLensWarp` says why): a
+   * scene whose lens never draws has not one node of it.
+   */
+  let lensWarpCompiled = false;
+  const uLensDistortion = uniform(float(0));
+
+  /**
+   * FOUNDRY'S GRID + OUTLINE — which shape is COMPILED IN (`foundryGridShapeKey`, null = no grid lines)
+   * and whether the outline is (`effects/grid/foundry-grid-render.js`). Off ⇒ no node exists.
+   */
+  let gridShape = null;
+  let outlineCompiled = false;
+  const uGrid = createFoundryGridUniforms(TSL);
+
+  /**
    * The Stylize effect's per-style colour transform, applied to the fully
    * graded/tone-mapped/LUT'd colour (i.e. strictly AFTER Colour Grade's own
    * tail) — matching V2's own `post.grade absorbs SepiaEffectV2` placement.
@@ -321,6 +360,11 @@ export function buildGradePresentMaterial({
    * current post-upscale-sharpen active state. The env grade and the LUT are
    * unaffected (they are uniform/texture-driven). */
   function rebuildFragment() {
+    /** Where the colour at screen `screenUv` came from in the frame the masks describe (see
+     * `lensWarpCompiled`): the lens's own warp, or the same uv when the lens is off. */
+    const sourceUvAt = (screenUv) =>
+      lensWarpCompiled ? lensWarpUv(TSL, screenUv, uLensDistortion, lensUvGuard) : screenUv;
+    const screenSourceUv = sourceUvAt(uv());
     /** Rebuild the complete pre-vision image at an arbitrary screen UV. V2's
      * lens distortion and chromatic aberration refract the already graded
      * display image, so their taps must travel through the same grade/LUT/
@@ -330,12 +374,14 @@ export function buildGradePresentMaterial({
         sharpenActive && buildPostUpscaleSharpenNode
           ? buildPostUpscaleSharpenNode(THREE, presentTexNode.value, sampleUv).rgb
           : presentTexNode.sample(sampleUv).rgb;
+      // The picture is sampled at `sampleUv`; what it SHOWS there came from `maskUv` (the lens warp).
+      const maskUv = sourceUvAt(sampleUv);
       // ENVIRONMENTAL grade, outdoor-gated. No tail on this scope (Grade.md §13).
       const outdoorsAt = buildOutdoorsGate(TSL, {
         uViewRect,
         uOutdoorsRect,
         outdoorsTexNode,
-        uvNode: sampleUv,
+        uvNode: maskUv,
         uExtentRect: uOutdoorsExtent,
       });
       const gradedEnv = buildGradeNode(TSL, sampledLit, uEnv);
@@ -345,7 +391,7 @@ export function buildGradePresentMaterial({
         toneMapping: currentToneMapping,
         lutTexture: lutTexNode,
         lutStrength: uArt.lutStrength,
-        lampGlow: lampGlowTexNode ? lampGlowTexNode.sample(sampleUv).rgb : null,
+        lampGlow: lampGlowTexNode ? lampGlowTexNode.sample(maskUv).rgb : null,
       });
       // VIGNETTE (2026-11-01) — the artistic grade's one spatial op: the frame's
       // corners darken by up to `vignette` (grade-ops.js#vignetteFactor mirrors it).
@@ -365,12 +411,13 @@ export function buildGradePresentMaterial({
       if (!fogHoldActive) return shot;
       // THE FOG HOLD — see `fogHoldActive`. Asked at the SAME uv the picture
       // was sampled at, so frost refraction and heat ripple move the fog's
-      // edge with the image instead of shearing it off.
+      // edge with the image instead of shearing it off — and through the
+      // lens's warp, so the lens bows it with the image too.
       const { revealed } = sampleVisionRevealFactor({
         THREE,
         maskTexture: fogHold.maskTexture,
         illumTexture: fogHold.illumTexture,
-        screenUV: sampleUv,
+        screenUV: maskUv,
         threshold: fogHold.threshold,
         extraRevealed: fogHold.extraRevealed ?? null,
       });
@@ -379,7 +426,7 @@ export function buildGradePresentMaterial({
         exploredTexture: fogHold.exploredTexture,
         uViewRect,
         uExploredRect: fogHold.uExploredRect,
-        screenUV: sampleUv,
+        screenUV: maskUv,
         exploredSnapshotTexture: fogHold.exploredSnapshotTexture ?? null,
       });
       return select(revealed, shot, select(isExplored, sampledLit, vec3(0, 0, 0)));
@@ -391,7 +438,10 @@ export function buildGradePresentMaterial({
       return Fn(() => {
         const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1e-5));
         const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1e-5));
-        const pw = vec2(uViewRect.x.add(uv().x.mul(viewSpanX)), uViewRect.y.add(uv().y.mul(viewSpanY)));
+        const pw = vec2(
+          uViewRect.x.add(screenSourceUv.x.mul(viewSpanX)),
+          uViewRect.y.add(screenSourceUv.y.mul(viewSpanY))
+        );
         const total = vec2(0, 0).toVar();
         If(uHeatActive.greaterThan(0.5), () => {
           for (let i = 0; i < HEAT_SLOTS; i++) {
@@ -435,12 +485,15 @@ export function buildGradePresentMaterial({
         sampleUv = sampleUv.add(frost.offsetUv);
       }
       if (heatRippleCompiled) {
-        const worldXY = vec2(uViewRect.x.add(uv().x.mul(viewSpanX)), uViewRect.y.add(uv().y.mul(viewSpanY)));
+        const worldXY = vec2(
+          uViewRect.x.add(screenSourceUv.x.mul(viewSpanX)),
+          uViewRect.y.add(screenSourceUv.y.mul(viewSpanY))
+        );
         sampleUv = sampleUv.add(
           buildHeatRippleOffset(TSL, {
             worldXY,
             noiseTexNode: tempNoiseNode,
-            gate: buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode }),
+            gate: buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode, uvNode: screenSourceUv }),
             u: uTemp,
             yFreq: HEAT_TAP_Y_FREQ,
           })
@@ -495,7 +548,24 @@ export function buildGradePresentMaterial({
       tokenSlots: uPlayerVisionTokens,
       sampleRgbAt: buildStyledAt,
     });
-    const finalRgb = visionGraded ?? afterStylize;
+    let finalRgb = visionGraded ?? afterStylize;
+    // FOUNDRY'S GRID + OUTLINE — over everything, like Foundry's interface group (never lit, graded or
+    // fogged), at the lens-warped source position (so the lines bow with the map) and on Parallax's
+    // plane for the grid's floor (canvas px = eye + (world − eye) / scale). Not heat-rippled: the
+    // lines are UI over the world, not part of it.
+    if (gridShape || outlineCompiled) {
+      const spanX = uViewRect.z.sub(uViewRect.x);
+      const spanY = uViewRect.w.sub(uViewRect.y);
+      const world = vec2(uViewRect.x.add(screenSourceUv.x.mul(spanX)), uViewRect.y.add(screenSourceUv.y.mul(spanY)));
+      const eye = uGrid.plane.xy;
+      const canvasXY = eye.add(world.sub(eye).div(uGrid.plane.z));
+      const [type, style] = gridShape ? gridShape.split(':').map(Number) : [0, 0];
+      finalRgb = compositeFoundryOverlay(TSL, finalRgb, {
+        gridAlpha: gridShape ? buildFoundryGridAlpha(TSL, { canvasXY, u: uGrid, type, style }) : null,
+        outlineAlpha: outlineCompiled ? buildSceneOutlineAlpha(TSL, { canvasXY, u: uGrid }) : null,
+        u: uGrid,
+      });
+    }
     material.fragmentNode = vec4(finalRgb, presentTexNode.a);
     material.needsUpdate = true;
   }
@@ -691,6 +761,43 @@ export function buildGradePresentMaterial({
     },
     /** Is the fog hold compiled in right now — for diagnostics and tests. */
     fogHoldCompiled: () => fogHoldActive,
+    /**
+     * Follow this frame's lens (see `lensWarpCompiled`). Called every frame with whether `post.lens`
+     * actually drew THIS frame and the distortion it drew with. The FIRST frame the lens draws compiles
+     * the warp in; after that it STAYS in and a lens that stops drawing is distortion 0 — a uniform
+     * write. Live-measured 2026-11-02: a present rebuild recompiles an ~86k-character shader and the
+     * frame showed black for seconds while it did, so toggling the Lens card must not rebuild every
+     * time. A scene whose lens never draws never compiles a node of it.
+     * @param {boolean} on @param {number} [distortion]
+     */
+    setLensWarp: (on, distortion = 0) => {
+      const drew = !!on;
+      if (drew && !lensWarpCompiled) {
+        lensWarpCompiled = true;
+        rebuildFragment();
+      }
+      uLensDistortion.value = drew && Number.isFinite(distortion) ? distortion : 0;
+    },
+    lensWarpCompiled: () => lensWarpCompiled,
+    /**
+     * Draw Foundry's grid and outline this frame (`foundry/scene-grid.js#readFoundryGrid`'s `grid` and
+     * `outline`; null = draw none). A new grid type/style, or the outline appearing/going, rebuilds.
+     * @param {{grid:object|null, outline:object|null, pxPerCanvas:number, clip?:object|null, plane?:object|null}} a
+     * @returns {{grid:boolean, outline:boolean}} what this draw now draws — a grid it cannot draw
+     *   (an unknown type/style) comes back false, so the caller leaves it to Foundry.
+     */
+    setFoundryOverlay: ({ grid = null, outline = null, pxPerCanvas = 1, clip = null, plane = null } = {}) => {
+      const shape = grid ? foundryGridShapeKey(grid.type, grid.style) : null;
+      const wantOutline = !!outline;
+      if (shape !== gridShape || wantOutline !== outlineCompiled) {
+        gridShape = shape;
+        outlineCompiled = wantOutline;
+        rebuildFragment();
+      }
+      writeFoundryGridUniforms(uGrid, { grid: shape ? grid : null, outline, pxPerCanvas, clip, plane });
+      return { grid: !!shape, outline: wantOutline };
+    },
+    foundryOverlayCompiled: () => ({ grid: gridShape, outline: outlineCompiled }),
     /** Re-point at a freshly-allocated lit target (resize). */
     rebindLit: (tex) => {
       presentTexNode.value = tex;

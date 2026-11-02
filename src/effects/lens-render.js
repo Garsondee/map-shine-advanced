@@ -102,6 +102,27 @@ const LENS_OVERLAY_DRIFT_AMPLITUDE = 0.02;
 export const LENS_DEFAULT_TIER = 1;
 
 /**
+ * THE LENS WARP — where the lens takes the colour it writes at screen position `uvNode`: V2's simple
+ * barrel/pincushion `centre + p·(1 + k·|p|²)`, then the Table's `uvGuard(plainUv, warpedUv)`
+ * (`effects/table/table-subsystem.js#lensGuard`, which keeps the warp off the straight rim; omitted ⇒
+ * the plain warp). ONE function, because two readers must agree to the pixel: the lens itself, and the
+ * present (`grade-present.js`), which grades the lens's OUTPUT and so must read its screen-position
+ * masks (`_Outdoors`, the fog, the lamps) and draw Foundry's grid at the position each pixel's colour
+ * actually came from — not where it ended up.
+ * @param {*} TSL
+ * @param {*} uvNode - the screen UV.
+ * @param {*} distortion - the `k` node (the lens's `distortion` param).
+ * @param {((plainUv:*, warpedUv:*) => *)|null} [uvGuard]
+ */
+export function lensWarpUv(TSL, uvNode, distortion, uvGuard = null) {
+  const { vec2, float, dot } = TSL;
+  const centre = vec2(LENS_DISTORTION_CENTER[0], LENS_DISTORTION_CENTER[1]);
+  const p = uvNode.sub(centre);
+  const warped = centre.add(p.mul(float(1).add(distortion.mul(dot(p, p)))));
+  return uvGuard ? uvGuard(uvNode, warped) : warped;
+}
+
+/**
  * The tier ladder, as a plan a builder can branch on — mirrors
  * `fluidTierPlan`/`specularTierPlan`'s own shape exactly.
  * @param {number} tier
@@ -343,11 +364,7 @@ export function buildLensCompositeMaterial({
   // `radialDistort`: p offset from centre, scaled by (1 + k·|p|²) — V2's own
   // simple barrel/pincushion warp, exactly transcribed.
   const distortCenter = vec2(LENS_DISTORTION_CENTER[0], LENS_DISTORTION_CENTER[1]);
-  const p = uv().sub(distortCenter);
-  const rawDistortedUv = distortCenter.add(p.mul(float(1).add(uDistortion.mul(dot(p, p)))));
-  // `uvGuard(plainUv, warpedUv)`: the Table's way to keep the warp off its straight rim
-  // (`effects/table/table-subsystem.js#lensGuard`). Omitted ⇒ the plain warp, unchanged.
-  const distortedUv = (uvGuard ? uvGuard(uv(), rawDistortedUv) : rawDistortedUv).toVar();
+  const distortedUv = lensWarpUv(THREE.TSL, uv(), uDistortion, uvGuard).toVar();
 
   /** `sampleSceneWithCA` — red/blue split along the radial direction from
    * distortion centre, blue and red offset OPPOSITE ways, green stays the

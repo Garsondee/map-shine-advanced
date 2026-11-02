@@ -245,7 +245,8 @@ export function renderSceneDepartment(container, ctx) {
         icon: 'reset',
         label: 'Remove all scene customisation…',
         armedLabel: 'Remove from ALL scenes? Click again',
-        title: 'Erase the GM’s effect tuning on EVERY scene in this world, so all scenes share the default settings (time and weather are kept)',
+        title:
+          'Erase the GM’s effect tuning on EVERY scene in this world, so all scenes share the default settings (time and weather are kept)',
         armedTitle:
           'Click again to erase the GM’s effect tuning on every scene and the world grid look. Time and weather are kept. This cannot be undone.',
         className: 'msa-btn msa-btn--sm msa-btn--danger',

@@ -10,6 +10,7 @@ import {
   getTokenGrounding,
   resetTokenGrounding,
   setTokenGroundingGroundDensity,
+  isTokenContactShadowOn,
   detailCapScale,
 } from '../token-grounding.js';
 
@@ -59,5 +60,16 @@ export function run(t) {
     resetTokenGrounding();
     ok('reset restores the default detail', getTokenGrounding().detail === TOKEN_GROUNDING_PARAMS.detail.default);
     ok('reset leaves it enabled', getTokenGrounding().enabled === true);
+
+    // Contact shadow controls.
+    ok('the contact shadow is on by default', isTokenContactShadowOn());
+    ok('shadow is clamped to 1', setTokenGrounding({ shadow: 5 }).shadow === 1);
+    ok('shadow size is clamped to its min', setTokenGrounding({ shadowSize: 0 }).shadowSize === 0.02);
+    setTokenGrounding({ shadow: 0 });
+    ok('shadow 0 turns the pass off', !isTokenContactShadowOn());
+    setTokenGrounding({ shadow: 0.5, enabled: false });
+    ok('disabled turns the pass off', !isTokenContactShadowOn());
+    resetTokenGrounding();
+    ok('reset restores the default shadow', getTokenGrounding().shadow === TOKEN_GROUNDING_PARAMS.shadow.default);
   }
 }

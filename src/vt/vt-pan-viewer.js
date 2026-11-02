@@ -66,6 +66,8 @@ import { mipChainByteLength } from './block-compress.js';
 import { buildAlbedoClarityNode, buildFlatAlbedoNode, isAlbedoClarityEnabled } from './albedo-clarity.js';
 import {
   buildTokenArtNode,
+  buildTokenContactShadowMaterial,
+  isTokenContactShadowOn,
   setTokenGroundingGroundDensity,
   setTokenGroundingWorldPerPixel,
 } from './token-grounding.js';
@@ -1072,6 +1074,7 @@ function disposeActive() {
     }
   }
   try {
+    _active.disposeTokenShadows?.();
     _active.disposeOcclusionMask?.();
   } catch (err) {
     log.error('occlusion mask dispose failed — VRAM may be leaked:', err);
@@ -9273,6 +9276,77 @@ async function startVtPanViewerUnserialized({
     // Parity.md §5). Runs AFTER geometry.world (which fills sceneColor) and
     // before present.composite (which reads sceneLit): the env snapshot is
     // already refreshed for this frame by updateEnvSnapshot() up in renderFrame.
+    // ── TOKEN CONTACT SHADOWS (vt/token-grounding.js, stage C) ─────────────
+    // One shadow quad per DRAWN token, keyed by item id, sharing the token's
+    // own geometry (never disposed here: the token owns it). A token whose
+    // art or geometry is swapped gets a fresh material; one that stops being
+    // drawn is disposed the same frame, so nothing outlives its token.
+    const tokenShadowScene = new THREE.Scene();
+    const tokenShadows = new Map();
+    function disposeTokenShadowEntry(entry) {
+      tokenShadowScene.remove(entry.mesh);
+      try {
+        entry.material.dispose();
+      } catch (err) {
+        log.warn('token contact shadow: material dispose failed (VRAM may leak):', err);
+      }
+    }
+    function syncTokenShadows() {
+      const seen = new Set();
+      if (isTokenContactShadowOn()) {
+        for (const item of lastItems) {
+          if (item.kind !== 'token' || item.dragPreview) continue;
+          const state = itemStates.get(item.id);
+          const tiles = state?.wholeImage?.tiles;
+          // A split (multi-tile) token has per-tile uvs the shadow cannot
+          // grow about one centre; a placeholder has no art yet.
+          if (!tiles || tiles.length !== 1 || !state.placement) continue;
+          const t = tiles[0];
+          if (t.isPlaceholder || !t.mesh?.visible || !t.tex || !t.geometry) continue;
+          let entry = tokenShadows.get(item.id);
+          if (entry && (entry.tex !== t.tex || entry.geometry !== t.geometry)) {
+            disposeTokenShadowEntry(entry);
+            entry = null;
+          }
+          if (!entry) {
+            const built = buildTokenContactShadowMaterial(THREE, {
+              tex: t.tex,
+              uvScale: t.uvScale,
+              texWidth: t.tex.image?.width ?? 1,
+              flagsTexture: sceneDepth.texture,
+              depthTexture: sceneDepth.depthTexture ?? null,
+              visionMaskTexture: visionMask.texture,
+            });
+            const mesh = new THREE.Mesh(t.geometry, built.material);
+            mesh.frustumCulled = false;
+            tokenShadowScene.add(mesh);
+            entry = {
+              mesh,
+              material: built.material,
+              uCenter: built.uCenter,
+              uAlpha: built.uAlpha,
+              uTokenDepth: built.uTokenDepth,
+              tex: t.tex,
+              geometry: t.geometry,
+            };
+            tokenShadows.set(item.id, entry);
+          }
+          const c = computeQuadCorners(state.placement);
+          entry.uCenter.value.set((c[0].x + c[1].x + c[2].x + c[3].x) / 4, (c[0].y + c[1].y + c[2].y + c[3].y) / 4);
+          entry.uAlpha.value = t.appearance?.uAlpha?.value ?? 1;
+          entry.uTokenDepth.value = t.uExpectedDepth?.value ?? 0;
+          entry.mesh.visible = true;
+          seen.add(item.id);
+        }
+      }
+      for (const [id, entry] of tokenShadows) {
+        if (seen.has(id)) continue;
+        disposeTokenShadowEntry(entry);
+        tokenShadows.delete(id);
+      }
+      return seen.size;
+    }
+
     function runLightAccumulatePass() {
       // THE FLOOR LIST, RESOLVED EXACTLY ONCE FOR THE WHOLE PASS (2026-08-12
       // cache-completeness pass). Four independent readers below —
@@ -10290,6 +10364,15 @@ async function startVtPanViewerUnserialized({
       // the old separate additive quad blended in LINEAR space and washed the
       // scene to one hue — see environmental-light.js's composite essay). The
       // coloration target above is fully rendered before this reads it.
+      // Token contact shadows: light that never reached the floor at a
+      // token's foot, multiplied into the finished illum before it is used.
+      if (syncTokenShadows() > 0) {
+        const prevShadowAutoClear = renderer.autoClearColor;
+        renderer.setRenderTarget(sceneIllum);
+        renderer.autoClearColor = false;
+        renderer.render(tokenShadowScene, camera);
+        renderer.autoClearColor = prevShadowAutoClear;
+      }
       profiler?.begin(Z.lightDrawComposite);
       renderer.setRenderTarget(sceneLit);
       compositeQuad.render(renderer);
@@ -29186,6 +29269,11 @@ async function startVtPanViewerUnserialized({
         }
       },
       /** Tear down buf:occlusion + every disc mesh/material (see disposeActive). */
+      /** Tear down every token contact-shadow material (geometry is the token's). */
+      disposeTokenShadows() {
+        for (const entry of tokenShadows.values()) disposeTokenShadowEntry(entry);
+        tokenShadows.clear();
+      },
       disposeOcclusionMask() {
         allocator.dispose(occlusionMask.rt);
         for (const entry of occlusionDiscs.values()) {

@@ -422,6 +422,7 @@ import {
   setTokenGrounding,
   getTokenGrounding,
   resetTokenGrounding,
+  TOKEN_GROUNDING_PARAMS,
   setVtPanViewerAlbedoClarityForce,
   getVtPanViewerAlbedoClarityForce,
   setVtPanViewerMaskNodeOffForce,
@@ -13248,6 +13249,62 @@ function install() {
     zone: 'workshop',
     effect: 'albedoClarity',
     order: 91,
+  });
+
+  /** TOKENS card (vt/token-grounding.js): how token art sits in the map. Same
+   * explicit per-key dispatch as the Sharpening card above, for the same
+   * params/no-dead-controls reason. */
+  function buildTokenGroundingPanel({ attachments } = {}) {
+    const getValue = (id) => {
+      const state = getTokenGrounding();
+      switch (id) {
+        case 'detail':
+          return state.detail;
+        case 'shadow':
+          return state.shadow;
+        case 'shadowSize':
+          return state.shadowSize;
+        default:
+          return undefined;
+      }
+    };
+    const onChange = (id, value) => {
+      switch (id) {
+        case 'detail':
+          setTokenGrounding({ detail: value });
+          break;
+        case 'shadow':
+          setTokenGrounding({ shadow: value });
+          break;
+        case 'shadowSize':
+          setTokenGrounding({ shadowSize: value });
+          break;
+        default:
+          break;
+      }
+    };
+    return buildEffectCard({
+      id: 'tokenGrounding',
+      diagnostics: attachments,
+      icon: '♟️',
+      title: 'Tokens',
+      subtitle:
+        "Draws tokens at the map's own pixel scale and gives each a soft contact shadow, so they " +
+        'sit in the scene instead of on top of it. Live; no reload.',
+      status: () => collapsedStatusLine({ enabled: getTokenGrounding().enabled }),
+      schema: TOKEN_GROUNDING_PARAMS,
+      fohKeys: ['detail', 'shadow'],
+      getValue,
+      onChange,
+      enabled: getTokenGrounding().enabled,
+      onToggleEnabled: (next) => setTokenGrounding({ enabled: next }),
+    });
+  }
+
+  MapShine.debug.registerPanel('token-grounding-panel', 'Tokens', buildTokenGroundingPanel, {
+    zone: 'workshop',
+    effect: 'tokenGrounding',
+    order: 92,
   });
 
   // THE WIND FIELD DEBUG OVERLAY (2026-07-21, docs/planning/Wind.md Tier 0 —

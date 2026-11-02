@@ -56,6 +56,10 @@ import { resolveEffectEnabled, resolveEffectParams, resolveEffectTier } from './
  * fresh one and the composition root owns the live instance (no ambient global
  * to reach around — the `no-global-bus` discipline).
  *
+ * @param {{forceDefaults?: () => boolean}} [options] - `forceDefaults()` true makes EVERY effect resolve
+ *   from its shipped defaults alone (stored scene/world/live param layers ignored, not deleted).
+ *   Asked at each resolve, so flipping it and re-resolving is all it takes; one door, so no effect can
+ *   forget to honour it.
  * @returns {{
  *   register: (manifest: object, apply: (r: ResolvedEffect) => void) => string,
  *   get: (id: string) => {manifest: object, apply: Function} | null,
@@ -63,7 +67,7 @@ import { resolveEffectEnabled, resolveEffectParams, resolveEffectTier } from './
  *   resolveAndApply: (id: string, layers?: object) => ResolvedEffect,
  * }}
  */
-export function createEffectRegistry() {
+export function createEffectRegistry({ forceDefaults = () => false } = {}) {
   /** @type {Map<string, {manifest: object, apply: Function}>} */
   const entries = new Map();
 
@@ -127,7 +131,9 @@ export function createEffectRegistry() {
     // whose ladder is tier-0-only always get 0, which is exactly right: their
     // manifest says they have nothing to spend a better machine on.
     const { tier, maxTier, source } = resolveEffectTier(entry.manifest, layers);
-    const { values, rejected } = resolveEffectParams(entry.manifest.params, layers?.paramLayers ?? []);
+    // FORCE DEFAULTS (foundry/force-defaults.js): no param layers at all = the manifest's own defaults.
+    const paramLayers = forceDefaults() ? [] : (layers?.paramLayers ?? []);
+    const { values, rejected } = resolveEffectParams(entry.manifest.params, paramLayers);
     const resolved = {
       enabled,
       params: values,

@@ -61,6 +61,20 @@ export function readGridDefaults() {
 }
 
 /**
+ * EMPTY the stored world values, so every key is back to the shipped default (the global reset's grid half).
+ * Not a merge: `writeGridDefaults({})` would keep what is stored.
+ * @returns {Promise<{ok: boolean, reason: string|null}>}
+ */
+export async function clearGridDefaults() {
+  try {
+    await writeSetting(GRID_DEFAULTS_NAMESPACE, GRID_DEFAULTS_KEY, '');
+    return { ok: true, reason: null };
+  } catch (err) {
+    return { ok: false, reason: `clearing the world grid look failed (GM only?): ${err?.message ?? err}` };
+  }
+}
+
+/**
  * Merge `patch` into the stored world values (GM only — Foundry rejects a player's world write).
  * @param {Record<string, unknown>} patch
  * @returns {Promise<{ok: boolean, reason: string|null}>}

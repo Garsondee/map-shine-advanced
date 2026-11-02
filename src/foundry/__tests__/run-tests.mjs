@@ -50,6 +50,7 @@ import { run as runTileMotion } from './tile-motion.test.mjs';
 import { run as runTileMotionRuntime } from './tile-motion-runtime.test.mjs';
 import { run as runV2AnchorImport } from './v2-anchor-import.test.mjs';
 import { run as runSettingsAdapter } from './settings-adapter.test.mjs';
+import { run as runForceDefaults } from './force-defaults.test.mjs';
 import { run as runWindPersistence } from './wind-persistence.test.mjs';
 import { run as runScenePresetPersistence } from './scene-preset-persistence.test.mjs';
 import { run as runPlayerLightPermissions } from './player-light-permissions.test.mjs';
@@ -137,6 +138,7 @@ const suites = [
   ['tile-motion-runtime', runTileMotionRuntime],
   ['v2-anchor-import', runV2AnchorImport],
   ['settings-adapter', runSettingsAdapter],
+  ['force-defaults', runForceDefaults],
   ['wind-persistence', runWindPersistence],
   ['scene-preset-persistence', runScenePresetPersistence],
   ['player-light-permissions', runPlayerLightPermissions],

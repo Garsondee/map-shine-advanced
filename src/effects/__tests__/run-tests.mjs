@@ -7,6 +7,7 @@
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runEffectRegistration } from './effect-registration.test.mjs';
+import { run as runForceDefaultsRegistry } from './force-defaults-registry.test.mjs';
 import { run as runEffectTier } from './effect-tier.test.mjs';
 import { run as runEffectTierConsumption } from './effect-tier-consumption.test.mjs';
 import { run as runDepthOfFieldBlur } from './depth-of-field-blur.test.mjs';
@@ -69,6 +70,7 @@ const t = {
 
 const suites = [
   ['effect-registration', runEffectRegistration],
+  ['force-defaults-registry', runForceDefaultsRegistry],
   ['wind-trails', runWindTrails],
   ['leaf-shed', runLeafShed],
   ['candle-wind-state', runCandleWindState],

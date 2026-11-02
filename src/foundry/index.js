@@ -100,9 +100,17 @@ export {
 export { isSceneOutline, setSceneOutlineVisible } from './scene-outline.js';
 export { readFoundryGrid, setFoundryGridOwnership } from './scene-grid.js';
 export {
+  registerForceDefaultsSettings,
+  isForcingDefaults,
+  writeForceDefaults,
+  resetAllEffectSettings,
+  resetWorldEffectSettings,
+} from './force-defaults.js';
+export {
   registerGridDefaultsSettings,
   readGridDefaults,
   writeGridDefaults,
+  clearGridDefaults,
   parseGridDefaults,
 } from './grid-defaults-persistence.js';
 

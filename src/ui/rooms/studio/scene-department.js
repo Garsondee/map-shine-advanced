@@ -193,6 +193,78 @@ export function renderSceneDepartment(container, ctx) {
     grid.append(copyPasteCard);
   }
 
+  // NEUTRAL LOOK (2026-11-02) — the two ways back to the curated defaults. A toggle (a world setting, so
+  // the whole table sees it) that makes every effect draw its shipped defaults WITHOUT deleting anything,
+  // and a red, two-click reset that really wipes every scene's authored effect params.
+  if (typeof ctx.getForceDefaults === 'function' && typeof ctx.setForceDefaults === 'function') {
+    const neutralCard = panel('reset', 'Neutral look');
+    neutralCard.append(
+      el(
+        'p',
+        'msa-note',
+        "Force defaults draws every effect at Map Shine's shipped settings, on every scene, for everyone. Nothing is deleted: switch it off and each scene's own tuning returns."
+      )
+    );
+    const status = statusLine();
+    let forcing = false;
+    try {
+      forcing = ctx.getForceDefaults() === true;
+    } catch (_) {
+      forcing = false;
+    }
+    const forceBtn = smallBtn('', 'Draw every effect at its shipped default on every scene (saved with the world)');
+    forceBtn.setAttribute('aria-live', 'polite');
+    const paintForce = () => {
+      forceBtn.textContent = forcing ? 'Force defaults: ON' : 'Force defaults: off';
+      forceBtn.setAttribute('aria-pressed', String(forcing));
+      forceBtn.classList.toggle('msa-btn--gold', forcing);
+    };
+    paintForce();
+    forceBtn.addEventListener('click', () => {
+      const next = !forcing;
+      forceBtn.disabled = true;
+      Promise.resolve(ctx.setForceDefaults(next)).then((res) => {
+        forceBtn.disabled = false;
+        if (res?.ok) {
+          forcing = next;
+          setTone(
+            status,
+            forcing ? 'Every effect now draws its shipped defaults.' : "Each scene's own tuning is back.",
+            true
+          );
+        } else {
+          setTone(status, `Not changed: ${res?.reason}`, false);
+        }
+        paintForce();
+      });
+    });
+    const btnRow = el('div', 'msa-row-flex');
+    btnRow.append(forceBtn);
+    if (typeof ctx.resetAllEffectSettings === 'function') {
+      const resetBtn = buildArmButton({
+        icon: 'reset',
+        label: 'Reset every scene…',
+        armedLabel: 'Wipe ALL scenes? Click again',
+        title: 'Erase the tuned effect settings on EVERY scene in this world and the world grid look',
+        armedTitle:
+          'Click again to erase every scene’s tuned effect settings and the world grid look. This cannot be undone.',
+        className: 'msa-btn msa-btn--sm msa-btn--danger',
+        onConfirm: () => {
+          Promise.resolve(ctx.resetAllEffectSettings()).then((res) => {
+            if (res?.ok) {
+              setTone(status, `Reset done: ${res.scenesWiped} scene(s) wiped, grid look cleared.`, true);
+            } else {
+              setTone(status, `Reset incomplete: ${res?.reason}`, false);
+            }
+          });
+        },
+      });
+      btnRow.append(resetBtn);
+    }
+    neutralCard.append(status, btnRow);
+    grid.append(neutralCard);
+  }
+
   // DARKNESS AT MAX (UI parity plan, phase 4a) — the old panel's own
   // Bridge-zone 'darkness-realism' select, real port: same real backend
   // (getDarknessRealism/setDarknessRealism), same widget canon every other

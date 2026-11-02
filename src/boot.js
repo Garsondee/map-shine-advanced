@@ -114,6 +114,10 @@ import {
   registerGridDefaultsSettings,
   readGridDefaults,
   writeGridDefaults,
+  registerForceDefaultsSettings,
+  isForcingDefaults,
+  writeForceDefaults,
+  resetWorldEffectSettings,
 } from './foundry/index.js';
 // THE TOKEN-VISION DIAGNOSTIC — see its own module header, and the
 // `token-vision` report registration below.
@@ -1057,7 +1061,7 @@ MapShine.resetTokenGrounding = resetTokenGrounding;
 // _uiShadowState; the frame loop reads only that, so it can never see a settings
 // store or UI state (the V2 `resolve-effect-enabled` race is unreachable). After
 // this rewire the low-level setUiShadow has exactly ONE caller — this apply.
-const effectRegistry = createEffectRegistry();
+const effectRegistry = createEffectRegistry({ forceDefaults: () => isForcingDefaults() });
 // Studio-card readout (mythica-machina-press#175) — same `buildCascadeReadout`
 // shape every other simple effect card's readout uses; declared right beside
 // this effect's own register() call rather than in the big readout cluster
@@ -1835,6 +1839,10 @@ function install() {
       // already existed; this Scene-department card was the missing UI.
       copySceneEffectSettings: () => MapShine.copySceneEffectSettings(),
       pasteSceneEffectSettings: () => MapShine.pasteSceneEffectSettings(),
+      // Neutral look card (Scene department): force defaults + the red global reset.
+      getForceDefaults: () => MapShine.getForceDefaults(),
+      setForceDefaults: (on) => MapShine.setForceDefaults(on),
+      resetAllEffectSettings: () => MapShine.resetAllEffectSettings(),
       // Scene presets card (Scene department) — the #177 library's Studio face.
       listScenePresets: () => MapShine.listScenePresets(),
       saveScenePreset: (name) => MapShine.saveScenePreset(name),
@@ -3780,6 +3788,67 @@ function install() {
       log.warn(`paste scene effect settings not persisted: ${result.reason}`);
       return result;
     });
+  };
+
+  // FORCE DEFAULTS + GLOBAL RESET (foundry/force-defaults.js) — the two ways back to the neutral look.
+
+  /** Drop every in-memory tweak (MapShine.setX / card drags) so the next resolve starts from stored values. */
+  function clearAllLiveOverrides() {
+    for (const o of [
+      uiShadowLiveOverride,
+      precipLiveOverride,
+      vegetationLiveOverride,
+      bloomLiveOverride,
+      lensLiveOverride,
+      prismLiveOverride,
+      iridescenceLiveOverride,
+      windTrailsLiveOverride,
+      leafShedLiveOverride,
+      temperatureEffectsLiveOverride,
+      tableLiveOverride,
+      gridLiveOverride,
+      parallaxLiveOverride,
+      dofLiveOverride,
+      cloudsLiveOverride,
+      cloudTopsLiveOverride,
+      sunShadowLiveOverride,
+      gradeLookLiveOverride,
+      stylizeLiveOverride,
+      candleLiveOverride,
+      lightningLiveOverride,
+      fireLiveOverride,
+      doorLiveOverride,
+    ]) {
+      for (const k of Object.keys(o)) delete o[k];
+    }
+  }
+
+  /** `MapShine.getForceDefaults()` — is the world drawing every effect at its shipped defaults? */
+  MapShine.getForceDefaults = () => isForcingDefaults();
+
+  /**
+   * `MapShine.setForceDefaults(true)` — GM only. Nothing is deleted; every client re-resolves through the
+   * setting's own onChange.
+   * @param {boolean} on
+   * @returns {Promise<{ok: boolean, reason?: string}>}
+   */
+  MapShine.setForceDefaults = (on) =>
+    Promise.resolve(writeForceDefaults(on === true)).then((result) => {
+      if (!result.ok) log.warn(`force defaults not changed: ${result.reason}`);
+      return result;
+    });
+
+  /**
+   * `MapShine.resetAllEffectSettings()` — GM only, NOT undoable: wipes the authored effect params off EVERY
+   * scene in the world, plus the world Grid look. The Studio asks twice before calling it.
+   * @returns {Promise<{ok: boolean, reason?: string, scenesWiped?: number, failures?: string[]}>}
+   */
+  MapShine.resetAllEffectSettings = async () => {
+    const result = await resetWorldEffectSettings();
+    clearAllLiveOverrides();
+    reapplyAll('global reset');
+    if (!result.ok) log.warn(`global reset incomplete: ${result.reason}`);
+    return result;
   };
 
   // EFFECT PRESETS (mythica-machina-press#102) — a named, reusable snapshot
@@ -20095,6 +20164,15 @@ function install() {
         });
       } catch (err) {
         log.error('grid world settings registration failed:', err);
+      }
+
+      // FORCE DEFAULTS (foundry/force-defaults.js): the GM flipping it re-resolves every effect on every client.
+      try {
+        registerForceDefaultsSettings({
+          onChange: () => reapplyAll('force defaults changed'),
+        });
+      } catch (err) {
+        log.error('force defaults settings registration failed:', err);
       }
 
       try {

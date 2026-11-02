@@ -9,6 +9,8 @@
  * the evidence in place.
  */
 import {
+  callerSite,
+  compileBusy,
   createInFlightTracker,
   createPipelineGovernor,
   describePipeline,
@@ -403,4 +405,77 @@ export async function run(t) {
     'the slow-compile bar is a few seconds, well under the 15 s watchdog',
     SLOW_COMPILE_MS >= 1_000 && SLOW_COMPILE_MS <= 5_000
   );
+
+  // ── WHO DREW IT (2026-11-02): an unnamed material is named by the MSA pass that drew it ──
+  {
+    const stack = [
+      'Error',
+      '    at siteNow (http://h/modules/map-shine-advanced/src/vt/pipeline-governor.js:300:20)',
+      '    at governed (http://h/modules/map-shine-advanced/src/vt/pipeline-governor.js:320:7)',
+      '    at Pipelines._getRenderPipeline (http://h/modules/map-shine-advanced/src/vendor/three/three.webgpu.js:1:1)',
+      '    at pipelines.getForRender (http://h/modules/map-shine-advanced/src/diag/pipeline-rebuild-probe.js:199:18)',
+      '    at runLightAccumulatePass (http://h/modules/map-shine-advanced/src/vt/vt-pan-viewer.js:10301:50)',
+      '    at runPassPlan (http://h/modules/map-shine-advanced/src/graph/run-frame.js:116:7)',
+    ].join('\n');
+    ok(
+      'callerSite skips three, the governor and the probes, and names the pass',
+      callerSite(stack) === 'runLightAccumulatePass'
+    );
+    ok(
+      '...an anonymous frame falls back to file:line',
+      callerSite('Error\n    at http://h/modules/map-shine-advanced/src/effects/x/thing.js:12:3') === 'thing.js:12'
+    );
+    ok(
+      '...and a stack with no MSA frame names nothing',
+      callerSite('Error\n    at foo (http://h/scripts/foundry.mjs:1:1)') === null
+    );
+    ok(
+      'describePipeline prefers the compile-policy name, then the site, over the bare type',
+      describePipeline(
+        { ...pipeline(10), material: { type: 'NodeMaterial', userData: { msaDeferCompile: 'cloud tops' } } },
+        'site'
+      ).label.startsWith('cloud tops#') &&
+        describePipeline({ ...pipeline(10), material: { type: 'NodeMaterial' } }, 'runX').label.startsWith('runX#') &&
+        describePipeline({ ...pipeline(10), material: { type: 'NodeMaterial' } }).label.startsWith('NodeMaterial#')
+    );
+  }
+
+  // ── THE COST OF A LOAD IS THE UNION OF THE COMPILES, NOT THEIR SUM ──
+  {
+    const b = compileBusy([
+      { startMs: 0, endMs: 100 },
+      { startMs: 50, endMs: 150 },
+      { startMs: 300, endMs: 400 },
+    ]);
+    ok('overlapping compiles count once: busy 250 of a 400 ms span', b.busyMs === 250 && b.spanMs === 400);
+    ok('...and the worst overlap is two at once', b.peakConcurrent === 2);
+    ok('no records is zero, not NaN', compileBusy([]).busyMs === 0 && compileBusy(null).peakConcurrent === 0);
+  }
+
+  // ── COMPUTE PIPELINES ARE COUNTED, NEVER CHANGED ──
+  {
+    const b = fakeBackend();
+    let called = 0;
+    b.utils.createComputePipeline = (p, bindings) => {
+      called++;
+      return bindings;
+    };
+    const gov = createPipelineGovernor({ renderer: b.renderer });
+    gov.install();
+    const out = b.utils.createComputePipeline({ computeProgram: { code: 'c'.repeat(500) } }, 'bindings');
+    const rep = gov.report();
+    ok(
+      "three's compute creation still runs, synchronously, with its result returned",
+      called === 1 && out === 'bindings'
+    );
+    ok(
+      '...and lands in the report: counted, sized, mode compute',
+      rep.compute === 1 && rep.largest[0]?.chars === 500 && rep.largest[0]?.mode === 'compute'
+    );
+    gov.uninstall();
+    ok(
+      "uninstall puts three's compute function back",
+      b.utils.createComputePipeline({ computeProgram: {} }, 'x') === 'x' && gov.report().compute === 1
+    );
+  }
 }

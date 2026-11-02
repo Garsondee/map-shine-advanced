@@ -20032,6 +20032,7 @@ function install() {
             warmUpPipelinesCreated: warmUpDiag?.shaders?.warmUpPipelinesCreated ?? null,
             warmUpSimPipelinesCreated: warmUpDiag?.shaders?.warmUpSimPipelinesCreated ?? null,
             postContentPipelinesCreated: warmUpDiag?.shaders?.postContentPipelinesCreated ?? null,
+            postContentPasses: warmUpDiag?.shaders?.postContentPasses ?? null,
             warmUpError: warmUpDiag?.shaders?.warmUpError ?? null,
             warmUpSimError: warmUpDiag?.shaders?.warmUpSimError ?? null,
             shaderCompileMs: warmUpDiag?.shaders?.precompileMs ?? null,
@@ -20073,13 +20074,18 @@ function install() {
         {
           const gov = lastLoadDiagnostics.shaderCompiles;
           if (gov?.installed) {
-            const top = (gov.slowest ?? [])
-              .slice(0, 4)
-              .map((r) => `${r.label} ${r.ms}ms/${r.chars}ch/${r.mode}`)
+            // LARGEST, not slowest (2026-11-02): per-pipeline times overlap (twenty compiles "taking 7 s" were one
+            // 7 s window) and a synchronous one's time is the GPU queue draining, so size is what points at a fix.
+            // `busyMs` is the real cost: how long at least one compile was running.
+            const top = (gov.largest ?? [])
+              .slice(0, 5)
+              .map((r) => `${r.label} ${Math.round(r.chars / 1000)}k chars/${r.mode}`)
               .join(', ');
             log.info(
-              `shader compiles: ${gov.created} pipelines (${gov.async} off-thread, ${gov.sync} on the GPU main thread, ` +
-                `${gov.failed} failed)${top ? `; slowest: ${top}` : ''}`,
+              `shader compiles: ${gov.created} pipelines + ${gov.compute ?? 0} compute ` +
+                `(${gov.async} off-thread, ${gov.sync} on the GPU main thread, ${gov.failed} failed), ` +
+                `${Math.round((gov.chars ?? 0) / 1000)}k chars of WGSL, compiling for ${gov.busyMs ?? '?'} ms` +
+                `${top ? `; largest: ${top}` : ''}`,
               gov
             );
           }

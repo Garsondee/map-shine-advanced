@@ -72,7 +72,6 @@ import {
 } from './window-glass.js';
 import { simplexFloat, rotate2d } from '../lighting/animations/tsl-noise-toolkit.js';
 import { WINDOW_FILL_RATE, WINDOW_OUTDOOR_MATCH_DEFAULT } from './window-weather.js';
-import { WINDOW_ROOM_TAPS } from './window-room-light.js';
 
 /**
  * Fraction of the authored file's resolution to upload for this shader's own
@@ -824,15 +823,16 @@ export function buildWindowSurfaceMaterial({
           .mul(step(u.x, float(1)))
           .mul(step(float(0), u.y))
           .mul(step(u.y, float(1)));
-      const beam = [];
-      for (let k = 0; k < WINDOW_ROOM_TAPS; k++) {
-        const uvK = maskUv.sub(room.offsetAt(k).mul(uUvPerWorldPx)).toVar(`winRoomUv${k}`);
+      // One tap as a function of `k` (a shader int): `combine` runs it inside its own loop, so it is emitted once,
+      // not once per tap (see that function's header).
+      const beamAt = (k) => {
+        const uvK = maskUv.sub(room.offsetAt(k).mul(uUvPerWorldPx)).toVar('winRoomUv');
         // The smear blurs as it goes: the cookie is read a little off the line (the room gate and the file test stay on it).
         const uvBlur = uvK.add(room.blurAt(k).mul(uUvPerWorldPx));
-        const tap = sampleCookieAt(warpUv ? uvBlur.add(warpUv) : uvBlur, `winRoomTap${k}`);
-        beam.push(tap.cookie.mul(tap.presence).mul(inFile(uvK)));
-      }
-      const folded = roomLight.combine(room, beam, cookie, positionWorld.xy);
+        const tap = sampleCookieAt(warpUv ? uvBlur.add(warpUv) : uvBlur, 'winRoomTap');
+        return tap.cookie.mul(tap.presence).mul(inFile(uvK));
+      };
+      const folded = roomLight.combine(room, beamAt, cookie, positionWorld.xy);
       cookie = folded.cookie;
       roomDebug = { rooms: room.debugRooms, wallDist: room.debugWallDist, sun: room.debugSun, gate: folded.debugGate };
     }

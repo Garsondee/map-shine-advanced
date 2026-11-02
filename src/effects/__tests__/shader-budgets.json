@@ -169,26 +169,26 @@
       }
     },
     "window-full": {
-      "_note": "2026-10-28: the window as production builds it at the glass rung — glass + rain on the glass + SUN & ROOMS. The rain alone (window-rain, unbudgeted) already measured 190,898 / 374,739 fs chars, 2.3 s / 4.9 s cold. SUN & ROOMS (8 beam taps, 4 gap + 8 line-of-sight clearance reads, two room-map textures — re-measured after the Compound stepped-edge fix) brings the pair to the numbers below: about +45k / +60k chars over rain alone. Both pipelines are far above the governor's 45k async line, so they never compile on the GPU process's main thread; the larger is the debug material, compiled only when a debug channel is picked.",
+      "_note": "2026-10-28: the window as production builds it at the glass rung — glass + rain on the glass + SUN & ROOMS. The rain alone (window-rain, unbudgeted) already measured 190,898 / 374,739 fs chars, 2.3 s / 4.9 s cold. SUN & ROOMS (8 beam taps in a shader Loop since 2026-11-02 - was pasted 8 times, 4 gap + 8 line-of-sight clearance reads, two room-map textures — re-measured after the Compound stepped-edge fix) brings the pair to the numbers below: about +45k / +60k chars over rain alone. Both pipelines are far above the governor's 45k async line, so they never compile on the GPU process's main thread; the larger is the debug material, compiled only when a debug channel is picked.",
       "scenario": "window-full",
       "opts": {},
       "mustBeDeferrable": false,
       "budget": {
         "noise": 12,
-        "unique": 2800,
+        "unique": 1582,
         "textures": 5
       },
       "measured": {
         "gpu": {
           "pipelines": 2,
-          "chars": 672932,
-          "maxPipelineChars": 438503,
-          "maxPipelineMs": 6170,
-          "coldMs": 9622
+          "chars": 604803,
+          "maxPipelineChars": 399566,
+          "maxPipelineMs": 6407,
+          "coldMs": 10055
         },
         "census": {
           "noise": 10,
-          "unique": 2444,
+          "unique": 1318,
           "textures": 5
         }
       }

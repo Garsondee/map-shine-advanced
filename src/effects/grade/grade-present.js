@@ -365,7 +365,31 @@ export function buildGradePresentMaterial({
   /** (Re)build the fragment node for the current tone-map selection AND the
    * current post-upscale-sharpen active state. The env grade and the LUT are
    * unaffected (they are uniform/texture-driven). */
-  function rebuildFragment() {
+  /** Every fragment build and the reasons that asked for it (2026-11-02): each one is a new ~50-90k-character
+   * shader to generate and compile, so a rebuild nobody expected (on a level change, say) is worth seeing. */
+  const rebuildHistory = [];
+  /** The reasons asked for since the last build; non-empty means the compiled fragment is stale. */
+  let pendingRebuild = [];
+  /**
+   * ASK for a rebuild; {@link flushRebuild} does it (2026-11-02, the author: "Loading / Shader compilation times
+   * just exploded"). Every structural setter used to rebuild on the spot, and a scene load calls six of them one
+   * after another (sharpen, fog hold, lens warp, Foundry overlay, tone map, sharpen again): the same ~50k-character
+   * shader was generated seven times before its first frame. Now they mark it stale and the viewer flushes once,
+   * right before the present draws, so the frame never sees a half-applied shape.
+   */
+  function rebuildFragment(reason = 'unknown') {
+    pendingRebuild.push(reason);
+  }
+  /** Build the fragment now if anything asked for it since the last build. Returns true when it rebuilt. */
+  function flushRebuild() {
+    if (pendingRebuild.length === 0) return false;
+    buildFragmentNow([...new Set(pendingRebuild)].join('+'));
+    return true;
+  }
+  function buildFragmentNow(reason) {
+    pendingRebuild = [];
+    rebuildHistory.push(reason);
+    if (rebuildHistory.length > 40) rebuildHistory.shift();
     /** Where the colour at screen `screenUv` came from in the frame the masks describe (see
      * `lensWarpCompiled`): the lens's own warp, or the same uv when the lens is off. */
     const sourceUvAt = (screenUv) =>
@@ -663,11 +687,16 @@ export function buildGradePresentMaterial({
       flickerOnStart,
     };
   }
-  rebuildFragment();
+  buildFragmentNow('built');
 
   return {
     material,
+    /** Apply every rebuild asked for since the last draw, as ONE build (see `rebuildFragment`). Call before
+     * drawing the present. */
+    flushRebuild,
     presentTexNode,
+    /** Why the fragment was rebuilt, oldest first (see `rebuildFragment`). */
+    rebuildHistory: () => rebuildHistory.slice(),
     /** Push this frame's environmental grade (resolved from env). */
     setEnvGrade: (params) => writeGradeUniforms(uEnv, params),
     /**
@@ -680,7 +709,7 @@ export function buildGradePresentMaterial({
       const next = STYLE_NAMES_SAFE.has(style) ? style : 'none';
       if (next !== currentStyle) {
         currentStyle = next;
-        rebuildFragment();
+        rebuildFragment('stylize');
       }
       uStylizeAmount.value = Number.isFinite(Number(amount)) ? Math.min(1, Math.max(0, Number(amount))) : 0;
     },
@@ -713,13 +742,13 @@ export function buildGradePresentMaterial({
           } else {
             beginVisionPowerTransition(0, 0, nowMs, 0);
             currentPlayerVisionMode = 'none';
-            rebuildFragment();
+            rebuildFragment('vision mode');
           }
         } else {
           const switchingFromNightVision = currentPlayerVisionMode === 'nightVision';
           if (next !== currentPlayerVisionMode) {
             currentPlayerVisionMode = next;
-            rebuildFragment();
+            rebuildFragment('vision mode');
           }
           if (next === 'nightVision') {
             const warmupFrom = switchingFromNightVision ? powerNow : 0;
@@ -747,7 +776,7 @@ export function buildGradePresentMaterial({
       uPlayerVisionPower.value = power;
       if (requestedPlayerVisionMode === 'none' && currentPlayerVisionMode !== 'none' && power <= 1e-3) {
         currentPlayerVisionMode = 'none';
-        rebuildFragment();
+        rebuildFragment('vision mode');
       }
     },
     /**
@@ -785,7 +814,7 @@ export function buildGradePresentMaterial({
       const nextTone = tail.toneMapping || 'none';
       if (nextTone !== currentToneMapping) {
         currentToneMapping = nextTone;
-        rebuildFragment();
+        rebuildFragment('tone map');
       }
     },
     /** Swap the 3D LUT texture (a parsed .cube uploaded as a Data3DTexture). */
@@ -809,7 +838,7 @@ export function buildGradePresentMaterial({
       const next = !!active && !!buildPostUpscaleSharpenNode;
       if (next !== sharpenActive) {
         sharpenActive = next;
-        rebuildFragment();
+        rebuildFragment('sharpen');
       }
     },
     /**
@@ -823,7 +852,7 @@ export function buildGradePresentMaterial({
       const next = !!active && !!fogHold;
       if (next !== fogHoldActive) {
         fogHoldActive = next;
-        rebuildFragment();
+        rebuildFragment('fog hold');
       }
     },
     /** Is the fog hold compiled in right now — for diagnostics and tests. */
@@ -841,7 +870,7 @@ export function buildGradePresentMaterial({
       const drew = !!on;
       if (drew && !lensWarpCompiled) {
         lensWarpCompiled = true;
-        rebuildFragment();
+        rebuildFragment('lens warp');
       }
       uLensDistortion.value = drew && Number.isFinite(distortion) ? distortion : 0;
     },
@@ -872,7 +901,7 @@ export function buildGradePresentMaterial({
       if (shape !== gridShape || wantOutline !== outlineCompiled) {
         gridShape = shape;
         outlineCompiled = wantOutline;
-        rebuildFragment();
+        rebuildFragment('foundry overlay');
       }
       writeFoundryGridUniforms(uGrid, { grid: shape ? grid : null, outline, pxPerCanvas, clip, plane, look });
       return { grid: !!shape, outline: wantOutline };
@@ -888,7 +917,7 @@ export function buildGradePresentMaterial({
       // identity a resize could (rarely, but see rebuildFragment's own
       // comment) have changed. The native path (sharpenActive false) is
       // untouched: this is a no-op call that costs nothing extra.
-      if (sharpenActive) rebuildFragment();
+      if (sharpenActive) rebuildFragment('lit rebind (sharpen)');
     },
     /**
      * Re-point at a DIFFERENT, ALREADY-SAME-SHAPE texture, EVERY FRAME — no
@@ -959,7 +988,7 @@ export function buildGradePresentMaterial({
       if (nextFrost !== frostCompiled || nextHeat !== heatRippleCompiled) {
         frostCompiled = nextFrost;
         heatRippleCompiled = nextHeat;
-        rebuildFragment();
+        rebuildFragment('temperature (frost/heat)');
       }
       const setV = (node, arr) => {
         if (Array.isArray(arr) && arr.every(Number.isFinite)) node.value.set(...arr);

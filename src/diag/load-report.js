@@ -373,6 +373,8 @@ function buildWarmUpSection(warmUp) {
     postContentPipelinesCreated: Number.isFinite(warmUp.postContentPipelinesCreated)
       ? warmUp.postContentPipelinesCreated
       : null,
+    // Each of those passes timed (2026-11-02): `planMs` redrawing the pass plan, `weatherMs` the weather scenarios.
+    postContentPasses: Array.isArray(warmUp.postContentPasses) ? warmUp.postContentPasses : null,
     // THE CAUSE, not just the fact (mythica-machina-press#584). A warm-up that
     // threw is only actionable if it says what threw — otherwise the report
     // reproduces the exact shrug that let #402 sit misfiled for weeks.
@@ -500,6 +502,32 @@ function buildZoneBreakdownSection(zoneRows) {
   };
 }
 
+/**
+ * THE SHADERS THIS LOAD COMPILED, BY NAME AND SIZE (2026-11-02, the author: "improving our recording of loading
+ * times and shader compilation"). From `vt/pipeline-governor.js#report`: how much WGSL, how long the GPU had a
+ * compile running (`busyMs`, the union — per-pipeline times overlap), and the largest shaders with the MSA pass
+ * that drew each. Size is what both costs scale with: three builds the text on the main thread, then the GPU
+ * compiles it.
+ */
+export function buildShaderSection(gov) {
+  if (!gov?.installed) return null;
+  return {
+    pipelines: gov.created ?? null,
+    compute: gov.compute ?? null,
+    offThread: gov.async ?? null,
+    onGpuMainThread: gov.sync ?? null,
+    failed: gov.failed ?? null,
+    wgslChars: gov.chars ?? null,
+    compilingMs: gov.busyMs ?? null,
+    spanMs: gov.spanMs ?? null,
+    peakConcurrent: gov.peakConcurrent ?? null,
+    largest: Array.isArray(gov.largest) ? gov.largest : [],
+    note:
+      'compilingMs is how long at least one shader was compiling (overlapping compiles counted once). A shader ' +
+      'over ~50k chars is worth a look: a JS loop in a TSL builder pastes its body once per iteration — use Loop().',
+  };
+}
+
 /** Rank phases by duration and name the biggest one — a verdict a tool can compute must not be left as an exercise. */
 function pickTopContributor(phaseRows) {
   const ranked = phaseRows.filter((p) => Number.isFinite(p.durMs)).sort((a, b) => b.durMs - a.durMs);
@@ -583,7 +611,13 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     const last = state.lastLoad;
     const totalMs = round(last.totalMs);
     const phaseRows = buildPhaseRows(last.phases, totalMs);
-    const warmingRow = phaseRows.find((p) => p.id === LOAD_PHASES.WARMING);
+    // A phase can be entered more than once (WARMING runs before AND after the first frame), and its blocker
+    // bucket holds both visits — so the breakdown's percentages are of the phase's TOTAL time, not of its first
+    // visit (which read "249% of phase" on 2026-11-02).
+    const warmingRows = phaseRows.filter((p) => p.id === LOAD_PHASES.WARMING);
+    const warmingRow = warmingRows.length
+      ? { ...warmingRows[0], durMs: warmingRows.reduce((a, p) => a + (p.durMs ?? 0), 0) }
+      : null;
     report.status = last.error ? 'failed' : last.forcedReveal ? 'forced-reveal' : 'complete';
     report.sceneName = last.sceneName ?? null;
     report.totalMs = totalMs;
@@ -612,6 +646,7 @@ export function buildLoadReport(loadingScreenState, diagnostics = null) {
     // Zone breakdown is COMPLETED-LOAD ONLY — see the in-progress branch's own
     // comment on why compile time reads live there but this does not (yet).
     report.zoneBreakdown = buildZoneBreakdownSection(diagnostics?.zoneRows ?? null);
+    report.shaders = buildShaderSection(diagnostics?.shaderCompiles ?? null);
   } else {
     report.status = 'no-data';
     report.note =

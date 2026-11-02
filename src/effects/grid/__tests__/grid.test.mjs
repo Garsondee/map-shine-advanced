@@ -10,6 +10,13 @@ import { resolveEffectEnabled } from '../../effect-cascade.js';
 import { buildGradePresentMaterial } from '../../grade/grade-present.js';
 import { parseGridDefaults } from '../../../foundry/grid-defaults-persistence.js';
 
+// The present rebuilds lazily (grade-present.js `rebuildFragment` marks it stale, `flushRebuild` builds once, right
+// before the draw), so "did it rebuild?" is asked of the node the next draw would use.
+const nodeOf = (g) => {
+  g.flushRebuild?.();
+  return g.material.fragmentNode;
+};
+
 function stubTexture() {
   const tex = new THREE.DataTexture(new Uint8Array([0, 128, 128, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
   tex.needsUpdate = true;
@@ -111,14 +118,14 @@ export function run(t) {
     '⭐ look on ⇒ the look is compiled, and the grid is drawn',
     r1.grid && gp.foundryOverlayCompiled().grid === 'look:1:solid'
   );
-  const withLook = gp.material.fragmentNode;
+  const withLook = nodeOf(gp);
   gp.setFoundryOverlay({
     grid,
     outline: null,
     pxPerCanvas: 1.5,
     look: resolveGridLook({ widthPx: 2, nightOpacity: 0.05, darkInk: '#000000' }),
   });
-  ok('⭐ a new width / opacity / ink is a uniform write, not a rebuild', gp.material.fragmentNode === withLook);
+  ok('⭐ a new width / opacity / ink is a uniform write, not a rebuild', nodeOf(gp) === withLook);
   gp.setFoundryOverlay({
     grid: { ...grid, type: T.HEXODDQ },
     outline: null,
@@ -127,7 +134,7 @@ export function run(t) {
   });
   ok(
     'a new pattern or grid type rebuilds',
-    gp.foundryOverlayCompiled().grid === 'look:4:dotted' && gp.material.fragmentNode !== withLook
+    gp.foundryOverlayCompiled().grid === 'look:4:dotted' && nodeOf(gp) !== withLook
   );
   const none = gp.setFoundryOverlay({ grid: null, outline: null, pxPerCanvas: 1, look: resolveGridLook({}) });
   ok(

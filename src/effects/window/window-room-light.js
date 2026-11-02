@@ -319,6 +319,9 @@ export function createWindowRoomLight({ THREE, roomTexture, fieldTexture }) {
     length,
     fract,
     dot,
+    int,
+    Loop,
+    Fn,
   } = TSL;
 
   const D = WINDOW_ROOM_DEFAULTS;
@@ -392,15 +395,17 @@ export function createWindowRoomLight({ THREE, roomTexture, fieldTexture }) {
         .mul(2 * Math.PI)
         .toVar('winRoomBlurAngle');
       /** World px tap `k` shifts its cookie read by (`roomTapBlur`): ADD to the sample point. */
+      // `k` is a JS number OR a shader int (the loop in `combine`): every helper below takes either, through
+      // `float(k)`, so one tap's arithmetic is written once whichever way it is emitted.
       const blurAt = (k) => {
-        const a = blurAngle.add(k * WINDOW_ROOM_GOLDEN_ANGLE);
-        return vec2(TSL.cos(a), TSL.sin(a)).mul(uBlur.mul((k + 0.5) / WINDOW_ROOM_TAPS));
+        const a = blurAngle.add(float(k).mul(WINDOW_ROOM_GOLDEN_ANGLE));
+        return vec2(TSL.cos(a), TSL.sin(a)).mul(uBlur.mul(float(k).add(0.5).div(WINDOW_ROOM_TAPS)));
       };
       /** `roomTapRamp`: 1 at the painted end of the smear, 1 − smear at the far end. */
-      const rampAt = (k) => float(1).sub(uSmear.mul(clamp(jitter.add(k + 0.5).div(WINDOW_ROOM_TAPS), 0, 1)));
+      const rampAt = (k) => float(1).sub(uSmear.mul(clamp(jitter.add(float(k).add(0.5)).div(WINDOW_ROOM_TAPS), 0, 1)));
       /** World px tap `k` reads back from P (the sample point is P − this), jittered. */
       const offsetAt = (k) =>
-        uThrow.mul(float(1).sub(uSmear.mul(float(1).sub(jitter.add(k + 0.5).div(WINDOW_ROOM_TAPS)))));
+        uThrow.mul(float(1).sub(uSmear.mul(float(1).sub(jitter.add(float(k).add(0.5)).div(WINDOW_ROOM_TAPS)))));
       // THE WAY MUST BE CLEAR — the running-minimum clearance, UNJITTERED (`evalRoomLightPixel`): over the gap before
       // the first tap here, then at each tap's own unjittered position in `combine`.
       const clearAt = (t) => ss(float(0), uOccSoft, fetchField(P.sub(uThrow.mul(t))).distPx);
@@ -416,7 +421,8 @@ export function createWindowRoomLight({ THREE, roomTexture, fieldTexture }) {
         );
       }
       const visGap = vis.toVar('winRoomVisGap');
-      const clearAtTap = (k) => clearAt(float(1).sub(uSmear.mul(1 - (k + 0.5) / WINDOW_ROOM_TAPS)));
+      const clearAtTap = (k) =>
+        clearAt(float(1).sub(uSmear.mul(float(1).sub(float(k).add(0.5).div(WINDOW_ROOM_TAPS)))));
       // A stable colour per room for the debug view.
       const hue = vec3(
         fract(idP.mul(0.618034)),
@@ -440,45 +446,59 @@ export function createWindowRoomLight({ THREE, roomTexture, fieldTexture }) {
       };
     },
     /**
-     * Fold the beam taps (each shaded by the path clearance at its own t) and add the static share. `beam[k]` is the
-     * light read at tap k (already gated to the mask file); `here` is the undrifted light at P (the full glass decode).
+     * Fold the beam taps (each shaded by the path clearance at its own t) and add the static share. `beamAt(k)` is
+     * the light read at tap k (already gated to the mask file); `here` is the undrifted light at P (the full glass
+     * decode).
+     *
+     * ONE TAP, IN A REAL SHADER LOOP (2026-11-02, the author: "Loading / Shader compilation times just exploded").
+     * The taps used to be a JS `for` here AND in the caller's beam, so the whole tap — a cookie decode, two room-map
+     * reads and the clearance read — was pasted into the shader once per tap: the window light measured ~238,000
+     * characters, the largest render pipeline in a Big Bank load, and the one a first load after an update waited
+     * on. The fold is unchanged, order included (each tap's weight uses the clearance up to the tap BEFORE it).
      * @param {ReturnType<ReturnType<typeof createWindowRoomLight>['prepare']>} prep
-     * @param {Array<*>} beam @param {*} here
+     * @param {(k: *) => *} beamAt - the beam's light at tap `k` (a shader int). @param {*} here
      * @param {*} P - `positionWorld.xy`, the same node `prepare` got.
      */
-    combine(prep, beam, here, P) {
-      let sum = vec3(0, 0, 0);
-      let wsum = vec3(0, 0, 0);
-      let asum = float(0);
-      let gate = float(0);
-      let vis = prep.visGap;
-      for (let k = 0; k < beam.length; k++) {
-        const Q = P.sub(prep.offsetAt(k));
-        const f = fetchField(Q);
-        const dQ = f.distPx.toVar(`winRoomDQ${k}`);
-        const same = float(1).sub(step(float(0.5), abs(fetchId(Q).sub(prep.idP))));
-        const w = same
-          .mul(vis)
-          .mul(float(1).add(ss(float(0), prep.fade, dQ).sub(1).mul(prep.aoW)))
-          .toVar(`winRoomW${k}`);
-        // The tap's own clearance shades only the taps beyond it (see `evalRoomLightPixel`).
-        vis = min(vis, prep.clearAtTap(k)).toVar(`winRoomVis${k}`);
-        const d = beam[k].mul(w).mul(f.facing).mul(prep.rampAt(k)).toVar(`winRoomD${k}`);
-        const a = max(max(d.r, d.g), d.b);
-        sum = sum.add(d);
-        wsum = wsum.add(d.mul(a));
-        asum = asum.add(a);
-        gate = gate.add(w);
-      }
-      const avg = sum.div(float(beam.length).mul(float(1).sub(uSmear.mul(0.5))));
-      const wmean = wsum.div(max(asum, float(1e-5)));
-      const direct = mix(avg, wmean, uKeep)
-        .mul(prep.destFade)
-        .mul(float(1).add(uLowSun.mul(uBoost)));
+    combine(prep, beamAt, here, P) {
+      // ⚠️ INSIDE ITS OWN `Fn`: a TSL `Loop` is emitted only into a function body being built, and the window
+      // material is assembled outside one on some paths — there the loop vanished from the shader without a word
+      // (caught by the shader-lab A/B: an 8,960-character "window" with no taps in it). A parameterless `Fn` is
+      // inlined, so this costs no call.
+      const folded = Fn(() => {
+        const sum = vec3(0, 0, 0).toVar('winRoomSum');
+        const wsum = vec3(0, 0, 0).toVar('winRoomWSum');
+        const asum = float(0).toVar('winRoomASum');
+        const gate = float(0).toVar('winRoomGate');
+        const vis = float(prep.visGap).toVar('winRoomVis');
+        Loop({ start: int(0), end: int(WINDOW_ROOM_TAPS), type: 'int', condition: '<' }, ({ i: k }) => {
+          const Q = P.sub(prep.offsetAt(k));
+          const f = fetchField(Q);
+          const dQ = f.distPx.toVar('winRoomDQ');
+          const same = float(1).sub(step(float(0.5), abs(fetchId(Q).sub(prep.idP))));
+          // ⚠️ AN ASSIGNMENT, NOT `expr.toVar()`: a `toVar` is emitted where it is first READ — after the `vis`
+          // update below — so it would see the clearance INCLUDING this tap. `assign` is a statement, in order.
+          const w = float(0).toVar('winRoomW');
+          w.assign(same.mul(vis).mul(float(1).add(ss(float(0), prep.fade, dQ).sub(1).mul(prep.aoW))));
+          // The tap's own clearance shades only the taps beyond it (see `evalRoomLightPixel`).
+          vis.assign(min(vis, prep.clearAtTap(k)));
+          const d = beamAt(k).mul(w).mul(f.facing).mul(prep.rampAt(k)).toVar('winRoomD');
+          const a = max(max(d.r, d.g), d.b);
+          sum.addAssign(d);
+          wsum.addAssign(d.mul(a));
+          asum.addAssign(a);
+          gate.addAssign(w);
+        });
+        const avg = sum.div(float(WINDOW_ROOM_TAPS).mul(float(1).sub(uSmear.mul(0.5))));
+        const wmean = wsum.div(max(asum, float(1e-5)));
+        const direct = mix(avg, wmean, uKeep)
+          .mul(prep.destFade)
+          .mul(float(1).add(uLowSun.mul(uBoost)));
+        return TSL.vec4(direct, gate.div(float(WINDOW_ROOM_TAPS)));
+      })().toVar('winRoomFolded');
       const diffuse = here.mul(float(1).sub(prep.facingP)).mul(max(float(0), float(1).sub(uLowSun.mul(uDim))));
       return {
-        cookie: direct.add(diffuse).toVar('winRoomCookie'),
-        debugGate: vec3(1, 1, 1).mul(gate.div(float(beam.length))),
+        cookie: folded.xyz.add(diffuse).toVar('winRoomCookie'),
+        debugGate: vec3(1, 1, 1).mul(folded.w),
       };
     },
     setLook(look) {

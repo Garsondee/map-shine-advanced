@@ -4010,6 +4010,7 @@ async function startVtPanViewerUnserialized({
      * file's own `resizeInternalTargets` comment, verified against bloom/
      * dof's own mip chains) — no rebind needed here either. */
     const cloudTopsCompositeMaterial = new THREE.NodeMaterial();
+    markCompileDeferrable(cloudTopsCompositeMaterial, 'cloud tops (composite)');
     {
       // `texture(rt.texture)` — the same idiom bloom/dof's own composite
       // materials sample their mip chain through (see `resizeInternalTargets`'s
@@ -4100,6 +4101,10 @@ async function startVtPanViewerUnserialized({
         });
         cloudTopsShadowMaterial = new THREE.NodeMaterial();
         cloudTopsShadowMaterial.colorNode = THREE.TSL.vec3(shadow, shadow, shadow);
+        // Drawn every awake frame: deferrable, so a cold compile can never hold the GPU process (GPU-SAFETY.md,
+        // checklist 1). Unflagged, the three cloud-tops pipelines compiled synchronously — 7 s on the GPU's main
+        // thread in a cloudy Big Bank load (2026-11-02, measured).
+        markCompileDeferrable(cloudTopsShadowMaterial, 'cloud tops (self-shadow)');
         cloudTopsShadowMaterial.depthTest = false;
         cloudTopsShadowMaterial.depthWrite = false;
         cloudTopsShadowMaterial.side = THREE.DoubleSide;
@@ -4212,6 +4217,7 @@ async function startVtPanViewerUnserialized({
       // 1x1 local space; `runCloudTopsPass` rewrites `position`/`scale` every
       // awake frame to cover the current view — no per-frame geometry churn.
       const geometry = new THREE.PlaneGeometry(1, 1);
+      markCompileDeferrable(material, 'cloud tops');
       cloudTopsMesh = new THREE.Mesh(geometry, material);
       cloudTopsMesh.frustumCulled = false;
       // Between the light/particle draws (below 19) and precipitation
@@ -9486,6 +9492,10 @@ async function startVtPanViewerUnserialized({
      * brass frames the map instead).
      */
     let foundryOverlayFailed = false;
+    /** True once Foundry's grid has been read successfully for this viewer (see the "no canvas yet" branch). */
+    let foundryOverlayEverDrawn = false;
+    /** The last grid Foundry reported, held across the frames a redraw has no grid mesh. */
+    let lastFoundryGrid = null;
     /** The Grid look resolved from its params, recomputed only when the cascade hands a new params object. */
     let gridLookFor = undefined;
     let gridLook = null;
@@ -9496,9 +9506,19 @@ async function startVtPanViewerUnserialized({
         const r = envLight.uViewRect.value;
         const spanX = r.z - r.x;
         if (!read?.ok || !(spanX > 0)) {
-          gradePresent.setFoundryOverlay({});
+          // "No canvas yet" is Foundry mid-redraw (a level change tears its canvas down and draws it again while
+          // this viewer keeps presenting). Keep the lines it last had: switching the overlay off and back on
+          // rebuilt the ~50k-character present shader twice on every level change (2026-11-02, measured). Before
+          // any overlay was ever drawn there is nothing to keep, and "off" is the right answer.
+          if (!foundryOverlayEverDrawn) gradePresent.setFoundryOverlay({});
           return;
         }
+        foundryOverlayEverDrawn = true;
+        // The same redraw, one step later: Foundry has destroyed the old grid mesh and not yet built the new one
+        // ("no grid mesh yet"). Keep the last grid for those frames, or the present shader is rebuilt without
+        // grid lines and then rebuilt with them again — twice per level change (2026-11-02, measured).
+        if (read.grid) lastFoundryGrid = read.grid;
+        const gridNow = read.grid ?? (read.gridReason === 'no grid mesh yet' ? lastFoundryGrid : null);
         const tableOn = tableSubsystem.info().on === true;
         const scale = parallaxSubsystem.isOn() ? parallaxSubsystem.floorScale(view?.floorIndex ?? 0) : 1;
         // Parallax scales every floor about the view centre (parallax-subsystem.js#update's `eye`).
@@ -9511,7 +9531,7 @@ async function startVtPanViewerUnserialized({
               ? gridLook
               : ((gridLookFor = gridState.params), (gridLook = resolveGridLook(gridState.params)))
             : null,
-          grid: read.grid,
+          grid: gridNow,
           // With the Table on the outline is not drawn — by alpha 0, not by leaving it out, so turning the
           // Table on or off is a uniform write and never a present rebuild (seconds of black, live).
           outline: tableOn && read.outline ? { ...read.outline, canvasAlpha: 0, sceneAlpha: 0 } : read.outline,
@@ -9523,7 +9543,7 @@ async function startVtPanViewerUnserialized({
           plane: { x: eye.x, y: eye.y, scale },
         });
         setFoundryGridOwnership?.({
-          grid: !read.foreignShader && (drawn.grid || read.grid === null),
+          grid: !read.foreignShader && (drawn.grid || gridNow === null),
           outline: true,
         });
       } catch (err) {
@@ -9546,6 +9566,9 @@ async function startVtPanViewerUnserialized({
       lensDrewDistortion = null;
       gradePresent.setLensWarp(lensK !== null, lensK ?? 0);
       syncFoundryOverlay();
+      // Every structural change asked for since the last frame, applied as ONE shader build (grade-present.js
+      // `rebuildFragment`) — a load used to build this ~50k-character shader seven times.
+      gradePresent.flushRebuild();
       // THE SUN-SHADOW DEBUG VIEW (author, 2026-07-26) — when a view is picked
       // it REPLACES the present entirely rather than blending over it: the
       // point is to see the shadow field alone, on white, with nothing else in
@@ -17504,7 +17527,7 @@ async function startVtPanViewerUnserialized({
       rotationLiftEnabled,
       pivot = null,
     }) {
-      const { vec2, vec4, float, positionLocal, sin, cos, length, pow, max, min, mix, smoothstep, clamp, texture } =
+      const { vec2, vec4, float, int, Loop, positionLocal, sin, cos, length, pow, max, min, mix, smoothstep, clamp, texture } =
         THREE.TSL;
       // TWO BODIES, ONE HAND-OVER (2026-11-02, author: "The current way of distorting trees/bushes is
       // causing shadows to self intersect and double in value"). Near the seam between two plants the
@@ -17920,20 +17943,25 @@ async function startVtPanViewerUnserialized({
             pivotXY.add(dir.mul(pivotRadiusPx.mul(float(0.55)))).add(side.mul(pivotRadiusPx.mul(float(0.75)))),
             pivotXY.add(dir.mul(pivotRadiusPx.mul(float(0.55)))).sub(side.mul(pivotRadiusPx.mul(float(0.75)))),
           ];
-          let allowed = float(1);
+          // A REAL SHADER LOOP, NOT 24 PASTED PROBES (2026-11-02, the author: "Loading / Shader compilation
+          // times just exploded"). The steps were a JS `for`, so every probe was emitted again — 3 origins ×
+          // 8 steps, twice over near a seam (TWO BODIES above) — ~59k-character vertex shaders for the canopy,
+          // its shadow and the depth proxy. `allowed` is a min over the steps, so their order never mattered
+          // and the loop gives the same answer.
+          const allowed = float(1).toVar();
           for (const o of origins) {
-            for (let i = VEG_WALL_PROBE_STEPS; i >= 1; i--) {
-              const t = i / VEG_WALL_PROBE_STEPS;
+            Loop({ start: int(1), end: int(VEG_WALL_PROBE_STEPS + 1), type: 'int', condition: '<' }, ({ i }) => {
+              const step = float(i);
               const crossed = smoothstep(
                 float(0.3),
                 float(0.6),
-                maskAt(o.add(dir.mul(moveLen.mul(float(t)))))
+                maskAt(o.add(dir.mul(moveLen.mul(step.div(VEG_WALL_PROBE_STEPS)))))
                   .sub(restSide)
                   .abs()
               );
               // Crossed at step i → allowed at most the step before it (minus a small gap).
-              allowed = min(allowed, mix(float(1), float(Math.max(0, (i - 1) / VEG_WALL_PROBE_STEPS)), crossed));
-            }
+              allowed.assign(min(allowed, mix(float(1), step.sub(1).div(VEG_WALL_PROBE_STEPS), crossed)));
+            });
           }
           const gap = clamp(float(VEG_WALL_GAP_PX).div(max(moveLen, float(1e-4))), float(0), float(1));
           const bodyScale = clamp(allowed.sub(gap.mul(THREE.TSL.step(allowed, float(0.999)))), float(0), float(1));
@@ -24244,6 +24272,8 @@ async function startVtPanViewerUnserialized({
     let weatherWarmCreated = 0;
     /** Pipelines created by the post-content warm-up — evidence it did real work. */
     let postContentPipelinesCreated = null;
+    /** Each post-content pass, timed (2026-11-02): the plan redraw and the weather warm-up, separately, in ms. */
+    const postContentPasses = [];
 
     /**
      * Ceiling on the convergence loop above. Four is generous — in practice a
@@ -24601,11 +24631,14 @@ async function startVtPanViewerUnserialized({
       // made async. Failure is swallowed and the latch is released either way —
       // warming is an optimisation and must never wedge readiness shut.
       let afterPlan = null;
+      const passStartMs = perfNowMs();
+      let planEndMs = null;
       warmUpDrawStateChunked({ recordStats: false })
         .then(() => {
           // Measured HERE, before the weather warm-up: convergence (below) asks "did the PASS PLAN still
           // compile something", and the weather scenarios compiling things is not that answer.
           afterPlan = readPipelineCount();
+          planEndMs = perfNowMs();
           return warmUpWeatherStates();
         })
         .catch((err) => {
@@ -24618,6 +24651,13 @@ async function startVtPanViewerUnserialized({
           // moved behind the curtain, not whatever the last pass happened to do.
           // The weather scenarios' pipelines are behind the same curtain, so they count here too.
           postContentPipelinesCreated = (postContentPipelinesCreated ?? 0) + (created ?? 0) + weatherWarmCreated;
+          const passEndMs = perfNowMs();
+          postContentPasses.push({
+            planMs: Math.round((planEndMs ?? passEndMs) - passStartMs),
+            weatherMs: planEndMs === null ? null : Math.round(passEndMs - planEndMs),
+            planPipelines: created,
+            weatherPipelines: weatherWarmCreated,
+          });
           weatherWarmCreated = 0;
           postContentWarmUpPasses++;
           // GO ROUND AGAIN if that pass compiled anything: something became
@@ -24677,17 +24717,25 @@ async function startVtPanViewerUnserialized({
           detail: formatWeatherWarmDetail(scenario),
         });
         // A frame first: a fresh task, so the governor's synchronous compile budget starts over for this scenario.
+        const tFrame = perfNowMs();
         await nextAnimationFrame();
+        const tDraw = perfNowMs();
         const scenarioBefore = readPipelineCount();
         try {
           warmWeatherScenario(scenario);
         } catch (err) {
           log.warn(`weather warm-up (${scenario.id}) failed — it will compile when first used:`, err);
         }
+        const tSettle = perfNowMs();
         await settleCompiles(`weather warm-up (${scenario.id})`);
         const scenarioAfter = readPipelineCount();
-        counts[scenario.id] =
+        const created =
           Number.isFinite(scenarioBefore) && Number.isFinite(scenarioAfter) ? scenarioAfter - scenarioBefore : null;
+        // WHERE EACH SCENARIO'S TIME WENT (2026-11-02): waiting for a frame, drawing (building shaders on this
+        // thread), and waiting for the compiles to finish.
+        counts[scenario.id] = `${created} pipelines; frame ${Math.round(tDraw - tFrame)} draw ${Math.round(
+          tSettle - tDraw
+        )} settle ${Math.round(perfNowMs() - tSettle)} ms`;
       }
       onLoadProgress?.({ phase: 'warming', done: scenarios.length, total: scenarios.length });
       const after = readPipelineCount();
@@ -29860,6 +29908,7 @@ async function startVtPanViewerUnserialized({
         renderer.setRenderTarget(sceneColor);
         renderer.render(scene, camera);
         renderer.setRenderTarget(null);
+        gradePresent.flushRebuild();
         presentQuad.render(renderer);
 
         return {
@@ -31406,6 +31455,8 @@ async function startVtPanViewerUnserialized({
           warmUpPipelinesCreated,
           warmUpSimPipelinesCreated,
           postContentPipelinesCreated,
+          postContentPasses: postContentPasses.slice(),
+          presentRebuilds: gradePresent.rebuildHistory?.() ?? null,
           pipelineGovernor,
           warmUpError,
           warmUpSimError,

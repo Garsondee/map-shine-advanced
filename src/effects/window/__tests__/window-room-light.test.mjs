@@ -363,9 +363,12 @@ export function run(t) {
   if (!built) return;
   ok('the material reports the room term compiled', built.roomCompiled === true && built.roomLight === handle);
   const snap = handle.snapshot();
+  // The taps run in a shader loop inside an `Fn` (2026-11-02), whose body three only builds when it compiles the
+  // material — so at construction the nodes that exist are P's own and the clearance samples; the tap's nodes are
+  // made at build time from the LIVE room textures and join the same lists `setRoomMap` updates.
   ok(
-    `id and field nodes exist for P, every tap and the clearance samples (${snap.idNodes} / ${snap.fieldNodes})`,
-    snap.idNodes >= WINDOW_ROOM_TAPS + 1 && snap.fieldNodes >= 2 * WINDOW_ROOM_TAPS + WINDOW_ROOM_GAP_SAMPLES + 1
+    `id and field nodes exist for P and the clearance samples (${snap.idNodes} / ${snap.fieldNodes})`,
+    snap.idNodes >= 1 && snap.fieldNodes >= WINDOW_ROOM_GAP_SAMPLES + 1
   );
   handle.setRoomMap({ roomTexture: stubTexture(), fieldTexture: stubTexture(), spec });
   handle.setFrame(westFrame);

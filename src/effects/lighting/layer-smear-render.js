@@ -136,7 +136,8 @@ export const GATE_AA_LOD = 0;
  * }}
  */
 export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTexture = null, steps = 32 }) {
-  const { uniform, texture, uv, vec2, vec4, float, max, min, mix, select, log2, smoothstep, pow, Fn, fract } = THREE.TSL;
+  const { uniform, texture, uv, vec2, vec4, float, int, max, min, mix, select, log2, smoothstep, pow, Fn, fract, Loop } =
+    THREE.TSL;
 
   const STEPS = Number.isFinite(steps) ? Math.max(4, Math.floor(steps)) : 32;
 
@@ -322,7 +323,17 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     const wallsBeyondSelf = float(0).toVar();
     const wallsNear = float(0).toVar();
     const wallsFar = float(0).toVar();
-    for (let j = 0; j <= STEPS; j++) {
+    // ⚠️ ONE STATION, AS A FUNCTION OF ITS WALK FRACTION `u` (2026-11-02, the author: "Loading / Shader
+    // compilation times just exploded"). The walk used to be a JS `for` over j = 0..STEPS, so every
+    // station was pasted into the shader again: 33 stations × 4 layers × up to 4 mip reads came out as
+    // 397 texture reads and ~289,000 characters of WGSL per slot, two slots per scene — measured as the
+    // largest pipelines of a Big Bank load (~13 s to compile each, and seconds of main-thread time just
+    // to generate the text). Station 0 is still emitted on its own (u = 0: the caster's own edge, and it
+    // makes every value the body shares get built OUTSIDE the loop); stations 1..STEPS run in a real
+    // shader loop with the same arithmetic, `(dither + j − 0.5) / STEPS`. The per-layer fan-out stays a
+    // JS loop (four layers, different channels and depth terms). Pixel-compared against the unrolled
+    // walk in the shader lab before it shipped (see the commit).
+    const station = (u) => {
       // ⚠️ EVERY LAYER WALKS ITS OWN THROW, NOT THE TALLEST LAYER'S (2026-10-28,
       // author: at the dawn/dusk extremes "building shadows leave a gap between
       // the outer edge of the building and where the shadow starts — these should
@@ -338,7 +349,6 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
       // fetch per layer per station was already being paid), and THE LAW still
       // holds — it only needs each layer's own falloff to decrease along its own
       // walk (`layer-smear.js#layerSmearVisibility` is the CPU twin).
-      const u = j === 0 ? float(0) : stationDither.add(j - 0.5).div(STEPS).clamp(0, 1);
       for (let i = 0; i < SHADOW_LAYER_COUNT; i++) {
         const L = layerThrow[i];
         const r = depthRadii[i];
@@ -434,7 +444,11 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
           wallsBeyondSelf.assign(max(wallsBeyondSelf, beyond.mul(isNear)));
         }
       }
-    }
+    };
+    station(float(0));
+    Loop({ start: int(1), end: int(STEPS + 1), type: 'int', condition: '<' }, ({ i: j }) => {
+      station(stationDither.add(float(j).sub(0.5)).div(STEPS).clamp(0, 1));
+    });
 
     // ⚠️ A LAYER NEVER SHADOWS ITS OWN FOOTPRINT — the TSL twin of
     // `layer-smear.js#layerSmearVisibility`'s own block; read THAT for the

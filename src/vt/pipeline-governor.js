@@ -89,19 +89,87 @@ export function fingerprint(text) {
   return (h >>> 0).toString(16).padStart(8, '0').slice(0, 6);
 }
 
+/** Frames that are never the answer to "who drew this": three itself, this file, the diag probes that wrap three. */
+const SITE_SKIP = /three\.webgpu|pipeline-governor|pipeline-rebuild-probe|shader-rebuild-probe|run-frame\.js/;
+
 /**
- * What to call a pipeline in a log, and how big it is.
- * @param {any} renderObject @returns {{label: string, chars: number}}
+ * THE MSA FUNCTION THAT ASKED FOR A PIPELINE, from a stack (2026-11-02, the author: "improving our recording
+ * of loading times and shader compilation"). Almost no material is named, so the census used to read
+ * `NodeMaterial#ed0f64 290700ch` — a 13 s compile nobody could find. The first frame under `src/` that is not
+ * three or a probe is the pass that drew it (`runLightAccumulatePass`, `bakeSunShadowField`, ...).
+ * @param {string} stack - an `Error().stack`. @returns {string|null} `functionName` or `file:line`.
  */
-export function describePipeline(renderObject) {
+export function callerSite(stack) {
+  for (const raw of String(stack ?? '').split('\n')) {
+    const line = raw.trim();
+    if (!/\/src\//.test(line) || SITE_SKIP.test(line)) continue;
+    const named = /^at (?:async )?(?:Object\.|Animation\.)?([\w$.]+?)(?: \[as [^\]]+\])? \(/.exec(line);
+    if (named && named[1] !== 'Object' && named[1] !== 'new') return named[1];
+    const file = /\/src\/([^?:)]+)(?:\?[^:)]*)?:(\d+)/.exec(line);
+    if (file) return `${file[1].split('/').pop()}:${file[2]}`;
+  }
+  return null;
+}
+
+/** The one-line reason a material was given a compile policy (`markCompileDeferrable(m, 'candle flame')`). */
+function policyName(material) {
+  const ud = material?.userData;
+  for (const k of ['msaDeferCompile', 'msaSyncCompile']) if (typeof ud?.[k] === 'string' && ud[k]) return ud[k];
+  return null;
+}
+
+/**
+ * What to call a pipeline in a log, and how big it is: the material's own name, else the name its compile
+ * policy was given, else the MSA function that drew it (`site`, see {@link callerSite}), else its type.
+ * @param {any} renderObject @param {string|null} [site] @returns {{label: string, chars: number}}
+ */
+export function describePipeline(renderObject, site = null) {
   const pipeline = renderObject?.pipeline;
   const vs = pipeline?.vertexProgram?.code;
   const fs = pipeline?.fragmentProgram?.code;
   const vertex = typeof vs === 'string' ? vs : '';
   const fragment = typeof fs === 'string' ? fs : '';
   const material = renderObject?.material;
-  const name = material?.name || renderObject?.object?.name || material?.type || 'pipeline';
+  const name =
+    material?.name || policyName(material) || site || renderObject?.object?.name || material?.type || 'pipeline';
   return { label: `${name}#${fingerprint(vertex + fragment)}`, chars: vertex.length + fragment.length };
+}
+
+/**
+ * How long the GPU had at least one compile running, and how many ran at once at worst (2026-11-02). Per-pipeline
+ * `ms` overlap one another — twenty pipelines that each "took 7 s" were one 7 s window — so neither their sum nor
+ * their max is the cost of a load. The union of the intervals is.
+ * @param {ReadonlyArray<{startMs: number, endMs: number}>} records
+ * @returns {{busyMs: number, spanMs: number, peakConcurrent: number}}
+ */
+export function compileBusy(records) {
+  const iv = (records ?? [])
+    .filter((r) => Number.isFinite(r?.startMs) && Number.isFinite(r?.endMs) && r.endMs >= r.startMs)
+    .map((r) => [r.startMs, r.endMs])
+    .sort((a, b) => a[0] - b[0]);
+  if (iv.length === 0) return { busyMs: 0, spanMs: 0, peakConcurrent: 0 };
+  let busy = 0;
+  let [s, e] = iv[0];
+  for (const [a, b] of iv.slice(1)) {
+    if (a > e) {
+      busy += e - s;
+      [s, e] = [a, b];
+    } else if (b > e) e = b;
+  }
+  busy += e - s;
+  const edges = iv.flatMap(([a, b]) => [
+    [a, 1],
+    [b, -1],
+  ]);
+  edges.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  let live = 0;
+  let peak = 0;
+  for (const [, d] of edges) peak = Math.max(peak, (live += d));
+  return {
+    busyMs: Math.round(busy),
+    spanMs: Math.round(Math.max(...iv.map((x) => x[1])) - iv[0][0]),
+    peakConcurrent: peak,
+  };
 }
 
 /**
@@ -128,12 +196,20 @@ export function createInFlightTracker({ now = perfNowMs } = {}) {
     begin(id, info) {
       live.set(id, { ...info, startedAt: now() });
     },
+    /** A compile that is already over (compute pipelines are created synchronously and not governed). */
+    note(info, ms) {
+      const t = now();
+      completed++;
+      records.push({ ...info, ms: Math.round(ms), failed: false, startMs: Math.round(t - ms), endMs: Math.round(t) });
+      if (records.length > MAX_RECORDS) records.splice(0, records.length - MAX_RECORDS);
+    },
     /** @param {string} id @param {Error|null} [error] @returns {{ms: number}|null} */
     end(id, error = null) {
       const entry = live.get(id);
       if (!entry) return null;
       live.delete(id);
-      const ms = Math.round(now() - entry.startedAt);
+      const endedAt = now();
+      const ms = Math.round(endedAt - entry.startedAt);
       if (error) failed++;
       else completed++;
       records.push({
@@ -143,6 +219,9 @@ export function createInFlightTracker({ now = perfNowMs } = {}) {
         reason: entry.reason,
         ms,
         failed: !!error,
+        // WHEN, not just how long — `compileBusy` needs the intervals (2026-11-02).
+        startMs: Math.round(entry.startedAt),
+        endMs: Math.round(endedAt),
       });
       if (records.length > MAX_RECORDS) records.splice(0, records.length - MAX_RECORDS);
       settleWaiters();
@@ -176,6 +255,7 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
     compileAsync: 0,
     overBudget: 0,
     heavyInBlocking: 0,
+    compute: 0,
     heavyUnflagged: [],
   };
   const warnedHeavy = new Set();
@@ -187,6 +267,8 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
   let original = null;
   /** The function as three defined it — what `uninstall` must put back (`original` is a bound copy). */
   let rawOriginal = null;
+  /** three's `createComputePipeline`, wrapped only to be counted (see `install`). */
+  let rawCompute = null;
   let utils = null;
   let syncBatch = null;
   const device = renderer?.backend?.device ?? null;
@@ -288,8 +370,21 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
     return policy;
   }
 
+  /** {@link callerSite} of the current call; the stack limit is raised for this one read (three is ~10 frames deep). */
+  function siteNow() {
+    const limit = Error.stackTraceLimit;
+    try {
+      Error.stackTraceLimit = 48;
+      return callerSite(new Error().stack);
+    } catch {
+      return null;
+    } finally {
+      Error.stackTraceLimit = limit;
+    }
+  }
+
   function governed(renderObject, promises) {
-    const info = describePipeline(renderObject);
+    const info = describePipeline(renderObject, siteNow());
 
     // three's own compileAsync already asks for async creation; count it, change nothing.
     if (promises !== null && promises !== undefined) {
@@ -368,7 +463,28 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
     utils.createRenderPipeline = governed;
     utils.__msaGoverned = true;
     stats.installed = true;
+    // COMPUTE PIPELINES ARE COUNTED, NOT GOVERNED (2026-11-02). three creates them synchronously and a skipped
+    // dispatch would lose a simulation step, so nothing here changes how they are made — but a 253k-character
+    // critter kernel was compiling on the GPU's main thread with no line in any report. Its WGSL is read off the
+    // program the same way a render pipeline's is; `ms` is only the JS side of the call.
+    if (typeof utils.createComputePipeline === 'function') {
+      rawCompute = utils.createComputePipeline;
+      utils.createComputePipeline = governedCompute;
+    }
     return true;
+  }
+
+  function governedCompute(pipeline, bindings) {
+    const code = pipeline?.computeProgram?.code;
+    const chars = typeof code === 'string' ? code.length : 0;
+    const label = `${siteNow() || pipeline?.computeProgram?.name || 'compute'}#${fingerprint(typeof code === 'string' ? code : '')}`;
+    stats.compute++;
+    const t0 = now();
+    try {
+      return rawCompute.call(utils, pipeline, bindings);
+    } finally {
+      tracker.note({ label, chars, mode: 'compute', reason: '' }, now() - t0);
+    }
   }
 
   function uninstall() {
@@ -376,6 +492,8 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
       utils.createRenderPipeline = rawOriginal;
       utils.__msaGoverned = false;
     }
+    if (utils && rawCompute && utils.createComputePipeline === governedCompute)
+      utils.createComputePipeline = rawCompute;
     stats.installed = false;
   }
 
@@ -399,10 +517,22 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
     idle: () => tracker.idle(),
     inFlight: () => tracker.inFlight(),
     /** For the load report and the console: what was created, how big, how long. */
-    report() {
-      const records = tracker.records();
+    report({ sinceMs = null } = {}) {
+      // `sinceMs` narrows the records to one load (or one floor change) on the governor's own clock.
+      const all = tracker.records();
+      const records = Number.isFinite(sinceMs) ? all.filter((r) => r.startMs >= sinceMs) : all;
       const byCost = records.slice().sort((a, b) => b.ms - a.ms || b.chars - a.chars);
+      const bySize = records.slice().sort((a, b) => b.chars - a.chars);
       return {
+        /** The governor's clock now, so a caller can pass it back as `sinceMs` later. */
+        nowMs: Math.round(now()),
+        /** Characters of WGSL compiled, in all — the number that tracks both JS build time and GPU compile time. */
+        chars: records.reduce((a, r) => a + (r.chars || 0), 0),
+        /** The ACTIONABLE list: the biggest shaders, by name (see `callerSite`). */
+        largest: bySize.slice(0, 10).map((r) => ({ label: r.label, chars: r.chars, ms: r.ms, mode: r.mode })),
+        /** How long at least one compile was running (the union of the intervals), and the worst overlap. */
+        ...compileBusy(records),
+        compute: stats.compute,
         installed: stats.installed,
         reason: stats.reason || null,
         created: stats.created,

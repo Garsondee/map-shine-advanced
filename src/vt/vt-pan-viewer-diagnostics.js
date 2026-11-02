@@ -563,6 +563,8 @@ export function buildViewerDiagnostics({
   warmUpPipelinesCreated = null,
   warmUpSimPipelinesCreated = null,
   postContentPipelinesCreated = null,
+  postContentPasses = null,
+  presentRebuilds = null,
   pipelineGovernor = null,
   warmUpError = null,
   warmUpSimError = null,
@@ -751,6 +753,9 @@ export function buildViewerDiagnostics({
       // kept separate from the initial warm-up's, because they are two
       // different events and one pair of fields cannot honestly report both.
       postContentPipelinesCreated,
+      // Each post-content warm-up pass, timed; why the present shader was rebuilt (2026-11-02).
+      postContentPasses,
+      presentRebuilds,
       // THE PIPELINE GOVERNOR'S CENSUS (vt/pipeline-governor.js, epic mmp-fpu): how many pipelines were made
       // on a worker thread versus on the GPU process's main thread, which compiles are still running, and the
       // slowest ones with their WGSL size. The number to watch is the slowest SYNCHRONOUS compile: past ~10 s

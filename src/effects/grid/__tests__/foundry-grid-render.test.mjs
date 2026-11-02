@@ -18,6 +18,13 @@ import {
 import { buildGradePresentMaterial } from '../../grade/grade-present.js';
 import { lensWarpUv } from '../../lens-render.js';
 
+// The present rebuilds lazily (grade-present.js `rebuildFragment` marks it stale, `flushRebuild` builds once, right
+// before the draw), so "did it rebuild?" is asked of the node the next draw would use.
+const nodeOf = (g) => {
+  g.flushRebuild?.();
+  return g.material.fragmentNode;
+};
+
 function stubTexture() {
   const tex = new THREE.DataTexture(new Uint8Array([0, 128, 128, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
   tex.needsUpdate = true;
@@ -116,38 +123,35 @@ export function run(t) {
       return warped;
     },
   });
-  const base = gp.material.fragmentNode;
+  const base = nodeOf(gp);
   ok('starts with no overlay and no lens warp', gp.foundryOverlayCompiled().grid === null && !gp.lensWarpCompiled());
   const r0 = gp.setFoundryOverlay({});
-  ok(
-    'an empty overlay changes nothing',
-    r0.grid === false && r0.outline === false && gp.material.fragmentNode === base
-  );
+  ok('an empty overlay changes nothing', r0.grid === false && r0.outline === false && nodeOf(gp) === base);
   const r1 = gp.setFoundryOverlay({ grid: grid(), outline, pxPerCanvas: 1 });
-  ok('⭐ a grid + outline compile in, and say so', r1.grid && r1.outline && gp.material.fragmentNode !== base);
-  const withGrid = gp.material.fragmentNode;
+  ok('⭐ a grid + outline compile in, and say so', r1.grid && r1.outline && nodeOf(gp) !== base);
+  const withGrid = nodeOf(gp);
   gp.setFoundryOverlay({ grid: grid({ alpha: 0.9, thicknessPx: 3 }), outline, pxPerCanvas: 2 });
-  ok('⭐ a new alpha/thickness/zoom is a uniform write, not a rebuild', gp.material.fragmentNode === withGrid);
+  ok('⭐ a new alpha/thickness/zoom is a uniform write, not a rebuild', nodeOf(gp) === withGrid);
   gp.setFoundryOverlay({ grid: grid({ type: T.HEXODDQ, style: S.LINE_DASHED }), outline, pxPerCanvas: 1 });
-  ok('a new type/style rebuilds', gp.material.fragmentNode !== withGrid && gp.foundryOverlayCompiled().grid === '4:1');
+  ok('a new type/style rebuilds', nodeOf(gp) !== withGrid && gp.foundryOverlayCompiled().grid === '4:1');
   const unknown = gp.setFoundryOverlay({ grid: grid({ style: 42 }), outline: null, pxPerCanvas: 1 });
   ok('⭐ a style it cannot draw reports grid:false (the caller leaves it to Foundry)', unknown.grid === false);
 
   gp.setLensWarp(false);
   ok('lens off ⇒ no warp compiled, no guard built', !gp.lensWarpCompiled() && guardCalls.length === 0);
-  const beforeLens = gp.material.fragmentNode;
+  const beforeLens = nodeOf(gp);
   gp.setLensWarp(true, -0.1);
   ok(
     "⭐ lens on ⇒ the warp compiles in, through the lens's own Table guard",
-    gp.lensWarpCompiled() && gp.material.fragmentNode !== beforeLens && guardCalls.length > 0
+    gp.lensWarpCompiled() && nodeOf(gp) !== beforeLens && guardCalls.length > 0
   );
-  const withLens = gp.material.fragmentNode;
+  const withLens = nodeOf(gp);
   gp.setLensWarp(true, -0.25);
-  ok('a new distortion is a uniform write, not a rebuild', gp.material.fragmentNode === withLens);
+  ok('a new distortion is a uniform write, not a rebuild', nodeOf(gp) === withLens);
   gp.setLensWarp(false);
   ok(
     '⭐ lens off again ⇒ the warp STAYS compiled (distortion 0): a toggle is never a rebuild',
-    gp.lensWarpCompiled() && gp.material.fragmentNode === withLens
+    gp.lensWarpCompiled() && nodeOf(gp) === withLens
   );
 
   // ── THE ONE WARP ────────────────────────────────────────────────────────

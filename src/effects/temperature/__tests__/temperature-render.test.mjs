@@ -13,6 +13,13 @@ import {
   buildVisionSnapshotPublishMaterial,
 } from '../../vision/vision-mask-render.js';
 
+// The present rebuilds lazily (grade-present.js `rebuildFragment` marks it stale, `flushRebuild` builds once, right
+// before the draw), so "did it rebuild?" is asked of the node the next draw would use.
+const nodeOf = (g) => {
+  g.flushRebuild?.();
+  return g.material.fragmentNode;
+};
+
 function stubTexture() {
   const tex = new THREE.DataTexture(new Uint8Array([0, 128, 128, 128]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
   tex.needsUpdate = true;
@@ -49,20 +56,20 @@ export function run(t) {
       temperatureNoiseTexture: withNoise ? stubTexture() : undefined,
     });
   const gp = build(true);
-  const base = gp.material.fragmentNode;
+  const base = nodeOf(gp);
   ok(
     'starts with neither layer compiled',
     gp.temperatureCompiled().frost === false && gp.temperatureCompiled().heatRipple === false
   );
   gp.setTemperatureEffects({ frost: false, heatRipple: false, frostCover: 0.5 });
-  ok('⭐ no change of layers ⇒ no rebuild', gp.material.fragmentNode === base);
+  ok('⭐ no change of layers ⇒ no rebuild', nodeOf(gp) === base);
   gp.setTemperatureEffects({
     frost: true,
     frostCover: 0.4,
     frostShape: [0.3, 0.5, 0.6, 0.4],
     frostTint: [0.9, 0.95, 1],
   });
-  ok('frost on ⇒ rebuilt with frost', gp.temperatureCompiled().frost === true && gp.material.fragmentNode !== base);
+  ok('frost on ⇒ rebuilt with frost', gp.temperatureCompiled().frost === true && nodeOf(gp) !== base);
   gp.setTemperatureEffects({ frost: true, heatRipple: true, heatAmpUv: [0.001, 0.001], heatScroll: [0.2, 0.4] });
   ok('both layers together build', gp.temperatureCompiled().heatRipple === true);
   gp.setTemperatureEffects({ frost: false, heatRipple: false });
@@ -93,13 +100,13 @@ export function run(t) {
       threshold: 0.1,
     },
   });
-  const heldBase = held.material.fragmentNode;
+  const heldBase = nodeOf(held);
   ok('fog hold starts off', held.fogHoldCompiled() === false);
   held.setFogHoldActive(true);
-  ok('⭐ fog hold on ⇒ rebuilt with it', held.fogHoldCompiled() === true && held.material.fragmentNode !== heldBase);
-  const heldOn = held.material.fragmentNode;
+  ok('⭐ fog hold on ⇒ rebuilt with it', held.fogHoldCompiled() === true && nodeOf(held) !== heldBase);
+  const heldOn = nodeOf(held);
   held.setFogHoldActive(true);
-  ok('fog hold on again ⇒ no rebuild', held.material.fragmentNode === heldOn);
+  ok('fog hold on again ⇒ no rebuild', nodeOf(held) === heldOn);
   held.setTemperatureEffects({ frost: true, heatRipple: true });
   held.setPlayerVisionMode('nightVision', 0, 1, { x: 10, y: 10 });
   ok('fog hold builds beside frost, ripple and a vision mode', held.fogHoldCompiled() === true);

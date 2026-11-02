@@ -197,12 +197,12 @@ export function renderSceneDepartment(container, ctx) {
   // the whole table sees it) that makes every effect draw its shipped defaults WITHOUT deleting anything,
   // and a red, two-click reset that really wipes every scene's authored effect params.
   if (typeof ctx.getForceDefaults === 'function' && typeof ctx.setForceDefaults === 'function') {
-    const neutralCard = panel('reset', 'Neutral look');
+    const neutralCard = panel('reset', 'Default effect settings');
     neutralCard.append(
       el(
         'p',
         'msa-note',
-        "Force defaults draws every effect at Map Shine's shipped settings, on every scene, for everyone. Nothing is deleted: switch it off and each scene's own tuning returns."
+        "Use default settings draws every effect at Map Shine's shipped settings on every scene, for everyone. Time and weather are not touched, and nothing is deleted: switch it off and the GM's tuning for each scene returns."
       )
     );
     const status = statusLine();
@@ -215,7 +215,7 @@ export function renderSceneDepartment(container, ctx) {
     const forceBtn = smallBtn('', 'Draw every effect at its shipped default on every scene (saved with the world)');
     forceBtn.setAttribute('aria-live', 'polite');
     const paintForce = () => {
-      forceBtn.textContent = forcing ? 'Force defaults: ON' : 'Force defaults: off';
+      forceBtn.textContent = forcing ? 'Use default settings: ON' : 'Use default settings: off';
       forceBtn.setAttribute('aria-pressed', String(forcing));
       forceBtn.classList.toggle('msa-btn--gold', forcing);
     };
@@ -243,11 +243,11 @@ export function renderSceneDepartment(container, ctx) {
     if (typeof ctx.resetAllEffectSettings === 'function') {
       const resetBtn = buildArmButton({
         icon: 'reset',
-        label: 'Reset every scene…',
-        armedLabel: 'Wipe ALL scenes? Click again',
-        title: 'Erase the tuned effect settings on EVERY scene in this world and the world grid look',
+        label: 'Remove all scene customisation…',
+        armedLabel: 'Remove from ALL scenes? Click again',
+        title: 'Erase the GM’s effect tuning on EVERY scene in this world, so all scenes share the default settings (time and weather are kept)',
         armedTitle:
-          'Click again to erase every scene’s tuned effect settings and the world grid look. This cannot be undone.',
+          'Click again to erase the GM’s effect tuning on every scene and the world grid look. Time and weather are kept. This cannot be undone.',
         className: 'msa-btn msa-btn--sm msa-btn--danger',
         onConfirm: () => {
           Promise.resolve(ctx.resetAllEffectSettings()).then((res) => {

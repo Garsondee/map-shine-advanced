@@ -37,6 +37,7 @@ import { run as runSceneDoors } from './scene-doors.test.mjs';
 import { run as runSceneRegions } from './scene-regions.test.mjs';
 import { run as runRegionDarknessOverride } from './region-darkness-override.test.mjs';
 import { run as runSceneVision } from './scene-vision.test.mjs';
+import { run as runSharedVision } from './shared-vision.test.mjs';
 import { run as runSceneExport } from './scene-export.test.mjs';
 import { run as runSceneOcclusionSources } from './scene-occlusion-sources.test.mjs';
 import { run as runSceneGeometry } from './scene-geometry.test.mjs';
@@ -122,6 +123,7 @@ const suites = [
   ['scene-regions', runSceneRegions],
   ['region-darkness-override', runRegionDarknessOverride],
   ['scene-vision', runSceneVision],
+  ['shared-vision', runSharedVision],
   ['scene-export', runSceneExport],
   ['scene-occlusion-sources', runSceneOcclusionSources],
   ['scene-geometry', runSceneGeometry],

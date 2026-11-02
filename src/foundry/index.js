@@ -461,6 +461,10 @@ export {
   MIN_POLYGON_FLOATS,
 } from './scene-vision.js';
 
+// SHARED PARTY VISION — all of a player's owned tokens keep contributing vision
+// when one is selected (core drops the rest and they render black).
+export { installSharedVision, sharesVisionWith } from './shared-vision.js';
+
 // V2 → V3 ANCHOR IMPORT — reads a scene's legacy `mapPointGroups` flags and
 // produces V3 anchor candidates (the Map Points successor). Boot hands them to
 // scene/anchor-authority.js. A leaf: it knows no anchor kinds — boot injects the

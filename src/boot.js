@@ -712,6 +712,7 @@ import {
   readSceneAllEffectParams,
   writeSceneAllEffectParams,
   registerEffectPresetSettings,
+  installSharedVision,
   readEffectPresets,
   writeEffectPresets,
   registerScenePresetSettings,
@@ -19914,6 +19915,12 @@ function install() {
       // drives the live render every time it changes), a preset LIBRARY
       // changing has nothing to re-apply until a GM explicitly applies one —
       // `MapShine.applyEffectPreset` re-resolves at that point itself.
+      try {
+        log.info('shared vision:', installSharedVision());
+      } catch (err) {
+        log.error('shared vision install failed:', err);
+      }
+
       try {
         registerEffectPresetSettings();
       } catch (err) {

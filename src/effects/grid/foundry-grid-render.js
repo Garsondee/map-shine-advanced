@@ -98,7 +98,7 @@ export function createFoundryGridUniforms(TSL) {
     /** MSA's look (`effects/grid/grid.js`): (width output px, fade-below px), (day, night) opacity, the
      * two inks (display space) and the switch-over luminance. Unused by Foundry's own styles. */
     look: uniform(vec2(1, 28)),
-    lookOpacity: uniform(vec2(0.34, 0.16)),
+    lookOpacity: uniform(vec2(0.2, 0.09)),
     lookDarkInk: uniform(vec3(0.11, 0.09, 0.07)),
     lookLightInk: uniform(vec3(0.94, 0.9, 0.82)),
     lookPivot: uniform(float(0.32)),

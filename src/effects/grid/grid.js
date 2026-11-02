@@ -67,7 +67,8 @@ export const GRID_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.34,
+    // 2026-11-02, author: 'more subtle … distract less from the scene artwork' (was 0.34).
+    default: 0.2,
     category: 'Day and night',
     label: 'Opacity on bright ground',
     help: 'How strong the dark ink is where the map is bright (daylight, lit rooms).',
@@ -77,7 +78,8 @@ export const GRID_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.16,
+    // 2026-11-02, same ask (was 0.16).
+    default: 0.09,
     category: 'Day and night',
     label: 'Opacity on dark ground',
     help: 'How strong the pale ink is where the map is dark (night, unlit rooms, fog). Keep it lower than the day opacity: a pale line on a dark map catches the eye far more.',

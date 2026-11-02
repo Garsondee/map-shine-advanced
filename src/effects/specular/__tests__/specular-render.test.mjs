@@ -130,11 +130,15 @@ export function run(t) {
   ok('...and carries its own colorNode', !!built.debugMaterial.colorNode);
 
   // ── THE BLEND CONTRACT ──────────────────────────────────────────────────
-  // `dst × src` and `dst + src`. Getting either backwards is invisible in
-  // review and catastrophic on screen.
+  // PREMULTIPLIED since the metal-body round (2026-11-02, mmp-9nb):
+  // `dst × (1 − darken) + shine`, the shine in rgb and the mirror/relief
+  // darkening in alpha. With darken 0 it is exactly the old `One / One` add.
+  // Getting the factors backwards is invisible in review and catastrophic on
+  // screen (One/SrcAlpha would KEEP only the darkened share).
   ok(
-    'the specular pass adds: One / One',
-    built.specularMaterial.blendSrc === THREE.OneFactor && built.specularMaterial.blendDst === THREE.OneFactor
+    'the specular pass is premultiplied: One / OneMinusSrcAlpha',
+    built.specularMaterial.blendSrc === THREE.OneFactor &&
+      built.specularMaterial.blendDst === THREE.OneMinusSrcAlphaFactor
   );
   ok(
     'it does not touch destination alpha (that is level-composite coverage, not ours)',

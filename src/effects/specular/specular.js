@@ -69,7 +69,8 @@ export const SPECULAR_PARAMS = Object.freeze({
     // header (specular-render.js).
     // RAISED 3.79 → 9.96 (ROUND 23, 2026-09-09) — new live-tuned defaults;
     // see SPECULAR_DEFAULT_STRENGTH's own header (specular-render.js).
-    default: 4.92, // LOWERED 9.96 → 4.92 (ROUND 24, 2026-10-17)
+    // LOWERED 9.96 → 4.92 (ROUND 24, 2026-10-17)
+    default: 5.5, // RAISED 4.92 → 5.5 (METAL BODY, 2026-11-02, mmp-9nb) — mirror depth now darkens between glints
     category: 'Look',
     label: 'Shine strength',
     help: 'Master strength of everything this effect draws. Turn it to 0 to see what the map looks like with no shine at all — turn it up past 5-10 to brute-force the shine through anything else that might be dimming it, as a diagnostic before reaching for the more targeted controls under Response.',
@@ -87,7 +88,8 @@ export const SPECULAR_PARAMS = Object.freeze({
     // RAISED 1.25 → 2 = THE SCHEMA'S OWN MAX (ROUND 22, 2026-09-09) — new
     // live-tuned defaults; see SPECULAR_DEFAULT_SATURATION's own header
     // (specular-render.js).
-    default: 1.1, // LOWERED 2 → 1.1 (ROUND 24, 2026-10-17)
+    // LOWERED 2 → 1.1 (ROUND 24, 2026-10-17)
+    default: 1.35, // RAISED 1.1 → 1.35 (METAL BODY, 2026-11-02, mmp-9nb) — keeps gold as saturated as before once the troughs darken
     category: 'Look',
     label: 'Metal colour',
     help: "How much of the colour you painted into the specular mask survives into the shine. 0 makes every metal a neutral white sheen; 1 keeps gold gold and copper copper; above 1 pushes the colour further than you painted it — the default sits slightly above 1 to counteract the screen's own tonemap, which desaturates highlights as they brighten. This is the control that decides whether a map reads as treasure or as polished stone.",
@@ -130,10 +132,77 @@ export const SPECULAR_PARAMS = Object.freeze({
     // LOWERED 40 → 5.55 (ROUND 22, 2026-09-09) — new live-tuned defaults; no
     // longer the schema's own max; see SPECULAR_DEFAULT_SHIMMER_GAIN's own
     // header (specular-render.js).
-    default: 12.65, // RAISED 5.55 → 12.65 (ROUND 24, 2026-10-17)
+    // RAISED 5.55 → 12.65 (ROUND 24, 2026-10-17)
+    default: 17, // RAISED 12.65 → 17 (METAL BODY, 2026-11-02, mmp-9nb) — focused glints are narrower, so each may be hotter
     category: 'Look',
     label: 'Shimmer contrast',
     help: 'How far the moving patterns may brighten the metal above its resting shine. Low gives an even satin surface; high gives hard bright glints against darker metal, which is what reads as polished and slightly blown out. At 0 the metal still shines, it just stops moving.',
+  },
+  // ── METAL BODY (2026-11-02, mmp-9nb) ─────────────────────────────────────
+  // Author: *"consider two new features that would improve the appearance of
+  // metallic surfaces… I only want a single colour mask."* Both read only the
+  // one `_Specular` mask and the light already on screen. Tuned in the lab on
+  // Big Bank's gold statue and Goblin Alchemist's copper (see
+  // SPECULAR_DEFAULT_MIRROR_DEPTH's header in specular-render.js).
+  mirrorDepth: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.6,
+    category: 'Look',
+    label: 'Mirror depth',
+    help: "Polished metal hardly returns any plain light of its own — what it is not reflecting looks dark, and that contrast is what makes gold and chrome read as metal rather than as glowing paint. This darkens the metal between its reflections (keeping the metal's own colour, deepened, in the dark parts). 0 is the old look: the shine only ever adds light. Around 0.6 reads as polished; 1 is a dark, mirror-like finish where only the glints are bright.",
+  },
+  reliefStrength: {
+    type: 'float',
+    min: 0,
+    max: 6,
+    step: 0.05,
+    default: 2,
+    category: 'Detail',
+    label: 'Edge relief',
+    help: 'Reads your painted specular mask as height — bright paint stands proud, dark ink lines are grooves — and lights it from where the light really is: the nearest lamp indoors, the sun outdoors. The edges facing the light catch a bright bevel and the far edges fall into shade, so engraving, rims and coin edges look raised. 0 turns it off.',
+  },
+  reliefWidthPx: {
+    type: 'float',
+    min: 1,
+    max: 16,
+    step: 0.25,
+    default: 3,
+    category: 'Detail',
+    label: 'Relief width',
+    help: 'How wide the bevel on each edge is, in map pixels. Small values give a crisp engraved line hugging the ink; larger values give soft, rounded, cast-metal edges. When you zoom far out it never gets thinner than a screen pixel and a half, so it cannot sparkle.',
+  },
+  glintFocus: {
+    type: 'float',
+    min: 0.5,
+    max: 4,
+    step: 0.05,
+    default: 2,
+    category: 'Look',
+    label: 'Glint focus',
+    help: 'How tightly each moving reflection is focused. 1 is a broad soft sweep; higher values pull the same reflection into a narrower, hotter band with darker metal around it — polished rather than satin. The brightest point of each reflection stays the same; only its spread changes.',
+  },
+  hotCore: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.4,
+    category: 'Look',
+    label: 'Hot core',
+    help: "How much the very brightest part of a reflection pales toward warm white, the way a real highlight on gold clips to pale yellow. 0 keeps every highlight the metal's full colour; 1 pales the hottest cores the most. It never goes all the way to grey, so gold stays gold.",
+  },
+  colourResponse: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 1,
+    category: 'Look',
+    label: 'Metal by colour',
+    help: 'Lets the colour you painted decide the KIND of metal, not just its tint. Bright grey/white paint becomes polished steel or silver — the most mirror-like: tighter, brighter glints and darker reflections. Dark grey paint becomes iron or pewter — a soft satin. Gold, copper, brass and other coloured paint keep the normal response. 0 treats every metal the same way.',
   },
   patternScalePx: {
     type: 'float',
@@ -145,7 +214,8 @@ export const SPECULAR_PARAMS = Object.freeze({
     // finer field. See `SPECULAR_DEFAULT_PATTERN_SCALE_PX`'s own header.
     // RAISED 6528 → 10816 (ROUND 21, 2026-08-05) — new live-tuned defaults;
     // see SPECULAR_DEFAULT_PATTERN_SCALE_PX's own header (specular-render.js).
-    default: 11840, // RAISED 10816 → 11840 (ROUND 24, 2026-10-17)
+    // RAISED 10816 → 11840 (ROUND 24, 2026-10-17)
+    default: 3500, // LOWERED 11840 → 3500 (METAL BODY, 2026-11-02, mmp-9nb) — at 11840 a 1500 px treasure saw ONE flat blob
     category: 'Look',
     label: 'Pattern size',
     help: 'How large the shimmer shapes are, measured across the MAP rather than the screen — so they stay the same physical size whether you are zoomed in or out. Large values give a few huge soft sweeps across the whole map; small values give many small busy ones. The fine glitter is not set here: that comes from how brightly you painted the mask.',
@@ -824,7 +894,10 @@ export const SPECULAR = Object.freeze({
       adds:
         'Six anisotropic blob-lattice layers (three broad-sweep, three fine-sparkle) plus a voronoi cellular ' +
         'base whose cell size follows the mask own brightness — bright gold breaks into fine glitter, dull ' +
-        'pewter into broad soft shapes. Pure ALU on tier 0 fetch. This is where it stops being a flat sheen.',
+        'pewter into broad soft shapes. Pure ALU on tier 0 fetch. This is where it stops being a flat sheen. ' +
+        'Plus the METAL BODY (2026-11-02): mirror depth darkens the metal between its reflections (premultiplied ' +
+        'blend) and edge relief lights the mask own bevels from the real light direction (4 mask + 4 light taps); ' +
+        'both compile out below this tier, where there are no glints to stand against.',
     }),
     Object.freeze({
       n: 2,

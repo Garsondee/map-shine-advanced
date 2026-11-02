@@ -327,7 +327,7 @@ function artToView() {
 // Render + readback
 // ---------------------------------------------------------------------------
 
-async function renderRaw(channel) {
+async function renderRaw(channel, clear = 0) {
   if (!rt) {
     rt = new THREE.RenderTarget(W, H, {
       // HalfFloat, matching `scene.lit` — an 8-bit target would clip every glint
@@ -356,9 +356,10 @@ async function renderRaw(channel) {
   const prevClear = new THREE.Color();
   renderer.getClearColor(prevClear);
   const prevAlpha = renderer.getClearAlpha();
-  // The shine is ADDITIVE; render it onto black and add the base in JS (exact
-  // for an additive blend, and it keeps the base out of the shader entirely).
-  renderer.setClearColor(new THREE.Color(0, 0, 0), 1);
+  // The blend is `dst × (1 − darken) + shine`. Rendered onto black it gives the
+  // shine; onto white, shine + keep — so two renders recover both terms and the
+  // base is composed in JS (exact, and it keeps the base out of the shader).
+  renderer.setClearColor(new THREE.Color(clear, clear, clear), 1);
   renderer.setRenderTarget(rt);
   renderer.render(scene, camera);
   renderer.setRenderTarget(prevTarget);
@@ -442,8 +443,17 @@ async function shot(opts = {}) {
   state.timeMs = o.timeMs;
 
   const levels = fillIllum(o.illum);
-  await renderRaw(o.channel);
+  let keep = null;
+  if (o.channel === 'off') {
+    await renderRaw(o.channel, 1);
+    keep = await readFrame();
+  }
+  await renderRaw(o.channel, 0);
   const frame = await readFrame();
+  // keep = (onto white) − (onto black): the share of the lit floor that survives.
+  if (keep)
+    for (let i = 0; i < keep.length; i++)
+      keep[i] = (keep[i] === keep[i] ? keep[i] : 1) - (frame[i] === frame[i] ? frame[i] : 0);
 
   const art = o.base === 'art' ? artToView() : null;
   const disp = new Uint8ClampedArray(W * H * 4);
@@ -475,7 +485,10 @@ async function shot(opts = {}) {
       const sr = r;
       const sg = g;
       const sb = b;
-      [r, g, b] = neutralToneMap([sr + br, sg + bg, sb + bb]);
+      const kr = keep ? keep[i * 4] : 1;
+      const kg = keep ? keep[i * 4 + 1] : 1;
+      const kb = keep ? keep[i * 4 + 2] : 1;
+      [r, g, b] = neutralToneMap([sr + br * kr, sg + bg * kg, sb + bb * kb]);
       if (o.base === 'art') {
         // What the SHINE alone added, in display luma: the art's own ink lines
         // and edges cancel, so `edgeReport` below measures the shimmer and not
@@ -571,6 +584,38 @@ async function bench({ frames = 40, warm = 6 } = {}) {
     H,
     frames,
     msPerFrame: { min: +samples[0].toFixed(3), median: +samples[2].toFixed(3), max: +samples[4].toFixed(3) },
+  };
+}
+
+/**
+ * The DISTRIBUTION of one debug channel's raw R over the metal (where the
+ * presence channel is > 0.5) at the current view — percentiles, not a picture,
+ * so a tuning decision can quote the field's real range.
+ * @param {{channel?: string, illum?: object}} [args]
+ */
+async function stats({ channel = 'shimmer', illum = { kind: 'flat', level: 0.6 } } = {}) {
+  await ready;
+  fillIllum(illum);
+  await renderRaw('presence');
+  const pres = await readFrame();
+  await renderRaw(channel);
+  const f = await readFrame();
+  const vals = [];
+  for (let i = 0; i < W * H; i++) if (pres[i * 4] > 0.5 && f[i * 4] === f[i * 4]) vals.push(f[i * 4]);
+  vals.sort((a, b) => a - b);
+  const pct = (p) => +(vals[Math.min(vals.length - 1, Math.floor(p * vals.length))] ?? 0).toFixed(4);
+  const mean = vals.reduce((s, v) => s + v, 0) / Math.max(1, vals.length);
+  return {
+    channel,
+    n: vals.length,
+    mean: +mean.toFixed(4),
+    p05: pct(0.05),
+    p25: pct(0.25),
+    p50: pct(0.5),
+    p75: pct(0.75),
+    p95: pct(0.95),
+    p99: pct(0.99),
+    max: pct(1),
   };
 }
 
@@ -701,6 +746,7 @@ window.specLab = {
   shot,
   scan,
   bench,
+  stats,
   state,
   view,
   edgeReport,

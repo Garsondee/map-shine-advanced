@@ -54,7 +54,7 @@ import {
   SPECULAR_DEFAULT_ISLAND_SPREAD,
   SPECULAR_DEFAULT_TIER,
 } from './specular-render.js';
-import { keyLightDirection } from './specular-material.js';
+import { keyLightDirection, outdoorGlintResponse } from './specular-material.js';
 import { buildSpecularIslandPack } from './specular-islands.js';
 import { buildTileMotionPositionNode, buildTileMotionMaskUvNode } from '../tile-motion-nodes.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
@@ -468,11 +468,15 @@ export function createSpecularTileSurfaceSubsystem({
     // like the floor subsystem's own `sync()`.
     const sky = getSkyHandle();
     if (sky?.key) {
-      const skyKey = `${sky.version}|${sky.key.azimuthDeg}|${sky.key.elevationDeg}`;
+      const skyKey = `${sky.version}|${sky.key.azimuthDeg}|${sky.key.elevationDeg}|${sky.clear01}|${sky.day01}`;
       if (skyKey !== lastSkyKey) {
         lastSkyKey = skyKey;
         const dir = keyLightDirection(sky.key);
-        for (const entry of entries.values()) entry.built?.setSunDir(dir[0], dir[1]);
+        const skyGlint = outdoorGlintResponse(sky);
+        for (const entry of entries.values()) {
+          entry.built?.setSunDir(dir[0], dir[1]);
+          entry.built?.setSkyGlint?.(skyGlint);
+        }
       }
     }
 
@@ -503,6 +507,12 @@ export function createSpecularTileSurfaceSubsystem({
       p.flickerSpeed,
       p.flickerScalePx,
       p.flickerRoughness,
+      p.reliefStrength,
+      p.reliefWidthPx,
+      p.mirrorDepth,
+      p.glintFocus,
+      p.hotCore,
+      p.colourResponse,
       JSON.stringify(layerParams),
     ].join('|');
     if (key !== lastParamsKey) {
@@ -530,6 +540,12 @@ export function createSpecularTileSurfaceSubsystem({
         if (Number.isFinite(p.flickerSpeed)) b.setFlickerSpeed(p.flickerSpeed);
         if (Number.isFinite(p.flickerScalePx)) b.setFlickerScalePx(p.flickerScalePx);
         if (Number.isFinite(p.flickerRoughness)) b.setFlickerRoughness(p.flickerRoughness);
+        if (Number.isFinite(p.reliefStrength)) b.setReliefStrength(p.reliefStrength);
+        if (Number.isFinite(p.reliefWidthPx)) b.setReliefWidthPx(p.reliefWidthPx);
+        if (Number.isFinite(p.mirrorDepth)) b.setMirrorDepth(p.mirrorDepth);
+        if (Number.isFinite(p.glintFocus)) b.setGlintFocus(p.glintFocus);
+        if (Number.isFinite(p.hotCore)) b.setHotCore(p.hotCore);
+        if (Number.isFinite(p.colourResponse)) b.setColourResponse(p.colourResponse);
         if (Number.isFinite(p.pulse)) b.setPulse(p.pulse);
         if (Number.isFinite(p.sunBias)) b.setSunBias(p.sunBias);
         for (let i = 0; i < layerParams.length; i++) {

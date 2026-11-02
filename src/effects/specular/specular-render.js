@@ -144,7 +144,8 @@ export const SPECULAR_LAYER_COUNT = 6;
  * ⚠️ RAISED 3.79 → 9.96 (ROUND 23, 2026-09-09) — new live-tuned defaults;
  * the author's own dialled-in scene, recorded exactly.
  */
-export const SPECULAR_DEFAULT_STRENGTH = 4.92; // LOWERED 9.96 → 4.92 (ROUND 24, 2026-10-17) — new live-tuned defaults
+// LOWERED 9.96 → 4.92 (ROUND 24, 2026-10-17) — new live-tuned defaults
+export const SPECULAR_DEFAULT_STRENGTH = 5.5; // RAISED 4.92 → 5.5 (METAL BODY, 2026-11-02, mmp-9nb)
 /**
  * ⚠️ RAISED FROM 1 TO 1.3 (ROUND 16, 2026-08-03) — now that the shader
  * actually honours values past 1 (see the tint mix's own comment), a MODEST
@@ -165,7 +166,8 @@ export const SPECULAR_DEFAULT_STRENGTH = 4.92; // LOWERED 9.96 → 4.92 (ROUND 2
  * new live-tuned defaults; the author's own dialled-in scene, recorded
  * exactly.
  */
-export const SPECULAR_DEFAULT_SATURATION = 1.1; // LOWERED 2 → 1.1 (ROUND 24, 2026-10-17)
+// LOWERED 2 → 1.1 (ROUND 24, 2026-10-17)
+export const SPECULAR_DEFAULT_SATURATION = 1.35; // RAISED 1.1 → 1.35 (METAL BODY, 2026-11-02, mmp-9nb)
 /**
  * THE SHADOW-CONTRAST CURVE (2026-09-02, mythica-machina-press#432) — an
  * exponent on `decodeSpecularMask`'s own `strength` axis, direct author ask:
@@ -210,7 +212,8 @@ export const SPECULAR_DEFAULT_MASK_CONTRAST = 4.09; // RAISED 1.74 → 4.09 (ROU
  * back toward fewer, larger cells across the map, though still well under
  * V2's original 16384.
  */
-export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 11840; // RAISED 10816 → 11840 (ROUND 24, 2026-10-17)
+// RAISED 10816 → 11840 (ROUND 24, 2026-10-17)
+export const SPECULAR_DEFAULT_PATTERN_SCALE_PX = 3500; // LOWERED 11840 → 3500 (METAL BODY, 2026-11-02, mmp-9nb)
 /**
  * The master parallax gain. **1 = V2's measured ≈1:1 world-space slide**, i.e.
  * the shimmer is very nearly SCREEN-LOCKED and sweeps across the map as the
@@ -301,7 +304,8 @@ export const SPECULAR_DEFAULT_PULSE = 0.28;
  * longer the schema's own max — the author's own dialled-in scene, recorded
  * exactly.
  */
-export const SPECULAR_DEFAULT_SHIMMER_GAIN = 12.65; // RAISED 5.55 → 12.65 (ROUND 24, 2026-10-17)
+// RAISED 5.55 → 12.65 (ROUND 24, 2026-10-17)
+export const SPECULAR_DEFAULT_SHIMMER_GAIN = 17; // RAISED 12.65 → 17 (METAL BODY, 2026-11-02, mmp-9nb)
 /**
  * THE LIGHT FLOOR. **0, corrected DOWN from 0.18 (2026-07-27) on direct live
  * feedback: metal was reading as SELF-ILLUMINATING in genuinely dark rooms —
@@ -348,6 +352,92 @@ export const SPECULAR_DEFAULT_LIGHT_FLOOR = 0;
  * ⚠️ RAISED 0.99 → 1 = THE SCHEMA'S OWN MAX (ROUND 23, 2026-09-09) — new
  * live-tuned defaults; back to V2's own full swing exactly. */
 export const SPECULAR_DEFAULT_SUN_BIAS = 1;
+
+/**
+ * ============================================================================
+ * THE METAL BODY (2026-11-02, mmp-9nb) — two features + a retune
+ * ============================================================================
+ * Author: *"make metallic surfaces feel more shiny metallic and metal like…
+ * stronger over subtle… a single colour mask… consider water specularity."*
+ *
+ * THE DIAGNOSIS (lab, Big Bank's gold mermaid statue `Vault_Treasure_05` and
+ * Goblin Alchemist's copper, real masks through the production loader): metal
+ * read as YELLOW-LIT PAINT. Three measured causes —
+ *   1. the shine only ever ADDED light, so there was no dark reflection for a
+ *      glint to stand against (metal p90−p10 display contrast 0.56);
+ *   2. the pattern (11840 px) was eight times a 1500 px treasure: the whole
+ *      statue sat inside ONE flat shimmer blob;
+ *   3. nothing used the mask's own SHAPE — the sculpted edges it describes
+ *      never caught any light.
+ *
+ * FEATURE A — MIRROR DEPTH (`mirrorDepth`). Polished metal returns almost no
+ * plain diffuse light; what it is not reflecting reads dark. The pass is now
+ * PREMULTIPLIED (`dst × (1 − darken) + shine`) and darkens the lit floor under
+ * the metal between reflections, putting back a little `tint²` (deep amber on
+ * gold, red-brown on copper — `TROUGH_RETURN`) so the troughs read as dim
+ * coloured reflections, not as the art scaled toward olive (round 2's fault).
+ *
+ * FEATURE B — EDGE RELIEF (`reliefStrength`, `reliefWidthPx`). The painted
+ * value is read as height (bright = proud, the author's ink lines = grooves);
+ * four world-px taps give a bevel normal, lit from where the light really is:
+ * the light buffer's own slope indoors (brighter side = toward the lamp), the
+ * sun outdoors, a quiet top-left key otherwise. Light-facing flanks catch a
+ * pale bevel; the far flanks fall into shade (via the same darkening alpha).
+ *
+ * THE RETUNE — glint focus (`pow` pivoted on the field's MEASURED peak,
+ * `SHIMMER_REF_PEAK`, because the six-layer union never gets near 1: p99 ≈
+ * 0.31-0.38), a warm hot core (half-way to grey, never to grey — full grey
+ * turned gold to pewter), pattern 11840 → 3500, and strength / saturation /
+ * shimmer gain raised to put the average brightness and colour BACK where they
+ * were once the troughs darken.
+ *
+ * MEASURED on the statue under a lamp pool (display space, metal pixels only):
+ *   today        mean 0.426  contrast p90−p10 0.562  saturation 0.444
+ *   these values mean 0.412  contrast p90−p10 0.619  saturation 0.440
+ * i.e. the same brightness and colour, ten per cent more contrast, and it now
+ * reads as polished gold. Slab (no mask edges): steepest per-pixel step 0.055
+ * at 1:1 (cap for "a visible line" is 0.10) — the field stays soft. Cost
+ * unchanged within noise (all-metal 1024² 1.04 → 1.0 ms).
+ *
+ * WATER (the agreement the author asked for): both are additive light in the
+ * same linear HDR buffer through the same tonemap and bloom; at golden hour
+ * and at night they already agree because `illum` carries the same sky. The
+ * one disagreement was CLOUD — water's sun glint follows `key.strength = day ×
+ * (1 − cloud)` and dies under overcast, metal kept full sun-like glints. Metal's
+ * OUTDOOR glints now follow the same term (`outdoorGlintResponse`,
+ * specular-material.js): overcast relaxes them into a broad satin at 45 %.
+ * Absolute peaks deliberately differ: water's glint is the sun's mirror IMAGE
+ * (GGX, ~40× HDR in a few pixels), metal's is a broad sheen (~3-4× HDR).
+ */
+export const SPECULAR_DEFAULT_RELIEF_STRENGTH = 2;
+export const SPECULAR_DEFAULT_RELIEF_WIDTH_PX = 3;
+export const SPECULAR_DEFAULT_MIRROR_DEPTH = 0.6;
+export const SPECULAR_DEFAULT_GLINT_FOCUS = 2;
+export const SPECULAR_DEFAULT_HOT_CORE = 0.4;
+export const SPECULAR_DEFAULT_COLOUR_RESPONSE = 1;
+/** World px over which the LIGHT's own gradient is read for relief's key
+ * direction indoors — wide enough to see a lamp's falloff, narrow enough that
+ * two lamps either side of a statue still light opposite flanks. */
+const RELIEF_LIGHT_PROBE_PX = 96;
+/** The fallback key when neither the light nor the sun gives a direction:
+ * classic top-left (world y is down). */
+const RELIEF_DEFAULT_KEY = [-0.6, -0.8];
+/** Where the six-layer shimmer union actually peaks over real metal — measured
+ * with `specLab.stats` on Big Bank's gold statue at three pattern sizes
+ * (p99 0.31-0.38, max 0.31-0.45; 2026-11-02). Focus and mirror pivot on it. */
+const SHIMMER_REF_PEAK = 0.35;
+/** How much saturated metal colour returns in the darkened troughs, per unit of
+ * darkening (× strength × light). Small: it recolours, it must not refill. */
+const TROUGH_RETURN = 0.45;
+/** METAL BY COLOUR (2026-11-02): how much further bright NEUTRAL paint (silver,
+ * steel, chrome) goes than gold — deeper mirror, tighter and brighter glints.
+ * First pass (+0.5 / ×1.75 / none) left the Bank's steel coin purses still
+ * reading as grey; these read as polished steel beside the gold. */
+const CHROME_MIRROR_GAIN = 0.8;
+const CHROME_FOCUS_GAIN = 1;
+const CHROME_GLINT_GAIN = 0.4;
+/** The most of the lit floor under the metal that darkening may take. */
+const MIRROR_MAX_DARKEN = 0.85;
 
 /**
  * Per-layer defaults, transcribed from V2's tuned values.
@@ -636,6 +726,12 @@ export function buildSpecularSurfaceMaterial({
   flickerSpeed = SPECULAR_FLICKER_SPEED,
   flickerScalePx = SPECULAR_FLICKER_SCALE_PX,
   flickerRoughness = SPECULAR_FLICKER_ROUGHNESS,
+  reliefStrength = SPECULAR_DEFAULT_RELIEF_STRENGTH,
+  reliefWidthPx = SPECULAR_DEFAULT_RELIEF_WIDTH_PX,
+  mirrorDepth = SPECULAR_DEFAULT_MIRROR_DEPTH,
+  glintFocus = SPECULAR_DEFAULT_GLINT_FOCUS,
+  hotCore = SPECULAR_DEFAULT_HOT_CORE,
+  colourResponse = SPECULAR_DEFAULT_COLOUR_RESPONSE,
   tier = SPECULAR_DEFAULT_TIER,
 }) {
   const TSL = THREE.TSL;
@@ -671,6 +767,9 @@ export function buildSpecularSurfaceMaterial({
     // composite uses — see `incident` below for why a matching curve, not a
     // tuned exponent, is what stops metal glowing in a dark room.
     sRGBTransferEOTF,
+    dFdx,
+    dFdy,
+    length,
     mx_worley_noise_float,
     mx_noise_float,
     mx_hsvtorgb,
@@ -715,6 +814,20 @@ export function buildSpecularSurfaceMaterial({
   const uFlickerSpeed = uniform(float(flickerSpeed));
   const uFlickerScalePx = uniform(float(flickerScalePx));
   const uFlickerRoughness = uniform(float(flickerRoughness));
+  // THE METAL BODY's knobs, PACKED (effects/uniform-budget caps this file at
+  // 40 uniform() calls): x relief strength, y relief width px, z mirror depth,
+  // w glint focus. Its sibling below carries hot core + the sky response.
+  const uMetalBody = uniform(vec4(reliefStrength, reliefWidthPx, mirrorDepth, glintFocus));
+  const uReliefStrength = uMetalBody.x;
+  const uReliefWidthPx = uMetalBody.y;
+  const uMirrorDepth = uMetalBody.z;
+  const uGlintFocus = uMetalBody.w;
+  /** x hot core; (y, z) = (gain, broaden) from `outdoorGlintResponse(sky)` —
+   * (1, 0) = clear sky, which is also what an unwired caller gets; w colour
+   * response (see METAL BY COLOUR below). */
+  const uGlintLook = uniform(vec4(hotCore, 1, 0, colourResponse));
+  const uHotCore = uGlintLook.x;
+  const uColourResponse = uGlintLook.w;
   /** Foundry's OWN readability floor (`ambient.darkness`, pulled toward black
    * by `darknessRealism01`) — see `setDarknessFloor` below for the full
    * account. Defaults to (0,0,0): a caller that never wires this gets the
@@ -1436,6 +1549,110 @@ export function buildSpecularSurfaceMaterial({
 
   const coverage = presence.mul(visibility01).toVar('specCoverage');
 
+  // ── RELIEF — the mask's own shape, lit from where the light really is ────
+  // The painted value is read as HEIGHT: bright paint stands proud, the
+  // author's dark ink lines are grooves. Its gradient is a bevel normal, and
+  // the flank that faces the light catches a highlight while the far flank
+  // falls into shade — engraving, rims and coin edges, from the one mask.
+  // Taps are WORLD-px apart (the art's own scale, not the screen's), mapped to
+  // mask UV through the quad's affine derivatives, so tiles rotated or
+  // scrolled by tile-motion stay correct. Built at TOP level: derivatives and
+  // implicit-LOD samples need uniform control flow, so none of this may move
+  // inside the presence gate's `If`.
+  // LADDER TIER 1 ('shimmer') and up, like the field itself: below it there
+  // are no glints for the mirror to leave dark between, so the whole metal
+  // body compiles OUT (JS-time) rather than darkening every metal pixel flat.
+  const reliefTaps = [];
+  const metalBodyEnabled = plan.shimmerEnabled;
+  const { reliefLit, reliefShade } = metalBodyEnabled
+    ? (() => {
+        const dWorldX = dFdx(positionWorld.x);
+        const dWorldY = dFdy(positionWorld.y);
+        const safeDiv = (d) => abs(d).lessThan(float(1e-6)).select(float(1e-6), d);
+        const uvPerWorldX = dFdx(maskUv).div(safeDiv(dWorldX));
+        const uvPerWorldY = dFdy(maskUv).div(safeDiv(dWorldY));
+        const heightAt = (dx, dy) => {
+          const node = texture(maskTexture, maskUv.add(uvPerWorldX.mul(dx)).add(uvPerWorldY.mul(dy))).level(float(0));
+          reliefTaps.push(node);
+          return dot(node.rgb, vec3(LUMA_601[0], LUMA_601[1], LUMA_601[2]));
+        };
+        // Never narrower than 1.5 SCREEN px: zoomed out, a 3-world-px tap falls
+        // inside one pixel and the gradient of an unfiltered level-0 read sparkles
+        // as the camera pans. Wider taps there simply give a broader bevel.
+        const rw = max(uReliefWidthPx, abs(dWorldX).mul(float(1.5))).toVar('specReliefWidth');
+        // ∇h, in "painted value per 2·width": ~1 across a hard painted edge.
+        const heightGrad = vec2(
+          heightAt(rw, float(0)).sub(heightAt(rw.negate(), float(0))),
+          heightAt(float(0), rw).sub(heightAt(float(0), rw.negate()))
+        ).toVar('specHeightGrad');
+
+        // The key direction, toward the light, world space (y down). Indoors: the
+        // light buffer's own slope (brighter side = toward the lamp). Outdoors: the
+        // sun. Neither: a quiet top-left default so relief never vanishes.
+        const probeU = float(RELIEF_LIGHT_PROBE_PX).div(viewSpanX);
+        const probeV = float(RELIEF_LIGHT_PROBE_PX).div(viewSpanY);
+        const illumLuma = (du, dv) =>
+          dot(
+            illumTexNode.sample(vec2(screenUv.x.add(du), screenUv.y.add(dv))).rgb,
+            vec3(LUMA_709[0], LUMA_709[1], LUMA_709[2])
+          );
+        const lightGrad = vec2(
+          illumLuma(probeU, float(0)).sub(illumLuma(probeU.negate(), float(0))),
+          illumLuma(float(0), probeV).sub(illumLuma(float(0), probeV.negate()))
+        ).toVar('specLightGrad');
+        const lightGradLen = length(lightGrad);
+        const lampConfidence = smoothstep(float(0.004), float(0.04), lightGradLen).mul(float(1).sub(outdoors));
+        const lampDir = lightGrad.div(max(lightGradLen, float(1e-5)));
+        const keyDir2 = lampDir
+          .mul(lampConfidence)
+          .add(uSunDir.mul(outdoors))
+          .add(vec2(RELIEF_DEFAULT_KEY[0], RELIEF_DEFAULT_KEY[1]).mul(float(0.25)));
+        const keyDir = keyDir2.div(max(length(keyDir2), float(1e-5))).toVar('specReliefKey');
+        // > 0 on the flank that faces the light (height falls toward it).
+        const facing = dot(heightGrad, keyDir).negate().mul(float(4)).toVar('specReliefFacing');
+        const reliefLit = clamp(facing, float(0), float(1));
+        const reliefShade = clamp(facing.negate(), float(0), float(1));
+        return { reliefLit, reliefShade };
+      })()
+    : { reliefLit: float(0), reliefShade: float(0) };
+
+  // ── MIRROR — polished metal returns little diffuse light ─────────────────
+  // What it does not reflect toward the eye reads DARK, which is the contrast
+  // that separates chrome and gold from paint that merely glows. Darkens the
+  // lit floor under the metal (premultiplied blend, `alpha` below) between
+  // reflections; the glints ride on top additively.
+  const reflectWeight = smoothstep(float(0.02), float(SHIMMER_REF_PEAK), shimmer);
+  // ── METAL BY COLOUR — one mask, several metals ─────────────────────────
+  // Author (2026-11-02): *"reproduce different metallic responses based on
+  // colour."* The painted hue already says which metal; its saturation and
+  // value say which FINISH. Bright NEUTRAL paint is silver/steel/chrome — the
+  // most mirror-like metal there is: tighter glints, deeper reflections (the
+  // Bank's steel coin purses read dull grey under one shared response). Dark
+  // neutral paint is iron/pewter: satin, shallow. Saturated paint (gold,
+  // copper, brass) keeps the tuned response. Weights, so mixed paint blends.
+  const maskMax = max(max(maskSample.r, maskSample.g), maskSample.b);
+  const maskSat = maskMax.sub(min(min(maskSample.r, maskSample.g), maskSample.b)).div(max(maskMax, float(1e-4)));
+  const neutralW = float(1).sub(smoothstep(float(0.12), float(0.35), maskSat));
+  const chromeW = neutralW
+    .mul(smoothstep(float(0.35), float(0.75), maskMax))
+    .mul(uColourResponse)
+    .toVar('specChromeW');
+  const ironW = neutralW
+    .mul(float(1).sub(smoothstep(float(0.2), float(0.5), maskMax)))
+    .mul(uColourResponse)
+    .toVar('specIronW');
+  const mirrorByColour = float(1)
+    .add(chromeW.mul(float(CHROME_MIRROR_GAIN)))
+    .sub(ironW.mul(float(0.5)));
+  const mirrorDarken = metalBodyEnabled
+    ? uMirrorDepth.mul(mirrorByColour).mul(float(1).sub(reflectWeight)).mul(coverage).mul(strengthNode.sqrt())
+    : float(0);
+  const reliefDarken = uReliefStrength.mul(reliefShade).mul(float(0.45)).mul(coverage);
+  const keepFloor = float(1)
+    .sub(clamp(mirrorDarken, float(0), float(1)))
+    .mul(float(1).sub(clamp(reliefDarken, float(0), float(1))));
+  const darkenAlpha = clamp(float(1).sub(keepFloor), float(0), float(MIRROR_MAX_DARKEN)).toVar('specDarken');
+
   /** Exact transcription of `reinhardCeiling`/`reinhardCeilingRgb`: a
    * genuinely-bounded, luminance-preserving soft knee. See the pattern
    * module's own header for the curve and why it is luminance-based.
@@ -1478,15 +1695,68 @@ export function buildSpecularSurfaceMaterial({
   const sheenRaw = tint.mul(shineResponse).mul(uStrength).mul(coverage).toVar('specSheenRaw');
   const sheen = ceilingCompress(sheenRaw, uSheenCeiling).toVar('specSheen');
 
-  const glintRaw = tint
-    .mul(shimmer.mul(uShimmerGain))
+  // GLINT FOCUS: pow(shimmer, focus) keeps a peak's height and narrows its
+  // skirt, so a broad wash tightens into a hot glint. HOT CORE: the top of a
+  // glint pales toward the metal's own luminance — the way a real highlight
+  // on gold clips toward pale yellow before the tonemap ever sees it.
+  // Pivoted on the field's MEASURED peak, not on 1: the six-layer union tops
+  // out near SHIMMER_REF_PEAK, so `pow(s, k)` alone would only ever dim it.
+  const shimmerRel = max(shimmer, float(0)).div(float(SHIMMER_REF_PEAK));
+  // THE SKY, outdoors only (`specular-material.js#outdoorGlintResponse`): a
+  // daylight overcast relaxes the focus toward a broad satin and dims the
+  // glint by the same cloud term water's sun glint follows.
+  const skyBroaden = uGlintLook.z.mul(outdoors);
+  const focusByColour = mix(
+    max(uGlintFocus, float(0.25)).mul(float(1).add(chromeW.mul(float(CHROME_FOCUS_GAIN)))),
+    float(1),
+    ironW.mul(float(0.6))
+  );
+  const focusEff = mix(focusByColour, float(1), skyBroaden);
+  const skyGain = mix(float(1), uGlintLook.y, outdoors);
+  const focused = pow(shimmerRel, focusEff)
+    .mul(float(SHIMMER_REF_PEAK))
+    .mul(skyGain)
+    .mul(float(1).add(chromeW.mul(float(CHROME_GLINT_GAIN))))
+    .toVar('specFocused');
+  const tintLuma = dot(tint, vec3(LUMA_709[0], LUMA_709[1], LUMA_709[2]));
+  // The core pales toward a WARM white — half way between the metal's own
+  // colour and its grey — never all the way to grey, which turned gold to
+  // pewter in the lab (round 2).
+  const paleTint = mix(vec3(tintLuma, tintLuma, tintLuma), tint, float(0.5));
+  const glintTint = mix(tint, paleTint, smoothstep(float(0.5), float(1.2), shimmerRel).mul(uHotCore));
+  const glintRaw = glintTint
+    .mul(focused.mul(uShimmerGain))
     .mul(shineResponse)
     .mul(uStrength)
     .mul(coverage)
     .toVar('specGlintRaw');
   const glint = ceilingCompress(glintRaw, uGlintCeiling).toVar('specGlint');
 
-  const shine = sheen.add(glint).toVar('specShine');
+  // The lit flank of the relief, half-way to the pale highlight colour.
+  const reliefTint = mix(tint, vec3(tintLuma, tintLuma, tintLuma), float(0.35));
+  const relief = reliefTint
+    .mul(reliefLit.mul(reliefLit))
+    .mul(uReliefStrength)
+    .mul(shineResponse)
+    .mul(uStrength)
+    .mul(coverage)
+    .toVar('specRelief');
+
+  // THE TROUGH COLOUR. A conductor colours what it reflects, and light that
+  // bounces between metal surfaces is coloured twice — so the dim reflections
+  // the mirror darkening leaves behind read as deep amber on gold and deep
+  // red-brown on copper, not as the art scaled toward olive (round 2). `tint²`
+  // over its own luma keeps the brightness and doubles the saturation.
+  const tintSq = tint.mul(tint).div(max(tintLuma, float(1e-3)));
+  const troughColour = tintSq
+    .mul(clamp(mirrorDarken, float(0), float(1)))
+    .mul(float(TROUGH_RETURN))
+    .mul(shineResponse)
+    .mul(uStrength)
+    .mul(coverage)
+    .toVar('specTrough');
+
+  const shine = sheen.add(glint).add(relief).add(troughColour).toVar('specShine');
 
   /** @param {*} material */
   function configureShared(material) {
@@ -1517,13 +1787,16 @@ export function buildSpecularSurfaceMaterial({
   // second material, a second draw, and another way to half-fail (suppression
   // with no highlight reads as a shader bug rather than as a missing mask).
   const specularMaterial = new THREE.NodeMaterial();
-  specularMaterial.colorNode = vec4(shine, 1);
+  // PREMULTIPLIED: `dst × (1 − darken) + shine`. At darken 0 this is exactly
+  // the old additive `One/One`; the alpha factors (configureShared) still
+  // leave the target's own alpha untouched.
+  specularMaterial.colorNode = vec4(shine, darkenAlpha);
   // mythica-machina-press#538/#539 — see `positionNode`'s own JSDoc above.
   // Omitted (every floor caller) leaves THREE's own unset default, unchanged.
   if (positionNode) specularMaterial.positionNode = positionNode;
   configureShared(specularMaterial);
   specularMaterial.blendSrc = THREE.OneFactor;
-  specularMaterial.blendDst = THREE.OneFactor;
+  specularMaterial.blendDst = THREE.OneMinusSrcAlphaFactor;
 
   // ── THE INSTRUMENT — a third material no mesh draws until asked ──────────
   // `specular.js#SPECULAR_DEBUG_CHANNELS` holds the why and the reading guide.
@@ -1680,6 +1953,10 @@ export function buildSpecularSurfaceMaterial({
     specularMaterial,
     debugMaterial,
     maskTexNode,
+    /** Relief's own taps of the SAME mask — exposed so a test can prove a mask
+     * swap reaches them (a tap left on the old mask lights the old floor's
+     * shapes on the new floor's metal). */
+    reliefTapNodes: reliefTaps,
     packTexNode,
     layerCount: SPECULAR_LAYER_COUNT,
     /** The ladder rung this exact material was built for — see
@@ -1690,6 +1967,8 @@ export function buildSpecularSurfaceMaterial({
      * lookup is uv-based, and the subsystem for who calls this. */
     setMaskTexture(tex) {
       maskTexNode.value = tex;
+      // The relief's four taps are their own texture nodes; they must follow.
+      for (const tap of reliefTaps) tap.value = tex;
     },
     setIslandPackTexture(tex) {
       packTexNode.value = tex;
@@ -1810,6 +2089,32 @@ export function buildSpecularSurfaceMaterial({
     },
     setFlickerRoughness(v) {
       uFlickerRoughness.value = Math.min(1, Math.max(0, v));
+    },
+    /** `outdoorGlintResponse(sky)`'s result, pushed when the sky changes.
+     * @param {{gain: number, broaden: number}} r */
+    setSkyGlint(r) {
+      const g = Number.isFinite(r?.gain) ? Math.min(1, Math.max(0, r.gain)) : 1;
+      const b = Number.isFinite(r?.broaden) ? Math.min(1, Math.max(0, r.broaden)) : 0;
+      uGlintLook.value.y = g;
+      uGlintLook.value.z = b;
+    },
+    setReliefStrength(v) {
+      uMetalBody.value.x = Math.max(0, v);
+    },
+    setReliefWidthPx(v) {
+      uMetalBody.value.y = Math.max(0.25, v);
+    },
+    setMirrorDepth(v) {
+      uMetalBody.value.z = Math.min(1, Math.max(0, v));
+    },
+    setGlintFocus(v) {
+      uMetalBody.value.w = Math.max(0.25, v);
+    },
+    setHotCore(v) {
+      uGlintLook.value.x = Math.min(1, Math.max(0, v));
+    },
+    setColourResponse(v) {
+      uGlintLook.value.w = Math.min(1, Math.max(0, v));
     },
     setIncidentKnee(v) {
       // Clamped ABOVE 0: a knee of 0 would divide every light level to

@@ -379,6 +379,16 @@ export function createSkyHandle({
     /** True when this handle is a mathematical no-op (parity mode). */
     neutral: realism === 0 && goldenAmount === 0 && moonAmount === 0 && afterglowAmount === 0,
 
+    /**
+     * HOW CLEAR THE SKY IS (1 − cloud cover) and HOW MUCH IT IS DAY (the sun's
+     * own day factor), as the two plain numbers `key.strength` is the product
+     * of. Added 2026-11-02 (mmp-9nb) so metal's sun glints can follow the SAME
+     * cloud term water's sun glint already does, without recombining key and
+     * fill by hand — which cannot tell overcast noon from a dark night.
+     */
+    clear01: 1 - cloud01,
+    day01: dayFactor01,
+
     /** The sun disc: where it is, what colour, how strong. */
     key: Object.freeze({
       /**

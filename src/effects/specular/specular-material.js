@@ -176,6 +176,38 @@ export function keyLightDirection(key) {
   return len > 1e-6 ? [x / len, y / len, s / len] : [0, 0, 1];
 }
 
+/**
+ * How much of a GLINT survives under cloud, at full overcast in daylight. Water's
+ * sun glint goes to zero there and its sky sheen carries the surface; polished
+ * metal does the same thing more softly — the hot mirror image of the sun goes,
+ * a broad bright satin from the grey sky stays. 0.45 of the clear-sky glint,
+ * fully broadened (focus 1), read side by side with the overcast sea in the
+ * rig (2026-11-02).
+ */
+export const SPECULAR_OVERCAST_GLINT = 0.45;
+
+/**
+ * THE OUTDOOR GLINT'S SKY RESPONSE — the same cloud term water's sun glint
+ * uses (`key.strength = day × (1 − cloud)`, sky-access.js), so gold on a quay
+ * and the sea beside it lose their sun glints together when the sky clouds
+ * over (mmp-9nb, "both surfaces agree on the correct response curve").
+ *
+ * Only DAYLIGHT overcast counts: at night the sky lights nothing and outdoor
+ * metal is lit by lamps, whose glints must survive — which is exactly why this
+ * reads `clear01`/`day01` and does not divide key by fill (that ratio cannot
+ * tell an overcast noon from a dark night).
+ *
+ * @param {{clear01?: number, day01?: number}|null} sky - the sky handle.
+ * @returns {{gain: number, broaden: number}} `gain` multiplies outdoor glints;
+ *   `broaden` 0..1 relaxes glint focus toward 1 (a soft sheen).
+ */
+export function outdoorGlintResponse(sky) {
+  const clear = clamp01(sky?.clear01 ?? 1);
+  const day = clamp01(sky?.day01 ?? 1);
+  const overcast = (1 - clear) * day;
+  return { gain: 1 - (1 - SPECULAR_OVERCAST_GLINT) * overcast, broaden: overcast };
+}
+
 /** @param {number} x @returns {number} */
 function clamp01(x) {
   const n = Number(x);

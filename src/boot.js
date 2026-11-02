@@ -12104,7 +12104,15 @@ function install() {
     title: 'Metal & shine',
     accVar: '--c-surface',
     schema: SPECULAR_PARAMS,
-    fohKeys: ['strength', 'incidentSteepness', 'shimmerGain', 'parallaxStrength', 'islandSpread'],
+    fohKeys: [
+      'strength',
+      'mirrorDepth',
+      'reliefStrength',
+      'incidentSteepness',
+      'shimmerGain',
+      'parallaxStrength',
+      'islandSpread',
+    ],
     getReadout: () => specular.getReadout(),
     setValue: (patch) => MapShine.setSpecular(patch),
     // UI parity plan, phase 5b — the SAME debug-channel select AND the SAME
@@ -12392,7 +12400,15 @@ function install() {
         // strips render below the categorised groups via `extraAdvanced`: a
         // flat schema cannot hold "one declaration, three live value sets", so
         // they were never able to go through `fohKeys`/`schema` at all.
-        fohKeys: ['strength', 'incidentSteepness', 'shimmerGain', 'parallaxStrength', 'islandSpread'],
+        fohKeys: [
+          'strength',
+          'mirrorDepth',
+          'reliefStrength',
+          'incidentSteepness',
+          'shimmerGain',
+          'parallaxStrength',
+          'islandSpread',
+        ],
         getValue: (id) => readLive().params?.[id] ?? SPECULAR_PARAMS[id]?.default,
         onChange: (id, value) => MapShine.setSpecular({ [id]: value }),
         enabled: readLive().enabled,

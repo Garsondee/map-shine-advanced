@@ -233,11 +233,15 @@ export async function run(t) {
   ok('once the mask lands the mesh is visible', mesh.visible === true);
   ok('…and hasContent() says the pass has work to do', sub.hasContent() === true);
   // Identified by BLEND rather than by object identity, because blend is the
-  // difference that matters on screen: the shine ADDS (One/One), the diagnostic
+  // difference that matters on screen: the shine ADDS onto a darkened floor
+  // (One/OneMinusSrcAlpha, premultiplied since 2026-11-02), the diagnostic
   // REPLACES (One/Zero). A swap that got the material right and the blend wrong
   // would draw the diagnostic additively over the lit map, and "black" would
   // come back as "unchanged" — unreadable.
-  ok('the mesh carries the ADDITIVE shine material by default', mesh.material.blendDst === THREE.OneFactor);
+  ok(
+    'the mesh carries the premultiplied shine material by default',
+    mesh.material.blendDst === THREE.OneMinusSrcAlphaFactor
+  );
   ok('the reported debug channel is 0 — the effect as it ships', sub.getStatus().debugChannel === 0);
 
   // ── THE TIER-HONESTY FIELD (2026-08-30) — getStatus().perfTier reports

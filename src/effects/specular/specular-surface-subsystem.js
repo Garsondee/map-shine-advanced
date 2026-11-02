@@ -45,7 +45,7 @@ import {
   SPECULAR_DEFAULT_ISLAND_SPREAD,
   SPECULAR_DEFAULT_TIER,
 } from './specular-render.js';
-import { keyLightDirection, describeSpecularMapping } from './specular-material.js';
+import { keyLightDirection, describeSpecularMapping, outdoorGlintResponse } from './specular-material.js';
 import { buildSpecularIslandPack } from './specular-islands.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
@@ -737,11 +737,12 @@ export function createSpecularSurfaceSubsystem({
     // with the camera.
     const sky = getSkyHandle();
     if (sky?.key) {
-      const skyKey = `${sky.version}|${sky.key.azimuthDeg}|${sky.key.elevationDeg}`;
+      const skyKey = `${sky.version}|${sky.key.azimuthDeg}|${sky.key.elevationDeg}|${sky.clear01}|${sky.day01}`;
       if (skyKey !== lastSkyKey) {
         lastSkyKey = skyKey;
         const dir = keyLightDirection(sky.key);
         surface.setSunDir(dir[0], dir[1]);
+        surface.setSkyGlint(outdoorGlintResponse(sky));
       }
     }
 
@@ -780,6 +781,12 @@ export function createSpecularSurfaceSubsystem({
       p.flickerSpeed,
       p.flickerScalePx,
       p.flickerRoughness,
+      p.reliefStrength,
+      p.reliefWidthPx,
+      p.mirrorDepth,
+      p.glintFocus,
+      p.hotCore,
+      p.colourResponse,
       JSON.stringify(layerParams),
     ].join('|');
     if (key === lastParamsKey) return;
@@ -803,6 +810,12 @@ export function createSpecularSurfaceSubsystem({
     if (Number.isFinite(p.flickerSpeed)) surface.setFlickerSpeed(p.flickerSpeed);
     if (Number.isFinite(p.flickerScalePx)) surface.setFlickerScalePx(p.flickerScalePx);
     if (Number.isFinite(p.flickerRoughness)) surface.setFlickerRoughness(p.flickerRoughness);
+    if (Number.isFinite(p.reliefStrength)) surface.setReliefStrength(p.reliefStrength);
+    if (Number.isFinite(p.reliefWidthPx)) surface.setReliefWidthPx(p.reliefWidthPx);
+    if (Number.isFinite(p.mirrorDepth)) surface.setMirrorDepth(p.mirrorDepth);
+    if (Number.isFinite(p.glintFocus)) surface.setGlintFocus(p.glintFocus);
+    if (Number.isFinite(p.hotCore)) surface.setHotCore(p.hotCore);
+    if (Number.isFinite(p.colourResponse)) surface.setColourResponse(p.colourResponse);
     if (Number.isFinite(p.pulse)) surface.setPulse(p.pulse);
     if (Number.isFinite(p.sunBias)) surface.setSunBias(p.sunBias);
 

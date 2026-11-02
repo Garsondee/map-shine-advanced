@@ -64,6 +64,11 @@ import { mipChainByteLength } from './block-compress.js';
 // the shader lab (which cannot load this file's Foundry-coupled transitive
 // imports) can import the real node-building functions directly. Intra-zone.
 import { buildAlbedoClarityNode, buildFlatAlbedoNode, isAlbedoClarityEnabled } from './albedo-clarity.js';
+import {
+  buildTokenArtNode,
+  setTokenGroundingGroundDensity,
+  setTokenGroundingWorldPerPixel,
+} from './token-grounding.js';
 // POST-UPSCALE SHARPEN (2026-08-27) — the render-scale governor's own repair
 // for its free bilinear upscale's softness. Injected into grade-present.js
 // (never imported there directly — a real circular zone dependency; see
@@ -14939,6 +14944,11 @@ async function startVtPanViewerUnserialized({
       }
       state.placement = placement;
       state.worldBounds = computeQuadBounds(placement);
+      // The floor's texel density is what token grounding caps a token's
+      // detail against (vt/token-grounding.js, stage A).
+      if (item.kind === 'levelBackground' && state.imageSize?.width > 0 && placement.width > 0) {
+        setTokenGroundingGroundDensity(state.imageSize.width / placement.width);
+      }
       if (state.geometry) {
         const pos = state.geometry.getAttribute('position');
         const corners = computeQuadCorners(placement);
@@ -16370,6 +16380,8 @@ async function startVtPanViewerUnserialized({
       camera.top = f.top;
       camera.bottom = f.bottom;
       camera.updateProjectionMatrix();
+      // Token detail match reads the zoom from here (vt/token-grounding.js).
+      setTokenGroundingWorldPerPixel(Math.abs(f.right - f.left) / Math.max(1, internalW));
       // depthCamera shares ONLY this X/Y framing — its OWN near/far/position
       // (set once, above) are never touched here.
       depthCamera.left = f.left;
@@ -16681,11 +16693,14 @@ async function startVtPanViewerUnserialized({
           uvS = tileMotion.uTexPivotUV.add(tileMotion.uTexScrollUV).add(rotated);
         }
         uvS = uvS.toVar();
-        // TOKENS sample sharper than the ground (see TOKEN_SHARP_LOD_BIAS).
-        const smallArt = item.kind === 'token' ? { lodBias: TOKEN_SHARP_LOD_BIAS, farRollOff: false } : {};
-        const clear = shouldUseFullAlbedoClarity()
-          ? buildAlbedoClarityNode(THREE, tex, uvS, uTexSize, smallArt)
-          : buildFlatAlbedoNode(THREE, tex, uvS, smallArt);
+        // TOKENS get their own sampler: detail-matched to the floor,
+        // supersampled, toned to the map (vt/token-grounding.js's header).
+        const clear =
+          item.kind === 'token'
+            ? buildTokenArtNode(THREE, tex, uvS)
+            : shouldUseFullAlbedoClarity()
+              ? buildAlbedoClarityNode(THREE, tex, uvS, uTexSize)
+              : buildFlatAlbedoNode(THREE, tex, uvS);
         const c = vec4(clear.rgb, clear.a).toVar();
         c.rgb.mulAssign(uTint);
         c.a.mulAssign(uAlpha);
@@ -31693,24 +31708,6 @@ function stopAndDetachTileVideo(t) {
  * the class memory:feedback_seam_default_hides_unwired exists to catch.
  */
 const ART_TEXTURE_ANISOTROPY = 16;
-
-/**
- * TOKEN SHARPNESS (author, 2026-10-27: "the token's artwork is fuzzy, low
- * resolution and blurred — the actual artwork is high resolution").
- *
- * A token takes the SAME load path and material as the map albedo (compressed
- * mip chain, trilinear, 16x anisotropy, CAS clarity) — what differs is the
- * SCALE. Ground art is shown at roughly 1-3 source texels per pixel; a
- * 1000px portrait on a 100px token is 5-10, so it lives at mip 2-3 and trilinear
- * blends two of those levels together, a blur on top of the downsample. And the
- * clarity gate's far roll-off (written to stop the ground's texel grid reading
- * as pixelation) cuts the sharpen to 35% right where a token sits.
- *
- * Two token-only corrections: sample half a stop-plus sharper than the
- * hardware's pick (the Lanczos mip chain is clean enough to afford it), and
- * keep the sharpen at full strength — a portrait has no texel grid to protect.
- */
-const TOKEN_SHARP_LOD_BIAS = -0.75;
 
 /**
  * INTERNAL RENDER SCALE WHILE THE COLD-LOAD CURTAIN IS UP

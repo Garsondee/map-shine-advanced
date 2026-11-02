@@ -199,6 +199,12 @@ export {
 // imports. Exposed here so the look is tunable live rather than only at a
 // rebuild.
 export { setAlbedoClarity, getAlbedoClarity, resetAlbedoClarity, ALBEDO_CLARITY_PARAMS } from './albedo-clarity.js';
+export {
+  setTokenGrounding,
+  getTokenGrounding,
+  resetTokenGrounding,
+  TOKEN_GROUNDING_PARAMS,
+} from './token-grounding.js';
 export { runVtLiveDecodeTest } from './vt-live-decode-report.js';
 // readPageBitmapPixels: the mask authority's injected page-pixel reader —
 // per-page CPU extraction is decode machinery, so it lives with the decoder.

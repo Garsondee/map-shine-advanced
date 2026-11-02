@@ -415,6 +415,9 @@ import {
   getAlbedoClarity,
   resetAlbedoClarity,
   ALBEDO_CLARITY_PARAMS,
+  setTokenGrounding,
+  getTokenGrounding,
+  resetTokenGrounding,
   setVtPanViewerAlbedoClarityForce,
   getVtPanViewerAlbedoClarityForce,
   setVtPanViewerMaskNodeOffForce,
@@ -1028,6 +1031,13 @@ MapShine.getDarknessRealism = getDarknessRealism;
 MapShine.setAlbedoClarity = setAlbedoClarity;
 MapShine.getAlbedoClarity = getAlbedoClarity;
 MapShine.resetAlbedoClarity = resetAlbedoClarity;
+// TOKEN GROUNDING (2026-11-02): how token art is sampled and toned so it sits
+// in the map (vt/token-grounding.js's header). `setTokenGrounding({ detail,
+// enabled })` is live, no reload; `getTokenGrounding()` also reports the floor
+// density the current scene supplied.
+MapShine.setTokenGrounding = setTokenGrounding;
+MapShine.getTokenGrounding = getTokenGrounding;
+MapShine.resetTokenGrounding = resetTokenGrounding;
 // UI-CAST WINDOW SHADOWS (2026-07-20): open character sheets / journals / context
 // menus cast a soft, offset shadow onto the map. As of Stage A it is MSA's first
 // REGISTERED effect — declared as data (effects/ui-window-shadow.js), driven

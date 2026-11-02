@@ -27,6 +27,7 @@ import { run as runSettle } from './settle.test.mjs';
 import { run as runCompressedTextures } from './compressed-textures.test.mjs';
 import { run as runDepthProxyMaterialPool } from './depth-proxy-material-pool.test.mjs';
 import { run as runAlbedoClarity } from './albedo-clarity.test.mjs';
+import { run as runTokenGrounding } from './token-grounding.test.mjs';
 import { run as runTaaResolve } from './taa-resolve.test.mjs';
 import { run as runBakedFormat } from './baked-format.test.mjs';
 import { run as runBakedTextures } from './baked-textures.test.mjs';
@@ -94,6 +95,7 @@ const suites = [
   ['compressed-textures', runCompressedTextures],
   ['depth-proxy-material-pool', runDepthProxyMaterialPool],
   ['albedo-clarity', runAlbedoClarity],
+  ['token-grounding', runTokenGrounding],
   ['taa-resolve', runTaaResolve],
   ['baked-format', runBakedFormat],
   ['baked-textures', runBakedTextures],

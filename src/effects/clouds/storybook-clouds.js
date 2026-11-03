@@ -346,6 +346,10 @@ export function createStorybookUniforms(TSL) {
     ink: uniform(vec3(0.04, 0.06, 0.12)),
     rim: uniform(vec3(1, 1, 1)),
     opacity: uniform(float(1)),
+    /** LOOP COUNTS as a uniform, never constants: head cells, lobes, trail cells, trails. A constant-bound loop
+     * is fully unrolled by the D3D compiler (FXC — Chrome's WebGL on Windows, and Dawn's WebGPU there too), and
+     * this shader's nested loops unrolled lost the device in the lab (2026-11-03). Never written after this. */
+    loops: uniform(vec4(4, STORYBOOK_LOBES, 9, STORYBOOK_TRAILS.length)),
   };
 }
 
@@ -393,12 +397,15 @@ function hashLobe(TSL, cell, li, salt) {
  * strongly is it faded by the domain edge. Inlined at each use (cheap ALU; the loops are real loops).
  */
 function cloudOf(TSL, u, wind, cell) {
-  const { float, vec2, smoothstep, mix, max, min, cos, sin, dot, sqrt, select } = TSL;
+  const { float, vec2, vec3, smoothstep, mix, clamp, max, min, cos, sin, dot, sqrt, select, mx_noise_float } = TSL;
   const spacing = u.deck.x;
   const h0 = hash3(TSL, cell, 0.37);
-  const jx = hash3(TSL, cell, 1.91).sub(0.5).mul(STORYBOOK_JITTER);
-  const jy = hash3(TSL, cell, 2.73).sub(0.5).mul(STORYBOOK_JITTER);
-  const centre = cell.add(vec2(0.5, 0.5)).add(vec2(jx, jy)).mul(spacing).add(wind.drift);
+  // REGIONS (2026-11-03, author: "varying shapes and sizes with varying sizes of gap between them"): a slow noise
+  // over the grid gathers clouds into clusters (more cells filled, bigger clouds) and opens wide clear stretches
+  // elsewhere, so the gaps are never one even spacing.
+  const region = mx_noise_float(vec2(cell.x.mul(0.31).add(2.2), cell.y.mul(0.31).add(7.7)));
+  const fillHere = clamp(u.deck.z.mul(float(1).add(region.mul(0.9))), 0, 1);
+  const sizeHere = float(1).add(region.mul(0.3));
   // Lie along the wind, ±35°.
   const yaw = hash3(TSL, cell, 4.41).sub(0.5).mul(1.2);
   const cy = cos(yaw);
@@ -409,7 +416,13 @@ function cloudOf(TSL, u, wind, cell) {
   const stretch = float(1).add(hash3(TSL, cell, 5.03).mul(float(0.4).add(u.deck.w)));
   // Size varies cloud to cloud, and a long cloud is a narrower one so its reach stays inside the cell.
   const cap = spacing.mul(STORYBOOK_MAX_REACH_FRAC / STORYBOOK_REACH_RADII).div(stretch);
-  const R0 = min(u.deck.y.mul(sqrt(hash3(TSL, cell, 3.17)).mul(0.6).add(0.4)), cap);
+  const R0 = min(u.deck.y.mul(sqrt(hash3(TSL, cell, 3.17)).mul(0.65).add(0.35)).mul(sizeHere), cap);
+  // A small cloud leaves slack in its cell, and spends it wandering: neighbours drift close or far apart.
+  const slack = max(spacing.mul(STORYBOOK_MAX_REACH_FRAC).sub(R0.mul(STORYBOOK_REACH_RADII).mul(stretch)), float(0)).div(spacing);
+  const jit = slack.mul(1.6).add(STORYBOOK_JITTER);
+  const jx = hash3(TSL, cell, 1.91).sub(0.5).mul(jit);
+  const jy = hash3(TSL, cell, 2.73).sub(0.5).mul(jit);
+  const centre = cell.add(vec2(0.5, 0.5)).add(vec2(jx, jy)).mul(spacing).add(wind.drift);
   // The dome: high over the board's middle, sinking past its edge (never below 6% of the base height).
   const rel = centre.sub(u.domeCentre).div(max(u.deck2.z, float(1)));
   const dome = float(1).sub(min(dot(rel, rel), float(1.7)));
@@ -423,10 +436,10 @@ function cloudOf(TSL, u, wind, cell) {
   // FRAGMENTS: some empty cells hold a small torn scrap of cloud instead (the reference's little shards between
   // the big heads) - variety of size is half of what reads as depth. None at cover 0.
   const fragShare = min(u.domain2.w.mul(4), float(1)).mul(0.3);
-  const isFrag = h0.greaterThanEqual(u.deck.z);
+  const isFrag = h0.greaterThanEqual(fillHere);
   const R = R0.mul(mix(float(0.3), float(1), edgeFade)).mul(select(isFrag, float(0.32), float(1)));
   const fade = smoothstep(float(0), float(0.35), edgeFade);
-  const exists = h0.lessThan(u.deck.z.add(fragShare)).and(fade.greaterThan(float(0.001)));
+  const exists = h0.lessThan(fillHere.add(fragShare)).and(fade.greaterThan(float(0.001)));
   return { exists, centre, R, along, across, stretch, z, fade, seed: h0 };
 }
 
@@ -480,48 +493,82 @@ function lobeOf(TSL, u, cloud, cell, li) {
 }
 
 /**
- * A cloud's TAILS (2026-11-03, author, with a reference sky: *"Shapes should allow for long trailing points and
- * tails"*): a long ragged comet tail trailing UPWIND from the head and a short one leading downwind, both
- * sweeping in a slight curve, their edges torn into long spikes by noise stretched along the cloud's axis (the
- * "trailing points" of the reference). Evaluated in 2-D, in the plane a little below the head, at `xy`.
- * Returns vec2(coverage 0..1, inner light streak 0..1). Tail length grows with cover and the Tails dial, capped
- * so a tail stays inside the 3x3 cells the tail pass tests.
+ * THE TRAILS (2026-11-03, author: "adding lots of trails at different low opacities ... the trails sometimes
+ * develop chunks missing out of them ... clouds and trails melt into each other"). Three per cloud, each its own
+ * length, width, side offset, opacity, tone and HEIGHT (the farther, lower ones are paler and slide less as the
+ * view pans). Each is a long torn comet trailing upwind (the main one also leads a short way downwind): a broad
+ * body thinning to its tip, edges torn by axis-stretched noise, split into several points near the tip, and
+ * bitten by rounded chunks (cellular noise). The main trail grows out of the head's UNDER-MASS — a ragged pad in
+ * the shadow tone under and behind the head — so a cloud and its trail are one form. Evaluated in 2-D at `xy`
+ * in the trail's own plane. JS-time `k` picks the trail (the parameters are constants per trail).
+ * Returns vec4(trail coverage, light streak, under-mass coverage, 0).
  */
-function tailOf(TSL, u, cloud, cell, xy) {
-  const { float, vec2, vec3, mix, clamp, min, max, abs, pow, smoothstep, select, dot, mx_noise_float } = TSL;
+export const STORYBOOK_TRAILS = Object.freeze([
+  Object.freeze({ len: [2.4, 4.2], width: 1.2, side: 0, opacity: 0.75, drop: 0.25, tone: 0.3, front: true }),
+  Object.freeze({ len: [1.6, 3.2], width: 0.8, side: 0.55, opacity: 0.5, drop: 0.42, tone: 0.45, front: false }),
+  Object.freeze({ len: [2.6, 4.4], width: 0.6, side: -0.6, opacity: 0.36, drop: 0.6, tone: 0.62, front: false }),
+]);
+
+/** One parameter of trail `kf` (a float node 0..2), from the table — a select chain, so the trail loop can be a
+ * real loop over `kf` instead of three pasted copies of the trail. */
+export function trailParam(TSL, kf, pick) {
+  const { float, select } = TSL;
+  const v = STORYBOOK_TRAILS.map((t) => float(pick(t)));
+  return select(kf.lessThan(float(0.5)), v[0], select(kf.lessThan(float(1.5)), v[1], v[2]));
+}
+
+function trailOf(TSL, u, cloud, cell, xy, kf) {
+  const { float, vec2, vec3, vec4, mix, clamp, min, max, abs, pow, length, smoothstep, select, dot, step } = TSL;
+  const { mx_noise_float, mx_worley_noise_float } = TSL;
+  const P = (pick) => trailParam(TSL, kf, pick);
+  const isMain = float(1).sub(step(float(0.5), kf));
   const R = max(cloud.R, float(1));
   const rel = xy.sub(cloud.centre);
   const sAx = dot(rel, cloud.along).div(R);
   const aAx = dot(rel, cloud.across).div(R);
-  const hT = hash3(TSL, cell, 6.13);
-  const hB = hash3(TSL, cell, 6.71);
+  const hT = hashLobe(TSL, cell, kf, 6.13);
+  const hB = hashLobe(TSL, cell, kf, 6.71);
+  const hS = hashLobe(TSL, cell, kf, 7.9);
   const tails = u.style2.w.mul(mix(float(0.55), float(1.3), u.domain2.w));
-  const Lb = min(mix(float(1.8), float(3.6), hT).mul(tails), u.deck.x.mul(0.8).div(R)).max(float(0.2));
-  const Lf = mix(float(0.45), float(1.1), hB).mul(tails).max(float(0.1));
+  const Lb = min(mix(P((t) => t.len[0]), P((t) => t.len[1]), hT).mul(tails), u.deck.x.mul(0.8).div(R)).max(float(0.2));
   const behind = sAx.lessThan(float(0));
-  const t = clamp(select(behind, sAx.negate().div(Lb), sAx.div(Lf)), 0, 1.3);
+  // Only the main trail leads downwind; the others have no front (t past the tip there).
+  const Lf = mix(float(0.45), float(1.1), hB).mul(tails).max(float(0.1));
+  const tFront = select(isMain.greaterThan(float(0.5)), sAx.div(Lf), float(2));
+  const t = clamp(select(behind, sAx.negate().div(Lb), tFront), 0, 1.3);
   const bend = hB.sub(0.5).mul(1.6);
-  const centre = select(behind, bend, bend.mul(-0.5)).mul(t).mul(t);
+  const side = P((t) => t.side).mul(hS.mul(0.8).add(0.6));
+  const centre = side.add(select(behind, bend, bend.mul(-0.5)).mul(t).mul(t));
   const off = aAx.sub(centre);
-  // A broad body that thins toward the tip; the noise is stretched along the axis so the edge tears into long
-  // fingers, and a low-frequency split noise carves gaps along the axis so the tip divides into several points.
-  const w = pow(float(1).sub(min(t, float(1))), float(1.05)).mul(0.95);
-  const nA = mx_noise_float(vec3(sAx.mul(0.7), off.mul(3.2), cloud.seed.mul(13.7)));
-  const nB = mx_noise_float(vec3(sAx.mul(1.9), off.mul(8.0), cloud.seed.mul(7.1).add(3.3)));
-  const split = mx_noise_float(vec3(sAx.mul(0.35), off.mul(2.4), cloud.seed.mul(5.3).add(9.1)));
-  const ragged = w.mul(float(0.6).add(nA.mul(0.6)).add(nB.mul(0.3)));
+  const w = pow(float(1).sub(min(t, float(1))), float(1.05)).mul(P((t) => t.width));
+  const sd = cloud.seed.add(kf.mul(0.37));
+  const nA = mx_noise_float(vec2(sAx.mul(0.7).add(sd.mul(13.7)), off.mul(3.2).add(sd.mul(29.3))));
+  const split = mx_noise_float(vec2(sAx.mul(0.35).add(sd.mul(5.3)).add(9.1), off.mul(2.4).add(sd.mul(11.9))));
+  // (A finer second tear noise was cut for compile time — 2026-11-03, the bites carry the detail now.)
+  const ragged = w.mul(float(0.62).add(nA.mul(0.75)));
   const gap = smoothstep(float(0.05), float(0.35), split).mul(smoothstep(float(0.25), float(0.75), t));
-  const edge = ragged.sub(abs(off)).sub(gap.mul(w).mul(0.9));
+  // CHUNKS MISSING: rounded bites (cellular noise, F1 distance) taken out of the trail's body past its root.
+  // 2-D cellular noise (a 3x3 search) — the 3-D one searches 27 cells and the D3D compiler unrolls the search.
+  const wor = mx_worley_noise_float(vec2(sAx.mul(1.15).add(sd.mul(31.0)), off.mul(2.7).add(sd.mul(17.0))), 1);
+  // (1 − smoothstep, never a reversed smoothstep: e0 > e1 is undefined in GLSL/WGSL and carved the whole trail.)
+  const bite = float(1).sub(smoothstep(float(0.15), float(0.34), wor)).mul(smoothstep(float(0.12), float(0.38), t));
+  const edge = ragged.sub(abs(off)).sub(gap.mul(w).mul(0.9)).sub(bite.mul(w).mul(1.4));
   const cov = smoothstep(float(0), float(0.05), edge).mul(float(1).sub(smoothstep(float(0.95), float(1.15), t)));
   const streak = smoothstep(float(0.1), float(0.45), nA).mul(smoothstep(float(0.04), float(0.2), edge));
-  return vec2(cov, streak);
+  // The UNDER-MASS (main trail only): an ellipse a little upwind of the head and wider than it, its rim torn by
+  // the same noise. The main trail's root (width 1.2 R) starts inside it and runs out past it, so the two join
+  // without a seam and the trail's broad body still shows.
+  const eU = length(vec2(sAx.add(0.2).div(cloud.stretch.mul(0.95)), aAx.div(0.82)));
+  const edgeU = float(1).sub(eU).add(nA.mul(0.16)).add(split.mul(0.1));
+  const under = smoothstep(float(0), float(0.08), edgeU).mul(isMain);
+  return vec4(max(cov, under), streak, under, float(0));
 }
 
-/** How far (cloud radii) a tail can reach from its cloud's centre: the tail pass's bounding test. */
+/** How far (cloud radii) any trail can reach from its cloud's centre: the trail pass's bounding test. */
 function tailReach(TSL, u, cloud) {
   const { float, min, max, mix } = TSL;
   const tails = u.style2.w.mul(mix(float(0.55), float(1.3), u.domain2.w));
-  return min(float(3.6).mul(tails), u.deck.x.mul(0.8).div(max(cloud.R, float(1)))).add(1.6);
+  return min(float(4.4).mul(tails), u.deck.x.mul(0.8).div(max(cloud.R, float(1)))).add(2.4);
 }
 
 /**
@@ -532,19 +579,20 @@ function tailReach(TSL, u, cloud) {
  * @returns {*} coverage 0..1.
  */
 function sheetAt(TSL, u, wind, xy) {
-  const { float, vec2, vec3, mix, max, min, smoothstep, dot, sqrt, mx_fractal_noise_float } = TSL;
+  const { float, vec2, vec3, mix, max, min, smoothstep, dot, sqrt, mx_fractal_noise_float, mx_noise_float } = TSL;
   const amount = smoothstep(float(0.5), float(1.0), u.domain2.w);
   const q = xy.sub(wind.drift.mul(0.8));
   const perp = vec2(wind.dir.y.negate(), wind.dir.x);
   const along0 = dot(q, wind.dir).div(max(u.deck.x.mul(1.4), float(1)));
   const across0 = dot(q, perp).div(max(u.deck.x.mul(0.32), float(1)));
   // Domain-warped, so the bands meander and break like piled stratocumulus rather than ruled slashes.
-  const wv = mx_fractal_noise_float(vec3(along0.mul(0.6), across0.mul(0.25), float(2.7)), 2, 2, 0.5, 1);
+  // Four noise octaves in all (was nine): the sheet alone cost ~4 s of cold compile in the D3D path.
+  const wv = mx_noise_float(vec2(along0.mul(0.6).add(2.7), across0.mul(0.25)));
   const along = along0.add(wv.mul(0.8));
   const across = across0.add(wv.mul(1.1));
-  const n = mx_fractal_noise_float(vec3(along, across, float(4.4)), 3, 2, 0.5, 1)
-    .mul(0.6)
-    .add(mx_fractal_noise_float(vec3(along.mul(0.35), across.mul(0.2), float(9.2)), 2, 2, 0.5, 1).mul(0.5));
+  const n = mx_fractal_noise_float(vec2(along.add(4.4), across), 2, 2, 0.5, 1)
+    .mul(0.65)
+    .add(mx_noise_float(vec2(along.mul(0.35).add(9.2), across.mul(0.2))).mul(0.5));
   const thr = mix(float(0.7), float(0.05), amount);
   const d = u.domain;
   const inset = min(min(xy.x.sub(d.x), d.z.sub(xy.x)), min(xy.y.sub(d.y), d.w.sub(xy.y)));
@@ -620,7 +668,7 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     const sdfMin = float(1e9).toVar('sbSdf');
     const sdfFade = float(0).toVar('sbSdfFade');
 
-    Loop({ start: 0, end: 4, type: 'int', name: 'sbc' }, ({ sbc }) => {
+    Loop({ start: 0, end: u.loops.x, type: 'int', name: 'sbc' }, ({ sbc }) => {
       const ci = float(sbc);
       const cell = cellBase.add(vec2(ci.sub(floor(ci.mul(0.5)).mul(2)), floor(ci.mul(0.5)))).toVar('sbCell');
       const cloud = cloudOf(TSL, u, wind, cell);
@@ -632,7 +680,7 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
       const slope = length(D.xy).div(max(D.z, float(0.05)));
       const reach = cloud.R.mul(float(STORYBOOK_REACH_RADII).mul(cloud.stretch).add(0.15)).add(cloud.R.mul(0.6).mul(slope));
       If(cloud.exists.and(length(across0).lessThan(reach.add(u.deck.y.mul(0.08)).add(u.style2.y.mul(float(6)).mul(2)))), () => {
-        Loop({ start: 0, end: N, type: 'int', name: 'sbl' }, ({ sbl }) => {
+        Loop({ start: 0, end: u.loops.y, type: 'int', name: 'sbl' }, ({ sbl }) => {
           const li = float(sbl);
           const lobe = lobeOf(TSL, u, cloud, cell, li);
           const Cs = vec3(lobe.C.x, lobe.C.y, lobe.C.z.div(float(SQ)));
@@ -693,7 +741,7 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
       const Ps = vec3(P.x, P.y, P.z.div(float(SQ)));
       const Ls = vec3(L.x, L.y, L.z.div(float(SQ)));
       const aL = dot(Ls, Ls);
-      Loop({ start: 0, end: N, type: 'int', name: 'sbs' }, ({ sbs }) => {
+      Loop({ start: 0, end: u.loops.y, type: 'int', name: 'sbs' }, ({ sbs }) => {
         const li = float(sbs);
         If(li.notEqual(bestLobe), () => {
           const lobe = lobeOf(TSL, u, cloud, bestCell, li);
@@ -714,8 +762,8 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     // Hand-painted band edges: the thresholds wobble with a lobe-scale noise, so a band edge reads as a brush
     // stroke and not as a contour line.
     const brushP = P.xy.div(max(bestR.mul(0.42), float(1)));
-    const brush = mx_noise_float(vec3(brushP.x, brushP.y, bestLobe.mul(3.1).add(bestCell.x.mul(0.37)))).mul(0.2).mul(u.style2.x);
-    const fine = mx_noise_float(vec3(brushP.x.mul(3.7), brushP.y.mul(3.7), float(11.3))).mul(0.08).mul(u.style2.x);
+    const brush = mx_noise_float(vec2(brushP.x.add(bestLobe.mul(3.1)), brushP.y.add(bestCell.x.mul(0.37)))).mul(0.2).mul(u.style2.x);
+    const fine = mx_noise_float(vec2(brushP.x.mul(3.7).add(11.3), brushP.y.mul(3.7))).mul(0.08).mul(u.style2.x);
     const tone = lit.add(brush).add(fine);
     const s = u.style.w;
     // The thresholds sit at the 20% and 65% quantiles of `lit` over a cloud-shaped ellipsoid under the 30-38°
@@ -727,9 +775,9 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     col.assign(mix(col, u.hi, toHi));
     // BROKEN COLOUR (impressionist): dabs of the neighbouring tones laid into each band, so a band is never one
     // flat fill — light flecks in the body, body flecks in the light, a little shadow colour in the body.
-    const dab = mx_noise_float(vec3(brushP.x.mul(2.2), brushP.y.mul(2.2), bestLobe.mul(1.7).add(5.3)));
+    const dab = mx_noise_float(vec2(brushP.x.mul(2.2).add(bestLobe.mul(1.7)).add(5.3), brushP.y.mul(2.2)));
     const dabUp = smoothstep(float(0.18), float(0.5), dab).mul(0.45).mul(u.style2.x).clamp(0, 1);
-    const dabDown = smoothstep(float(-0.18), float(-0.5), dab).mul(0.35).mul(u.style2.x).clamp(0, 1);
+    const dabDown = float(1).sub(smoothstep(float(-0.5), float(-0.18), dab)).mul(0.35).mul(u.style2.x).clamp(0, 1);
     col.assign(mix(col, mix(u.body, u.hi, toShadow), dabUp));
     col.assign(mix(col, mix(u.shadow, u.body, toHi), dabDown));
 
@@ -746,9 +794,9 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     // RAGGED EDGES: the silhouette and every lobe rim pushed in and out by a two-scale noise, so an edge reads
     // as a loaded brush dragged round the form rather than a compass circle. Shared by ink, rim and coverage.
     const ragP = G.xy.div(max(u.deck.y.mul(0.16), float(1)));
-    const ragN = mx_noise_float(vec3(ragP.x, ragP.y, float(31.7)))
+    const ragN = mx_noise_float(vec2(ragP.x.add(31.7), ragP.y))
       .mul(0.7)
-      .add(mx_noise_float(vec3(ragP.x.mul(3.1), ragP.y.mul(3.1), float(17.2))).mul(0.3));
+      .add(mx_noise_float(vec2(ragP.x.mul(3.1).add(17.2), ragP.y.mul(3.1))).mul(0.3));
     const rag = ragN.mul(u.deck.y.mul(0.07)).mul(u.style2.x);
     const edgeR = bestEdge.add(rag);
     const sdfR = sdfMin.sub(rag);
@@ -766,10 +814,10 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     col.assign(mix(col, u.rim, rimBand.mul(facing).mul(u.style.z)));
 
     // INK: each lobe's own rim, plus the creases. A little pressure wobble so the line breathes.
-    const press = mx_noise_float(vec3(P.x.div(bestR.mul(0.25).max(1)), P.y.div(bestR.mul(0.25).max(1)), float(3.7))).mul(0.25).add(1);
+    const press = mx_noise_float(vec2(P.x.div(bestR.mul(0.25).max(1)).add(3.7), P.y.div(bestR.mul(0.25).max(1)))).mul(0.25).add(1);
     // Interior lines are thinner than the outline and break here and there, as a brush lifts; the outline itself
     // fades in and out too (a serious comic's line, not a sticker's).
-    const lift = smoothstep(float(-0.25), float(0.2), mx_noise_float(vec3(brushP.x.mul(1.3), brushP.y.mul(1.3), float(7.9))));
+    const lift = smoothstep(float(-0.25), float(0.2), mx_noise_float(vec2(brushP.x.mul(1.3).add(7.9), brushP.y.mul(1.3))));
     const inkRim = float(1).sub(smoothstep(lw.mul(0.45).mul(press), lw.mul(1.0).mul(press), edgeR)).mul(mix(float(0.4), float(1), lift));
     const inkCrease = float(1).sub(smoothstep(lw.mul(0.15), lw.mul(0.7), dt.mul(0.5))).mul(0.75).mul(lift);
     const ink = clamp(max(inkRim, inkCrease).mul(u.style.y), 0, 1);
@@ -777,7 +825,7 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
 
     // Paper grain, the same fine texture the maps carry.
     const grainP = groundXY.div(max(u.style2.y.mul(2.5), float(0.5)));
-    const grain = mx_noise_float(vec3(grainP.x, grainP.y, float(23.1))).mul(0.035).mul(u.style2.x);
+    const grain = mx_noise_float(vec2(grainP.x.add(23.1), grainP.y)).mul(0.035).mul(u.style2.x);
     col.assign(col.mul(float(1).add(grain)));
 
     // COVERAGE: inside the union of lobes, antialiased over about one screen px. A pixel just outside every
@@ -791,28 +839,41 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     const fade = select(hit, bestFade, sdfFade);
     const headA = cover.mul(fade);
 
-    // THE TAILS (middle layer): 3x3 cells (a tail reaches past its own cell), each tested in the plane a
-    // little below its head, where THIS pixel's ray crosses that height - so tails hang lower than heads and
-    // slide against them as the view pans.
-    const tailCov = float(0).toVar('sbTailCov');
-    const tailHi = float(0).toVar('sbTailHi');
+    // THE TRAILS + UNDER-MASSES (middle layers): 3x3 cells (a trail reaches past its own cell). Each trail is
+    // tested in its own plane below its head, where THIS pixel's ray crosses that height, so trails at
+    // different heights slide against each other and against the heads as the view pans. Farthest first.
+    const trailC = vec3(0, 0, 0).toVar('sbTrailC');
+    const trailA = float(0).toVar('sbTrailA');
+    const underA = float(0).toVar('sbUnderA');
     const q3 = Pm.sub(wind.drift).div(u.deck.x);
     const base3 = floor(q3).sub(vec2(1, 1)).toVar('sbTailBase');
     If(u.style2.w.greaterThan(float(0.001)), () => {
-      Loop({ start: 0, end: 9, type: 'int', name: 'sbt' }, ({ sbt }) => {
-        const ti = float(sbt);
-        const ty = floor(ti.div(3));
-        const cell = base3.add(vec2(ti.sub(ty.mul(3)), ty));
+      // ONE flat loop over (cell, trail) pairs, not a trail loop nested in a cell loop: the nested form cost the
+      // D3D compiler far more (measured, 2026-11-03). Trails run farthest-first within each cell.
+      Loop({ start: 0, end: u.loops.z.mul(u.loops.w), type: 'int', name: 'sbt' }, ({ sbt }) => {
+        const idx = float(sbt);
+        const ci = floor(idx.div(u.loops.w));
+        const kf = u.loops.w.sub(1).sub(idx.sub(ci.mul(u.loops.w)));
+        const ty = floor(ci.div(3));
+        const cell = base3.add(vec2(ci.sub(ty.mul(3)), ty));
         const cloud = cloudOf(TSL, u, wind, cell);
-        const zt = cloud.z.sub(cloud.R.mul(0.3)).max(float(0));
-        const Pt = G.xy.add(D.xy.mul(zt.div(max(D.z, float(0.05)))));
-        If(cloud.exists.and(length(Pt.sub(cloud.centre)).lessThan(tailReach(TSL, u, cloud).mul(cloud.R).mul(cloud.stretch))), () => {
-          const tl = tailOf(TSL, u, cloud, cell, Pt);
-          const c = tl.x.mul(cloud.fade);
-          If(c.greaterThan(tailCov), () => {
-            tailCov.assign(c);
-            tailHi.assign(tl.y);
-          });
+        const P0 = G.xy.add(D.xy.mul(cloud.z.div(max(D.z, float(0.05)))));
+        If(cloud.exists.and(length(P0.sub(cloud.centre)).lessThan(tailReach(TSL, u, cloud).mul(cloud.R).mul(cloud.stretch))), () => {
+          {
+            const zt = cloud.z.sub(cloud.R.mul(trailParam(TSL, kf, (t) => t.drop))).max(float(0));
+            const Pt = G.xy.add(D.xy.mul(zt.div(max(D.z, float(0.05)))));
+            const tr = trailOf(TSL, u, cloud, cell, Pt, kf);
+            const a = tr.x
+              .sub(tr.z)
+              .max(0)
+              .mul(trailParam(TSL, kf, (t) => t.opacity))
+              .mul(cloud.fade)
+              .mul(TSL.clamp(u.style2.w, 0, 1));
+            const c = mix(mix(u.body, u.hi, trailParam(TSL, kf, (t) => t.tone)), u.hi, tr.y.mul(0.8));
+            trailC.assign(c.mul(a).add(trailC.mul(float(1).sub(a))));
+            trailA.assign(a.add(trailA.mul(float(1).sub(a))));
+            underA.assign(max(underA, tr.z.mul(cloud.fade)));
+          }
         });
       });
     });
@@ -822,16 +883,19 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     const Ps = G.xy.add(D.xy.mul(zs.div(max(D.z, float(0.05)))));
     const sheet = sheetAt(TSL, u, wind, Ps);
 
-    // Premultiplied "over", back to front: sheet, tails, heads. The sheet and tails are the light shadow tone,
-    // translucent; the tails carry a white streak down their middle like the reference's.
+    // Back to front, premultiplied "over": the sheet, the trails, the under-masses, the heads. The under-mass
+    // is the head's own shadow tone, nearly opaque, so the head's feathered edge melts into it, and it into the
+    // main trail, instead of a white ball stuck onto a streak.
     const sheetA = sheet.mul(0.5);
     const sheetC = mix(u.body, u.hi, float(0.3));
-    const tailA = tailCov.mul(0.72);
-    const tailC = mix(mix(u.body, u.hi, float(0.25)), u.hi, tailHi.mul(0.85));
     const accC = sheetC.mul(sheetA).toVar('sbAccC');
     const accA = sheetA.toVar('sbAccA');
-    accC.assign(tailC.mul(tailA).add(accC.mul(float(1).sub(tailA))));
-    accA.assign(tailA.add(accA.mul(float(1).sub(tailA))));
+    accC.assign(trailC.add(accC.mul(float(1).sub(trailA))));
+    accA.assign(trailA.add(accA.mul(float(1).sub(trailA))));
+    const underK = underA.mul(0.88);
+    const underC = mix(u.body, u.shadow, float(0.22));
+    accC.assign(underC.mul(underK).add(accC.mul(float(1).sub(underK))));
+    accA.assign(underK.add(accA.mul(float(1).sub(underK))));
     accC.assign(headRgb.mul(headA).add(accC.mul(float(1).sub(headA))));
     accA.assign(headA.add(accA.mul(float(1).sub(headA))));
     const rgb = accC.div(max(accA, float(1e-4)));
@@ -879,7 +943,7 @@ export function buildStorybookShadowNode(TSL, { worldXY, u, wind, offset, blur, 
     const sdf = float(1e9).toVar('sbsSdf');
     const fadeAt = float(0).toVar('sbsFade');
     const softAt = float(1).toVar('sbsSoft');
-    Loop({ start: 0, end: 4, type: 'int', name: 'sbsc' }, ({ sbsc }) => {
+    Loop({ start: 0, end: u.loops.x, type: 'int', name: 'sbsc' }, ({ sbsc }) => {
       const ci = float(sbsc);
       const cell = cellBase.add(vec2(ci.sub(floor(ci.mul(0.5)).mul(2)), floor(ci.mul(0.5)))).toVar('sbsCell');
       const cloud = cloudOf(TSL, u, wind, cell);
@@ -887,7 +951,7 @@ export function buildStorybookShadowNode(TSL, { worldXY, u, wind, offset, blur, 
       If(cloud.exists.and(length(p.sub(cloud.centre)).lessThan(reachS)), () => {
         // A low sun drags the shadow out along its bearing, up to 2.2× (the realistic shadow's streak, in shape).
         const stretch = min(float(1).add(offLen.div(max(cloud.R, float(1))).mul(0.18)), float(2.2));
-        Loop({ start: 0, end: N, type: 'int', name: 'sbsl' }, ({ sbsl }) => {
+        Loop({ start: 0, end: u.loops.y, type: 'int', name: 'sbsl' }, ({ sbsl }) => {
           const lobe = lobeOf(TSL, u, cloud, cell, float(sbsl));
           const v = p.sub(lobe.C.xy);
           const d = length(vec2(dot(v, od).div(stretch), dot(v, op))).sub(lobe.r.mul(0.94));
@@ -904,13 +968,13 @@ export function buildStorybookShadowNode(TSL, { worldXY, u, wind, offset, blur, 
     const tailCov = float(0).toVar('sbsTail');
     const base3 = floor(p.sub(wind.drift).div(u.deck.x)).sub(vec2(1, 1)).toVar('sbsTailBase');
     If(u.style2.w.greaterThan(float(0.001)), () => {
-      Loop({ start: 0, end: 9, type: 'int', name: 'sbst' }, ({ sbst }) => {
+      Loop({ start: 0, end: u.loops.z, type: 'int', name: 'sbst' }, ({ sbst }) => {
         const ti = float(sbst);
         const ty = floor(ti.div(3));
         const cell = base3.add(vec2(ti.sub(ty.mul(3)), ty));
         const cloud = cloudOf(TSL, u, wind, cell);
         If(cloud.exists.and(length(p.sub(cloud.centre)).lessThan(tailReach(TSL, u, cloud).mul(cloud.R).mul(cloud.stretch))), () => {
-          tailCov.assign(max(tailCov, tailOf(TSL, u, cloud, cell, p).x.mul(cloud.fade)));
+          tailCov.assign(max(tailCov, trailOf(TSL, u, cloud, cell, p, float(0)).x.mul(cloud.fade)));
         });
       });
     });

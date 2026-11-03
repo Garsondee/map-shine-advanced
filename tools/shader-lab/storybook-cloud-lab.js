@@ -121,8 +121,8 @@ export class StorybookDriver {
     return tex;
   }
 
-  material(mode, tex) {
-    const key = `${mode}:${tex.uuid}`;
+  material(mode, tex, variant = 'both') {
+    const key = `${mode}:${variant}:${tex.uuid}`;
     if (this.materials.has(key)) return this.materials.get(key);
     const THREE = this.THREE;
     const T = THREE.TSL;
@@ -173,8 +173,9 @@ export class StorybookDriver {
     }
     // Shadow only on the board (the cache is clipped to the effects extent).
     const shadowVis = mix(float(1), mix(float(1), vis, u.shadowStrength).max(float(0)), inBoard);
-    const lit = ground.mul(u.tint).mul(shadowVis);
-    const out = mix(lit, tops.rgb, clamp(tops.alpha, 0, 1));
+    // `variant` (compile timing): 'tops' / 'shadow' build only that half, as production's two separate materials.
+    const lit = ground.mul(u.tint).mul(variant === 'tops' ? float(1) : shadowVis);
+    const out = variant === 'shadow' ? lit : mix(lit, tops.rgb, clamp(tops.alpha, 0, 1));
     const mat = new THREE.MeshBasicNodeMaterial();
     mat.colorNode = vec4(out, float(1));
     this.materials.set(key, mat);
@@ -273,7 +274,7 @@ export class StorybookDriver {
       timeSec: o.time ?? 0,
     });
     this.sbU.opacity.value = o.opacity ?? 1;
-    this.quad.material = this.material(mode, tex);
+    this.quad.material = this.material(mode, tex, o.variant ?? 'both');
     if (!this._rt || this._rt.width !== W || this._rt.height !== H) {
       this._rt?.dispose();
       this._rt = new THREE.RenderTarget(W, H, { type: THREE.UnsignedByteType, format: THREE.RGBAFormat });

@@ -120,6 +120,11 @@ export const WINDOW_OVERCAST_CONTRAST_SOFTEN = 0.6;
 /** The floor `strength` is allowed to dim to at full overcast — 0.5 is
  * exactly the author's own "up to 50%". */
 export const WINDOW_OVERCAST_MIN_STRENGTH = 0.5;
+/** How far full overcast drains the colour of the light a window lets in
+ * (0 = untouched, 1 = grey). Added 2026-11-03 (author: under cloud the window
+ * light should be more diffuse and less saturated/vibrant, not merely dimmer),
+ * the window's twin of the env grade's `cloudDesaturation`. */
+export const WINDOW_OVERCAST_DESATURATION = 0.45;
 /** Hex source for the two daylight keyframes — mirrors `WINDOW_PARAMS.dawnDuskTint`/
  * `.nightTint`'s own `default`. Decoded once here rather than per frame; noon has
  * no colour of its own — it is the neutral (1,1,1) this effect falls back to. */
@@ -343,6 +348,7 @@ export function buildWindowSurfaceMaterial({
   cloudOvercastEdgeWidenNode = null,
   cloudOvercastContrastSoftenNode = null,
   cloudOvercastMinStrengthNode = null,
+  cloudOvercastDesaturateNode = null,
   // THE CLEAR-NOON MIRROR (round 3, 2026-09-10) — author's ask: "This also
   // needs to boost the brightness of the _Window effect" (at a clear, high
   // sun). A single pre-multiplied uniform (`1 + windowNoonBoost *
@@ -1074,10 +1080,20 @@ export function buildWindowSurfaceMaterial({
   // already folded in and `uDaylightTint` is now the debug channel's alone),
   // shaded by the cloud overhead and by the weather.
   // ...and by the snow's cool lean (a uniform: white when it is not snowing).
+  const targetColoured = hasSnow
+    ? uTargetLight.mul(cloudFactor).mul(weatherGain).mul(debugGlass.snow.tint)
+    : uTargetLight.mul(cloudFactor).mul(weatherGain);
+  // OVERCAST DESATURATION (2026-11-03): luminance-preserving pull toward grey,
+  // the same move the env grade makes outdoors under cloud. JS-time branch, so
+  // a caller without `cloudOvercastNode` compiles none of it.
   const target = (
-    hasSnow
-      ? uTargetLight.mul(cloudFactor).mul(weatherGain).mul(debugGlass.snow.tint)
-      : uTargetLight.mul(cloudFactor).mul(weatherGain)
+    overcast01
+      ? mix(
+          vec3(targetColoured.r.mul(0.2126).add(targetColoured.g.mul(0.7152)).add(targetColoured.b.mul(0.0722))),
+          targetColoured,
+          float(1).sub(overcast01.mul(cloudOvercastDesaturateNode ?? float(WINDOW_OVERCAST_DESATURATION)))
+        )
+      : targetColoured
   ).toVar('winTarget');
   // THE CC (the card's Colour section) grades the light COMING IN — through the
   // project's ONE grade primitive (`window-grade.js`), identity at its defaults

@@ -521,7 +521,33 @@ export const DEFAULT_ENV_GRADE_CONFIG = Object.freeze({
    * night + full cloud, on top of the small -0.1 baseline) — "even darker"
    * was the author's own emphasis, not a subtle nudge. */
   cloudNightDarken: 1.1,
+  /** ZOOM-WEIGHTED OVERCAST (2026-11-03, author: "at high atmos values and high
+   * cloud the overcast CC should still be much lower when zoomed in, but as I
+   * zoom out ... it looks like atmospheric haze getting in the way of the
+   * camera"). The DAYTIME cloud terms above (desaturation, flatten, cool,
+   * exposure) are scaled by a weight that is `cloudNearWeight` at play zoom and
+   * ramps to 1 across the SAME view-width band the haze builds over
+   * (`DEFAULT_HAZE_CONFIG.startWidthPx` .. `+ refWidthPx`). Only the overcast
+   * terms — the time-of-day saturation, the clear-noon boost and
+   * `cloudNightDarken` (a darkening, not a veil) are NOT zoom-weighted. */
+  cloudNearWeight: 0.25,
 });
+
+/**
+ * How much of the daytime overcast grade applies at this view width — see
+ * `DEFAULT_ENV_GRADE_CONFIG.cloudNearWeight`. Non-finite / <= 0 width (no
+ * measurement) is treated as play zoom. Pure.
+ * @param {number} viewWidthWorldPx
+ * @param {number} nearWeight
+ * @param {object} [hazeConfig]
+ * @returns {number} nearWeight .. 1
+ */
+export function overcastZoomWeight(viewWidthWorldPx, nearWeight, hazeConfig = DEFAULT_HAZE_CONFIG) {
+  const width = Number(viewWidthWorldPx);
+  const x = Number.isFinite(width) && width > 0 ? (width - hazeConfig.startWidthPx) / hazeConfig.refWidthPx : 0;
+  const t = clamp01(x);
+  return lerp(nearWeight, 1, t * t * (3 - 2 * t));
+}
 
 /**
  * Resolve the environmental grade params for a frame, from the env snapshot.
@@ -530,13 +556,22 @@ export const DEFAULT_ENV_GRADE_CONFIG = Object.freeze({
  *
  * @param {object} env - the env snapshot (`env.sun`, `env.weather`).
  * @param {object} [config]
+ * @param {{viewWidthWorldPx?: number}} [opts] - pass the view width to
+ *   zoom-weight the daytime overcast terms (see `cloudNearWeight`); omitted =
+ *   full weight, the behaviour before 2026-11-03.
  * @returns {object} grade params (pre-strength; the caller scales by the lever).
  */
-export function resolveEnvGrade(env, config = DEFAULT_ENV_GRADE_CONFIG) {
+export function resolveEnvGrade(env, config = DEFAULT_ENV_GRADE_CONFIG, opts = {}) {
   const cfg = { ...DEFAULT_ENV_GRADE_CONFIG, ...(config || {}) };
   const sun = env?.sun || {};
   const day = clamp01(sun.dayFactor01 ?? 1);
-  const cloud = clamp01(env?.weather?.cloudCover01 ?? 0);
+  const rawCloud = clamp01(env?.weather?.cloudCover01 ?? 0);
+  // Zoom-weighted cloud for the overcast "veil" terms; `rawCloud` for the
+  // night darkening, which is not haze and must not fade at play zoom.
+  const cloud =
+    opts && opts.viewWidthWorldPx !== undefined
+      ? rawCloud * overcastZoomWeight(opts.viewWidthWorldPx, cfg.cloudNearWeight)
+      : rawCloud;
 
   // ToD owns saturation depth (vivid day → muted night); the sky light owns hue.
   const todSat = lerp(cfg.nightSaturation, cfg.daySaturation, day);
@@ -554,7 +589,7 @@ export function resolveEnvGrade(env, config = DEFAULT_ENV_GRADE_CONFIG) {
   // ⚠️ NIGHT-ONLY — see `cloudNightDarken`'s own doc. Fades to a hard no-op
   // at day (this term never touches the already-approved daytime overcast
   // look), strongest at a fully clouded, fully dark night.
-  const cloudNightDarkenNow = cfg.cloudNightDarken * cloud * (1 - day);
+  const cloudNightDarkenNow = cfg.cloudNightDarken * rawCloud * (1 - day);
 
   return {
     exposure: cfg.cloudExposure * cloud - cloudNightDarkenNow,

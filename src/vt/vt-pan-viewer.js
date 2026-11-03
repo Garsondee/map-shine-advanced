@@ -3861,14 +3861,18 @@ async function startVtPanViewerUnserialized({
      * feel maximally gloomy through every atmospheric consumer, even though
      * the FIELD's own rendered silhouette never paints solid white. */
     const uCloudOvercast01 = THREE.TSL.uniform(THREE.TSL.float(0));
+    /** The window's own overcast axis: raw cloud cover × the Atmos slider, so the
+     * slider moves window blur / flatten / desaturation / dim along with the
+     * outdoor grade (author 2026-11-03). Slider at 0 = windows ignore cloud. */
+    const uWindowAtmosOvercast01 = THREE.TSL.uniform(THREE.TSL.float(0));
     /** Live-tunable twins of `window-render.js`'s own `WINDOW_OVERCAST_
      * EDGE_WIDEN`/`CONTRAST_SOFTEN`/`MIN_STRENGTH` constants (0.22/0.6/0.5
      * — mirrored here as the starting `.value's, not imported, the SAME
      * "shared external uniform" shape `uCloudOvercast01` above already is)
      * — one instance, handed to every window subsystem below, so a single
      * Studio-card slider moves every window on the map at once. */
-    const uWindowOvercastEdgeWiden = THREE.TSL.uniform(THREE.TSL.float(0.03));
-    const uWindowOvercastContrastSoften = THREE.TSL.uniform(THREE.TSL.float(0));
+    const uWindowOvercastEdgeWiden = THREE.TSL.uniform(THREE.TSL.float(0.15));
+    const uWindowOvercastContrastSoften = THREE.TSL.uniform(THREE.TSL.float(0.3));
     // 0.05 — author's own round-3 tuned value (round 2 shipped 0.5, "drop
     // its overall brightness by up to 50%"); overcast can now extinguish
     // window light almost entirely.
@@ -12716,6 +12720,10 @@ async function startVtPanViewerUnserialized({
      * neutral (the automatic ToD/weather look is off). This is the lever that
      * carries the cloud desaturation the deleted sky veil couldn't. */
     let gradeEnvStrength = 0;
+    /** The Atmos slider's reach on the OUTDOOR grade. 0.5 (2026-11-03, author: the
+     * slider read as pea soup / grey shroud at full; halve it). The slider still
+     * runs 0..1; only what it does to the grade is scaled. */
+    const ATMOS_GRADE_SCALE = 0.5;
     /** Sun latitude, degrees (mythica-machina-press#170). Default 30 matches
      * `sky-settings.js#DEFAULT_SKY.latitudeDeg` — 90-30=60, `world/sun.js`'s
      * own shipped `DEFAULT_SUN_CONFIG.maxElevationDeg`, so a fresh viewer's
@@ -13227,6 +13235,7 @@ async function startVtPanViewerUnserialized({
         // own declaration comment for why this is deliberately a different
         // number from the field's own capped silhouette.
         uCloudOvercast01.value = env.weather.cloudCover01;
+        uWindowAtmosOvercast01.value = env.weather.cloudCover01 * gradeEnvStrength;
 
         // ── CLOUD TOPS (2026-09-12) — same recipe/field/drift phase as the
         // ground shadow above, lit and drawn only when the camera has pulled
@@ -13325,7 +13334,11 @@ async function startVtPanViewerUnserialized({
         0,
         Math.min(1, (1 - env.weather.cloudCover01) * (env.sun?.dayFactor01 ?? 0) * (1 - (env.sun?.golden01 ?? 0)))
       );
-      const envGradeResolved = resolveEnvGrade(env);
+      // Measured here (not just for the haze below) so the overcast grade can
+      // fade in with zoom-out like haze — see `cloudNearWeight`.
+      const hazeViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+      const hazeViewWidth = hazeViewRect ? hazeViewRect.maxX - hazeViewRect.minX : 0;
+      const envGradeResolved = resolveEnvGrade(env, undefined, { viewWidthWorldPx: hazeViewWidth });
       envGradeResolved.exposure += noonExposureBoost * clearNoon01;
       envGradeResolved.contrast *= 1 + noonContrastBoost * clearNoon01;
       envGradeResolved.temperature += noonWarmth * clearNoon01;
@@ -13335,15 +13348,14 @@ async function startVtPanViewerUnserialized({
       // exactly zero at play zoom and builds as the view pulls back; thicker
       // and whiter under cloud, never zero in clear air. Rides the env grade's
       // existing outdoor gate and strength lever — no new uniform, no new pass.
-      const hazeViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
-      const hazeMap = resolveHazeGrade(env, hazeViewRect ? hazeViewRect.maxX - hazeViewRect.minX : 0);
+      const hazeMap = resolveHazeGrade(env, hazeViewWidth);
       // TEMPERATURE EFFECTS — stepped here, before either grade is pushed: the
       // outdoor-gated env grade carries the share that does not reach indoors
       // (`indoorShare`), `pushGradeLook` below carries the rest.
       pushTemperatureEffects(env);
       gradePresent.setEnvGrade(
         applyTemperatureGrade(
-          scaleGradeToIdentity(applyHazeToGrade(envGradeResolved, hazeMap), gradeEnvStrength),
+          scaleGradeToIdentity(applyHazeToGrade(envGradeResolved, hazeMap), gradeEnvStrength * ATMOS_GRADE_SCALE),
           temperatureGradeDelta,
           1 - temperatureIndoorShare
         )
@@ -16779,7 +16791,7 @@ async function startVtPanViewerUnserialized({
         },
         uViewRect: envLight.uViewRect,
         cloudFactorNode: buildWindowCloudFactorNode(),
-        cloudOvercastNode: uCloudOvercast01,
+        cloudOvercastNode: uWindowAtmosOvercast01,
         cloudOvercastEdgeWidenNode: uWindowOvercastEdgeWiden,
         cloudOvercastContrastSoftenNode: uWindowOvercastContrastSoften,
         cloudOvercastMinStrengthNode: uWindowOvercastMinStrength,
@@ -16872,7 +16884,7 @@ async function startVtPanViewerUnserialized({
       // THE CLOUD SHADOW / OVERCAST MOOD — see `createWindowSurfaceForFloor`'s
       // own identical wiring, just above, for the full reasoning.
       cloudFactorNode: buildWindowCloudFactorNode(),
-      cloudOvercastNode: uCloudOvercast01,
+      cloudOvercastNode: uWindowAtmosOvercast01,
       cloudOvercastEdgeWidenNode: uWindowOvercastEdgeWiden,
       cloudOvercastContrastSoftenNode: uWindowOvercastContrastSoften,
       cloudOvercastMinStrengthNode: uWindowOvercastMinStrength,
@@ -30951,7 +30963,7 @@ async function startVtPanViewerUnserialized({
           // instruments-must-not-lie bar as the sky block above.
           grade: {
             envStrength: gradeEnvStrength,
-            envResolved: scaleGradeToIdentity(resolveEnvGrade(lastEnvSnapshot.env), gradeEnvStrength),
+            envResolved: scaleGradeToIdentity(resolveEnvGrade(lastEnvSnapshot.env), gradeEnvStrength * ATMOS_GRADE_SCALE),
             // The artistic (Look) grade effect: on/off + its tone-map curve, so
             // "is a film response active" is answerable from the report.
             artEnabled: getGradeLookState()?.enabled === true,

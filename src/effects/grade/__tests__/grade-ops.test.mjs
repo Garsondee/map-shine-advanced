@@ -155,6 +155,26 @@ export function run(t) {
     t.ok('an overcast-graded red is greyer', sat0(graded) < sat0(red));
   }
 
+  // ---- zoom-weighted overcast (2026-11-03) -----------------------------------
+  {
+    const e = (day, cloud) => ({ sun: { dayFactor01: day }, weather: { cloudCover01: cloud } });
+    const near = resolveEnvGrade(e(1, 1), undefined, { viewWidthWorldPx: 1500 });
+    const far = resolveEnvGrade(e(1, 1), undefined, { viewWidthWorldPx: 20000 });
+    const legacy = resolveEnvGrade(e(1, 1));
+    const clear = resolveEnvGrade(e(1, 0));
+    t.ok(
+      'overcast desaturation is much weaker zoomed in',
+      clear.saturation - near.saturation < (clear.saturation - far.saturation) * 0.3
+    );
+    t.ok('zoomed out it reaches the full overcast grade', Math.abs(far.saturation - legacy.saturation) < 1e-9);
+    t.ok(
+      'zoom never touches a clear sky',
+      resolveEnvGrade(e(1, 0), undefined, { viewWidthWorldPx: 1500 }).saturation === clear.saturation
+    );
+    const nightNear = resolveEnvGrade(e(0, 1), undefined, { viewWidthWorldPx: 1500 });
+    t.ok('night + cloud darkening is not zoom-weighted', nightNear.exposure < -1);
+  }
+
   // ---- atmospheric haze (aerial perspective as lift/gain data) --------------
   {
     const env = (day, cloud) => ({ sun: { dayFactor01: day }, weather: { cloudCover01: cloud } });

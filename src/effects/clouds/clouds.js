@@ -244,7 +244,9 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // 2026-10-27: 0.1 -> 0.03. Overcast now plays as drifting sun breaks at
     // full strength (window-weather.js), and the author asked that it not
     // soften the window's look: "We're going for dramatic, never dull."
-    default: 0.03,
+    // 2026-11-03: 0.03 -> 0.15. Author: under cloud the window light should be
+    // more diffuse (and less saturated, see WINDOW_OVERCAST_DESATURATION).
+    default: 0.15,
     category: 'Light',
     label: 'Window blur (overcast)',
     help: "How much extra softening heavy overcast adds to a window's own light cookie edge, independent of any cloud directly overhead — a global sky-mood response, not a moving shadow. 0 = window edges never soften with overcast.",
@@ -258,7 +260,8 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     // windowCloudContrast (default was 0.6).
     // 2026-10-27: 0.64 -> 0. Author: not "lower the contrast to the point of
     // making it look less exciting" — the sun breaks carry the overcast now.
-    default: 0,
+    // 2026-11-03: 0 -> 0.3, same ask as the blur above.
+    default: 0.3,
     category: 'Light',
     label: 'Window flatten (overcast)',
     help: "How much heavy overcast flattens a window cookie's own internal contrast toward neutral — the other half of a diffuse, gloomy interior look. 0 = window contrast never responds to overcast.",

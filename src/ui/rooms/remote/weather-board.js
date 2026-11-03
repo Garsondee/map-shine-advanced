@@ -195,9 +195,9 @@ const ENV_CHANNELS = Object.freeze([
   {
     key: 'atmosphere',
     label: 'Atmosphere',
-    shortLabel: 'Colour',
+    shortLabel: 'Atmos',
     icon: 'fog',
-    help: 'Environmental colour-grade strength.',
+    help: 'How much the atmosphere (cloud, haze, time of day) grades the outdoor colour and window light.',
     getValue: 'getGradeEnvStrength',
     onCommit: 'onGradeEnvStrengthCommit',
   },

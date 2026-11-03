@@ -58,23 +58,31 @@
  * Tuned in the shader lab against the author's reference photos (`tools/shader-lab/storybook-cloud-lab.js`).
  */
 export const STORYBOOK_FIELD = Object.freeze({
-  /** The silhouette's soft edge, in core units (before the screen-px AA floor). Defined, not cut. */
-  edge: 0.035,
-  /** Core units over which a cloud's broad dome rises from its edge to its crown. */
-  domeRise: 0.55,
   /** Domain-warp strength (cloud units) and frequency: irregular, never taffy (0.6 smeared every cloud). */
   warp: 0.15,
   warpFreq: 0.6,
   /** fBm body frequency. */
   bodyFreq: 0.7,
-  /** Two scales of rounded puffs (Worley): frequency and strength. They make the cauliflower edge AND the
-   * lumps the light reads inside. */
+  /** Two scales of rounded puffs (Worley) on the base shape's outline: frequency and strength. */
   puffFreq: 2.0,
   puffAmp: 0.6,
   puff2Freq: 4.6,
   puff2Amp: 0.34,
-  puff3Freq: 9.5,
-  puff3Amp: 0.07,
+  /** Erosion detail (inverted Worley fBm): frequency, how far the warp swirls it, and how deep it eats. */
+  detailFreq: 9,
+  detailSwirl: 0.12,
+  erosion: 0.42,
+  /** Erosion at the far edge of the skirt, where only scattered scraps survive. */
+  erosionFar: 1.15,
+  /** The base shape's remap above (and a little below) the threshold, in core units. */
+  baseLead: 0.2,
+  baseRise: 0.3,
+  /** Mist strength (alpha) round and between the clouds. */
+  mist: 0.1,
+  /** Light: absorption along the sunward samples, powder strength, and opacity per unit density. */
+  lightAbsorb: 1.1,
+  powder: 2.2,
+  opacity: 3.2,
   /** Cluster strength (how much the crowded/open regions decide where clouds may be). */
   clusterAmp: 1.1,
   /** The cheap core's mean offset from the full one (the puffs' mean, which the cheap core leaves out). */
@@ -97,24 +105,24 @@ export const STORYBOOK_FIELD = Object.freeze({
  */
 export const STORYBOOK_CORE_QUANTILES = Object.freeze([
   [0, 1.8],
-  [0.0102, 1.2],
-  [0.0348, 1],
-  [0.0575, 0.9],
-  [0.0887, 0.8],
-  [0.1298, 0.7],
-  [0.181, 0.6],
-  [0.2429, 0.5],
-  [0.3118, 0.4],
-  [0.3866, 0.3],
-  [0.4659, 0.2],
-  [0.5488, 0.1],
-  [0.6297, 0],
-  [0.7065, -0.1],
-  [0.7747, -0.2],
-  [0.8344, -0.3],
-  [0.8832, -0.4],
-  [0.9484, -0.6],
-  [0.9815, -0.8],
+  [0.0093, 1.2],
+  [0.0326, 1],
+  [0.0545, 0.9],
+  [0.0845, 0.8],
+  [0.1244, 0.7],
+  [0.1744, 0.6],
+  [0.235, 0.5],
+  [0.3033, 0.4],
+  [0.3775, 0.3],
+  [0.456, 0.2],
+  [0.5388, 0.1],
+  [0.6204, 0],
+  [0.6976, -0.1],
+  [0.7672, -0.2],
+  [0.8278, -0.3],
+  [0.8781, -0.4],
+  [0.9454, -0.6],
+  [0.9803, -0.8],
   [1, -1.4],
 ]);
 
@@ -437,30 +445,6 @@ export function pushStorybookUniforms(u, { deck, palette, light, eye, board, foo
 // ---------------------------------------------------------------------------
 
 /**
- * SOFT LUMPS — a sum of round Gaussian bumps, one per jittered cell (3x3 neighbourhood): rounded hills that
- * merge smoothly where they meet. What the LIGHT reads inside a cloud (round cauliflower lumps of every size),
- * never a silhouette — the outline comes from the field, so this can never make a bundle of balloons.
- * Worley (`1 − F1²`) has a kink on every cell border and lit kinks drew cracked rock; |Perlin| drew worm-like
- * folds (brain coral). Returns ~0..1.
- * @param {object} TSL @param {*} p - vec2 node, in lump cells.
- */
-function softLumps(TSL, p) {
-  const { float, vec2, floor, fract, sin, dot, exp } = TSL;
-  const i = floor(p);
-  const f = fract(p);
-  let sum = float(0);
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      const c = i.add(vec2(dx, dy));
-      const o = fract(sin(vec2(dot(c, vec2(127.1, 311.7)), dot(c, vec2(269.5, 183.3)))).mul(43758.5453));
-      const r = vec2(dx, dy).add(o.mul(0.8).add(0.1)).sub(f);
-      sum = sum.add(exp(dot(r, r).mul(-3.6)));
-    }
-  }
-  return float(1).sub(exp(sum.mul(-1.25)));
-}
-
-/**
  * The cumulus field at world point `P` (on the deck), as nodes.
  * @param {object} TSL
  * @param {object} u
@@ -488,69 +472,79 @@ function coreAt(TSL, u, wind, P, { billows = true, octaves = 2 } = {}) {
   const qb = q.add(w.mul(F.warp));
   const body = mx_fractal_noise_float(qb.mul(F.bodyFreq).add(ev.mul(0.6)), octaves, 2.07, 0.5, 1);
   let core = body.add(cluster.mul(F.clusterAmp));
-  // The SMOOTH field (no Worley): what the light reads. Every Worley cell border is a kink, and a lit kink is a
-  // hard crack line (round 5f drew cracked rock); the Worley puffs only shape the outline.
-  let smooth = core.add(float(F.cheapOffset));
-  let puff = float(0.5);
   if (billows) {
-    // PUFFS: rounded lumps at two scales — high on a Worley feature point, low in the crease between.
+    // PUFFS: rounded lumps at two scales on the outline — high on a Worley feature point, low in the crease.
     const c1 = mx_worley_noise_float(qb.mul(F.puffFreq).sub(ev.mul(1.4)));
     const c2 = mx_worley_noise_float(qb.mul(F.puff2Freq).add(vec2(4.1, 9.3)).sub(ev.mul(2.1)));
-    const c3 = mx_worley_noise_float(qb.mul(F.puff3Freq).add(vec2(7.7, 1.9)).sub(ev.mul(3.0)));
-    const p1 = float(1).sub(c1.mul(c1));
-    const p2 = float(1).sub(c2.mul(c2));
-    const p3 = float(1).sub(c3.mul(c3));
-    core = core.add(p1.sub(0.75).mul(F.puffAmp)).add(p2.sub(0.75).mul(F.puff2Amp)).add(p3.sub(0.75).mul(F.puff3Amp));
-    // What the LIGHT reads: smooth lumps (Perlin) mixed with a little of the Worley puffs. Worley alone has a
-    // kink on every cell border, and the light drew each kink as a hard ridge (an ice sculpture, not a cloud);
-    // the finest Worley scale only bumps the outline (inside, it read as crumpled paper).
-    const s1 = mx_noise_float(
-      qb
-        .mul(F.puffFreq * 0.9)
-        .add(vec2(2.9, 8.1))
-        .sub(ev.mul(1.2))
-    );
-    const s2 = mx_noise_float(
-      qb
-        .mul(F.puff2Freq * 0.8)
-        .add(vec2(6.3, 4.4))
-        .sub(ev.mul(1.8))
-    );
-    // Rounded lumps at two sizes (soft Gaussian bumps, nudged by a smooth noise so they never sit on a grid).
-    const b1 = softLumps(
-      TSL,
-      qb
-        .mul(F.puffFreq * 1.7)
-        .add(s1.mul(0.35))
-        .sub(ev.mul(1.2))
-    );
-    const b2 = softLumps(
-      TSL,
-      qb
-        .mul(F.puff2Freq * 1.6)
-        .add(vec2(6.3, 4.4))
-        .add(s2.mul(0.35))
-        .sub(ev.mul(1.8))
-    );
-    puff = b1.mul(0.78).add(b2.mul(0.22));
-    smooth = smooth.add(b1.sub(0.4).mul(0.14)).add(b2.sub(0.4).mul(0.04));
+    core = core
+      .add(float(1).sub(c1.mul(c1)).sub(0.75).mul(F.puffAmp))
+      .add(float(1).sub(c2.mul(c2)).sub(0.75).mul(F.puff2Amp));
   } else {
     core = core.add(float(F.cheapOffset));
   }
-  return { core, smooth, puff, cluster };
+  return { core, cluster, qb, w, ev };
 }
 
-/** Coverage 0..1 of a core value against the threshold, over `w` core units (the silhouette). */
-function edgeOf(TSL, u, core, w) {
-  return TSL.smoothstep(TSL.float(0), w, core.sub(u.field.x));
+/**
+ * EROSION DETAIL (round 6, after Schneider's *Real-time Volumetric Cloudscapes of Horizon Zero Dawn*, SIGGRAPH
+ * 2015): three octaves of INVERTED Worley (packed billows), its coordinates swirled by the same warp that shapes
+ * the cloud (Schneider swirls his with curl noise). Never added to a cloud — SUBTRACTED from its edges (see
+ * `densityOf`), so the edge frays into tufts and wisps while the core stays whole. ~0..1.
+ */
+function detailAt(TSL, c) {
+  const { float, vec2, mx_worley_noise_float } = TSL;
+  const F = STORYBOOK_FIELD;
+  const qd = c.qb.add(c.w.mul(F.detailSwirl));
+  const w1 = mx_worley_noise_float(qd.mul(F.detailFreq).sub(c.ev.mul(2.0)));
+  const w2 = mx_worley_noise_float(
+    qd
+      .mul(F.detailFreq * 2.03)
+      .add(vec2(5.3, 1.7))
+      .sub(c.ev.mul(3.1))
+  );
+  const w3 = mx_worley_noise_float(
+    qd
+      .mul(F.detailFreq * 4.11)
+      .add(vec2(2.2, 8.8))
+      .sub(c.ev.mul(4.3))
+  );
+  const wor = float(1).sub(w1).mul(0.625).add(float(1).sub(w2).mul(0.25)).add(float(1).sub(w3).mul(0.125));
+  // PERLIN-WORLEY (Schneider): Perlin keeps it connected, Worley adds the billows. Worley alone read as cobblestones.
+  const per = TSL.mx_fractal_noise_float(qd.mul(F.detailFreq * 0.7).add(vec2(9.1, 3.3)), 3, 2.1, 0.5, 1)
+    .mul(0.5)
+    .add(0.5);
+  return TSL.clamp(per.mul(0.55).add(wor.mul(0.45)), 0, 1);
 }
 
-/** The cloud's top surface height, 0..1 of its thickness: a broad dome from edge to crown, with the puffs riding
- * on it (so the light finds lumps inside the cloud, not one plateau). */
-function heightOf(TSL, u, c) {
-  const { smoothstep, float } = TSL;
-  const dome = smoothstep(float(-0.08), float(STORYBOOK_FIELD.domeRise), c.smooth.sub(u.field.x));
-  return dome.mul(c.puff.mul(0.6).add(0.4));
+/** Schneider's remap: `v` from [lo, hi] onto [0, 1], clamped. */
+function remap01(TSL, v, lo, hi) {
+  return TSL.clamp(v.sub(lo).div(TSL.max(hi.sub(lo), TSL.float(1e-4))), 0, 1);
+}
+
+/**
+ * DENSITY 0..1 at a field sample: the base shape remapped above the threshold, then ERODED by the detail —
+ * `remap(base, detail·E, 1)`. Where the base is thick the erosion barely touches it; where it thins toward the
+ * edge the detail eats it into tufts. At the thinnest the detail is used INVERTED (Schneider: "If you invert the
+ * Worley noise at the base of the clouds you get some nice whispy shapes").
+ */
+function densityOf(TSL, u, c, detail, tuft) {
+  const { float, mix } = TSL;
+  const F = STORYBOOK_FIELD;
+  const base = remap01(TSL, c.core, u.field.x.sub(F.baseLead), u.field.x.add(F.baseRise));
+  // In the thin skirt the contrast-stretched tufts erode it, so whole scraps survive (the soft detail there ate
+  // the skirt evenly away and left no fragments).
+  const body = TSL.smoothstep(float(0.35), float(0.6), base);
+  const d = mix(float(1).sub(tuft), detail, body);
+  // The erosion DEEPENS with distance from the cloud (author, round 6: fragments "need to start thick near their
+  // parent clouds and then quickly become more sparse"): deep in the body only the shallowest bites; out in the
+  // thin skirt only the strongest billows survive, as scraps. One continuous density — a separate fragment band
+  // left a seam (a ring of nothing) between a cloud and its scraps.
+  const reach = TSL.smoothstep(float(0), float(0.75), base);
+  const depth = mix(float(F.erosionFar), float(F.erosion), reach);
+  const e = d.mul(depth);
+  // A scrap that survives is a whole small cloud, not a ghost: in the skirt the density ramps to full over a short
+  // span above the erosion (to 1 it left every scrap a faint 15% smudge; over 0.12 it cut them out crisp).
+  return remap01(TSL, base, e, mix(e.add(0.3), float(1), body));
 }
 
 /**
@@ -565,9 +559,8 @@ function heightOf(TSL, u, c) {
  * @returns {{rgb:*, alpha:*}} rgb is straight (not premultiplied); composite with NormalBlending.
  */
 export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = null }) {
-  const { Fn, If, float, vec2, vec3, max, min, abs, clamp, smoothstep, mix, normalize, dot, length, step, select } =
-    TSL;
-  const { mx_fractal_noise_float, mx_noise_float, dFdx, dFdy } = TSL;
+  const { Fn, If, float, vec2, vec3, max, min, clamp, smoothstep, mix, normalize, dot, length, step } = TSL;
+  const { mx_fractal_noise_float, mx_noise_float } = TSL;
   const F = STORYBOOK_FIELD;
   const out = Fn(() => {
     // THE FISHEYE: a barrel warp of the deck about the view centre, on top of the world dome below.
@@ -591,8 +584,6 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     const L = u.light;
     const lLen = max(length(L.xy), float(1e-3));
     const lxy = L.xy.div(lLen);
-    // Screen-px floor for the silhouette's soft edge, in core units (the field changes ~3 core units per cloud unit).
-    const aaW = max(float(F.edge), u.style2.y.div(S).mul(3));
 
     // ── THE WISPS (back layer) — the field's thin, wind-torn edge ─────────────
     const zW = zDeck.sub(T.mul(F.wispDrop)).max(float(0));
@@ -618,76 +609,69 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
       .clamp(0, 1);
     const wispC = mix(u.body, u.hi, float(0.35));
 
-    // ── THE CLOUD (front layer) ────────────────────────────────────────────
+    // ── THE CLOUD (front layer) — a density field, lit the way a volume is ──
     const P0 = at(zDeck).toVar('sbP0');
     const scout = coreAt(TSL, u, wind, P0, { billows: false, octaves: 1 }).core;
-    // Inside the scout's If: only the field itself. Everything that takes a screen-space derivative runs after
-    // it, in uniform control flow (a derivative inside a divergent branch is undefined). Outside every cloud's
-    // reach these stay at their defaults, which is fully transparent.
-    const h1 = float(0).toVar('sbH1');
-    const puffV = float(0.5).toVar('sbPuff');
-    const edgeV = float(0).toVar('sbEdge');
-    const coreV = float(-1).toVar('sbCoreV');
-    const occ = float(0).toVar('sbOcc');
-    If(scout.greaterThan(thr.sub(0.5)), () => {
+    const coreC = vec3(0, 0, 0).toVar('sbCoreC');
+    const coreA = float(0).toVar('sbCoreA');
+    If(scout.greaterThan(thr.sub(0.6)), () => {
       const c1 = coreAt(TSL, u, wind, P0);
-      h1.assign(heightOf(TSL, u, c1));
-      puffV.assign(c1.puff);
-      edgeV.assign(edgeOf(TSL, u, c1.core, aaW));
-      coreV.assign(c1.core.sub(thr));
-      // SELF-SHADOW: a taller billow a little way sunward shades this one.
-      const dS = S.mul(0.14);
-      const hS = heightOf(TSL, u, coreAt(TSL, u, wind, P0.add(lxy.mul(dS)), { octaves: 1 }));
-      occ.assign(
-        smoothstep(
-          float(-0.05).mul(T),
-          T.mul(0.35),
-          hS
-            .sub(h1)
-            .mul(T)
-            .sub(dS.mul(L.z.div(lLen)))
-        )
+      const detail = detailAt(TSL, c1);
+      // Contrast-stretched copy for the INSIDE and the light (the raw mix sits in ~0.4..0.7, too flat to break a
+      // cloud's inside up); the raw one erodes the body's edge (stretched, it cut a flat camouflage print), the
+      // stretched one only the thin skirt beyond it, into scraps.
+      const tuft = smoothstep(float(0.3), float(0.75), detail);
+      const dens = densityOf(TSL, u, c1, detail, tuft).toVar('sbDens');
+      // The INSIDE breaks up too: the same billows ride across the whole cloud as density, so light and powder
+      // find tufts everywhere (author: "inside ... more painterly fluffy broken up ... tending towards blob").
+      dens.assign(dens.mul(tuft.mul(0.75).add(0.45)).clamp(0, 1));
+      // MIST: a diffuse, undefined veil round and between the clouds (thin enough to see the ground through).
+      const mist = smoothstep(thr.sub(0.5), thr.add(0.15), c1.core).mul(detail.mul(0.5).add(0.5)).mul(F.mist);
+      // LIGHT (Beer's law + "powder", Schneider 2015): optical depth toward the sun from three base samples
+      // sunward; thick cloud between here and the sun dims it, exponentially.
+      const lb = (k) =>
+        remap01(
+          TSL,
+          coreAt(TSL, u, wind, P0.add(lxy.mul(S.mul(k))), { billows: false, octaves: 1 }).core,
+          thr.sub(0.05),
+          thr.add(0.5)
+        );
+      const depth = lb(0.035)
+        .mul(0.6)
+        .add(lb(0.09).mul(0.9))
+        .add(lb(0.18))
+        .mul(F.lightAbsorb)
+        .add(dens.mul(0.4))
+        .add(float(1).sub(tuft).mul(1.2));
+      // MULTIPLE SCATTERING, approximated by octaves (Wrenninge; skygl, Nubis): each octave lets light through
+      // more easily at half the energy, so thick cloud glows softly from inside instead of going flat grey.
+      const beer = TSL.exp(depth.negate())
+        .add(TSL.exp(depth.mul(-0.4)).mul(0.5))
+        .add(TSL.exp(depth.mul(-0.16)).mul(0.25))
+        .div(1.75);
+      // POWDER: the edges facing the light lose energy (no in-scattering from behind them), the dense middle
+      // gathers it — the soft darkening on the sunlit rim of every billow. Detail-rich, so the inside breaks up.
+      const powder = float(1).sub(TSL.exp(dens.mul(-F.powder)));
+      const sun = clamp(beer.mul(mix(float(1), powder, float(0.55))).mul(1.0), 0, 1);
+      // Ambient: the shade tone in thin cloud, the body tone where it is thick.
+      const amb = mix(mix(u.body, u.shadow, float(0.25)), u.body, smoothstep(float(0), float(0.8), dens));
+      const col = mix(amb, u.hi, smoothstep(float(0.05), float(1.0), sun)).toVar('sbCol');
+      // A little broken colour, so it sits with painted art (Brush).
+      const bp = P0.div(S.mul(0.06));
+      const dab = mx_noise_float(vec2(bp.x.add(5.3), bp.y));
+      col.assign(col.mul(float(1).add(dab.mul(0.05).mul(u.style2.x))));
+      // OPACITY from optical thickness: thin cloud is see-through — the soft, fluffy edge is the volume's own.
+      const aCloud = float(1).sub(TSL.exp(dens.mul(-F.opacity)));
+      const aMist = mist.mul(float(1).sub(aCloud));
+      const mistC = mix(u.body, u.hi, float(0.5));
+      coreC.assign(
+        col
+          .mul(aCloud)
+          .add(mistC.mul(aMist))
+          .div(max(aCloud.add(aMist), float(1e-4)))
       );
+      coreA.assign(aCloud.add(aMist));
     });
-    // THE SURFACE'S SLOPE from screen-space derivatives of its height (a 2x2 solve against the deck point's own
-    // derivatives — the fisheye and the dome make the screen→deck map non-uniform). The full 2-D gradient at no
-    // extra field evaluation; the one-sided sunward difference it replaces drew streaks along the light.
-    const dPx = dFdx(P0);
-    const dPy = dFdy(P0);
-    const dhx = dFdx(h1);
-    const dhy = dFdy(h1);
-    const det = dPx.x.mul(dPy.y).sub(dPx.y.mul(dPy.x));
-    const detS = select(abs(det).lessThan(float(1e-6)), float(1e-6), det);
-    const grad = vec2(dhx.mul(dPy.y).sub(dhy.mul(dPx.y)), dPx.x.mul(dhy).sub(dPy.x.mul(dhx)))
-      .div(detS)
-      .mul(T.mul(0.8));
-    const N = normalize(vec3(grad.negate(), float(1)));
-    const ndl = dot(N, L);
-    const lit = clamp(ndl.mul(0.95).add(0.02), 0, 1).mul(float(1).sub(occ.mul(0.6)));
-    const soft = u.style.w.mul(2).add(0.05);
-    // White where the puffs face the light, the body tone as they turn away, the cool shadow tone where they
-    // face away or something shades them — the round, sculpted read of the photos.
-    const col = mix(u.shadow, u.body, smoothstep(float(0.1), float(0.5).add(soft), lit)).toVar('sbCol');
-    col.assign(mix(col, u.hi, smoothstep(float(0.55).sub(soft), float(0.9), lit)));
-    const crease = float(1)
-      .sub(smoothstep(float(0.35), float(0.62), puffV))
-      .mul(smoothstep(float(0.05), float(0.4), h1));
-    col.assign(mix(col, u.shadow, crease.mul(0.35)));
-    // A thin edge is the wisps' own colour, so the head melts into its wisps with no seam.
-    col.assign(mix(wispC, col, smoothstep(float(0), float(0.3), h1)));
-    // A little broken colour, so it sits with painted art (Brush).
-    const bp = P0.div(S.mul(0.08));
-    const dab = mx_noise_float(vec2(bp.x.add(5.3), bp.y));
-    col.assign(col.mul(float(1).add(dab.mul(0.04).mul(u.style2.x))));
-    const coreC = col;
-    // FLUFFY, not cut: the thin rim is part see-through (the sea shows through a cumulus's edge in every
-    // reference photo), and a fine noise frays the last stretch of it into tufts.
-    const fp = P0.div(S.mul(0.07));
-    const fray = mx_noise_float(vec2(fp.x.add(13.1), fp.y))
-      .mul(0.5)
-      .add(0.5);
-    const rim = smoothstep(float(0.02), float(0.2), coreV);
-    const coreA = edgeV.mul(mix(fray.mul(0.55).add(0.1), float(1), rim));
 
     // Back to front, premultiplied: wisps, then the cloud.
     const accC = wispC.mul(wispA).toVar('sbAccC');

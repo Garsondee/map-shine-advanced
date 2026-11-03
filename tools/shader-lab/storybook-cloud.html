@@ -31,6 +31,33 @@
         await driver.ready;
         window.THREE = THREE;
         window.sb = { driver, LAB_MAPS };
+        // The standing comparison set (round 5): two sea frames to sit beside the author's reference photos
+        // (runs/sb-ref/), a whole map at noon, and a close golden hour. `sb.run(tag)` calibrates once, then shoots
+        // into runs/r5/<tag>-*.png; poll `sb.last`.
+        sb.STD = [
+          ['sea-z1.png', { ground: 'sea', hour: 11, cover: 0.45, zoom: 1, label: 'sea noon c0.45 z1' }],
+          ['sea-z2.png', { ground: 'sea', hour: 11, cover: 0.45, zoom: 2.2, label: 'sea noon c0.45 z2.2' }],
+          ['map-z1.png', { map: 'wilderness', hour: 11, cover: 0.45, zoom: 1, label: 'wilderness noon c0.45' }],
+          ['map-gold.png', { map: 'jhh', hour: 18.3, cover: 0.6, zoom: 1.4, label: 'jhh 18:20 c0.6' }],
+        ];
+        sb.shots = async (tag, list = sb.STD, run = 'r5') => {
+          if (!driver.calTable) await driver.calibrate();
+          const r = [];
+          for (const [f, o] of list) {
+            const t0 = performance.now();
+            const s = await driver.shot(run, `${tag}-${f}`, { width: 1280, ...o, label: `${tag} ${o.label ?? f}` });
+            r.push([f, s.ok, Math.round(performance.now() - t0)]);
+          }
+          return r;
+        };
+        sb.run = (tag, list, run) => {
+          sb.last = 'pending';
+          sb.shots(tag, list, run).then(
+            (v) => (sb.last = v),
+            (e) => (sb.last = String((e && e.stack) || e))
+          );
+          return 'started';
+        };
         log(`ready — backend: ${driver.backend}`);
       } catch (e) {
         log('FAILED: ' + (e && e.stack ? e.stack : e));

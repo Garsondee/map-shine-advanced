@@ -121,12 +121,12 @@ export class StorybookDriver {
     return tex;
   }
 
-  material(mode, tex, variant = 'both') {
-    const key = `${mode}:${variant}:${tex.uuid}`;
+  material(mode, tex, variant = 'both', groundKind = 'map') {
+    const key = `${mode}:${variant}:${groundKind}:${tex.uuid}`;
     if (this.materials.has(key)) return this.materials.get(key);
     const THREE = this.THREE;
     const T = THREE.TSL;
-    const { float, vec2, vec3, vec4, mix, uv, texture, step, clamp, max } = T;
+    const { float, vec2, vec3, vec4, mix, uv, texture, step, clamp } = T;
     const u = this.u;
     const wx = mix(u.view.x, u.view.z, uv().x);
     const wy = mix(u.view.w, u.view.y, uv().y);
@@ -134,10 +134,19 @@ export class StorybookDriver {
     const bw = u.board.z.sub(u.board.x);
     const bh = u.board.w.sub(u.board.y);
     const mapUv = vec2(wx.sub(u.board.x).div(bw), wy.sub(u.board.y).div(bh));
-    const inBoard = step(float(0), mapUv.x).mul(step(mapUv.x, float(1))).mul(step(float(0), mapUv.y)).mul(step(mapUv.y, float(1)));
+    const inBoard = step(float(0), mapUv.x)
+      .mul(step(mapUv.x, float(1)))
+      .mul(step(float(0), mapUv.y))
+      .mul(step(mapUv.y, float(1)));
     const albedo = texture(tex, clamp(mapUv, 0, 1)).rgb;
     const felt = vec3(0.035, 0.075, 0.05);
-    const ground = mix(felt.mul(u.tableOn), albedo, inBoard);
+    // 'sea': the reference photos' deep blue sea, so a frame can sit beside them (round 5, 2026-11-03).
+    const sea = mix(
+      vec3(0.012, 0.09, 0.26),
+      vec3(0.03, 0.16, 0.42),
+      T.mx_noise_float(worldXY.div(9000)).mul(0.5).add(0.5)
+    );
+    const ground = groundKind === 'sea' ? sea : mix(felt.mul(u.tableOn), albedo, inBoard);
     const wind = { drift: this.cloudU.drift, dir: this.cloudU.windDir };
     let vis;
     let tops;
@@ -172,12 +181,17 @@ export class StorybookDriver {
       tops = { rgb: t.rgb, alpha: t.alpha.mul(u.topsOpacity).mul(inBoard) };
     }
     // Shadow only on the board (the cache is clipped to the effects extent).
-    const shadowVis = mix(float(1), mix(float(1), vis, u.shadowStrength).max(float(0)), inBoard);
+    const shadowVis = mix(
+      float(1),
+      mix(float(1), vis, u.shadowStrength).max(float(0)),
+      groundKind === 'sea' ? float(1) : inBoard
+    );
     // `variant` (compile timing): 'tops' / 'shadow' build only that half, as production's two separate materials.
     const lit = ground.mul(u.tint).mul(variant === 'tops' ? float(1) : shadowVis);
     const out = variant === 'shadow' ? lit : mix(lit, tops.rgb, clamp(tops.alpha, 0, 1));
     const mat = new THREE.MeshBasicNodeMaterial();
-    mat.colorNode = vec4(out, float(1));
+    // 'cov': the raw shadow transmittance (calibration: with fillShare 0 and a hard edge it is the coverage mask).
+    mat.colorNode = variant === 'cov' ? vec4(vec3(vis, vis, vis), float(1)) : vec4(out, float(1));
     this.materials.set(key, mat);
     return mat;
   }
@@ -272,9 +286,19 @@ export class StorybookDriver {
       board,
       footprintPx: spanX / W,
       timeSec: o.time ?? 0,
+      evolve: o.evolve ?? 1,
     });
+    const calThr = o.variant !== 'cov' && deck.fill > 0 ? this.thrFor(deck.fill) : null;
+    if (Number.isFinite(o.threshold)) this.sbU.field.value.x = o.threshold;
+    else if (calThr !== null) this.sbU.field.value.x = calThr;
+    if (o.variant === 'cov') {
+      u.fillShare.value = 0;
+      u.blur.value = 0.001;
+      u.offset.value.set(0, 0);
+      this.sbU.domain2.value.z = 1;
+    }
     this.sbU.opacity.value = o.opacity ?? 1;
-    this.quad.material = this.material(mode, tex, o.variant ?? 'both');
+    this.quad.material = this.material(mode, tex, o.variant ?? 'both', o.ground ?? 'map');
     if (!this._rt || this._rt.width !== W || this._rt.height !== H) {
       this._rt?.dispose();
       this._rt = new THREE.RenderTarget(W, H, { type: THREE.UnsignedByteType, format: THREE.RGBAFormat });
@@ -291,6 +315,56 @@ export class StorybookDriver {
     const ms = performance.now() - t0;
     this.renderer.setRenderTarget(prev);
     return { bytes, w: W, h: H, ms, deck, eyeH };
+  }
+
+  /**
+   * Measure the field's coverage at a ladder of thresholds (the hard-edged shadow mask, wide view, 3 places) —
+   * the data behind `STORYBOOK_CORE_QUANTILES`. Afterwards `render` uses it for every frame's threshold, so a
+   * field change can be judged at the right coverage before the module's table is updated.
+   */
+  async calibrate() {
+    const ths = [-0.8, -0.6, -0.4, -0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2];
+    const out = [];
+    for (const th of ths) {
+      let cov = 0;
+      let n = 0;
+      for (const [px, py] of [
+        [0, 0],
+        [7, 3],
+        [-11, 5],
+      ]) {
+        const r = await this.render({
+          variant: 'cov',
+          ground: 'sea',
+          cover: 0.5,
+          zoom: 0.25,
+          panX: px,
+          panY: py,
+          threshold: th,
+          width: 480,
+          evolve: 0,
+        });
+        for (let i = 0; i < r.bytes.length; i += 4) {
+          n++;
+          if (r.bytes[i] < 128) cov++;
+        }
+      }
+      out.push([th, +(cov / n).toFixed(4)]);
+    }
+    this.calTable = out;
+    return out;
+  }
+
+  /** The calibrated threshold for a coverage fraction (null before `calibrate`). */
+  thrFor(fill) {
+    const t = this.calTable;
+    if (!t) return null;
+    for (let i = 0; i < t.length - 1; i++) {
+      const [a, fa] = t[i];
+      const [b, fb] = t[i + 1];
+      if (fill <= fa && fill >= fb) return a + ((b - a) * (fa - fill)) / Math.max(1e-6, fa - fb);
+    }
+    return fill > t[0][1] ? t[0][0] : t[t.length - 1][0];
   }
 
   /** Render and POST a PNG to runs/<run>/<file>. */

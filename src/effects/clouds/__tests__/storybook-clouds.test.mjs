@@ -15,9 +15,8 @@ import { CLOUD_LOOK_PARAMS } from '../clouds.js';
 import { CLOUD_TOPS_PARAMS } from '../cloud-tops.js';
 import {
   STORYBOOK_DECK_DEFAULTS,
-  STORYBOOK_JITTER,
-  STORYBOOK_MAX_RADIUS_FRAC,
-  STORYBOOK_MAX_REACH_FRAC,
+  STORYBOOK_CORE_QUANTILES,
+  storybookThreshold,
   storybookDensity,
   resolveStorybookDeck,
   storybookPalette,
@@ -30,14 +29,20 @@ import {
 import { computeSun } from '../../../world/sun.js';
 
 const lum = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-const finite = (o) => Object.values(o).every((v) => (Array.isArray(v) ? v.every(Number.isFinite) : typeof v !== 'number' || Number.isFinite(v)));
+const finite = (o) =>
+  Object.values(o).every((v) =>
+    Array.isArray(v) ? v.every(Number.isFinite) : typeof v !== 'number' || Number.isFinite(v)
+  );
 
 export function run(t) {
   const { ok } = t;
 
   // ---- 1. declarations -----------------------------------------------------
   ok('CLOUD_LOOK_PARAMS (with style) is a valid params schema', validateParamsSchema(CLOUD_LOOK_PARAMS).ok);
-  ok('CLOUD_TOPS_PARAMS (with the storybook dials) is a valid params schema', validateParamsSchema(CLOUD_TOPS_PARAMS).ok);
+  ok(
+    'CLOUD_TOPS_PARAMS (with the storybook dials) is a valid params schema',
+    validateParamsSchema(CLOUD_TOPS_PARAMS).ok
+  );
   ok('storybook is the default style', CLOUD_LOOK_PARAMS.style.default === 'storybook');
   ok('realistic stays selectable', CLOUD_LOOK_PARAMS.style.values.includes('realistic'));
   for (const [k, v] of Object.entries(STORYBOOK_DECK_DEFAULTS)) {
@@ -60,36 +65,77 @@ export function run(t) {
   // ---- 2b. the deck --------------------------------------------------------
   const board = { minX: 0, minY: 0, maxX: 15000, maxY: 7500 };
   const H = 15000;
-  const onTable = resolveStorybookDeck({ cover01: 0.5, scalePx: 1100, anisotropy: 1.15, board, tableOn: true, eyeHeight: H });
-  const offTable = resolveStorybookDeck({ cover01: 0.5, scalePx: 1100, anisotropy: 1.15, board, tableOn: false, eyeHeight: H });
+  const onTable = resolveStorybookDeck({
+    cover01: 0.5,
+    scalePx: 1100,
+    anisotropy: 1.15,
+    board,
+    tableOn: true,
+    eyeHeight: H,
+  });
+  const offTable = resolveStorybookDeck({
+    cover01: 0.5,
+    scalePx: 1100,
+    anisotropy: 1.15,
+    board,
+    tableOn: false,
+    eyeHeight: H,
+  });
   ok('the deck is all finite numbers', finite(onTable) && finite(offTable));
-  ok('the radius respects the cell (never past the unstretched cap)', onTable.radius <= onTable.spacing * STORYBOOK_MAX_RADIUS_FRAC + 1e-9);
+  ok(
+    'the field threshold leaves the asked-for share of sky covered (monotone, 0 covers nothing)',
+    storybookThreshold(0.1) > storybookThreshold(0.5) &&
+      storybookThreshold(0.5) > storybookThreshold(0.9) &&
+      onTable.threshold === storybookThreshold(onTable.fill)
+  );
+  ok(
+    'the coverage quantiles table is monotone',
+    STORYBOOK_CORE_QUANTILES.every((q, i, a) => i === 0 || (q[0] > a[i - 1][0] && q[1] < a[i - 1][1]))
+  );
+  ok(
+    'cover 0 sets a threshold nothing can reach',
+    resolveStorybookDeck({ cover01: 0, scalePx: 1100, board, tableOn: true, eyeHeight: H }).threshold >= 9
+  );
   ok('with the Table the clouds reach past the map', onTable.domain[0] < board.minX && onTable.domain[2] > board.maxX);
-  ok('without the Table they stay over the map (the padding rule)', offTable.clipToBoard === true && offTable.domain[0] === board.minX);
+  ok(
+    'without the Table they stay over the map (the padding rule)',
+    offTable.clipToBoard === true && offTable.domain[0] === board.minX
+  );
   ok('the dome is centred on the map', onTable.domeCentre[0] === 7500 && onTable.domeCentre[1] === 3750);
-  const tall = resolveStorybookDeck({ cover01: 1, scalePx: 6000, board, tableOn: true, eyeHeight: 2000, params: { storybookHeight: 0.5, storybookBulge: 1.5 } });
+  const tall = resolveStorybookDeck({
+    cover01: 1,
+    scalePx: 6000,
+    board,
+    tableOn: true,
+    eyeHeight: 2000,
+    params: { storybookHeight: 0.5, storybookBulge: 1.5 },
+  });
   ok(
     'even a tall, bulging deck keeps its highest crown under the eye',
-    tall.baseHeight + tall.domeHeight + tall.radius * 0.98 < 0.85 * 2000
+    tall.baseHeight + tall.domeHeight + tall.radius < 0.85 * 2000
   );
-  ok('a flat deck has no dome and no fisheye', resolveStorybookDeck({ cover01: 0.5, scalePx: 1100, board, tableOn: true, eyeHeight: H, params: { storybookBulge: 0 } }).domeHeight === 0);
-  const smallMap = resolveStorybookDeck({ cover01: 0.5, scalePx: 1100, board: { minX: 0, minY: 0, maxX: 3000, maxY: 3000 }, tableOn: true, eyeHeight: H });
-  ok('spacing follows the map (a small map gets closer clouds)', smallMap.spacing < onTable.spacing);
-  ok('cover 0 decks are empty', resolveStorybookDeck({ cover01: 0, scalePx: 1100, board, tableOn: true, eyeHeight: H }).fill === 0);
-
-  // The shader's own promise: a cloud never reaches outside the 2x2 cells a pixel tests. Worst case: the
-  // farthest edge bump (rho 0.72 + wobble 0.16, radius 0.36, breathing +6%, fattened by sqrt(stretch)) on the
-  // longest cloud the cap allows, plus the centre's jitter.
-  let worst = 0;
-  for (let s = 1; s <= 2.8; s += 0.05) {
-    const R = (STORYBOOK_MAX_REACH_FRAC / 1.3) / s;
-    // + the ragged edge (7% of the BASE radius, which is at most the cap at s = 1).
-    const reach = (0.88 * s + 0.36 * 1.06 * Math.sqrt(s)) * R + 0.07 * (STORYBOOK_MAX_REACH_FRAC / 1.3);
-    worst = Math.max(worst, reach);
-  }
   ok(
-    `a cloud's reach plus jitter stays inside its cell with room for perspective (${(worst + STORYBOOK_JITTER / 2).toFixed(3)} < 0.42)`,
-    worst + STORYBOOK_JITTER / 2 < 0.42
+    'a flat deck has no dome and no fisheye',
+    resolveStorybookDeck({
+      cover01: 0.5,
+      scalePx: 1100,
+      board,
+      tableOn: true,
+      eyeHeight: H,
+      params: { storybookBulge: 0 },
+    }).domeHeight === 0
+  );
+  const smallMap = resolveStorybookDeck({
+    cover01: 0.5,
+    scalePx: 1100,
+    board: { minX: 0, minY: 0, maxX: 3000, maxY: 3000 },
+    tableOn: true,
+    eyeHeight: H,
+  });
+  ok('cloud scale follows the map (a small map gets smaller clouds)', smallMap.spacing < onTable.spacing);
+  ok(
+    'cover 0 decks are empty',
+    resolveStorybookDeck({ cover01: 0, scalePx: 1100, board, tableOn: true, eyeHeight: H }).fill === 0
   );
 
   // ---- 2c. the palette -----------------------------------------------------
@@ -97,7 +143,8 @@ export function run(t) {
   let inRange = true;
   for (let h = 0; h < 24; h += 0.25) {
     const p = pal(h);
-    for (const slot of ['hi', 'body', 'shadow', 'ink', 'rim']) if (!p[slot].every((v) => v >= 0 && v <= 1)) inRange = false;
+    for (const slot of ['hi', 'body', 'shadow', 'ink', 'rim'])
+      if (!p[slot].every((v) => v >= 0 && v <= 1)) inRange = false;
   }
   ok('every slot is a linear colour in 0..1 at every hour', inRange);
   // Continuity, not slowness: twilight colours move fast (the sun crosses a 5° keyframe gap in ~20 min), but a
@@ -114,9 +161,15 @@ export function run(t) {
   };
   const coarse = maxStep(0.05);
   const fine = maxStep(0.005);
-  ok(`the palette is continuous through the day (${coarse.toFixed(3)} per 3 min, ${fine.toFixed(4)} per 18 s)`, fine < coarse * 0.2 && fine < 0.03);
+  ok(
+    `the palette is continuous through the day (${coarse.toFixed(3)} per 3 min, ${fine.toFixed(4)} per 18 s)`,
+    fine < coarse * 0.2 && fine < 0.03
+  );
   const noon = pal(12);
-  ok('by day the three tones step down in value: light > body > shadow > ink', lum(noon.hi) > lum(noon.body) && lum(noon.body) > lum(noon.shadow) && lum(noon.shadow) > lum(noon.ink));
+  ok(
+    'by day the three tones step down in value: light > body > shadow > ink',
+    lum(noon.hi) > lum(noon.body) && lum(noon.body) > lum(noon.shadow) && lum(noon.shadow) > lum(noon.ink)
+  );
   ok('night clouds are darker than noon clouds', lum(pal(0).body) < lum(noon.body) * 0.5);
   const dawn = storybookPalette({ elevationDeg: 2, rising: true });
   const dusk = storybookPalette({ elevationDeg: 2, rising: false });
@@ -133,7 +186,10 @@ export function run(t) {
   const unit = (v) => Math.abs(Math.hypot(...v) - 1) < 1e-9;
   ok('the light is a unit vector', unit(dayL) && unit(lowL) && unit(nightL));
   ok('a high sun still rakes (held at or below 38°)', dayL[2] <= Math.sin((38 * Math.PI) / 180) + 1e-9);
-  ok('a sun on the horizon still lights the tops (held at or above 30°)', lowL[2] >= Math.sin((30 * Math.PI) / 180) - 1e-9);
+  ok(
+    'a sun on the horizon still lights the tops (held at or above 30°)',
+    lowL[2] >= Math.sin((30 * Math.PI) / 180) - 1e-9
+  );
   ok('it comes from the sun by day', dayL[0] > 0);
   ok('after dark the moon lights from the other side', nightL[0] < 0);
 

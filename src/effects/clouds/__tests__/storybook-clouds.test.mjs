@@ -96,7 +96,10 @@ export function run(t) {
     'cover 0 sets a threshold nothing can reach',
     resolveStorybookDeck({ cover01: 0, scalePx: 1100, board, tableOn: true, eyeHeight: H }).threshold >= 9
   );
-  ok('with the Table the clouds reach past the map', onTable.domain[0] < board.minX && onTable.domain[2] > board.maxX);
+  ok(
+    'with the Table the field has no edge (nothing shrinks or grows in at a border)',
+    onTable.clipToBoard === false && onTable.domainFade === 1
+  );
   ok(
     'without the Table they stay over the map (the padding rule)',
     offTable.clipToBoard === true && offTable.domain[0] === board.minX
@@ -136,6 +139,34 @@ export function run(t) {
   ok(
     'cover 0 decks are empty',
     resolveStorybookDeck({ cover01: 0, scalePx: 1100, board, tableOn: true, eyeHeight: H }).fill === 0
+  );
+
+  // Every look dial reaches the deck the shader reads, in the slot the uniforms document.
+  const tuned = resolveStorybookDeck({
+    cover01: 0.5,
+    scalePx: 1100,
+    board,
+    tableOn: true,
+    eyeHeight: H,
+    params: {
+      storybookCluster: 2,
+      storybookFraySize: 2.5,
+      storybookScrapReach: 0.4,
+      storybookDrama: 2.5,
+      storybookMist: 0.3,
+    },
+  });
+  ok(
+    'look dials land in their uniform slots (cluster, fray, scrap reach, drama, mist)',
+    tuned.shape[0] === 2 &&
+      tuned.shape2[2] === 2.5 &&
+      tuned.edge[2] === 0.4 &&
+      tuned.light2[1] === 2.5 &&
+      tuned.light3[3] === 0.3
+  );
+  ok(
+    'no dial can go negative into the shader',
+    [tuned.shape, tuned.shape2, tuned.edge, tuned.light1, tuned.light2, tuned.light3].flat().every((v) => v >= 0)
   );
 
   // ---- 2c. the palette -----------------------------------------------------
@@ -187,8 +218,12 @@ export function run(t) {
   ok('the light is a unit vector', unit(dayL) && unit(lowL) && unit(nightL));
   ok('a high sun still rakes (held at or below 38°)', dayL[2] <= Math.sin((38 * Math.PI) / 180) + 1e-9);
   ok(
-    'a sun on the horizon still lights the tops (held at or above 30°)',
-    lowL[2] >= Math.sin((30 * Math.PI) / 180) - 1e-9
+    'a sun on the horizon still lights the tops (held at or above 6°)',
+    lowL[2] >= Math.sin((6 * Math.PI) / 180) - 1e-9
+  );
+  ok(
+    'golden hour rakes in low (a 10° sun lights from well below the noon light)',
+    storybookLight({ x: 1, y: 0 }, 10)[2] < dayL[2] * 0.4
   );
   ok('it comes from the sun by day', dayL[0] > 0);
   ok('after dark the moon lights from the other side', nightL[0] < 0);

@@ -159,7 +159,12 @@ export class StorybookDriver {
         blur: u.blur,
         fillShare: u.fillShare,
       });
-      tops = buildStorybookCloudNode(T, { groundXY: worldXY, u: this.sbU, wind });
+      tops = buildStorybookCloudNode(T, {
+        groundXY: worldXY,
+        u: this.sbU,
+        wind,
+        debug: variant === 'debug' ? 'occ' : null,
+      });
     } else {
       vis = buildCloudGroundVisNode(T, {
         worldXY,
@@ -191,7 +196,12 @@ export class StorybookDriver {
     const out = variant === 'shadow' ? lit : mix(lit, tops.rgb, clamp(tops.alpha, 0, 1));
     const mat = new THREE.MeshBasicNodeMaterial();
     // 'cov': the raw shadow transmittance (calibration: with fillShare 0 and a hard edge it is the coverage mask).
-    mat.colorNode = variant === 'cov' ? vec4(vec3(vis, vis, vis), float(1)) : vec4(out, float(1));
+    mat.colorNode =
+      variant === 'debug'
+        ? vec4(tops.rgb, float(1))
+        : variant === 'cov'
+          ? vec4(vec3(vis, vis, vis), float(1))
+          : vec4(out, float(1));
     this.materials.set(key, mat);
     return mat;
   }

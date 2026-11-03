@@ -129,8 +129,10 @@ export const BILLOW_SMOKE_RAMP = Object.freeze({
    * and a dusty mauve side by side and let the eye mix them. Both sit at the ramp's own values, so they shift the hue, not the
    * brightness, and both stay warm (red above blue): the painted maps' smoke is never neutral or blue.
    */
-  dabWarm: '#e6c9ab',
-  dabCool: '#a48f93',
+  // (2026-11-03 v2: the first pair, peach + mauve, went muddy pink on a brown floor; these are the author's own cream and
+  // stone grey, read off the walls and paving of her map)
+  dabWarm: '#e9e0d0',
+  dabCool: '#9d9893',
   /** the soot a wood fire adds on top (kept subtle: the art's smoke is pale). */
   soot: '#5a4a44',
   /** the line round every billow and the darkest shade of a sooty column: a warm near-black, so the smoke reads on ANY floor. */
@@ -186,7 +188,7 @@ export const BILLOW_TUNE = Object.freeze({
   // (2026-11-03, author: "a lot bigger and longer as a trail... too thin": roughly twice the life, twice the climb, 1.6x the
   // billow, and 1.45x the billows so the longer column stays one body)
   smokeLife: 8.5,
-  smokeRise: 5.4, // × R at an open fire
+  smokeRise: 7.5, // × R at an open fire (R of a 50 px fire: a smaller fire's plume is relatively taller, see `Rs`)
   smokeSize: 0.92,
   smokeStart: 0.42, // a billow is born this fraction of its full width...
   smokeGrow: 2.5, // ...and grows by this much more as it climbs (a plume SHOULD outgrow its fire)
@@ -892,14 +894,22 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     const r4 = hash01(id, cyc, 44);
     const r6 = hash01(id, cyc, 46);
     const r7 = hash01(id, cyc, 47);
-    const envS = smoothstep(0.04, 0.3, a) * (1 - smoothstep(0.7, 1, a));
+    // (v2: the billow keeps its size and most of its strength to the end of its life and only fades over the last fifth;
+    // fading strength from 70% of the life dropped the upper half under the silhouette, so a long plume drew short)
+    const envGrow = smoothstep(0.04, 0.3, a);
+    const envS = envGrow * (1 - smoothstep(0.8, 1, a));
     if (envS < 0.01) continue;
     basePoint(f, R, r1, r2, r3, 0.75, base);
     // smoke is born ABOVE the flame body and climbs from there, thin at first
     // (a gale blows smoke along the ground rather than up: at full wind it climbs half as high and drifts the whole way)
+    // THE PLUME'S SCALE IS NOT THE FIRE'S (v2, author: "the smoke is very short" on a brazier): a plume's height and drift go
+    // with the square root of the fire's size, so a small brazier still sends up a column several flames tall and a bonfire's
+    // does not reach off the map. `Rs` = R for a 50 px fire.
+    const Rs = Math.sqrt(Math.max(R, 1) * 50);
     const zTop =
-      R * tune.smokeRise * (0.35 + 0.65 * outdoor) * (0.75 + 0.5 * r4) * (0.6 + 0.4 * sz.iPow) * (1 - 0.5 * leanG);
-    const z = height * 0.75 + zTop * Math.pow(a, 0.9);
+      Rs * tune.smokeRise * (0.35 + 0.65 * outdoor) * (0.75 + 0.5 * r4) * (0.6 + 0.4 * sz.iPow) * (1 - 0.5 * leanG);
+    // (v2: born at 55% of the flame's height, not 75%, so the column grows out of the fire instead of floating above it)
+    const z = height * 0.55 + zTop * Math.pow(a, 0.9);
     // THE COLUMN IS ONE RIBBON (2026-11-03): every billow shares one travelling wave (its phase is the climb, `a`, and the clock),
     // so the whole column S-curves and meanders together instead of each puff wobbling alone into a fuzzy cloud. The wave
     // swings across the wind in a breeze (a streamer flutters sideways) and round a slowly turning bearing in still air. Each
@@ -915,19 +925,20 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       Math.sin(t * 0.55 - a * 3.4 + (seed % 628) * 0.01);
     const sway = wvx * wave + plume * 0.5 * (r6 - 0.5) * a;
     const swayY = wvy * wave + plume * 0.5 * (r7 - 0.5) * a;
-    const drift = R * tune.smokeDrift * (0.15 + 0.85 * leanG) * (0.12 + Math.pow(a, 1.3));
+    const drift = Rs * tune.smokeDrift * (0.15 + 0.85 * leanG) * (0.04 + Math.pow(a, 1.3));
     // a sealed room's smoke goes nowhere in particular: it just rises and fades
     const x = base[0] + sway + wdx * drift;
     // from above, smoke climbs up the page faster than its height says (the painted plumes reach three flames up): the extra
     // lift is a shift of the ground position, so it adds no parallax of its own (the side view keeps the true height)
-    const cheat = env.projection === 'side' ? 0 : (tune.smokeLift - 1) * (env.tilt ?? 0.45) * (z - height * 0.75);
+    const cheat = env.projection === 'side' ? 0 : (tune.smokeLift - 1) * (env.tilt ?? 0.45) * (z - height * 0.55);
     const y = base[1] + swayY + wdy * drift - cheat;
     // a plume SHOULD outgrow its fire: small and dense at the base, billowing wide as it climbs
     const rad =
       plume *
       tune.smokeSize *
       (tune.smokeStart + tune.smokeGrow * Math.pow(a, 0.85)) *
-      Math.pow(envS, 0.5) *
+      Math.pow(envGrow, 0.5) *
+      Math.sqrt(Rs / Math.max(R, 1)) *
       (0.85 + 0.35 * r3);
     const tone = clamp01(a * 1.05 + 0.08 * r2);
     // the lobe's `heat` slot is the smoke's colour channel: + is steam (rain turns it white), - is soot (a sooty fuel, or a whole
@@ -1044,8 +1055,8 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     const bend = Math.sin(t * 0.27 + a * 2.6 + hash01(seed, 9, 9) * TAU) * Rm * 0.16 * Math.pow(a, 0.8);
     const x = m.x + Math.cos(ang) * rho + Math.sin(t * 0.5 + r3 * TAU) * Rm * 0.05 * a + bend + wdx * drift;
     const y = m.y + Math.sin(ang) * rho + Math.cos(t * 0.4 + r4 * TAU) * Rm * 0.04 * a + wdy * drift - cheat;
-    // (0.2 -> 0.5, 2026-11-03: the campfire's smoke grew 1.6x and 2.5x the climb; the burning roof's column stays the bigger of the two)
-    const rad = Rm * 0.5 * sizeK * (0.4 + 1.5 * Math.pow(a, 0.8)) * Math.pow(envS, 0.5) * (0.8 + 0.45 * r3);
+    // (0.2 -> 0.5 -> 0.62, 2026-11-03: the campfire's smoke grew 1.6x and 2.5x the climb; the burning roof's column stays the bigger of the two)
+    const rad = Rm * 0.62 * sizeK * (0.4 + 1.5 * Math.pow(a, 0.8)) * Math.pow(envS, 0.5) * (0.8 + 0.45 * r3);
     const strength = (0.55 + 0.45 * Math.min(1, amt)) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3);
     // (the lower half of the column is still lit by the fire, the upper greys and darkens)
     const tone = clamp01(Math.pow(a, 1.3) * 1.05 + 0.08 * r2);

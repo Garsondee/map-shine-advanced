@@ -64,7 +64,7 @@ const DIRECT = {
   coalCrack: ['look', 'coalCrack', 0.6, 0.03, 0.6],
   flameWobbleSpeed: ['look', 'warpSpeed', 0.5, 0, 3],
   flameWobbleScale: ['look', 'warpFreq', 0.02, 0.01, 0.2],
-  smokeFadeIn: ['look', 'smokeFadeIn', 0.3, 0, 1],
+  smokeFadeIn: ['look', 'smokeFadeIn', 0.12, 0, 1],
   smokeOverFlame: ['look', 'smokeOverFlame', 0.55, 0, 1],
   smokeLife: ['tune', 'smokeLife', 8.5, 1, 20],
   smokeStart: ['tune', 'smokeStart', 0.42, 0.1, 1.5],

@@ -119,17 +119,16 @@ export const BILLOW_LOOK = Object.freeze({
   /**
    * THE PAINTERLY EDGE (2026-11-03, author: "something more diffuse and dithered... artistic and impressionistic"):
    * `smokeGrain` breaks the silhouette into brushed dabs (a world-anchored noise added to the density the edge is cut from),
-   * `smokeDither` stipples the half-covered fringe into dots the size of `smokeDitherPx` field px (a screen door, not a gradient),
+   * `smokeDither` thins the half-covered fringe in soft uneven patches (a dry-brush scumble; v2: it was a pixel stipple),
    * and `smokeDabs` breaks the colour into warm and cool patches. All 0 = the earlier cel-shaded cloud.
    */
   smokeGrain: 0.6,
   smokeDither: 0.55,
-  smokeDitherPx: 2,
-  smokeDabs: 0.4,
+  smokeDabs: 0.3,
   /** How much greyer the smoke goes in a fully bright scene (so it stands off a pale floor). */
   smokeDayDark: 0.69,
   /** Smoke is drawn OVER the flame: how far up its life it fades in, and how opaque it is where it crosses the flame. */
-  smokeFadeIn: 0.3,
+  smokeFadeIn: 0.12, // (v2 0.3 -> 0.12: a clear young billow left a gap between the flame and its column)
   smokeOverFlame: 0.55,
   /** Shading light direction (screen space, up-left). */
   lightX: -0.55,
@@ -291,7 +290,6 @@ export function createBillowRenderer({
     smokeCrisp: num('smokeCrisp'),
     smokeGrain: num('smokeGrain'),
     smokeDither: num('smokeDither'),
-    smokeDitherPx: num('smokeDitherPx'),
     smokeDabs: num('smokeDabs'),
     smokeDayDark: num('smokeDayDark'),
     smokeFadeIn: num('smokeFadeIn'),
@@ -645,26 +643,34 @@ export function createBillowRenderer({
     const sAA = clamp(sGradLen, float(0.02), float(0.5))
       .add(U.smokeSoft)
       .add(age.mul(0.22))
-      .add(U.smokeDither.mul(0.18));
-    const sCover0 = smoothstep(U.smokeOutline.sub(sAA), U.smokeOutline.add(sAA), S);
+      .add(U.smokeDither.mul(0.25));
+    // (v2: the feather's foot is kept ABOVE zero and the cover is gated on there being any smoke at all. With the softness at
+    // its maximum the foot went below zero, so empty air drew a pale veil that stopped dead at the edge of the contour box: a
+    // hard-rimmed halo round every plume.)
+    const sCover0 = smoothstep(max(U.smokeOutline.sub(sAA), float(0.04)), U.smokeOutline.add(sAA), S).mul(
+      smoothstep(float(0.01), float(0.12), S0)
+    );
     const dens = clamp(S.sub(U.smokeOutline).div(1.6), float(0), float(1));
     // a thin rim or tail is see-through, the body is solid
     const sCoverSoft = sCover0
       .mul(U.smokeOpacity)
       .mul(mix(float(0.72), float(1), smoothstep(float(0), float(0.3), dens)))
       .mul(float(1).sub(age.mul(0.35)));
-    // THE DITHERED FRINGE: where the smoke is part-covered (the feather, the thin tails) the alpha becomes dots: a pixel is
-    // either smoke or not, with the share of smoke pixels following the coverage (interleaved-gradient noise on a world-anchored
-    // grid, so the screen door stays put while the smoke drifts through it). The solid body and the clear air are untouched.
-    const ditherCell = floor(local.div(max(U.smokeDitherPx, float(1))));
-    const ign = fract(fract(dot(ditherCell, vec2(0.06711056, 0.00583715))).mul(52.9829189));
-    const fringe = smoothstep(float(0.02), float(0.18), sCoverSoft).mul(
-      float(1).sub(smoothstep(float(0.6), float(0.97), sCoverSoft))
-    );
-    const sCover = mix(
-      sCoverSoft,
-      select(sCoverSoft.greaterThan(ign), float(0.9), float(0)),
-      U.smokeDither.mul(fringe)
+    // THE BROKEN FRINGE (v2, 2026-11-03 — the first pass stippled this into a pixel screen door and the author said it looked
+    // like a 16-bit game; dithering here means a painter's scumble, not dots): where the smoke is part-covered, two octaves of
+    // SMOOTH noise thin it in soft patches and streaks, so the feather is a dry-brushed, uneven veil with the floor showing
+    // through in places. Nothing is quantised to a pixel grid; the solid body and the clear air are untouched.
+    const scumble = mx_noise_float(vec3(local.x.mul(0.06), local.y.mul(0.045), tt.mul(0.3).add(17.3)))
+      .mul(0.6)
+      .add(mx_noise_float(vec3(local.x.mul(0.15).add(4.1), local.y.mul(0.11), tt.mul(0.5).add(2.6))).mul(0.4));
+    const fringe = float(1).sub(smoothstep(float(0.5), float(0.95), sCoverSoft));
+    const sCover = sCoverSoft.mul(
+      float(1).sub(
+        U.smokeDither
+          .mul(fringe)
+          .mul(smoothstep(float(-0.25), float(0.55), scumble))
+          .mul(0.85)
+      )
     );
     // how many px inside the silhouette this is: (density above the edge) / (density change per px; the taps are 1.5 texels each side)
     const edgePx = max(S.sub(U.smokeOutline), float(0)).div(max(sGradLen.mul(0.6667), float(0.0005)));

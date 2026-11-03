@@ -182,3 +182,16 @@ export {
 // ONE-TIME RGBA EXPANSION of a one-byte mask grid, cached by array identity, so floor PREPARE can do it off screen and
 // the commit frame gets the bytes for free (loading audit P-06).
 export { expandGridToRgba, getGridRgbaStats } from './grid-rgba.js';
+// Added 2026-11-03 [structure-change]: vt/vt-pan-viewer.js used to import these from the file directly.
+export { computeTileSubPlacement, rectsOverlap, worldToQuadUv } from './world-quad.js';
+// Added 2026-11-03 [structure-change]: vt/vt-pan-viewer.js used to import these from the file directly.
+export {
+  createHoverFadeState,
+  isOccludable,
+  isHoverFadeEligible,
+  testItemHoverAlpha,
+  testVegetationHoverAlpha,
+  testTokenOcclusion,
+  updateHoverFade,
+  HOVER_FADE_CONFIG,
+} from './occlusion.js';

@@ -63,7 +63,7 @@ export const SHAPE_KNOB_DEFAULTS = Object.freeze({
   leafWidth: 1,
   leafVariety: 1,
   saturation: 1,
-  brightness: 1,
+  brightness: 0.9,
   shading: 0.55,
   underside: 1,
   veins: 0.45,
@@ -151,7 +151,14 @@ function segment(TSL, u, v, ax, ay, bx, by, ra, rb) {
   const pay = v.sub(n(ay));
   const bax = n(bx).sub(n(ax));
   const bay = n(by).sub(n(ay));
-  const h = clamp(pax.mul(bax).add(pay.mul(bay)).div(max(bax.mul(bax).add(bay.mul(bay)), 1e-5)), 0, 1);
+  const h = clamp(
+    pax
+      .mul(bax)
+      .add(pay.mul(bay))
+      .div(max(bax.mul(bax).add(bay.mul(bay)), 1e-5)),
+    0,
+    1
+  );
   const dx = pax.sub(bax.mul(h));
   const dy = pay.sub(bay.mul(h));
   const r = mix(n(ra), n(rb), h);
@@ -197,12 +204,27 @@ function palmateLeaf(TSL, u, v, r) {
   let reach = float(0);
   LOBES.forEach(([a, len], k) => {
     const variety = knob(TSL, 'leafVariety');
-    const ang = float(a).add(reroll(TSL, r[k % 4], 2.3 + k).sub(0.5).mul(0.22).mul(variety));
-    const l = float(len).mul(float(1).add(reroll(TSL, r[(k + 1) % 4], 5.1 + k).sub(0.5).mul(0.3).mul(variety)));
+    const ang = float(a).add(
+      reroll(TSL, r[k % 4], 2.3 + k)
+        .sub(0.5)
+        .mul(0.22)
+        .mul(variety)
+    );
+    const l = float(len).mul(
+      float(1).add(
+        reroll(TSL, r[(k + 1) % 4], 5.1 + k)
+          .sub(0.5)
+          .mul(0.3)
+          .mul(variety)
+      )
+    );
     reach = max(reach, l.mul(pow(max(float(1).sub(abs(th.sub(ang)).div(0.42)), 0), 1.25)));
   });
   const tri = abs(fract(th.mul(4.4).add(r[2])).sub(0.5)).mul(2);
-  const teeth = tri.sub(0.5).mul(0.05).mul(select(reach.greaterThan(0.08), float(1), float(0)));
+  const teeth = tri
+    .sub(0.5)
+    .mul(0.05)
+    .mul(select(reach.greaterThan(0.08), float(1), float(0)));
   return rho.sub(float(0.3).add(reach.mul(0.62)).add(teeth)).mul(0.72);
 }
 
@@ -212,7 +234,11 @@ function trifoliateLeaf(TSL, u, v, r) {
   const qc = rotated(TSL, u, v, r[0].sub(0.5).mul(0.2), -0.42, 0);
   let d = leafDistance(TSL, qc.u.sub(0.5).mul(1.9), qc.v.mul(1.9), [r[1], r[2], r[3], r[0]]).div(1.9);
   for (const s of [-1, 1]) {
-    const a = float(s * 1.05).add(reroll(TSL, r[s > 0 ? 1 : 2], 3.3).sub(0.5).mul(0.3));
+    const a = float(s * 1.05).add(
+      reroll(TSL, r[s > 0 ? 1 : 2], 3.3)
+        .sub(0.5)
+        .mul(0.3)
+    );
     const q = rotated(TSL, u, v, a, -0.42, 0);
     d = min(d, leafDistance(TSL, q.u.sub(0.38).mul(2.5), q.v.mul(2.5), [r[2], r[s > 0 ? 3 : 0], r[1], r[3]]).div(2.5));
   }
@@ -233,7 +259,11 @@ function hastateLeaf(TSL, u, v, r) {
   const { min, float } = TSL;
   let d = leafDistance(TSL, u, v.mul(1.7), [0.45, 0.2, r[2], 0.5]).div(1.7);
   for (const s of [-1, 1]) {
-    const a = float(s * 2.3).add(reroll(TSL, r[s > 0 ? 0 : 3], 4.1).sub(0.5).mul(0.3));
+    const a = float(s * 2.3).add(
+      reroll(TSL, r[s > 0 ? 0 : 3], 4.1)
+        .sub(0.5)
+        .mul(0.3)
+    );
     const q = rotated(TSL, u, v, a, -0.48, 0);
     d = min(d, leafDistance(TSL, q.u.sub(0.3).mul(3.0), q.v.mul(3.0), [r[1], 0.3, r[0], 0.5]).div(3.0));
   }
@@ -245,7 +275,9 @@ function serratedLeaf(TSL, u, v, r) {
   const { clamp, fract, float } = TSL;
   const t = clamp(u.add(1).mul(0.5), 0, 1);
   const d = leafDistance(TSL, u, v.mul(0.92), [0.85, 0.6, r[2], r[3]]);
-  const tooth = float(1).sub(fract(t.mul(8).add(r[0]))).mul(0.07);
+  const tooth = float(1)
+    .sub(fract(t.mul(8).add(r[0])))
+    .mul(0.07);
   return d.add(tooth).sub(0.035);
 }
 
@@ -325,7 +357,9 @@ export function twigShape(TSL, u, vIn, rnd = null) {
   const N = 6;
   const L = float(1.85 / N).mul(float(0.88).add(die(0).mul(0.2)));
   const zig = select(die(2).greaterThan(0.5), float(1), float(-1));
-  const R0 = float(TWIG_BASE_R).mul(float(0.85).add(die(3).mul(0.35))).mul(knob(TSL, 'twigThickness'));
+  const R0 = float(TWIG_BASE_R)
+    .mul(float(0.85).add(die(3).mul(0.35)))
+    .mul(knob(TSL, 'twigThickness'));
   const curl = knob(TSL, 'twigCurl');
   const branching = knob(TSL, 'twigBranching');
   const base = [-0.93, 0];
@@ -336,7 +370,14 @@ export function twigShape(TSL, u, vIn, rnd = null) {
   let acc = null;
   const FORKS = { 2: 1, 4: -1 };
   for (let i = 0; i < N; i++) {
-    th = th.add(die(10 + i).sub(0.5).mul(0.5).mul(curl)).add(zig.mul(i % 2 ? 0.17 : -0.17).mul(curl));
+    th = th
+      .add(
+        die(10 + i)
+          .sub(0.5)
+          .mul(0.5)
+          .mul(curl)
+      )
+      .add(zig.mul(i % 2 ? 0.17 : -0.17).mul(curl));
     const nx = x.add(L.mul(cos(th)));
     const ny = y.add(L.mul(sin(th)));
     const radEnd = rad.mul(INTERNODE_TAPER);
@@ -357,7 +398,12 @@ export function twigShape(TSL, u, vIn, rnd = null) {
       const sideLens = [0.8, 0.62, 0.45];
       sideLens.forEach((k, j) => {
         // It curves back toward the parent's heading as it grows, with its own wander.
-        sth = sth.sub(sgn.mul(0.16)).add(die(30 + i * 3 + j).sub(0.5).mul(0.45).mul(curl));
+        sth = sth.sub(sgn.mul(0.16)).add(
+          die(30 + i * 3 + j)
+            .sub(0.5)
+            .mul(0.45)
+            .mul(curl)
+        );
         const ex = sx.add(L.mul(k).mul(branching).mul(cos(sth)));
         const ey = sy.add(L.mul(k).mul(branching).mul(sin(sth)));
         const er = sr.mul(j === sideLens.length - 1 ? 0.35 : 0.72);
@@ -417,8 +463,7 @@ export function shedBody(TSL, p, kind, flipCos, rnd = null) {
       const t = twigShape(TSL, u, p.y, rnd);
       return { d: t.d, rad: t.r, cut: t.cut };
     }
-    const d =
-      knownKind < 0.5 ? leafDistance(TSL, u.mul(1.1), v.mul(1.1), rnd).div(1.1) : clumpDistance(TSL, u, v, rnd);
+    const d = knownKind < 0.5 ? leafDistance(TSL, u.mul(1.1), v.mul(1.1), rnd).div(1.1) : clumpDistance(TSL, u, v, rnd);
     return { d: d.mul(flipCos), rad: float(1), cut: float(0) };
   }
   // A twig is a round stick: turning over does not thin it the way it thins a flat leaf.
@@ -534,7 +579,11 @@ function buildShedLookNow(TSL, { p, aa, kind, flip, rgb: rgbIn, inkW, lightSide,
   const alpha = float(1).sub(smoothstep(aa.negate(), aa, d));
   // The underside: paler and a touch greyer, as a real leaf's is.
   const under = rgb.mul(0.82).add(vec3(0.06, 0.065, 0.045));
-  const base = select(c.greaterThanEqual(0), rgb, select(isTwig, rgb.mul(0.9), mix(rgb, under, knob(TSL, 'underside'))));
+  const base = select(
+    c.greaterThanEqual(0),
+    rgb,
+    select(isTwig, rgb.mul(0.9), mix(rgb, under, knob(TSL, 'underside')))
+  );
   const hi = min(rgb.mul(1.18).add(0.03), vec3(1, 1, 1));
   const shading = knob(TSL, 'shading');
   const litHalf = smoothstep(-0.05, 0.08, v.mul(lightSide)).mul(select(isTwig, shading.mul(0.35 / 0.55), shading));

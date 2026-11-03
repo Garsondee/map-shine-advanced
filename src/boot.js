@@ -34,7 +34,7 @@
 // THE NODE BUILD (docs/planning/Shaders.md). It does NOT export WebGLRenderer —
 // which is why the TSL port was all-or-nothing: one import, and every renderer
 // moves at once. WebGPURenderer picks WebGPU or WebGL2 itself.
-import { unionVisibleFireGrid } from './effects/fire/fire-floor-union.js';
+import { unionVisibleFireGrid } from './effects/index.js';
 import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
@@ -798,7 +798,7 @@ import {
   endSceneLoad,
   getLoadingScreenState,
   resetLoadingSceneMemory,
-} from './ui/loading-screen.js';
+} from './ui/index.js';
 import { buildLoadReport } from './diag/load-report.js';
 import {
   installPainter,
@@ -15089,7 +15089,7 @@ function install() {
   function optionOnScreen(stored, live) {
     if (typeof stored === 'string') return typeof live === 'string' && stored.toLowerCase() === live.toLowerCase();
     if (!Number.isFinite(stored) || !Number.isFinite(live)) return false;
-    const d = Math.abs((((stored - live) % 360) + 540) % 360 - 180);
+    const d = Math.abs(((((stored - live) % 360) + 540) % 360) - 180);
     return d <= 2;
   }
 

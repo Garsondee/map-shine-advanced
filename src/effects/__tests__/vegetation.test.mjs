@@ -145,9 +145,9 @@ export function run(t) {
       VEGETATION_PARAMS.liftGain.category === 'Motion'
   );
   ok(
-    'the shipped default is deliberately UNDERdamped (springDamping < 2*sqrt(springStiffness)) — a gust should ' +
-      "visibly overshoot and counter-sway, matching the author's own ask",
-    VEGETATION_PARAMS.springDamping.default < 2 * Math.sqrt(VEGETATION_PARAMS.springStiffness.default)
+    'the shipped default is deliberately OVERdamped (springDamping >= 2*sqrt(springStiffness)) — her 2026-10-31 live ' +
+      'defaults: a stiff, heavily damped spring that settles without ringing (was underdamped before)',
+    VEGETATION_PARAMS.springDamping.default >= 2 * Math.sqrt(VEGETATION_PARAMS.springStiffness.default)
   );
   ok(
     'springStiffness/springDamping cannot go negative — a negative spring constant is not a softer spring, ' +
@@ -237,7 +237,7 @@ export function run(t) {
       // full account: #499 shrank the wind field's own magnitude ~3x, and
       // #505 removed the seam/sampling tears that had been silently capping
       // how far several of these dials could usefully go).
-      resolved.params.windResponse === 0.5 && resolved.params.swayAmount === 12 && resolved.params.intensity === 1.0
+      resolved.params.windResponse === 0.5 && resolved.params.swayAmount === 13 && resolved.params.intensity === 1.0
     );
     throws(
       'a duplicate vegetation registration throws',

@@ -96,3 +96,15 @@ export { installRemote } from './rooms/remote/shell.js';
 // this stage does and does not cover (player-light is a missing renderer,
 // not a UI gap).
 export { installPlayer } from './rooms/player-shell.js';
+// Added 2026-11-03 [structure-change]: boot.js used to import these from the file directly.
+export {
+  beginSceneLoad,
+  beginSceneLoadPhase,
+  reportSceneLoadProgress,
+  reportSceneLoadBlockers,
+  shouldStopWaitingForReady,
+  pastOrdinaryRevealDeadline,
+  endSceneLoad,
+  getLoadingScreenState,
+  resetLoadingSceneMemory,
+} from './loading-screen.js';

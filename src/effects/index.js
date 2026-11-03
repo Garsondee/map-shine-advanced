@@ -1062,3 +1062,5 @@ export {
 } from './clouds/storybook-clouds.js';
 // RAIN FROM THE CLOUDS (2026-11-03) — the rain field and the deck the fall is born at. See cloud-rain.js's header.
 export { buildStorybookRainFieldNode, cloudRainLinkWeight, virtualRainDeck } from './precipitation/cloud-rain.js';
+// Added 2026-11-03 [structure-change]: boot.js used to import these from the file directly.
+export { unionVisibleFireGrid } from './fire/fire-floor-union.js';

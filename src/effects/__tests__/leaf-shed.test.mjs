@@ -107,31 +107,81 @@ export function run(t) {
     const runtime = readFileSync(new URL('../particles/leaf-shed-runtime.js', here), 'utf8');
     // The author, looking at her rock-and-vegetation art: "a noisy high contrast black outline".
     const ink = /const black = vec3\(([\d.]+), ([\d.]+), ([\d.]+)\)/.exec(shape);
-    ok('⭐ outline: leaves are lined in a deeper shade of their own green, never black', /const deep = max\(vec3\(lum/.test(shape) && /select\(isTwig, brown, deep\)/.test(shape) && !/const black = /.test(shape));
-    ok('⭐ outline: the edge is wobbled by the brush noise on both of its boundaries', /d0\.add\(outerWobble\)/.test(shape) && /d0\.add\(innerWobble\)/.test(shape));
-    ok('shape: every body takes the leaf dice (no two leaves alike)', /leafDistance\(TSL, u\.mul\(1\.1\), v\.mul\(1\.1\), rnd\)/.test(shape) && /clumpDistance\(TSL, u, v, rnd\)/.test(shape));
-    ok('⭐ twigs: outlined in dark brown, not black (the tree line is brown)', /const brown = vec3/.test(shape) && /select\(isTwig, brown, deep\)/.test(shape));
+    ok(
+      '⭐ outline: leaves are lined in a deeper shade of their own green, never black',
+      /const deep = max\(vec3\(lum/.test(shape) &&
+        /select\(isTwig, brown, deep\)/.test(shape) &&
+        !/const black = /.test(shape)
+    );
+    ok(
+      '⭐ outline: the edge is wobbled by the brush noise on both of its boundaries',
+      /d0\.add\(outerWobble\)/.test(shape) && /d0\.add\(innerWobble\)/.test(shape)
+    );
+    ok(
+      'shape: every body takes the leaf dice (no two leaves alike)',
+      /leafDistance\(TSL, u\.mul\(1\.1\), v\.mul\(1\.1\), rnd\)/.test(shape) &&
+        /clumpDistance\(TSL, u, v, rnd\)/.test(shape)
+    );
+    ok(
+      '⭐ twigs: outlined in dark brown, not black (the tree line is brown)',
+      /const brown = vec3/.test(shape) && /select\(isTwig, brown, deep\)/.test(shape)
+    );
     // The author, 2026-10-31: twigs "need about four more designs … more than one design".
-    ok('⭐ twigs are grown: a zig-zag main axis, Leonardo forks (area conserved), shoots curving back', /sqrt\(float\(1\)\.sub\(f\.mul\(f\)\)\)/.test(shape) && /INTERNODE_TAPER/.test(shape) && /zig\.mul/.test(shape));
-    ok('⭐ broad leaves: five real forms (palmate, trifoliate, cordate, hastate, serrated), no prong-and-circle', /BROAD_LEAF_FORMS = 5/.test(shape) && ['palmateLeaf', 'trifoliateLeaf', 'cordateLeaf', 'hastateLeaf', 'serratedLeaf'].every((n) => shape.includes(`function ${n}`)));
-    ok('⭐ outlines keep an interior: a leaf line is capped, a twig line is a share of its local stick radius', /MAX_INK_LEAF/.test(shape) && /body\.rad\.mul\(INK_OF_RADIUS\)/.test(shape));
-    ok('⭐ twigs: freshly broken ends are pale wood from her sheet', /CUT_WOOD = \[226/.test(shape) && /endMask/.test(shape));
-    ok('⭐ twigs taper: every segment narrows along its length and each internode is thinner', /mix\(n\(ra\), n\(rb\), h\)/.test(shape) && /INTERNODE_TAPER = 0\.[5-9]/.test(shape));
+    ok(
+      '⭐ twigs are grown: a zig-zag main axis, Leonardo forks (area conserved), shoots curving back',
+      /sqrt\(float\(1\)\.sub\(f\.mul\(f\)\)\)/.test(shape) && /INTERNODE_TAPER/.test(shape) && /zig\.mul/.test(shape)
+    );
+    ok(
+      '⭐ broad leaves: five real forms (palmate, trifoliate, cordate, hastate, serrated), no prong-and-circle',
+      /BROAD_LEAF_FORMS = 5/.test(shape) &&
+        ['palmateLeaf', 'trifoliateLeaf', 'cordateLeaf', 'hastateLeaf', 'serratedLeaf'].every((n) =>
+          shape.includes(`function ${n}`)
+        )
+    );
+    ok(
+      '⭐ outlines keep an interior: a leaf line is capped, a twig line is a share of its local stick radius',
+      /MAX_INK_LEAF/.test(shape) && /body\.rad\.mul\(INK_OF_RADIUS\)/.test(shape)
+    );
+    ok(
+      '⭐ twigs: freshly broken ends are pale wood from her sheet',
+      /CUT_WOOD = \[226/.test(shape) && /endMask/.test(shape)
+    );
+    ok(
+      '⭐ twigs taper: every segment narrows along its length and each internode is thinner',
+      /mix\(n\(ra\), n\(rb\), h\)/.test(shape) && /INTERNODE_TAPER = 0\.[5-9]/.test(shape)
+    );
     // The author, 2026-10-31: "give me lots of controls so that I can fine tune the appearance".
     {
       const keys = Object.keys(LEAF_SHED_PARAMS);
-      ok('⭐ dials: at least 30 controls, grouped into named sections', keys.length >= 30 && new Set(keys.map((k) => LEAF_SHED_PARAMS[k].category)).size >= 6);
-      const knobKeys = [...shape.matchAll(/^  (\w+): [\d.]+,$/gm)].map((m) => m[1]);
-      ok('⭐ dials: every shape knob is a Studio param with the same default (so the look is unchanged until moved)',
-        knobKeys.length >= 12 && knobKeys.every((k) => LEAF_SHED_PARAMS[k] && new RegExp(`  ${k}: ${LEAF_SHED_PARAMS[k].default},`).test(shape)));
-      ok('dials: the runtime turns every shape knob into a uniform and sets it from the params', /\.\.\.Object\.entries\(SHAPE_KNOB_DEFAULTS\)/.test(runtime) && /for \(const \[k, u\] of Object\.entries\(uKnobs\)\)/.test(runtime));
-      ok('dials: fall speed, spin and ground grip reach the kernel', /\.mul\(uFall\)/.test(runtime) && /\.mul\(uSpin\)/.test(runtime) && /\.div\(uGrip\)/.test(runtime));
+      ok(
+        '⭐ dials: at least 30 controls, grouped into named sections',
+        keys.length >= 30 && new Set(keys.map((k) => LEAF_SHED_PARAMS[k].category)).size >= 6
+      );
+      const knobKeys = [...shape.matchAll(/^ {2}(\w+): [\d.]+,$/gm)].map((m) => m[1]);
+      ok(
+        '⭐ dials: every shape knob is a Studio param with the same default (so the look is unchanged until moved)',
+        knobKeys.length >= 12 &&
+          knobKeys.every(
+            (k) => LEAF_SHED_PARAMS[k] && new RegExp(`  ${k}: ${LEAF_SHED_PARAMS[k].default},`).test(shape)
+          )
+      );
+      ok(
+        'dials: the runtime turns every shape knob into a uniform and sets it from the params',
+        /\.\.\.Object\.entries\(SHAPE_KNOB_DEFAULTS\)/.test(runtime) &&
+          /for \(const \[k, u\] of Object\.entries\(uKnobs\)\)/.test(runtime)
+      );
+      ok(
+        'dials: fall speed, spin and ground grip reach the kernel',
+        /\.mul\(uFall\)/.test(runtime) && /\.mul\(uSpin\)/.test(runtime) && /\.div\(uGrip\)/.test(runtime)
+      );
       ok('card: titled "Falling Leaves & Twigs"', LEAF_SHED.title === 'Falling Leaves & Twigs');
       // Caught in the real Studio 2026-10-31: an unknown category is silently filed under Technical.
       const order = readFileSync(new URL('../../ui/widgets/param-groups.js', new URL('.', import.meta.url)), 'utf8');
       const cats = [...new Set(Object.values(LEAF_SHED_PARAMS).map((d) => d.category))];
-      ok('⭐ card: every section this card declares is one the Studio draws (none silently swept into Technical)',
-        cats.every((c) => order.includes(`'${c}',`)));
+      ok(
+        '⭐ card: every section this card declares is one the Studio draws (none silently swept into Technical)',
+        cats.every((c) => order.includes(`'${c}',`))
+      );
     }
     const tbl = (name) => {
       const m = new RegExp(String.raw`const ${name} = \[([^\]]+)\]`).exec(runtime);
@@ -141,21 +191,43 @@ export function run(t) {
     const tau = tbl('KIND_GROUND_TAU_SEC');
     const mob = tbl('KIND_GROUND_MOBILITY');
     const stick = tbl('KIND_GROUND_STICK_MPS');
-    ok('⭐ ground: a twig is grippier than a clump, a clump than a leaf (keeps less, stops sooner, moves less, needs a harder gust)',
+    ok(
+      '⭐ ground: a twig is grippier than a clump, a clump than a leaf (keeps less, stops sooner, moves less, needs a harder gust)',
       !!(keep && tau && mob && stick) &&
-        keep[2] < keep[1] && keep[1] < keep[0] && tau[2] < tau[1] && tau[1] < tau[0] &&
-        mob[2] < mob[1] && mob[1] < mob[0] && stick[2] > stick[1] && stick[1] > stick[0]);
+        keep[2] < keep[1] &&
+        keep[1] < keep[0] &&
+        tau[2] < tau[1] &&
+        tau[1] < tau[0] &&
+        mob[2] < mob[1] &&
+        mob[1] < mob[0] &&
+        stick[2] > stick[1] &&
+        stick[1] > stick[0]
+    );
     ok('⭐ ground: a twig stops at the moment it lands (keeps under 5% of its flight speed)', !!keep && keep[2] < 0.05);
-    ok('outdoors: the kernel steers round the mask and the draw hides what is inside it',
-      /wallSense\(pos, headingRaw/.test(runtime) && /outdoorsGate/.test(runtime) && /outdoorsAt\(pos\)\.greaterThan\(0\.5\)/.test(runtime));
+    ok(
+      'outdoors: the kernel steers round the mask and the draw hides what is inside it',
+      /wallSense\(pos, headingRaw/.test(runtime) &&
+        /outdoorsGate/.test(runtime) &&
+        /outdoorsAt\(pos\)\.greaterThan\(0\.5\)/.test(runtime)
+    );
   }
 
   // ── which leaves drop, the design pictures, storm lofting (2026-10-31) ─────────────────────────────
   {
     const all = resolveLeafShedParams({});
     const designs = SHED_DESIGNS.map((d) => d.param);
-    ok('⭐ pick: every design has a drop toggle, on by default', designs.every((k) => LEAF_SHED_PARAMS[k]?.type === 'bool' && all[k] === true));
-    ok('pick: resolve keeps a false toggle false (never coerced to a number)', resolveLeafShedParams({ dropTwig: false }).dropTwig === false);
+    ok(
+      '⭐ pick: every design has a drop toggle; leaf, trifoliate and twig are on by default (her 2026-10-31 choice)',
+      designs.every((k) => LEAF_SHED_PARAMS[k]?.type === 'bool') &&
+        designs
+          .filter((k) => all[k] === true)
+          .sort()
+          .join() === 'dropLeaf,dropTrifoliate,dropTwig'
+    );
+    ok(
+      'pick: resolve keeps a false toggle false (never coerced to a number)',
+      resolveLeafShedParams({ dropTwig: false }).dropTwig === false
+    );
     const rolls = (canopy, p) => {
       const n = { 0: 0, 1: 0, 2: 0, none: 0 };
       for (let i = 0; i < 200; i++) {
@@ -165,7 +237,10 @@ export function run(t) {
       return n;
     };
     const base = rolls('tree', all);
-    ok('pick: by default a tree sheds all three kinds in the dialled shares', base[2] === 20 && base[1] === 24 && base[0] === 156);
+    ok(
+      'pick: by default a tree sheds all three kinds in the dialled shares',
+      base[2] === 24 && base[1] === 56 && base[0] === 120
+    );
     const noTwig = rolls('tree', { ...all, dropTwig: false });
     ok('⭐ pick: twigs off → no twig ever', noTwig[2] === 0 && noTwig[0] + noTwig[1] === 200);
     const broadOnly = rolls('tree', { ...all, dropLeaf: false, dropTwig: false });
@@ -183,26 +258,69 @@ export function run(t) {
       return n;
     };
     const pics = Object.fromEntries(SHED_DESIGNS.map((d) => [d.id, renderShedPreview(d.id, {}, 32)]));
-    ok('⭐ pictures: every design draws something', SHED_DESIGNS.every((d) => cover(pics[d.id]) > 15));
+    ok(
+      '⭐ pictures: every design draws something',
+      SHED_DESIGNS.every((d) => cover(pics[d.id]) > 15)
+    );
     const sigs = new Set(SHED_DESIGNS.map((d) => Array.from(pics[d.id].filter((_, i) => i % 4 === 3)).join(',')));
     ok('pictures: the seven designs are seven different shapes', sigs.size === SHED_DESIGNS.length);
-    ok('⭐ pictures follow the sliders: a wider leaf covers more', cover(renderShedPreview('leaf', { leafWidth: 1.6 }, 32)) > cover(pics.leaf) * 1.2);
-    ok('pictures follow the sliders: a thicker twig covers more', cover(renderShedPreview('twig', { twigThickness: 2.5 }, 32)) > cover(pics.twig) * 1.5);
+    ok(
+      '⭐ pictures follow the sliders: a wider leaf covers more',
+      cover(renderShedPreview('leaf', { leafWidth: 1.6 }, 32)) > cover(pics.leaf) * 1.2
+    );
+    ok(
+      'pictures follow the sliders: a thicker twig covers more',
+      cover(renderShedPreview('twig', { twigThickness: 2.5 }, 32)) > cover(pics.twig) * 1.5
+    );
     const shim = readFileSync(new URL('../leaf-shed-shim.js', new URL('.', import.meta.url)), 'utf8');
-    ok('pictures: drawn by the shader builders themselves, not a copy', /from '\.\/leaf-shed-shape\.js'/.test(readFileSync(new URL('../leaf-shed-preview.js', new URL('.', import.meta.url)), 'utf8')) && /isScalarShim: true/.test(shim));
+    ok(
+      'pictures: drawn by the shader builders themselves, not a copy',
+      /from '\.\/leaf-shed-shape\.js'/.test(
+        readFileSync(new URL('../leaf-shed-preview.js', new URL('.', import.meta.url)), 'utf8')
+      ) && /isScalarShim: true/.test(shim)
+    );
 
     const rt = readFileSync(new URL('../particles/leaf-shed-runtime.js', new URL('.', import.meta.url)), 'utf8');
-    ok('⭐ lofting: dials exist, starting at half the wind dial (35 m/s) by default', LEAF_SHED_PARAMS.loft?.default > 0 && LEAF_SHED_PARAMS.loftStartsAboveMps?.default === 35);
-    ok('⭐ lofting: above a tree\'s height a leaf is drawn over the canopies (the depth gate yields) but never over the _Outdoors black', /max\(occlusionGate\(/.test(rt) && /mul\(outdoorsGate\)/.test(rt) && !/max\(outdoorsGate, vAbove\)/.test(rt));
+    ok(
+      '⭐ lofting: dials exist, starting at half the wind dial (35 m/s) by default',
+      LEAF_SHED_PARAMS.loft?.default > 0 && LEAF_SHED_PARAMS.loftStartsAboveMps?.default === 35
+    );
+    ok(
+      "⭐ lofting: above a tree's height a leaf is drawn over the canopies (the depth gate yields) but never over the _Outdoors black",
+      /max\(occlusionGate\(/.test(rt) && /mul\(outdoorsGate\)/.test(rt) && !/max\(outdoorsGate, vAbove\)/.test(rt)
+    );
     // THE WALL IS A WALL (2026-11-03): the position step itself is vetoed by the mask, at every height.
-    ok('⭐ walls: the step is swept through the mask and can never end indoors, at any height', /const step = guardedStep\(pos, move\.mul\(dt\)\)/.test(rt) && /const next = step\.next/.test(rt) && /SWEEP_N = 6/.test(rt) && /0\.9 \* SWEEP_N/.test(rt));
+    ok(
+      '⭐ walls: the step is swept through the mask and can never end indoors, at any height',
+      /const step = guardedStep\(pos, move\.mul\(dt\)\)/.test(rt) &&
+        /const next = step\.next/.test(rt) &&
+        /SWEEP_N = 6/.test(rt) &&
+        /0\.9 \* SWEEP_N/.test(rt)
+    );
     ok('walls: no roof exemption is left in the steering', !/overRoofs/.test(rt));
-    ok('walls: a body already in the black ends (the floor\'s mask changed under it)', /select\(out\.or\(shut\), a, lf1\)/.test(rt) && /const shut = outdoorsAt\(pos\)\.lessThan\(0\.5\)/.test(rt));
-    ok('walls: the velocity that hit is zeroed, so landed leaves pile along the wall', /select\(step\.hitX, float\(0\), v1\.x\)/.test(rt) && /select\(step\.hitY, float\(0\), v1\.y\)/.test(rt));
-    ok('walls: the outward nudge is for airborne bodies only, so a landed one can lie against the wall', /pixelsPerMetreNode\.mul\(0\.35\)\.mul\(pushOut\)/.test(rt));
-    ok('lofting: the lift stops after LOFT_SEC, so everything comes down', /LOFT_SEC = \d+/.test(rt) && /smoothstep\(LOFT_SEC - 2, LOFT_SEC, a\)/.test(rt));
+    ok(
+      "walls: a body already in the black ends (the floor's mask changed under it)",
+      /select\(out\.or\(shut\), a, lf1\)/.test(rt) && /const shut = outdoorsAt\(pos\)\.lessThan\(0\.5\)/.test(rt)
+    );
+    ok(
+      'walls: the velocity that hit is zeroed, so landed leaves pile along the wall',
+      /select\(step\.hitX, float\(0\), v1\.x\)/.test(rt) && /select\(step\.hitY, float\(0\), v1\.y\)/.test(rt)
+    );
+    ok(
+      'walls: the outward nudge is for airborne bodies only, so a landed one can lie against the wall',
+      /pixelsPerMetreNode\.mul\(0\.35\)\.mul\(pushOut\)/.test(rt)
+    );
+    ok(
+      'lofting: the lift stops after LOFT_SEC, so everything comes down',
+      /LOFT_SEC = \d+/.test(rt) && /smoothstep\(LOFT_SEC - 2, LOFT_SEC, a\)/.test(rt)
+    );
     ok('lofting: a lull never snaps a lofted leaf down (the ceiling is never below it)', /max\(rise, c\.x\)/.test(rt));
-    ok('pick: the broad-leaf forms follow their toggles in the shader', /BROAD_FORM_KNOBS\.forEach\(\(k, i\) => \(uKnobs\[k\]\.value = p\[BROAD_FORM_PARAMS\[i\]\] === false \? 0 : 1\)\)/.test(rt));
+    ok(
+      'pick: the broad-leaf forms follow their toggles in the shader',
+      /BROAD_FORM_KNOBS\.forEach\(\(k, i\) => \(uKnobs\[k\]\.value = p\[BROAD_FORM_PARAMS\[i\]\] === false \? 0 : 1\)\)/.test(
+        rt
+      )
+    );
   }
 
   // ── the birth record ───────────────────────────────────────────────────
@@ -278,7 +396,10 @@ export function run(t) {
       darkest = Math.min(darkest, lum([a.pool[p * 5 + 2], a.pool[p * 5 + 3], a.pool[p * 5 + 4]]));
     ok('colour match: outline texels are lifted to the fill (no black leaves)', darkest >= lum(a.fill) - 1);
   }
-  ok('⭐ twigs: always the wood-sheet bark colour, whatever the branches measure', a.twig.join() === DEFAULT_TWIG_SRGB.join() && b.twig.join() === DEFAULT_TWIG_SRGB.join());
+  ok(
+    '⭐ twigs: always the wood-sheet bark colour, whatever the branches measure',
+    a.twig.join() === DEFAULT_TWIG_SRGB.join() && b.twig.join() === DEFAULT_TWIG_SRGB.join()
+  );
   ok(
     'canopies: an empty raster is no emitters',
     buildCanopyEmitters({ spec: r1.spec, rgba: new Uint8Array(r1.rgba.length) }, 'tree').length === 0
@@ -479,7 +600,10 @@ export function run(t) {
   // ── 2026-10-31: leaves swerve where the trees swerve (they share the canopies' gust wander) ───────────
   {
     const d = LEAF_SHED_PARAMS.followTrees;
-    ok('followTrees: a Motion dial, 0..1, on by default', d && d.category === 'Motion' && d.min === 0 && d.max === 1 && d.default === 1);
+    ok(
+      'followTrees: a Motion dial, 0..1, on by default',
+      d && d.category === 'Motion' && d.min === 0 && d.max === 1 && d.default === 1
+    );
     ok('resolve: followTrees clamps to the schema', resolveLeafShedParams({ followTrees: 9 }).followTrees === 1);
     const here = new URL('.', import.meta.url);
     const runtime = readFileSync(new URL('../particles/leaf-shed-runtime.js', here), 'utf8');
@@ -488,16 +612,22 @@ export function run(t) {
     const num = (src, re) => Number(re.exec(src)?.[1]);
     // The leaves copy the trees' constants; if the canopies' wander is retuned, a leaf must not silently stop agreeing.
     ok(
-      '⭐ followTrees: the leaf wander uses the trees\' space frequency',
+      "⭐ followTrees: the leaf wander uses the trees' space frequency",
       num(runtime, /TREE_GUST_SPACE_FREQ = ([\d.]+)/) === num(viewer, /VEG_GUST_WANDER_SPACE_FREQ = ([\d.]+)/)
     );
     ok(
-      '⭐ followTrees: the leaf wander uses the trees\' churn rate',
+      "⭐ followTrees: the leaf wander uses the trees' churn rate",
       num(runtime, /TREE_GUST_RATE = ([\d.]+)/) === num(viewer, /VEG_GUST_WANDER_RATE = ([\d.]+)/)
     );
     const treeKind = /label: 'Tree canopy'[\s\S]*?gustPhase:\s*(-?\d+)/.exec(veg);
-    ok('⭐ followTrees: the leaf wander uses the tree kind\'s gust phase', treeKind && num(runtime, /TREE_GUST_PHASE = (-?\d+)/) === Number(treeKind[1]));
-    ok('followTrees: scaled by the field\'s own speed, so dead calm stays calm', /wander\.mul\(uTreeGust\)\.mul\(uFollow\)\.mul\(field\.length\(\)\)/.test(runtime));
+    ok(
+      "⭐ followTrees: the leaf wander uses the tree kind's gust phase",
+      treeKind && num(runtime, /TREE_GUST_PHASE = (-?\d+)/) === Number(treeKind[1])
+    );
+    ok(
+      "followTrees: scaled by the field's own speed, so dead calm stays calm",
+      /wander\.mul\(uTreeGust\)\.mul\(uFollow\)\.mul\(field\.length\(\)\)/.test(runtime)
+    );
     const sub = readFileSync(new URL('../leaf-shed-subsystem.js', here), 'utf8');
     const boot = readFileSync(new URL('../../boot.js', here), 'utf8');
     ok('followTrees: the random jink gives way to it', /float\(1\)\.sub\(uFollow\.mul\(0\.75\)\)/.test(runtime));
@@ -510,15 +640,24 @@ export function run(t) {
         !/w\.coherent\.mul\(w\.openness\)/.test(runtime) &&
         /baked: lagFraction === 0 \? 'now'/.test(viewer)
     );
-    ok('same wind texture: no bake yet means the analytic field, as for the trees', /if \(!fieldGrid\) return windHandle\.node\(TSL, \{ centerXY: pos, time: uTimeMs \}\)/.test(runtime));
-    ok('same wind texture: a re-allocated texture is rebound in place, never a stale binding', /for \(const n of fieldTexNodes\) n\.value = fieldTexture/.test(runtime));
+    ok(
+      'same wind texture: no bake yet means the analytic field, as for the trees',
+      /if \(!fieldGrid\) return windHandle\.node\(TSL, \{ centerXY: pos, time: uTimeMs \}\)/.test(runtime)
+    );
+    ok(
+      'same wind texture: a re-allocated texture is rebound in place, never a stale binding',
+      /for \(const n of fieldTexNodes\) n\.value = fieldTexture/.test(runtime)
+    );
     ok(
       '⭐ clump turn: the leaf uses the tree clump hash, salt and cell size',
-      /dot\(cell, vec2\(float\(127\.1\), float\(311\.7\)\)\)\.add\(float\(salt\)\)\)\.mul\(float\(43758\.5453\)\)/.test(viewer) &&
+      /dot\(cell, vec2\(float\(127\.1\), float\(311\.7\)\)\)\.add\(float\(salt\)\)\)\.mul\(float\(43758\.5453\)\)/.test(
+        viewer
+      ) &&
         /dot\(cell, vec2\(127\.1, 311\.7\)\)\.add\(float\(salt\)\)\)\.mul\(43758\.5453\)/.test(runtime) &&
         /blendedClumpHash\(91\.3 \+ hashSalt\)/.test(viewer) &&
         num(runtime, /TREE_CLUMP_DIR_SALT = ([\d.]+)/) === 91.3 &&
-        num(runtime, /TREE_CLUMP_SIZE_MUL = ([\d.]+)/) === num(veg, /label: 'Tree canopy'[\s\S]*?clumpSizeMultiplier: ([\d.]+)/) &&
+        num(runtime, /TREE_CLUMP_SIZE_MUL = ([\d.]+)/) ===
+          num(veg, /label: 'Tree canopy'[\s\S]*?clumpSizeMultiplier: ([\d.]+)/) &&
         /label: 'Tree canopy'[\s\S]*?clumpHashSalt: 0,/.test(veg)
     );
     ok(
@@ -528,6 +667,10 @@ export function run(t) {
         /clumpSizePx: Number\(veg\?\.clumpSizePx\)/.test(boot) &&
         /clumpDirSpread: Number\.isFinite\(Number\(veg\?\.clumpDirSpread\)\)/.test(boot)
     );
-    ok('followTrees: the Vegetation card\'s Gust turbulence reaches the engine', /treeGustTurbulence: state\.gustTurbulence/.test(sub) && /gustTurbulence: Number\.isFinite\(Number\(veg\?\.gustTurbulence\)\)/.test(boot));
+    ok(
+      "followTrees: the Vegetation card's Gust turbulence reaches the engine",
+      /treeGustTurbulence: state\.gustTurbulence/.test(sub) &&
+        /gustTurbulence: Number\.isFinite\(Number\(veg\?\.gustTurbulence\)\)/.test(boot)
+    );
   }
 }

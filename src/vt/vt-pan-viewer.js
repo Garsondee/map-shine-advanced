@@ -251,7 +251,7 @@ import {
   computeTileSubPlacement,
   rectsOverlap,
   worldToQuadUv,
-} from '../scene/world-quad.js';
+} from '../scene/index.js';
 import {
   computeQuadCorners,
   computeQuadBounds,
@@ -365,7 +365,7 @@ import {
   testTokenOcclusion,
   updateHoverFade,
   HOVER_FADE_CONFIG,
-} from '../scene/occlusion.js';
+} from '../scene/index.js';
 
 import {
   buildEnvSnapshot,
@@ -4636,7 +4636,12 @@ async function startVtPanViewerUnserialized({
       if (linkWeight > 0 && precip01 > 0) {
         const mx = (spawnRect.maxX - spawnRect.minX) * CLOUD_RAIN_FIELD_PAD;
         const my = (spawnRect.maxY - spawnRect.minY) * CLOUD_RAIN_FIELD_PAD;
-        rect = { minX: spawnRect.minX - mx, minY: spawnRect.minY - my, maxX: spawnRect.maxX + mx, maxY: spawnRect.maxY + my };
+        rect = {
+          minX: spawnRect.minX - mx,
+          minY: spawnRect.minY - my,
+          maxX: spawnRect.maxX + mx,
+          maxY: spawnRect.maxY + my,
+        };
         uCloudRainRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
         const prevTarget = renderer.getRenderTarget();
         renderer.setRenderTarget(cloudRainRT);
@@ -4845,7 +4850,10 @@ async function startVtPanViewerUnserialized({
     const parallaxLightRig = {
       eye: { x: 0, y: 0 },
       scaleOf(light) {
-        const hit = resolveElevationFloorIndex(parallaxLightFloors, Number.isFinite(light?.elevation) ? light.elevation : 0);
+        const hit = resolveElevationFloorIndex(
+          parallaxLightFloors,
+          Number.isFinite(light?.elevation) ? light.elevation : 0
+        );
         return hit ? parallaxSubsystem.floorScale(hit.index) : 1;
       },
     };
@@ -9054,7 +9062,8 @@ async function startVtPanViewerUnserialized({
       if (temperatureNoisePrebuildStarted || temperatureNoiseTexture) return;
       temperatureNoisePrebuildStarted = true;
       try {
-        if (typeof Worker !== 'function' || globalThis.localStorage?.getItem('msa.temperatureNoiseWorker') === '0') return;
+        if (typeof Worker !== 'function' || globalThis.localStorage?.getItem('msa.temperatureNoiseWorker') === '0')
+          return;
         const worker = new Worker(new URL('../effects/temperature/temperature-noise.worker.js', import.meta.url), {
           type: 'module',
         });
@@ -30963,7 +30972,10 @@ async function startVtPanViewerUnserialized({
           // instruments-must-not-lie bar as the sky block above.
           grade: {
             envStrength: gradeEnvStrength,
-            envResolved: scaleGradeToIdentity(resolveEnvGrade(lastEnvSnapshot.env), gradeEnvStrength * ATMOS_GRADE_SCALE),
+            envResolved: scaleGradeToIdentity(
+              resolveEnvGrade(lastEnvSnapshot.env),
+              gradeEnvStrength * ATMOS_GRADE_SCALE
+            ),
             // The artistic (Look) grade effect: on/off + its tone-map curve, so
             // "is a film response active" is answerable from the report.
             artEnabled: getGradeLookState()?.enabled === true,

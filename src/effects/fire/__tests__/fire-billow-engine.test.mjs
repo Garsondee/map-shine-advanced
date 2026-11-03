@@ -529,7 +529,8 @@ export function run(t) {
       }
     }
     t.ok('and the box encloses the centre of every flame, coal and smoke lobe', inside);
-    t.ok('the box is a sane size (not the whole map)', bw > 40 && bw < 900 && bh > 40 && bh < 900);
+    // (the smoke column is long on purpose now: a 90 px fire's column stands several hundred px up, so the box is tall, not the map)
+    t.ok('the box is a sane size (not the whole map)', bw > 40 && bw < 1100 && bh > 40 && bh < 1400);
 
     // the clusters are only replanned when the paint, the fires or the scale change
     const r1 = engine.update(base);
@@ -771,7 +772,7 @@ export function run(t) {
     {
       const eighty = [];
       const ePts = [];
-      for (let i = 0; i < 18; i++) {
+      for (let i = 0; i < 16; i++) {
         const x = 150 + (i % 6) * 220;
         const y = 150 + Math.floor(i / 6) * 220;
         eighty.push({ id: `q${i}`, x, y, diameterPx: 80 });
@@ -807,6 +808,8 @@ export function run(t) {
       ctxOf({
         fires: bigFires,
         cloud: makeCloud(bigPts),
+        // (short smoke: this is about folding boxes, and a long column would make neighbouring boxes overlap and merge)
+        params: { ...defaults, windResponse: 1, weatherResponse: 1, rainResponse: 1, smokeHeight: 0.1 },
         ctx: { rect: { minX: 0, minY: 0, maxX: 4400, maxY: 4000 } },
       })
     );
@@ -1002,6 +1005,8 @@ export function run(t) {
         ctxOf({
           fires,
           cloud: makeCloud(pts),
+          // (short smoke, so a long column does not overlap its neighbour's box and merge the two)
+          params: { ...defaults, windResponse: 1, weatherResponse: 1, rainResponse: 1, smokeHeight: 0.1 },
           ctx: { pxPerWorld: 1.5, bloom: bloomOn, rect: { minX: 0, minY: 0, maxX: 4400, maxY: 3600 } },
         })
       );

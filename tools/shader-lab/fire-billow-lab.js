@@ -234,6 +234,8 @@ async function main() {
       tSec: S.t,
       camX: (rect.minX + rect.maxX) / 2,
       camY: (rect.minY + rect.maxY) / 2,
+      // the engine's camera: 2.2 scene eyes over a view this tall (45 degree field of view), so the smoke's perspective matches Foundry's
+      cameraHeight: S.cameraHeight ?? Math.max(400, ((rect.maxY - rect.minY) / 2 / Math.tan(Math.PI / 8)) * 2.2),
       parallax: S.parallax,
       tilt: S.tilt,
       projection: S.view,

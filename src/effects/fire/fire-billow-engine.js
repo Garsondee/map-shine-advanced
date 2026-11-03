@@ -674,7 +674,8 @@ export function createBillowEngine({
       const spreadSec = clamp(Number(params?.spreadSec) || 0, 0, 3600);
       const margin = 24;
       const inView = (c) => {
-        const reach = c.radius * 7 + margin;
+        // (v3: plus the smoke column's own climb, which swells toward the camera: a fire just off screen still smokes into it)
+        const reach = c.radius * 7 + margin + Math.sqrt(Math.max(c.radius, 1) * 50) * br.tune.smokeRise;
         return !(
           c.x + reach < rect.minX ||
           c.x - reach > rect.maxX ||
@@ -863,10 +864,15 @@ export function createBillowEngine({
         let minY = Infinity;
         let maxX = -Infinity;
         let maxY = -Infinity;
-        const grow = (buf, from, to) => {
+        // (v3: an old smoke billow is wide and faint (its smoke is shared out over a lot of air), and its soft bump is invisible
+        // out toward the rim: the box takes the radius where it still draws, not the radius of its quad, or one tall column would
+        // have the contour shader run over a screen-sized box of nothing)
+        const grow = (buf, from, to, smoke = false) => {
           for (let i = from; i < to; i++) {
             const o = i * LOBE_STRIDE;
-            const r = buf[o + 2] * Math.max(buf[o + 5], buf[o + 10], 1);
+            let r = buf[o + 2] * Math.max(buf[o + 5], buf[o + 10], 1);
+            if (smoke)
+              r *= Math.min(1, 0.15 + Math.sqrt(Math.max(0, 1 - Math.sqrt(0.04 / Math.max(buf[o + 3], 1e-4)))));
             if (buf[o] - r < minX) minX = buf[o] - r;
             if (buf[o] + r > maxX) maxX = buf[o] + r;
             if (buf[o + 1] - r < minY) minY = buf[o + 1] - r;
@@ -874,7 +880,7 @@ export function createBillowEngine({
           }
         };
         grow(renderer.flameLobes, f0, nf);
-        grow(renderer.smokeLobes, s0, ns);
+        grow(renderer.smokeLobes, s0, ns, true);
         if (maxX > minX) {
           const sc = billowSmokeScale(pxPerWorld, c.radius);
           const bm = margin + sc.shadowOffWorld;

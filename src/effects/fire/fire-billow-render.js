@@ -104,12 +104,13 @@ export const BILLOW_LOOK = Object.freeze({
   coalCrack: 0.6,
   /** Smoke: the density level of its silhouette, its edge softness, how solid it is, and the soot a fuel adds. */
   smokeOutline: 0.42,
-  smokeSoft: 0.5,
+  /** (v3) Opacity is 1 - e^(-smokeVeil × density): how quickly thickening smoke turns solid (it replaced the cut-out edge). */
+  smokeVeil: 2.4,
   smokeOpacity: 0.94,
   smokeSoot: 0.0,
   /** The darkened rim round the cloud (px wide, 0 = none) and how dark it is (0..1): the pigment pooling at a painted edge. */
   smokeLinePx: 2.4,
-  smokeLineA: 0.15,
+  smokeLineA: 0, // (v3: 0.15 -> 0, a line round a veil is the hard edge the author does not want)
   /** The soft ground shadow under the smoke (0..1 darkening). Its offset and the crescents' width follow the billows' size per box. */
   smokeShadow: 0.26,
   /** How steeply the cloud's overall shape tilts its shading (the shaded and lit crescents). */
@@ -209,6 +210,7 @@ export function createBillowRenderer({
     normalize,
     length,
     sin,
+    exp,
     select,
     mx_noise_float,
     screenUV,
@@ -280,7 +282,7 @@ export function createBillowRenderer({
     coalCell: num('coalCell'),
     coalCrack: num('coalCrack'),
     smokeOutline: num('smokeOutline'),
-    smokeSoft: num('smokeSoft'),
+    smokeVeil: num('smokeVeil'),
     smokeOpacity: num('smokeOpacity'),
     smokeSoot: num('smokeSoot'),
     smokeLinePx: num('smokeLinePx'),
@@ -370,7 +372,10 @@ export function createBillowRenderer({
     // a big billow (a burning building's column) is more of a soft hill than a flat disc: its flanks are what the contour shades,
     // and a flat top over a whole roof's width is a featureless potato. Billows up to ~120 world px keep the crisp scalloped edge;
     // by ~240 they are 40% less crisp.
-    const crisp = U.smokeCrisp.mul(float(1).sub(smoothstep(float(120), float(240), vRad).mul(0.6)));
+    // (v3: and an OLD billow is a soft bump whatever its size: it is spreading into the air, there is no edge left to it)
+    const crisp = U.smokeCrisp
+      .mul(float(1).sub(smoothstep(float(120), float(240), vRad).mul(0.6)))
+      .mul(float(1).sub(smoothstep(float(0.25), float(0.7), vData.w)));
     const k = mix(k0.mul(k0), kPlat, crisp);
     const w = vData.x.mul(k);
     // B carries the STEAM weight (a doused fire's smoke is wet: whiter, denser)
@@ -638,24 +643,18 @@ export function createBillowRenderer({
     const sootL = clamp(bSig.negate(), float(0), float(1));
     const sGrad = vec2(sR.x.sub(sL.x), sD2.x.sub(sU.x)).mul(0.5);
     const sGradLen = length(sGrad);
-    // the painted plumes thin out and feather as they age: the top of a column dissolves into the air instead of ending at a hard edge
+    // the painted plumes thin out as they age: the top of a column goes greyer and more see-through
     const age = smoothstep(float(0.5), float(1.0), toneS);
-    const sAA = clamp(sGradLen, float(0.02), float(0.5))
-      .add(U.smokeSoft)
-      .add(age.mul(0.22))
-      .add(U.smokeDither.mul(0.25));
-    // (v2: the feather's foot is kept ABOVE zero and the cover is gated on there being any smoke at all. With the softness at
-    // its maximum the foot went below zero, so empty air drew a pale veil that stopped dead at the edge of the contour box: a
-    // hard-rimmed halo round every plume.)
-    const sCover0 = smoothstep(max(U.smokeOutline.sub(sAA), float(0.04)), U.smokeOutline.add(sAA), S).mul(
-      smoothstep(float(0.01), float(0.12), S0)
-    );
-    const dens = clamp(S.sub(U.smokeOutline).div(1.6), float(0), float(1));
-    // a thin rim or tail is see-through, the body is solid
-    const sCoverSoft = sCover0
-      .mul(U.smokeOpacity)
-      .mul(mix(float(0.72), float(1), smoothstep(float(0), float(0.3), dens)))
-      .mul(float(1).sub(age.mul(0.35)));
+    // THE VEIL (v3, 2026-11-03 — author: "the smoke disappears in units instead of fading out and spreading out / becoming
+    // diffuse"). The smoke used to be CUT from the field at a density level, so a dying billow kept a hard edge until its
+    // density sank through the cut and the whole puff blinked out. Now opacity simply follows density, like real smoke
+    // (1 - e^-kρ): thick at the core, a veil where it is thin, and nothing where there is none. A billow that spreads as it dies
+    // (the geometry does that) fades away into the air. The grain is a brush's loading of the veil (thicker here, thinner
+    // there), proportional to the density, so it never paints blotches into clear air.
+    const load = clamp(float(1).add(grain.mul(U.smokeGrain).mul(1.2)), float(0.15), float(2));
+    const sCover0 = float(1).sub(exp(max(S0.mul(load).sub(0.05), float(0)).mul(U.smokeVeil).negate()));
+    const dens = clamp(S0.sub(0.3).div(1.6), float(0), float(1));
+    const sCoverSoft = sCover0.mul(U.smokeOpacity).mul(float(1).sub(age.mul(0.3)));
     // THE BROKEN FRINGE (v2, 2026-11-03 — the first pass stippled this into a pixel screen door and the author said it looked
     // like a 16-bit game; dithering here means a painter's scumble, not dots): where the smoke is part-covered, two octaves of
     // SMOOTH noise thin it in soft patches and streaks, so the feather is a dry-brushed, uneven veil with the floor showing
@@ -732,7 +731,9 @@ export function createBillowRenderer({
     // own shadow room (`vLook.y`), and as dark as every other shadow relative to clear noon
     const shLen = vLook.y.mul(U.sunShadow.z);
     const shOff = vec2(shLen.mul(U.sunShadow.x), dirY(shLen.mul(U.sunShadow.y))).div(U.rectSize);
-    const shadowA = smoothstep(float(0.1), float(0.55), smokeNode.sample(p.sub(shOff)).x)
+    // (v3: as soft as the smoke itself: it follows the density, it has no edge of its own)
+    const shadowA = float(1)
+      .sub(exp(smokeNode.sample(p.sub(shOff)).x.mul(-1.6)))
       .mul(U.smokeShadow)
       .mul(float(1).add(bright.mul(0.9)))
       .mul(U.sunShadow.w);

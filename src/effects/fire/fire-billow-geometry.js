@@ -163,8 +163,8 @@ export const BILLOW_TUNE = Object.freeze({
   tongueLobes: 7,
   fleckBase: 5,
   fleckPerR: 0.07,
-  smokeBase: 16,
-  smokePerR: 0.2,
+  smokeBase: 48,
+  smokePerR: 0.35,
   // ── body billows ──
   bodyRadius: 0.66, // plume radius, × R
   bodyLifeMul: 1.1, // × each layer's own cycle
@@ -187,15 +187,24 @@ export const BILLOW_TUNE = Object.freeze({
   // ── smoke ──
   // (2026-11-03, author: "a lot bigger and longer as a trail... too thin": roughly twice the life, twice the climb, 1.6x the
   // billow, and 1.45x the billows so the longer column stays one body)
-  smokeLife: 8.5,
-  smokeRise: 7.5, // × R at an open fire (R of a 50 px fire: a smaller fire's plume is relatively taller, see `Rs`)
+  // (v3, author: "still far too short": twice the climb again, a longer life, and ~1.7x the billows to keep the column whole)
+  smokeLife: 13,
+  smokeRise: 20, // × R at an open fire (R of a 50 px fire: a smaller fire's plume is relatively taller, see `Rs`)
   smokeSize: 0.92,
-  smokeStart: 0.42, // a billow is born this fraction of its full width...
-  smokeGrow: 2.5, // ...and grows by this much more as it climbs (a plume SHOULD outgrow its fire)
+  smokeStart: 1.2, // a billow is born this fraction of its full width...
+  smokeGrow: 1.6, // ...and grows by this much more as it climbs (a plume SHOULD outgrow its fire)
   smokeWave: 0.55, // × plume radius: how far the whole column meanders as one ribbon in still air (the puffs share one wave)
   smokeWindLife: 0.5, // a gale stretches a billow's life by this much (the trail is longer when it is blown)
+  // (v3) how much wider an old billow spreads as it dies, thinning as it goes: smoke DISSOLVES, it does not go out puff by puff
+  smokeSpread: 2.8,
   massRise: 6, // × the mass's radius: how far a burning building's column climbs
-  smokeLift: 3.4, // from above (the 3/4 picture) smoke rises this much faster up the page than its height says: the painted plumes reach three flames up
+  // THE SMOKE'S CAMERA (v3, author: "no real perspective... at 0 wind it's still flat and heading north, not UPWARDS"). Smoke is
+  // seen from the 3/4 view the painted art is drawn in, AND by a real perspective camera: it climbs up the page (`smokeLift` per
+  // unit of height above the flame) while it swells toward the viewer and leans out from the middle of the view, so a column is a
+  // CONE that widens as it rises, not a flat ribbon. The billow camera is `BILLOW_CAMERA_PER_EYE` (2.2) eyes high; dividing by
+  // `smokePerspective` brings it down to the scene's own eye at 2.2 (what walls and canopies use). Higher = a nearer camera.
+  smokePerspective: 1.5,
+  smokeLift: 2.4,
   smokeDrift: 9.0, // × R of downwind drift at a full gale
   // ── wind ──
   leanLength: 2.6, // × plume radius, at full lean
@@ -203,7 +212,7 @@ export const BILLOW_TUNE = Object.freeze({
   leanStreak: 5,
   windShear: 1.8, // extra downwind shear of every flame lobe, x its height x the lean (a gale lays the whole body over, not just the tip)
   windFlatten: 0.6, // how much of its height a flame loses at full lean (the wind presses it down)
-  smokeStreak: 6, // how far smoke is stretched along the wind at full lean (a plume is a streamer in a gale)
+  smokeStreak: 3.5, // how far smoke is stretched along the wind at full lean (a plume is a streamer in a gale)
   // ── weather ──
   rainShrink: 0.62, // how much of its size a fully rained-on flame loses
   // ── camera ──
@@ -457,17 +466,20 @@ export function basePoint(f, R, h1, h2, h3, pull, scratch) {
   return scratch;
 }
 
-/** The camera: ground-plane position + height → where it lands in the picture, and its magnification. */
-function project(env, x, y, z, out) {
+/**
+ * The camera: ground-plane position + height → where it lands in the picture, and its magnification.
+ * `D` overrides the camera height (the smoke's own, nearer camera); `tiltZ` is how much of the height the 3/4 tilt lifts
+ * (smoke is tilted only as high as the flame it leaves: above that it rises toward the camera, not up the page).
+ */
+function project(env, x, y, z, out, D = env.cameraHeight ?? BILLOW_TUNE.cameraHeight, tiltZ = z) {
   if (env.projection === 'side') {
     out[0] = x;
     out[1] = (env.groundY ?? 0) - z * (env.sideScale ?? 1);
     out[2] = 1;
     return out;
   }
-  const D = env.cameraHeight ?? BILLOW_TUNE.cameraHeight;
   const par = env.parallax ?? 1;
-  const hh = clamp(z, 0, D * 0.6) * par;
+  const hh = Math.min(clamp(z, 0, D * 0.6) * par, D * 0.6);
   const M = D / (D - hh);
   const cx = env.camX ?? 0;
   const cy = env.camY ?? 0;
@@ -476,9 +488,14 @@ function project(env, x, y, z, out) {
   // depth and 3D"). MSA's camera is orthographic and straight down, so the tilt is faked per billow: height lifts
   // the picture up the screen by `tilt` per unit, on top of the perspective parallax.
   out[0] = cx + (x - cx) * M;
-  out[1] = cy + (y - cy) * M - z * (env.tilt ?? 0.45);
+  out[1] = cy + (y - cy) * M - tiltZ * (env.tilt ?? 0.45);
   out[2] = M;
   return out;
+}
+
+/** The smoke's camera height: the billow camera brought down to the scene's eye (see `smokePerspective`). */
+function smokeCameraHeight(env, tune) {
+  return (env.cameraHeight ?? BILLOW_TUNE.cameraHeight) / Math.max(0.5, tune.smokePerspective ?? 1);
 }
 
 /**
@@ -553,6 +570,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
 
   const proj = [0, 0, 1];
   const base = [0, 0, 1];
+  const smokeD = smokeCameraHeight(env, tune);
   let n = start;
   let ns = startSmoke;
   let flameCount = 0;
@@ -571,7 +589,10 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       y += wdy * shear;
       z *= 1 - tune.windFlatten * leanG;
     }
-    project(env, x, y, z, proj);
+    // smoke is seen by the nearer camera, and tilted up the page (the flame tilts as the flame; smoke above it by `smokeLift`)
+    if (kind === KIND_SMOKE)
+      project(env, x, y, z, proj, smokeD, Math.min(z, height) + Math.max(0, z - height) * tune.smokeLift);
+    else project(env, x, y, z, proj);
     const M = proj[2];
     const toSmoke = kind === KIND_SMOKE && outSmoke !== null;
     const buf = toSmoke ? outSmoke : out;
@@ -896,9 +917,14 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     const r7 = hash01(id, cyc, 47);
     // (v2: the billow keeps its size and most of its strength to the end of its life and only fades over the last fifth;
     // fading strength from 70% of the life dropped the upper half under the silhouette, so a long plume drew short)
-    const envGrow = smoothstep(0.04, 0.3, a);
-    const envS = envGrow * (1 - smoothstep(0.8, 1, a));
+    // (v3, author: "the smoke disappears in units instead of fading out and spreading out": an old billow SPREADS, wider and
+    // thinner at once, so its smoke is shared out over more and more air until there is nothing left to see; the renderer
+    // turns density into opacity smoothly, so no billow is ever cut off at an edge)
+    // (and it is born at body size almost at once: a slow fade-in left a string of small beads between the flame and its column)
+    const envGrow = smoothstep(0.0, 0.14, a);
+    const envS = envGrow * (1 - smoothstep(0.72, 1, a));
     if (envS < 0.01) continue;
+    const spread = 1 + tune.smokeSpread * Math.pow(smoothstep(0.3, 1, a), 1.4);
     basePoint(f, R, r1, r2, r3, 0.75, base);
     // smoke is born ABOVE the flame body and climbs from there, thin at first
     // (a gale blows smoke along the ground rather than up: at full wind it climbs half as high and drifts the whole way)
@@ -927,18 +953,17 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     const swayY = wvy * wave + plume * 0.5 * (r7 - 0.5) * a;
     const drift = Rs * tune.smokeDrift * (0.15 + 0.85 * leanG) * (0.04 + Math.pow(a, 1.3));
     // a sealed room's smoke goes nowhere in particular: it just rises and fades
+    // (v3: the lift and the swell both happen in `put`'s camera, so the billow's ground position is just the fire's and the wind's)
     const x = base[0] + sway + wdx * drift;
-    // from above, smoke climbs up the page faster than its height says (the painted plumes reach three flames up): the extra
-    // lift is a shift of the ground position, so it adds no parallax of its own (the side view keeps the true height)
-    const cheat = env.projection === 'side' ? 0 : (tune.smokeLift - 1) * (env.tilt ?? 0.45) * (z - height * 0.55);
-    const y = base[1] + swayY + wdy * drift - cheat;
-    // a plume SHOULD outgrow its fire: small and dense at the base, billowing wide as it climbs
+    const y = base[1] + swayY + wdy * drift;
+    // a plume SHOULD outgrow its fire: small and dense at the base, billowing wide as it climbs, and wider still as it dies
     const rad =
       plume *
       tune.smokeSize *
       (tune.smokeStart + tune.smokeGrow * Math.pow(a, 0.85)) *
       Math.pow(envGrow, 0.5) *
       Math.sqrt(Rs / Math.max(R, 1)) *
+      spread *
       (0.85 + 0.35 * r3);
     const tone = clamp01(a * 1.05 + 0.08 * r2);
     // the lobe's `heat` slot is the smoke's colour channel: + is steam (rain turns it white), - is soot (a sooty fuel, or a whole
@@ -949,7 +974,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       y,
       z,
       rad,
-      (0.62 + 0.5 * smokeAmt) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3),
+      ((0.62 + 0.5 * smokeAmt) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3)) / (spread * spread),
       wet - soot,
       1 + tune.smokeStreak * leanG * Math.pow(a, 0.7),
       wdx,
@@ -980,8 +1005,8 @@ export const MASS_SMOKE_MAX = 48;
 /**
  * ONE column of smoke for a whole burning mass (a roof, a building). The flames of a split fire each make only a wisp (the
  * engine turns their smoke down); the mass as a whole makes THIS: a few big billows rising from its middle, growing as they
- * climb, dark with soot, leaning with the wind and thinning out above. From above it reaches up the page like the painted
- * plumes do. Same lobe format as a flame's smoke, drawn into the same field.
+ * climb, dark with soot, leaning with the wind and thinning out above. From above it rises toward the camera (v3: it used
+ * to be slid up the page). Same lobe format as a flame's smoke, drawn into the same field.
  *
  * @param {Float32Array} out the smoke lobe buffer @param {number} start the lobe index to write at
  * @param {BillowMass} m @param {BillowEnv} env @param {object} [tuneOverride]
@@ -1019,7 +1044,7 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
   const leanG = billowLeanGain(clamp01(m.windMotion01 ?? 0));
   const baseZ = m.baseZ ?? 0;
   const soot = clamp01(m.sootiness01 ?? 0.5) * (1 - wet);
-  const tilt = env.tilt ?? 0.45;
+  const smokeD = smokeCameraHeight(env, tune);
   const proj = [0, 0, 1];
   let n = start;
   for (let i = 0; i < count; i++) {
@@ -1034,8 +1059,10 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     const r2 = hash01(id, cyc, 72);
     const r3 = hash01(id, cyc, 73);
     const r4 = hash01(id, cyc, 74);
-    const envS = smoothstep(0.04, 0.3, a) * (1 - smoothstep(0.66, 1, a));
+    const envS = smoothstep(0.04, 0.3, a) * (1 - smoothstep(0.72, 1, a));
     if (envS < 0.01) continue;
+    // (v3: the column dissolves the way a campfire's does, each billow spreading and thinning as it dies)
+    const spread = 1 + tune.smokeSpread * 0.7 * Math.pow(smoothstep(0.3, 1, a), 1.4);
     const ang = r1 * TAU;
     // (smoke comes off the whole roof and gathers into one column as it climbs)
     const rho = Rm * 0.4 * Math.sqrt(r2) * (1 - 0.5 * a);
@@ -1050,17 +1077,17 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
       (0.6 + 0.4 * weak);
     const z = baseZ + climb;
     const drift = Rm * tune.smokeDrift * 0.35 * (0.15 + 0.85 * leanG) * (0.12 + Math.pow(a, 1.3));
-    const cheat = env.projection === 'side' ? 0 : (tune.smokeLift - 1) * tilt * climb;
     // (the column is an S, not a pole: it sways more the higher it is, slowly, whatever the wind)
     const bend = Math.sin(t * 0.27 + a * 2.6 + hash01(seed, 9, 9) * TAU) * Rm * 0.16 * Math.pow(a, 0.8);
     const x = m.x + Math.cos(ang) * rho + Math.sin(t * 0.5 + r3 * TAU) * Rm * 0.05 * a + bend + wdx * drift;
-    const y = m.y + Math.sin(ang) * rho + Math.cos(t * 0.4 + r4 * TAU) * Rm * 0.04 * a + wdy * drift - cheat;
+    const y = m.y + Math.sin(ang) * rho + Math.cos(t * 0.4 + r4 * TAU) * Rm * 0.04 * a + wdy * drift;
     // (0.2 -> 0.5 -> 0.62, 2026-11-03: the campfire's smoke grew 1.6x and 2.5x the climb; the burning roof's column stays the bigger of the two)
-    const rad = Rm * 0.62 * sizeK * (0.4 + 1.5 * Math.pow(a, 0.8)) * Math.pow(envS, 0.5) * (0.8 + 0.45 * r3);
-    const strength = (0.55 + 0.45 * Math.min(1, amt)) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3);
+    const rad = Rm * 0.62 * sizeK * (0.4 + 1.5 * Math.pow(a, 0.8)) * Math.pow(envS, 0.5) * spread * (0.8 + 0.45 * r3);
+    const strength = ((0.55 + 0.45 * Math.min(1, amt)) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3)) / (spread * spread);
     // (the lower half of the column is still lit by the fire, the upper greys and darkens)
     const tone = clamp01(Math.pow(a, 1.3) * 1.05 + 0.08 * r2);
-    project(env, x, y, z, proj);
+    // (v3: seen by the smoke's own camera, tilted up the page by `smokeLift` per unit of height above the flame tops)
+    project(env, x, y, z, proj, smokeD, Math.min(z, baseZ) + Math.max(0, z - baseZ) * tune.smokeLift);
     const o = n * LOBE_STRIDE;
     out[o] = proj[0];
     out[o + 1] = proj[1];

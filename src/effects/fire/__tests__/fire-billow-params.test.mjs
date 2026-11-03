@@ -206,6 +206,7 @@ export function run(t) {
         smokeLife: 'smokeLife',
         smokeStart: 'smokeStart',
         smokeGrow: 'smokeGrow',
+        smokePerspective: 'smokePerspective',
         smokeLift: 'smokeLift',
         buildingSmokeHeight: 'massRise',
         spitThrow: 'spitRange',
@@ -228,7 +229,7 @@ export function run(t) {
         smokeCrisp: 'smokeCrisp',
         smokeShading: 'smokeRelief',
         smokeCoverage: 'smokeOutline',
-        smokeEdgeSoft: 'smokeSoft',
+        smokeBody: 'smokeVeil',
         smokeBrightGrey: 'smokeDayDark',
       },
     };
@@ -376,6 +377,8 @@ export function run(t) {
       'brightness',
       'smokeAmount',
       'grain',
+      // (v3 smoke, 2026-11-03: the cut-out edge is gone, so a stored value of it means nothing now)
+      'smokeEdgeSoft',
     ];
     t.ok(
       'the retired sprite-era dials are gone from the schema (their stored values mean nothing to a billow model)',

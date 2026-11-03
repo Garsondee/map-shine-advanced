@@ -160,8 +160,11 @@ export function buildFlyBrain(TSL, { u, zone }) {
       const delta = s.P.sub(u(`tokenPos${i}`));
       const d = length(delta);
       const nearer = d.lessThan(tokenDist);
-      tokenAway = vec2(select(nearer, delta.x, tokenAway.x), select(nearer, delta.y, tokenAway.y));
-      tokenDist = select(nearer, d, tokenDist);
+      // `.toVar()` PINS each step: a conditional's operands are re-emitted inside each of its branches, so an
+      // unpinned chain doubles per slot (2^8 copies of the scan — the fly kernel was 391k chars; see
+      // `core/tsl-fn.js`'s header).
+      tokenAway = select(nearer, delta, tokenAway).toVar();
+      tokenDist = select(nearer, d, tokenDist).toVar();
     }
     // 0 beyond the startle radius, 1 standing on the token — a smooth switch, not a snap at the
     // edge. `1 - smoothstep(0, radius, dist)`, the same reversed-ramp idiom `edgeBias` below uses,

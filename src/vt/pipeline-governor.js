@@ -61,6 +61,7 @@
 import { createLogger } from '../core/log.js';
 import { perfNowMs } from '../core/frame-clock.js';
 import { compilePolicyFor, HEAVY_PIPELINE_CHARS } from '../core/compile-policy.js';
+import { layoutLeaks } from '../core/tsl-fn.js';
 
 const log = createLogger('pipeline-governor');
 
@@ -88,6 +89,38 @@ export function fingerprint(text) {
   }
   return (h >>> 0).toString(16).padStart(8, '0').slice(0, 6);
 }
+
+/**
+ * HOW MUCH OF A SHADER IS ITS OWN CODE AGAIN (2026-11-03, epic mmp-8gf.1). TSL pastes a helper's body at every
+ * call and re-emits a conditional's operands in each branch (`core/tsl-fn.js`), so a shader can grow 2-5x with no
+ * one writing more code: the fly kernel was 391k chars, 81% of its lines repeats. This is the share of the
+ * shader's statements (variable numbers and literals blanked, so `nodeVar12 = a * 2.0` and `nodeVar98 = a * 3.0`
+ * read alike) that are repeats of an earlier one. Calibrated on one Big Bank load (2026-11-03): healthy shaders
+ * read 0.2-0.8 (blanking makes many taps alike); the three blow-ups read 0.89 (window rain, 169k), 0.97
+ * (fireflies, 255k) and 0.98 (flies, 391k), and 0.47-0.80 once fixed. Warned at {@link REPEAT_SHARE_WARN} on a
+ * heavy shader only. Measured at {@link REPEAT_SCAN_MIN_CHARS} or more (a text scan: ~1-2 ms per 100k chars).
+ * @param {string} code @returns {number} 0..1
+ */
+export function repeatShare(code) {
+  const seen = new Set();
+  let total = 0;
+  let repeats = 0;
+  const start = code.search(/@(fragment|vertex|compute)/);
+  for (const raw of code.slice(Math.max(0, start)).split('\n')) {
+    const l = raw.trim();
+    if (l.length < 12 || l.startsWith('var') || l.startsWith('}')) continue;
+    const key = l
+      .replace(/nodeVar\d+/g, 'v')
+      .replace(/nodeUniform\d+/g, 'u')
+      .replace(/\b\d+(\.\d+)?(e[-+]?\d+)?u?\b/g, '0');
+    total++;
+    if (seen.has(key)) repeats++;
+    else seen.add(key);
+  }
+  return total ? repeats / total : 0;
+}
+export const REPEAT_SCAN_MIN_CHARS = 20_000;
+export const REPEAT_SHARE_WARN = 0.85;
 
 /** Frames that are never the answer to "who drew this": three itself, this file, the diag probes that wrap three. */
 const SITE_SKIP = /three\.webgpu|pipeline-governor|pipeline-rebuild-probe|shader-rebuild-probe|run-frame\.js/;
@@ -257,8 +290,12 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
     heavyInBlocking: 0,
     compute: 0,
     heavyUnflagged: [],
+    repetitive: [],
+    layoutLeaks: [],
   };
   const warnedHeavy = new Set();
+  const warnedRepeat = new Set();
+  const warnedLeak = new Set();
   let blockingDepth = 0;
   /** Characters of shader this JS task has already asked the GPU to compile synchronously. */
   let syncChars = 0;
@@ -383,8 +420,42 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
     }
   }
 
+  /** Name a heavy shader that is mostly its own code again, once per label ({@link repeatShare}). */
+  function noteRepeats(label, chars, code) {
+    if (chars < HEAVY_PIPELINE_CHARS || warnedRepeat.has(label)) return;
+    const share = repeatShare(code);
+    if (share < REPEAT_SHARE_WARN) return;
+    warnedRepeat.add(label);
+    stats.repetitive.push({ label, chars, share: Math.round(share * 100) / 100 });
+    log.warn(
+      `${label} is ${chars} chars of shader and ${Math.round(share * 100)}% of its statements repeat — a TSL helper ` +
+        `pasted per call, or a select chain carried through a JS loop. See core/tsl-fn.js (layoutFn / .toVar()).`
+    );
+  }
+
+  /** A layout function that reads a binding is a broken shader in waiting (`core/tsl-fn.js#layoutLeaks`). */
+  function noteLeaks(label, code) {
+    if (warnedLeak.has(label)) return;
+    const leaks = layoutLeaks(code);
+    if (!leaks.length) return;
+    warnedLeak.add(label);
+    stats.layoutLeaks.push({ label, leaks });
+    log.error(
+      `${label}: layout function(s) ${leaks.map((l) => `${l.name} reads ${l.token}`).join(', ')} — a layout body may read ` +
+        `only its parameters; pass uniforms/textures in as arguments (core/tsl-fn.js).`
+    );
+  }
+
   function governed(renderObject, promises) {
     const info = describePipeline(renderObject, siteNow());
+    try {
+      const p = renderObject?.pipeline;
+      const code = `${p?.vertexProgram?.code ?? ''}\n${p?.fragmentProgram?.code ?? ''}`;
+      if (info.chars >= HEAVY_PIPELINE_CHARS) noteRepeats(info.label, info.chars, code);
+      noteLeaks(info.label, code);
+    } catch (err) {
+      log.warn('repeat scan failed:', err);
+    }
 
     // three's own compileAsync already asks for async creation; count it, change nothing.
     if (promises !== null && promises !== undefined) {
@@ -479,6 +550,10 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
     const chars = typeof code === 'string' ? code.length : 0;
     const label = `${siteNow() || pipeline?.computeProgram?.name || 'compute'}#${fingerprint(typeof code === 'string' ? code : '')}`;
     stats.compute++;
+    if (typeof code === 'string') {
+      noteRepeats(label, chars, code);
+      noteLeaks(label, code);
+    }
     const t0 = now();
     try {
       return rawCompute.call(utils, pipeline, bindings);
@@ -547,6 +622,8 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
         ...tracker.counts(),
         slowest: byCost.slice(0, 8),
         heavyUnflagged: stats.heavyUnflagged.slice(),
+        repetitive: stats.repetitive.slice(),
+        layoutLeaks: stats.layoutLeaks.slice(),
         compiling: tracker.snapshot(),
       };
     },

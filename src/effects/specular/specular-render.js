@@ -77,6 +77,7 @@ import {
 import { ISLAND_PARALLAX_RANGE } from './specular-islands.js';
 import { SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from './specular.js';
 import { buildDebugChannelColor, pickEquals } from '../debug-channel-select.js';
+import { sharedFn } from '../../core/tsl-fn.js';
 
 /**
  * Fraction of the authored file's resolution to upload for the SHIMMER's own
@@ -1071,6 +1072,19 @@ export function buildSpecularSurfaceMaterial({
    * @returns {*}
    */
   function cellBlobExponent(cell, off, rows, L, spreadMul) {
+    return cellBlobFn(cell, off, rows, L.uStreak, spreadMul);
+  }
+  // A SHARED layout function (`core/tsl-fn.js`): four cells x every shine layer called it, and each call was a
+  // pasted copy of three hashes and a rotation (12 copies in one surface-response shader). It reads only its
+  // arguments, so one function serves every layer and every shader.
+  const cellBlobFn = sharedFn(
+    TSL,
+    'msaSpecCellBlob',
+    { cell: 'vec2', off: 'vec2', rows: 'float', streak: 'float', spreadMul: 'float' },
+    'float',
+    ({ cell, off, rows, streak, spreadMul }) => cellBlobExponentBody(cell, off, rows, streak, spreadMul)
+  );
+  function cellBlobExponentBody(cell, off, rows, streak, spreadMul) {
     // ⚠️ ROTATE BEFORE THE STRETCH. Rotating a circle then stretching gives a
     // skewed ellipse with a real orientation; stretching then rotating gives
     // the same ellipse every time, merely turned — every glint on the map ends
@@ -1078,7 +1092,7 @@ export function buildSpecularSurfaceMaterial({
     // wallpaper. This ordering IS the streaking.
     const rot = hash12(cell.add(vec2(17.3, 91.7)))
       .sub(float(0.5))
-      .mul(L.uStreak)
+      .mul(streak)
       .mul(float(STREAK_RADIANS));
     const c = cos(rot).toVar();
     const s = sin(rot).toVar();

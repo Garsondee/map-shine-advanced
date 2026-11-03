@@ -55,6 +55,8 @@
  * @module effects/window/window-rain
  */
 
+import { layoutFn, sharedFn } from '../../core/tsl-fn.js';
+
 /** Every tuned constant, shared by the JS twin and the shader. Change one place. */
 export const RAIN_TUNE = Object.freeze({
   // splats: FOUR interleaved lattices of world-aligned cells, all nearly the same size (rain on glass is fairly
@@ -927,32 +929,55 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   const flowTexNodes = [];
 
   // ── the integer hash: `hashU32` in u32 nodes. Wrapping multiplies, so it is bit-exact against the twin. ─────
+  // Every helper this shader calls more than once is a LAYOUT function (`core/tsl-fn.js`): emitted once, called
+  // everywhere. Inlined, the hash alone was pasted ~90 times and the whole rain was 169k chars of WGSL.
+  // An i32 argument reaches a u32 parameter as `u32(x)`, the same bit-preserving cast `uint(x)` made inline.
   const U = (n) => uint(n);
-  const hashUT = (a, b, c, d) => {
-    let h = U(a)
-      .mul(U(0x9e3779b1))
-      .bitXor(U(b).mul(U(0x85ebca77)))
-      .bitXor(U(c).mul(U(0xc2b2ae3d)))
-      .bitXor(U(d).mul(U(0x27d4eb2f)));
-    h = h.bitXor(h.shiftRight(U(16))).mul(U(0x7feb352d));
-    h = h.bitXor(h.shiftRight(U(15))).mul(U(0x846ca68b));
-    return h.bitXor(h.shiftRight(U(16)));
-  };
+  const hashUT = sharedFn(
+    TSL,
+    'msaRainHash',
+    { a: 'uint', b: 'uint', c: 'uint', d: 'uint' },
+    'uint',
+    ({ a, b, c, d }) => {
+      const h0 = a
+        .mul(U(0x9e3779b1))
+        .bitXor(b.mul(U(0x85ebca77)))
+        .bitXor(c.mul(U(0xc2b2ae3d)))
+        .bitXor(d.mul(U(0x27d4eb2f)))
+        .toVar();
+      const h1 = h0
+        .bitXor(h0.shiftRight(U(16)))
+        .mul(U(0x7feb352d))
+        .toVar();
+      const h2 = h1
+        .bitXor(h1.shiftRight(U(15)))
+        .mul(U(0x846ca68b))
+        .toVar();
+      return h2.bitXor(h2.shiftRight(U(16)));
+    }
+  );
   const unit24T = (h) => float(h.shiftRight(U(8))).div(16777216);
   /** Smooth value noise in [0, 1) - `vnoise`. */
-  const vnoiseT = (x, y, seed) => {
-    const x0 = floor(x);
-    const y0 = floor(y);
-    const fx = x.sub(x0);
-    const fy = y.sub(y0);
-    const sx = fx.mul(fx).mul(F(3).sub(fx.mul(2)));
-    const sy = fy.mul(fy).mul(F(3).sub(fy.mul(2)));
-    const ix = int(x0);
-    const iy = int(y0);
-    const hv = (i, j) => unit24T(hashUT(i, j, seed, 7));
-    return mix(mix(hv(ix, iy), hv(ix.add(1), iy), sx), mix(hv(ix, iy.add(1)), hv(ix.add(1), iy.add(1)), sx), sy);
-  };
-  const hash2T = (a, b, c, d) => vec2(unit24T(hashUT(a, b, c, d)), unit24T(hashUT(a, b, c, U(d).add(U(0x632be5ab)))));
+  const vnoiseT = sharedFn(
+    TSL,
+    'msaRainValueNoise',
+    { x: 'float', y: 'float', seed: 'uint' },
+    'float',
+    ({ x, y, seed }) => {
+      const x0 = floor(x);
+      const y0 = floor(y);
+      const fx = x.sub(x0);
+      const fy = y.sub(y0);
+      const sx = fx.mul(fx).mul(F(3).sub(fx.mul(2)));
+      const sy = fy.mul(fy).mul(F(3).sub(fy.mul(2)));
+      const ix = int(x0);
+      const iy = int(y0);
+      const hv = (i, j) => unit24T(hashUT(i, j, seed, U(7)));
+      return mix(mix(hv(ix, iy), hv(ix.add(1), iy), sx), mix(hv(ix, iy.add(1)), hv(ix.add(1), iy.add(1)), sx), sy);
+    }
+  );
+  const hash2T = (a, b, c, d) =>
+    vec2(unit24T(hashUT(a, b, c, U(d))), unit24T(hashUT(a, b, c, U(d).add(U(0x632be5ab)))));
 
   /** The flow fetch: both facets, the blend weight, the confidence and the pane height. */
   const fetchFlow = (P) => {
@@ -977,24 +1002,94 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     return select(l.greaterThan(1e-4), v.div(max(l, F(1e-4))), vec2(0, 1));
   };
 
-  /** One octave of splats and beads - `evalSplatLayer`. */
+  // THE UNIFORMS, AS ARGUMENTS. A layout function's body may read only its parameters: three builds a function's
+  // code ONCE per renderer and reuses it in every shader that calls it, so a uniform read inside it carries the
+  // FIRST shader's binding name into the second (two window-light shaders share this rain: the second failed with
+  // "struct member nodeUniform1 not found"). So the dials are packed in at the call and unpacked under their own
+  // names at the top of each body — the body code itself reads exactly as before.
+  const RAIN_PACK = { kA: 'vec4', kB: 'vec4', kC: 'vec4', kD: 'vec4', kE: 'float' };
+  const rainPack = () => [
+    TSL.vec4(uScale, uRefract, uCaustic, uRim),
+    TSL.vec4(uTrail, uStretch, uWobble, uStick),
+    TSL.vec4(uCover, uRate, uLive, uImpact),
+    TSL.vec4(uSlider, uSheet, uGust, uClock),
+    uSlideClock,
+  ];
+  const unpackRain = ({ kA, kB, kC, kD, kE }) => ({
+    uScale: kA.x,
+    uRefract: kA.y,
+    uCaustic: kA.z,
+    uRim: kA.w,
+    uTrail: kB.x,
+    uStretch: kB.y,
+    uWobble: kB.z,
+    uStick: kB.w,
+    uCover: kC.x,
+    uRate: kC.y,
+    uLive: kC.z,
+    uImpact: kC.w,
+    uSlider: kD.x,
+    uSheet: kD.y,
+    uGust: kD.z,
+    uClock: kD.w,
+    uSlideClock: kE,
+  });
+
+  /**
+   * One octave of splats and beads - `evalSplatLayer`. A layout function called once per octave: the octave's two
+   * constants come in as arguments (`cellMul` = octScale x cellMul, `seed` = octSeed) and the result is packed
+   * as (offset.xy, gain).
+   */
+  const splatLayerFn = layoutFn(
+    TSL,
+    'msaRainSplatLayer',
+    {
+      P: 'vec2',
+      cellMul: 'float',
+      seed: 'uint',
+      dd: 'vec2',
+      paneH: 'float',
+      exposure: 'float',
+      lod: 'float',
+      ...RAIN_PACK,
+    },
+    'vec3',
+    (a) => {
+      const s = splatLayerBody(a.P, a.cellMul, a.seed, a.dd, a.paneH, a.exposure, a.lod, unpackRain(a));
+      return vec3(s.off, s.gain);
+    }
+  );
   const splatLayerT = (P, octave, dd, paneH, exposure, lod) => {
-    const cellPx = uScale.mul(T.octScale[octave] * T.cellMul);
-    const seed = T.octSeed[octave];
+    const r = splatLayerFn(
+      P,
+      F(T.octScale[octave] * T.cellMul),
+      U(T.octSeed[octave]),
+      dd,
+      paneH,
+      exposure,
+      lod,
+      ...rainPack()
+    );
+    return { off: r.xy, gain: r.z };
+  };
+  const splatLayerBody = (P, cellMul, seed, dd, paneH, exposure, lod, K) => {
+    const { uScale, uClock, uCover, uLive, uStretch, uCaustic, uRim, uRefract, uImpact } = K;
+    const cellPx = uScale.mul(cellMul);
+    const seedK = (k) => seed.mul(U(4)).add(U(k));
     const q = P.div(cellPx);
     const cell = floor(q);
     const fr = q.sub(cell);
     const cx = int(cell.x);
     const cy = int(cell.y);
-    const h1 = hash2T(cx, cy, 0, seed * 4 + 1);
+    const h1 = hash2T(cx, cy, 0, seedK(1));
     const period = F(T.periodMin).add(h1.x.mul(T.periodSpan));
     const age01 = uClock.add(h1.y.mul(period)).div(period);
     const k = floor(age01);
     const a = age01.sub(k);
     const tAge = a.mul(period);
     const kw = int(mod(k, F(61)));
-    const h2 = hash2T(cx, cy, kw, seed * 4 + 2);
-    const h3 = hash2T(cx, cy, kw, seed * 4 + 3);
+    const h2 = hash2T(cx, cy, kw, seedK(2));
+    const h3 = hash2T(cx, cy, kw, seedK(3));
 
     const cover = sat(uCover.mul(exposure).mul(mix(F(0.75), F(1.25), paneH)));
     const alive = F(1).sub(smoothstep(cover.sub(T.aliveSoft), cover, h2.x));
@@ -1021,7 +1116,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       const nx = d.x.div(r0).add(h3.x.mul(37));
       const ny = d.y.div(r0).add(h3.y.mul(41));
       const n1 = vnoiseT(nx.mul(T.noiseFreq), ny.mul(T.noiseFreq), seed).mul(2).sub(1);
-      const n2 = vnoiseT(nx.mul(T.noiseFreq * 2.3).add(11), ny.mul(T.noiseFreq * 2.3).add(5), seed + 1)
+      const n2 = vnoiseT(nx.mul(T.noiseFreq * 2.3).add(11), ny.mul(T.noiseFreq * 2.3).add(5), seed.add(U(1)))
         .mul(2)
         .sub(1);
       const dist = length(d).mul(F(1).add(n1.mul(T.noiseEdge)));
@@ -1127,8 +1222,38 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   const dropCenterT = (latC, wphase, wfreq, s, wobbleCol, colW) =>
     latC.add(wobbleCol.mul(smoothstep(F(0), colW.mul(T.wobbleRampCol), s)).mul(sin(wfreq.mul(s).add(wphase))));
 
-  /** Everything in one rigid facet frame - `evalFacetFrame`. */
+  /** Everything in one rigid facet frame - `evalFacetFrame`. A layout function (two facets call it), packed (off.xy, gain). */
+  const facetFrameFn = layoutFn(
+    TSL,
+    'msaRainFacetFrame',
+    { P: 'vec2', dir: 'vec2', paneH: 'float', exposure: 'float', kappa: 'float', pxPerWorld: 'float', ...RAIN_PACK },
+    'vec3',
+    (a) => {
+      const f = facetFrameBody(a.P, a.dir, a.paneH, a.exposure, a.kappa, a.pxPerWorld, unpackRain(a));
+      return vec3(f.off, f.gain);
+    }
+  );
   const facetFrameT = (P, dir, paneH, exposure, kappa, pxPerWorld) => {
+    const r = facetFrameFn(P, dir, paneH, exposure, kappa, pxPerWorld, ...rainPack());
+    return { off: r.xy, gain: r.z };
+  };
+  const facetFrameBody = (P, dir, paneH, exposure, kappa, pxPerWorld, K) => {
+    const {
+      uScale,
+      uSlider,
+      uWobble,
+      uSlideClock,
+      uStick,
+      uRate,
+      uTrail,
+      uStretch,
+      uRim,
+      uRefract,
+      uCaustic,
+      uSheet,
+      uGust,
+      uClock,
+    } = K;
     const dX = dir.x;
     const dY = dir.y;
     const nX = dY.negate();
@@ -1184,7 +1309,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
         cand.reduce((best, c) => {
           const better = c[key].lessThan(best[key]);
           const o = {};
-          for (const f of DROP_FIELDS) o[f] = select(better, c[f], best[f]);
+          // pinned: an unpinned select chain re-emits `best` inside each branch (see `core/tsl-fn.js`)
+          for (const f of DROP_FIELDS) o[f] = select(better, c[f], best[f]).toVar();
           return o;
         });
       const head = nearest('hd');

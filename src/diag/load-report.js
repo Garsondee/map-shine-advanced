@@ -522,9 +522,13 @@ export function buildShaderSection(gov) {
     spanMs: gov.spanMs ?? null,
     peakConcurrent: gov.peakConcurrent ?? null,
     largest: Array.isArray(gov.largest) ? gov.largest : [],
+    /** Heavy shaders that are mostly their own code again (`pipeline-governor.js#repeatShare`). Should be empty. */
+    repetitive: Array.isArray(gov.repetitive) ? gov.repetitive : [],
     note:
       'compilingMs is how long at least one shader was compiling (overlapping compiles counted once). A shader ' +
-      'over ~50k chars is worth a look: a JS loop in a TSL builder pastes its body once per iteration — use Loop().',
+      'over ~50k chars is worth a look: a JS loop in a TSL builder pastes its body once per iteration (use Loop()), ' +
+      'a helper called N times is N pasted copies (use core/tsl-fn.js layoutFn), and a select chain carried ' +
+      'through a loop doubles per step (pin it with .toVar()). "repetitive" names the ones this load caught.',
   };
 }
 

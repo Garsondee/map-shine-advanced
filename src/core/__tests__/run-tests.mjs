@@ -10,6 +10,7 @@ import { run as runSceneScale } from './scene-scale.test.mjs';
 import { run as runAxisDerivation } from './axis-derivation.test.mjs';
 import { run as runSafeMode } from './safe-mode.test.mjs';
 import { run as runCompilePolicy } from './compile-policy.test.mjs';
+import { run as runTslFn } from './tsl-fn.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -37,6 +38,7 @@ const suites = [
   ['axis-derivation', runAxisDerivation],
   ['safe-mode', runSafeMode],
   ['compile-policy', runCompilePolicy],
+  ['tsl-fn', runTslFn],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

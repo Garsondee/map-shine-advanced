@@ -73,6 +73,7 @@ import {
 // THE LENS WARP (2026-11-02) — post.lens runs BEFORE this draw, so the picture arrives already bowed;
 // every screen-position mask here is read through the lens's own warp so it lands on the same pixels.
 import { lensWarpUv } from '../lens-render.js';
+import { layoutFn } from '../../core/tsl-fn.js';
 // FOUNDRY'S GRID + OUTLINE (2026-11-02), drawn here, last, over the finished frame (that module's header).
 import {
   createFoundryGridUniforms,
@@ -509,6 +510,34 @@ export function buildGradePresentMaterial({
     // by `reach` radii; two octaves of slow noise pushed upward make the picture ripple.
     const heatOffsetUv = (() => {
       const { Fn, If, mx_noise_float, exp, smoothstep } = TSL;
+      // ONE FIRE'S SHIMMER, as a layout function (`core/tsl-fn.js`): eight slots called it, and each was a pasted
+      // copy of three noise calls. Packed as the slot's (dx, dy) contribution in world px. The clock comes in as an
+      // argument: a layout body may read only its parameters (`core/tsl-fn.js`).
+      const heatSlot = layoutFn(
+        TSL,
+        'msaPresentHeatSlot',
+        { pw: 'vec2', h: 'vec4', sh: 'vec4', time: 'float' },
+        'vec2',
+        ({ pw, h, sh, time }) => {
+          const r = max(h.z, float(8));
+          const dx = pw.x.sub(h.x).div(r);
+          const up = h.y.sub(pw.y).div(r); // screen up is -y: positive above the fire
+          const across = exp(dx.mul(dx).mul(-1.3));
+          const rise = smoothstep(float(-0.25), float(0.35), up).mul(
+            float(1).sub(smoothstep(sh.x.mul(0.35), sh.x, up))
+          );
+          const w = across.mul(rise).mul(h.w);
+          const f = sh.z.mul(0.06).div(r.mul(0.02));
+          const tt = time.mul(sh.y);
+          const nx = mx_noise_float(vec3(pw.x.mul(f), pw.y.mul(f).add(tt.mul(1.9)), tt.mul(0.4)));
+          const ny = mx_noise_float(vec3(pw.x.mul(f).add(17.3), pw.y.mul(f).add(tt.mul(1.6)), tt.mul(0.35).add(5.1)));
+          const n2 = mx_noise_float(
+            vec3(pw.x.mul(f).mul(2.3).add(3.1), pw.y.mul(f).mul(2.3).add(tt.mul(2.8)), tt.mul(0.6))
+          );
+          const amp = r.mul(0.16).mul(w);
+          return vec2(nx.add(n2.mul(0.5)), ny.mul(0.7).add(n2.mul(0.3))).mul(amp);
+        }
+      );
       return Fn(() => {
         const viewSpanX = max(uViewRect.z.sub(uViewRect.x), float(1e-5));
         const viewSpanY = max(uViewRect.w.sub(uViewRect.y), float(1e-5));
@@ -518,27 +547,7 @@ export function buildGradePresentMaterial({
         );
         const total = vec2(0, 0).toVar();
         If(uHeatActive.greaterThan(0.5), () => {
-          for (let i = 0; i < HEAT_SLOTS; i++) {
-            const h = uHeat[i];
-            const sh = uHeatShape[i];
-            const r = max(h.z, float(8));
-            const dx = pw.x.sub(h.x).div(r);
-            const up = h.y.sub(pw.y).div(r); // screen up is -y: positive above the fire
-            const across = exp(dx.mul(dx).mul(-1.3));
-            const rise = smoothstep(float(-0.25), float(0.35), up).mul(
-              float(1).sub(smoothstep(sh.x.mul(0.35), sh.x, up))
-            );
-            const w = across.mul(rise).mul(h.w);
-            const f = sh.z.mul(0.06).div(r.mul(0.02));
-            const tt = uHeatTime.mul(sh.y);
-            const nx = mx_noise_float(vec3(pw.x.mul(f), pw.y.mul(f).add(tt.mul(1.9)), tt.mul(0.4)));
-            const ny = mx_noise_float(vec3(pw.x.mul(f).add(17.3), pw.y.mul(f).add(tt.mul(1.6)), tt.mul(0.35).add(5.1)));
-            const n2 = mx_noise_float(
-              vec3(pw.x.mul(f).mul(2.3).add(3.1), pw.y.mul(f).mul(2.3).add(tt.mul(2.8)), tt.mul(0.6))
-            );
-            const amp = r.mul(0.16).mul(w);
-            total.addAssign(vec2(nx.add(n2.mul(0.5)), ny.mul(0.7).add(n2.mul(0.3))).mul(amp));
-          }
+          for (let i = 0; i < HEAT_SLOTS; i++) total.addAssign(heatSlot(pw, uHeat[i], uHeatShape[i], uHeatTime));
         });
         return vec2(total.x.div(viewSpanX), total.y.div(viewSpanY));
       })();
@@ -664,7 +673,9 @@ export function buildGradePresentMaterial({
     // same encode here with the same node three's output pass uses (`renderOutput(None, sRGB)`), and the
     // viewer sets the renderer's output space to linear, so the present is one draw straight into the canvas.
     const presentOut = vec4(finalRgb, presentTexNode.a);
-    material.fragmentNode = directSrgb ? TSL.renderOutput(presentOut, THREE.NoToneMapping, THREE.SRGBColorSpace) : presentOut;
+    material.fragmentNode = directSrgb
+      ? TSL.renderOutput(presentOut, THREE.NoToneMapping, THREE.SRGBColorSpace)
+      : presentOut;
     material.needsUpdate = true;
   }
 

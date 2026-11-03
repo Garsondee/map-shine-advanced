@@ -139,8 +139,9 @@ export function buildFireflyBrain(TSL, { u, zone }) {
       const delta = s.P.sub(u(`tokenPos${i}`));
       const d = length(delta);
       const nearer = d.lessThan(tokenDist);
-      tokenAway = vec2(select(nearer, delta.x, tokenAway.x), select(nearer, delta.y, tokenAway.y));
-      tokenDist = select(nearer, d, tokenDist);
+      // Pinned per step (see fly-brain.js): an unpinned select chain doubles per slot.
+      tokenAway = select(nearer, delta, tokenAway).toVar();
+      tokenDist = select(nearer, d, tokenDist).toVar();
     }
     const startle = float(1)
       .sub(smoothstep(float(0), u('tokenStartleRadius'), tokenDist))

@@ -18164,15 +18164,27 @@ async function startVtPanViewerUnserialized({
       // SCENE-EDGE-FADE — computed from the REST position, same reasoning as
       // the original: fading based on the displaced position would make the
       // fade depend on the very displacement it is supposed to gate.
-      // Per plant (2026-11-01): faded where the PLANT stands, so a bush at the scene edge stays whole.
-      const sceneUv = motionXY.sub(sceneMin).div(sceneSize);
-      const edgeDistX = min(sceneUv.x, float(1).sub(sceneUv.x));
-      const edgeDistY = min(sceneUv.y, float(1).sub(sceneUv.y));
-      const edgeFadeWidthNormX = motion.uEdgeFadeWidthPx.div(sceneSize.x);
-      const edgeFadeWidthNormY = motion.uEdgeFadeWidthPx.div(sceneSize.y);
-      const edgeFade = smoothstep(float(0), max(edgeFadeWidthNormX, float(1e-5)), edgeDistX).mul(
-        smoothstep(float(0), max(edgeFadeWidthNormY, float(1e-5)), edgeDistY)
-      );
+      // ⭐ PINNED AT THE EDGE, NOT TORN FROM IT (2026-11-02, author: "Trees still tear away from the
+      // edge. The fadeout is meant to make the wind effect trees and bushes less as we approach the edge
+      // of the scene so that we don't have to deal with these things having no data outside the scene to
+      // draw from, thus creating gaps"). 2026-11-01 faded at the plant's PIVOT only, so a tree cut by the
+      // scene edge (pivot inside) moved whole and pulled its cut edge in, opening a gap of void. Now two
+      // fades, the larger wins:
+      //  - plantFade: by the plant's BODY gap (pivot distance minus radius). A plant clear of the band
+      //    moves fully and rigidly, exactly as before.
+      //  - vertexFade: by the vertex's OWN rest distance, over at least two plant radii. A plant touching
+      //    the edge is held at 0 there and bends in over its body, so its cut edge never moves — a
+      //    stretch spread across the whole crown, not a tear.
+      // Without a pivot (radius 0) both collapse to the old per-vertex fade.
+      const sceneMaxXY = sceneMin.add(sceneSize);
+      const edgeDistPx = (p) =>
+        min(min(p.x.sub(sceneMin.x), sceneMaxXY.x.sub(p.x)), min(p.y.sub(sceneMin.y), sceneMaxXY.y.sub(p.y)));
+      const fadeWidthPx = max(motion.uEdgeFadeWidthPx, float(1e-3));
+      const bodyRadiusPx = pivotXY ? pivotRadiusPx.mul(pivotWeight) : float(0);
+      const plantGapPx = edgeDistPx(motionXY).sub(bodyRadiusPx);
+      const plantFade = smoothstep(float(0), fadeWidthPx, plantGapPx);
+      const vertexFade = smoothstep(float(0), max(fadeWidthPx, bodyRadiusPx.mul(float(2))), edgeDistPx(worldXY));
+      const edgeFade = max(plantFade, vertexFade);
 
       let translateDisplace = bend
         .add(oscillate)
@@ -18386,6 +18398,29 @@ async function startVtPanViewerUnserialized({
           const bodyScale = clamp(allowed.sub(gap.mul(THREE.TSL.step(allowed, float(0.999)))), float(0), float(1));
           xy = mix(perVertex, cappedDisplace.mul(bodyScale), pivotWeight);
         }
+      }
+      /* ⭐ NOTHING LEAVES THE MAP (2026-11-02, author: "Trees can move away from the edges of the map, we
+       * want to avoid that happening"). `edgeFade` above only looks at where the plant's PIVOT stands, and
+       * its band is ~10 px, so a tree 150 px in from the edge still swung its whole crown out past the
+       * scene boundary into the void. Same idea as the wall stop: the plant may move only as far as
+       * keeps its body (pivot ± radius) inside the scene rect, rigidly, along its own direction. A plant
+       * touching the edge is pinned there by `edgeFade` instead, so here each of its vertices is its own
+       * body (a whole-body stop would freeze it whenever the wind blew outward). Without a pivot (tile
+       * vegetation, bare quad) the vertex itself is the body (radius 0). */
+      {
+        const sceneMax = sceneMin.add(sceneSize);
+        const clear = THREE.TSL.step(float(0), plantGapPx);
+        const bodyXY = pivotXY ? mix(worldXY, pivotXY, pivotWeight.mul(clear)) : worldXY;
+        const bodyR = bodyRadiusPx.mul(clear);
+        const toMax = sceneMax.sub(bodyXY).sub(bodyR);
+        const toMin = bodyXY.sub(sceneMin).sub(bodyR);
+        const roomX = max(mix(toMin.x, toMax.x, THREE.TSL.step(float(0), xy.x)), float(0));
+        const roomY = max(mix(toMin.y, toMax.y, THREE.TSL.step(float(0), xy.y)), float(0));
+        const keepScale = min(
+          float(1),
+          min(roomX.div(max(xy.x.abs(), float(1e-4))), roomY.div(max(xy.y.abs(), float(1e-4))))
+        );
+        xy = xy.mul(keepScale);
       }
       return { xy, liftY };
     }

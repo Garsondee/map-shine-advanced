@@ -371,7 +371,7 @@ export class RainCloudDriver {
     this.frame = resolveSpeciesFrame(row, {
       precip01: precip,
       stormActivity01: o.storm ?? 0,
-      dayFactor01: Math.max(0, Math.min(1, sky.key.strength + 0.3)),
+      dayFactor01: sun.dayFactor01, // production feeds the sun's, not the cloud-dimmed key
       flash01: 0,
       sceneLight01: 1,
     });

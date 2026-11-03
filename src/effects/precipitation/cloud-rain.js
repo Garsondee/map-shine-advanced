@@ -69,7 +69,10 @@ export function cloudRainLinkWeight(fill01, link01) {
   const f = Number.isFinite(fill01) ? Math.max(0, Math.min(1, fill01)) : 0;
   const l = Number.isFinite(link01) ? Math.max(0, Math.min(1, link01)) : 0;
   const t = Math.min(1, f / 0.12);
-  return l * t * t * (3 - 2 * t);
+  // Under a heavy overcast the sky is one cloud: dry gaps would read as "the weather stopped". The link eases off
+  // from 55% to 85% fill, to a fifth of itself (some shower structure stays, never a dry view).
+  const o = Math.min(1, Math.max(0, (f - 0.55) / 0.3));
+  return l * t * t * (3 - 2 * t) * (1 - 0.8 * o * o * (3 - 2 * o));
 }
 
 /**

@@ -21,8 +21,10 @@ export function run(t) {
   t.ok('cloud rain: no cloud => link 0 (rain everywhere)', cloudRainLinkWeight(0, 1) === 0);
   t.ok('cloud rain: a deck 12% full links fully', Math.abs(cloudRainLinkWeight(0.12, 1) - 1) < 1e-9);
   t.ok('cloud rain: the dial at 0 unlinks', cloudRainLinkWeight(0.6, 0) === 0);
-  t.ok('cloud rain: the dial scales linearly', Math.abs(cloudRainLinkWeight(0.6, 0.5) - 0.5) < 1e-9);
+  t.ok('cloud rain: the dial scales linearly', Math.abs(cloudRainLinkWeight(0.4, 0.5) - 0.5) < 1e-9);
   t.ok('cloud rain: the ramp rises monotonically', cloudRainLinkWeight(0.03, 1) < cloudRainLinkWeight(0.08, 1));
+  t.ok('cloud rain: heavy overcast eases the link (no dry views)', cloudRainLinkWeight(0.85, 1) <= 0.21 && cloudRainLinkWeight(0.85, 1) > 0);
+  t.ok('cloud rain: mid cover keeps the full link', Math.abs(cloudRainLinkWeight(0.5, 1) - 1) < 1e-9);
   t.ok('cloud rain: junk in => 0, never NaN', cloudRainLinkWeight(NaN, undefined) === 0);
   t.ok('cloud rain: the depth window is ordered', CLOUD_RAIN_DEPTH_LO < CLOUD_RAIN_DEPTH_HI);
   t.ok('cloud rain: best of several birthplaces', CLOUD_RAIN_CANDIDATES >= 2);

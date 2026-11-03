@@ -9,6 +9,7 @@
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runCloudTops } from './cloud-tops.test.mjs';
+import { run as runStorybook } from './storybook-clouds.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -24,7 +25,10 @@ const t = {
   },
 };
 
-const suites = [['cloud-tops', runCloudTops]];
+const suites = [
+  ['cloud-tops', runCloudTops],
+  ['storybook-clouds', runStorybook],
+];
 for (const [name, fn] of suites) {
   const before = failed;
   await fn(t);

@@ -1049,3 +1049,14 @@ export { CLOUD_LOOK, CLOUD_LOOK_PARAMS, cloudLookDefaults } from './clouds/cloud
 // above, zoom-gated with parallax. Landed 2026-09-12 — previously a
 // deferred rung on CLOUD_LOOK with zero callers of the shading it already had.
 export { CLOUD_TOPS, CLOUD_TOPS_PARAMS, cloudTopsDefaults } from './clouds/cloud-tops.js';
+// STORYBOOK CLOUDS (2026-11-03) — the default cloud style: distinct, inked, cel-shaded clouds ray-cast in 3-D
+// over a domed deck, their ground shadow from the same clouds. See storybook-clouds.js's header.
+export {
+  createStorybookUniforms,
+  pushStorybookUniforms,
+  resolveStorybookDeck,
+  storybookPalette,
+  storybookLight,
+  buildStorybookCloudNode,
+  buildStorybookShadowNode,
+} from './clouds/storybook-clouds.js';

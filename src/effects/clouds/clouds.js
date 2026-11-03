@@ -51,6 +51,29 @@
  */
 export const CLOUD_LOOK_PARAMS = Object.freeze({
   // ── Look ────────────────────────────────────────────────────────────────
+  // 2026-11-03 — author: "we have a mismatch between the realistic rendering of our clouds and the
+  // cartoony/painterly style of the maps ... distinct clouds with spaces between them instead of the current
+  // grey slime." Storybook (effects/clouds/storybook-clouds.js) is the default; Realistic keeps the noise
+  // field and its physically lit tops exactly as they were. One switch for both the shadows and the tops, so
+  // a cloud and its shadow can never come from different skies.
+  style: {
+    type: 'enum',
+    values: ['storybook', 'realistic'],
+    default: 'storybook',
+    category: 'Look',
+    label: 'Cloud style',
+    help: 'Storybook: distinct, inked, cel-shaded clouds in the maps\' own painted style, coloured by the hour, drifting over the whole table with sky between them. Realistic: the soft noise deck with physically lit tops. Both the ground shadows and the zoomed-out cloud tops follow this.',
+  },
+  storybookShadowDensity: {
+    type: 'float',
+    min: 0,
+    max: 1.5,
+    step: 0.01,
+    default: 0.85,
+    category: 'Look',
+    label: 'Storybook shadow density',
+    help: "How solid a storybook cloud's ground shadow is before Shadow strength (below) scales it. 1 = as deep as the sky's own key/fill split allows at its core; lower leaves more sun through, like a thinner cloud. Realistic style ignores this.",
+  },
   shadowStrength: {
     type: 'float',
     min: 0,

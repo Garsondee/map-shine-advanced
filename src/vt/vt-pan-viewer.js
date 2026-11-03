@@ -623,6 +623,15 @@ import {
   cloudTopsGate,
   cloudTopsEyeMagnification,
   buildCloudTopsParallaxWorldXY,
+  // STORYBOOK CLOUDS (2026-11-03) — the default cloud style (effects/clouds/storybook-clouds.js): the tops and
+  // the ground shadow from one set of ray-cast, inked clouds.
+  createStorybookUniforms,
+  pushStorybookUniforms,
+  resolveStorybookDeck,
+  storybookPalette,
+  storybookLight,
+  buildStorybookCloudNode,
+  buildStorybookShadowNode,
   // The infravision hot-body recolour's slot count — the producer below must
   // agree with the node graph's own fixed unroll count.
   PLAYER_VISION_TOKEN_SLOTS,
@@ -3981,6 +3990,14 @@ async function startVtPanViewerUnserialized({
      * IS submitted, but a fully-closed gate must not submit it at all — the
      * precipitation zoom gate's own "shrinks the submitted draw list" test). */
     let cloudTopsAwake = false;
+    /** STORYBOOK CLOUDS (2026-11-03) — the deck's own uniforms (drift and wind direction stay the shared
+     * `cloudUniforms`' own, so both styles drift identically). Pushed every frame the sky has cloud, because
+     * the ground-shadow cache reads them at every zoom, not only while the tops are awake. */
+    const sbU = createStorybookUniforms(THREE.TSL);
+    const sbWind = { drift: cloudUniforms.drift, dir: cloudUniforms.windDir };
+    /** The Clouds card's `style` — true unless it says 'realistic'. Picks the shadow-cache material per frame
+     * and the tops build (`cloudTopsWantedBuildKey`). */
+    let cloudStyleStorybook = true;
     /** The lazily-built quad + its own tiny scene — mirrors `precip-
      * subsystem.js#curtainFor`'s "wait for real data rather than build
      * against a placeholder" posture, here waiting for the gate to open once
@@ -4035,6 +4052,7 @@ async function startVtPanViewerUnserialized({
      * through the function. */
     function cloudTopsWantedBuildKey() {
       const o = cloudTopsDiagOverride;
+      if (cloudStyleStorybook) return 'storybook';
       return `${o.noShadowMarch ? 1 : 0}:${o.cheapGradient ? 1 : 0}:${o.lowOctaves ? 1 : 0}:${o.noAlphaGate ? 1 : 0}:${o.inlineShadow ? 1 : 0}`;
     }
 
@@ -4154,6 +4172,44 @@ async function startVtPanViewerUnserialized({
         cloudTopsMesh.geometry?.dispose?.();
         cloudTopsScene = null;
         cloudTopsMesh = null;
+      }
+      if (wantedKey === 'storybook') {
+        // STORYBOOK TOPS (2026-11-03): one material, drawn straight into sceneLit at FULL resolution (the ink
+        // lines are a few screen px wide; the half-res target + bilinear composite the realistic tops use would
+        // smear them), no self-shadow pre-pass (the lobe shadow is a second ray inside the same shader). The
+        // deck bounds itself (its own domain fade, and the padding rule per pixel when the Table is off); only
+        // the floors-above gate comes from here, same as the realistic tops.
+        cloudTopsShadowMaterial?.dispose?.();
+        cloudTopsShadowMaterial = null;
+        const openAboveSb = THREE.TSL.float(1).sub(
+          buildOutdoorsMaskAtXY(THREE.TSL, {
+            uOutdoorsRect: uTopsSkyCoverRect,
+            outdoorsTexNode: topsSkyCoverTexNode,
+            worldXY: THREE.TSL.positionWorld.xy,
+          })
+        );
+        const sb = buildStorybookCloudNode(THREE.TSL, {
+          groundXY: THREE.TSL.positionWorld.xy,
+          u: sbU,
+          wind: sbWind,
+          visibility: openAboveSb,
+        });
+        const sbMaterial = new THREE.NodeMaterial();
+        sbMaterial.colorNode = sb.rgb;
+        sbMaterial.opacityNode = sb.alpha.mul(uTopsOpacity);
+        sbMaterial.transparent = true;
+        sbMaterial.depthTest = false;
+        sbMaterial.depthWrite = false;
+        sbMaterial.side = THREE.DoubleSide;
+        sbMaterial.blending = THREE.NormalBlending;
+        markCompileDeferrable(sbMaterial, 'cloud tops (storybook)');
+        cloudTopsMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), sbMaterial);
+        cloudTopsMesh.frustumCulled = false;
+        cloudTopsMesh.renderOrder = 19;
+        cloudTopsScene = new THREE.Scene();
+        cloudTopsScene.add(cloudTopsMesh);
+        cloudTopsMeshBuiltForKey = wantedKey;
+        return cloudTopsMesh;
       }
       const worldXY = buildCloudTopsParallaxWorldXY(
         THREE.TSL,
@@ -4400,6 +4456,37 @@ async function startVtPanViewerUnserialized({
     }
     cloudShadowCacheMaterial.depthTest = false;
     cloudShadowCacheMaterial.depthWrite = false;
+    // THE STORYBOOK SHADOW (2026-11-03) — the same cache, filled from the storybook clouds instead of the noise
+    // field (`storybook-clouds.js#buildStorybookShadowNode`), so every consumer sees the clouds the tops draw.
+    // Same padding branch; same raw-transmittance texel (strength stays per consumer).
+    const cloudShadowCacheStorybookMaterial = new THREE.NodeMaterial();
+    {
+      const { mix, uv, vec2, vec4, float, Fn, If } = THREE.TSL;
+      const r = uCloudShadowCacheRect;
+      const worldX = mix(r.x, r.z, uv().x);
+      const worldY = mix(r.y, r.w, uv().y);
+      const vis = Fn(() => {
+        const out = float(1).toVar('cloudCacheVisSb');
+        const inScene = buildInsideRectNode(THREE.TSL, { worldX, worldY, rect: uEffectsExtent });
+        If(inScene.greaterThan(float(0.5)), () => {
+          out.assign(
+            buildStorybookShadowNode(THREE.TSL, {
+              worldXY: vec2(worldX, worldY),
+              u: sbU,
+              wind: sbWind,
+              offset: uCloudOffset,
+              // The card's Shadow blur, read as a fraction of a cloud's radius here.
+              blur: uCloudShadowBlur,
+              fillShare: uCloudFillShare,
+            })
+          );
+        });
+        return out;
+      })();
+      cloudShadowCacheStorybookMaterial.fragmentNode = vec4(vis, float(0), float(0), float(1));
+    }
+    cloudShadowCacheStorybookMaterial.depthTest = false;
+    cloudShadowCacheStorybookMaterial.depthWrite = false;
     const cloudShadowCacheClearMaterial = new THREE.NodeMaterial();
     cloudShadowCacheClearMaterial.fragmentNode = THREE.TSL.vec4(1, 1, 1, 1);
     cloudShadowCacheClearMaterial.depthTest = false;
@@ -4437,10 +4524,18 @@ async function startVtPanViewerUnserialized({
      * @param {{x:number,y:number,z:number,w:number}} rect
      */
     function renderCloudShadowCache(rect) {
-      const clear = cloudUniforms.macroThreshold.value >= CLOUD_THRESHOLD_OFF;
+      // Storybook's clear sky is "no cell holds a cloud" (fill 0 — exactly cover 0, the same instant the
+      // realistic threshold goes off).
+      const clear = cloudStyleStorybook
+        ? !(sbU.deck.value.z > 0)
+        : cloudUniforms.macroThreshold.value >= CLOUD_THRESHOLD_OFF;
       if (clear && cloudShadowCacheHoldsClear) return;
       uCloudShadowCacheRect.value.set(rect.x, rect.y, rect.z, rect.w);
-      const m = clear ? cloudShadowCacheClearMaterial : cloudShadowCacheMaterial;
+      const m = clear
+        ? cloudShadowCacheClearMaterial
+        : cloudStyleStorybook
+          ? cloudShadowCacheStorybookMaterial
+          : cloudShadowCacheMaterial;
       if (cloudShadowCacheQuad.material !== m) cloudShadowCacheQuad.material = m;
       const prevTarget = renderer.getRenderTarget();
       renderer.setRenderTarget(cloudShadowCacheRT);
@@ -4453,7 +4548,7 @@ async function startVtPanViewerUnserialized({
     function warmCloudShadowCache() {
       const prevTarget = renderer.getRenderTarget();
       renderer.setRenderTarget(cloudShadowCacheRT);
-      for (const m of [cloudShadowCacheMaterial, cloudShadowCacheClearMaterial]) {
+      for (const m of [cloudShadowCacheStorybookMaterial, cloudShadowCacheMaterial, cloudShadowCacheClearMaterial]) {
         cloudShadowCacheQuad.material = m;
         cloudShadowCacheQuad.render(renderer);
       }
@@ -11194,6 +11289,18 @@ async function startVtPanViewerUnserialized({
       // rounding) rather than genuinely covering it.
       mesh.position.set((topsViewRect.minX + topsViewRect.maxX) / 2, (topsViewRect.minY + topsViewRect.maxY) / 2, 0);
       mesh.scale.set(w * 1.02, h * 1.02, 1);
+      if (cloudTopsMeshBuiltForKey === 'storybook') {
+        // Storybook: straight into sceneLit at full resolution (see `ensureCloudTopsMesh`).
+        const prevSbAutoClear = renderer.autoClearColor;
+        profiler?.begin(Z.cloudTopsDraw);
+        renderer.setRenderTarget(sceneLit);
+        renderer.autoClearColor = false;
+        renderer.render(cloudTopsScene, camera);
+        profiler?.end(Z.cloudTopsDraw);
+        renderer.autoClearColor = prevSbAutoClear;
+        renderer.setRenderTarget(null);
+        return;
+      }
       // mythica-machina-press#552 — this pass ran measured-but-unattributed
       // from the day it shipped: the pass-level hook already timed it as
       // pass.surface.cloudTops, but that auto-synthesised row carries no
@@ -12860,6 +12967,41 @@ async function startVtPanViewerUnserialized({
           boil: cloudBoil,
           windDir: flow,
         });
+
+        // ── STORYBOOK CLOUDS (2026-11-03) — the default style. The deck reads the RAW cover (the visual cap
+        // above exists to stop the noise deck whiting out; storybook clouds always keep sky between them), the
+        // hour's palette and a storybook light from the sun, and the shared scene eye for its 3-D. Pushed even
+        // while the tops sleep: the ground-shadow cache reads the same clouds at every zoom.
+        cloudStyleStorybook = cp.style !== 'realistic';
+        if (cloudStyleStorybook) {
+          const sbBoard = sceneRectToMinMax(dimensions.sceneRect);
+          const sbView = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+          const sbEye =
+            frameSceneEye ??
+            resolveSceneEye(sbView, getTableRenderState()?.params?.fovDeg ?? SCENE_EYE_DEFAULT_FOV_DEG);
+          const sbTops = getCloudTopsRenderState?.()?.params ?? {};
+          const sbDeck = resolveStorybookDeck({
+            cover01: env.weather.cloudCover01,
+            scalePx: env.weather.cloudScalePx,
+            anisotropy: recipe.anisotropy,
+            board: sbBoard,
+            tableOn: !!getTableRenderState()?.enabled,
+            eyeHeight: sbEye?.height,
+            params: { ...sbTops, storybookShadowDensity: cp.storybookShadowDensity },
+          });
+          pushStorybookUniforms(sbU, {
+            deck: sbDeck,
+            palette: storybookPalette(env.sun, {
+              cover01: env.weather.cloudCover01,
+              precip01: env.weather.precip01,
+            }),
+            light: storybookLight({ x: skyHandle.key.dirX, y: skyHandle.key.dirY }, skyHandle.key.elevationDeg),
+            eye: sbEye,
+            board: sbBoard,
+            footprintPx: sbView ? (sbView.maxX - sbView.minX) / Math.max(1, internalW) : 1,
+            timeSec: uGlobalTimeMs.value / 1000,
+          });
+        }
 
         // THE SHADOW OFFSET (+ the streak's own basis) — the SAME function
         // `effects/shadow-access.js` calls for every vegetation caster (doc

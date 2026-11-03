@@ -24745,7 +24745,11 @@ async function startVtPanViewerUnserialized({
         const tDraw = perfNowMs();
         const scenarioBefore = readPipelineCount();
         try {
-          warmWeatherScenario(scenario);
+          // Background: this can start AFTER the curtain is down (it waits for every other readiness probe), and a
+          // synchronous ~19k-character precipitation shader compiled in the middle of play froze the page for
+          // 230-400 ms apiece. The scenario's draw skips an object whose pipeline is not ready yet; `settleCompiles`
+          // below waits for them, so what this leaves behind is the same set of ready pipelines.
+          pipelineGovernor.background(() => warmWeatherScenario(scenario));
         } catch (err) {
           log.warn(`weather warm-up (${scenario.id}) failed — it will compile when first used:`, err);
         }

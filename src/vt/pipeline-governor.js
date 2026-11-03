@@ -297,6 +297,7 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
   const warnedRepeat = new Set();
   const warnedLeak = new Set();
   let blockingDepth = 0;
+  let backgroundDepth = 0;
   /** Characters of shader this JS task has already asked the GPU to compile synchronously. */
   let syncChars = 0;
   let syncChecked = false;
@@ -386,6 +387,13 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
     if (base.reason === 'sync-only') {
       spendSync(info.chars);
       return base;
+    }
+    // BACKGROUND WORK (frame-rate round, 2026-11-02): a warm-up that may run while the player is already moving
+    // creates its pipelines on a worker thread whatever their size. It costs the warm-up's own draw a few frames
+    // of "not ready yet", which nobody sees; compiled in the middle of play it was a 230-400 ms freeze per shader
+    // (four ~19k-character precipitation shaders, seen as 368-395 ms frames). Blocking wins when both are asked.
+    if (backgroundDepth > 0 && blockingDepth === 0) {
+      return { mode: 'async', reason: 'background' };
     }
     let policy = base;
     if (blockingDepth > 0) {
@@ -586,6 +594,20 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
         return fn();
       } finally {
         blockingDepth--;
+      }
+    },
+    /**
+     * Run `fn` with every pipeline that is not a one-shot pass created ASYNCHRONOUSLY, however small: for a warm-up
+     * that may run during play, where a synchronous compile is a visible freeze and the result is only wanted "ready
+     * by the time it is needed". The caller waits for `idle()` to know they exist. Re-entrant; `blocking()` wins.
+     * @template T @param {() => T} fn @returns {T}
+     */
+    background(fn) {
+      backgroundDepth++;
+      try {
+        return fn();
+      } finally {
+        backgroundDepth--;
       }
     },
     /** Resolves when no pipeline is compiling (synchronous ones count until the GPU has finished them). */

@@ -244,6 +244,48 @@ export async function run(t) {
     ok('a throw inside blocking() cannot leave the governor stuck synchronous', b.requests.at(-1).async === true);
   }
 
+  // ── BACKGROUND MODE (frame-rate round, 2026-11-02) ───────────────────────
+  {
+    const b = fakeBackend();
+    const gov = createPipelineGovernor({ renderer: b.renderer });
+    gov.install();
+    const precip = pipeline(19_000, 'precip');
+    const result = gov.background(() => {
+      b.utils.createRenderPipeline(precip, null);
+      return 'bg result';
+    });
+    ok(
+      'inside background(), a small unmarked pipeline is created asynchronously (a 19k shader was a 230-400 ms freeze in play)',
+      b.requests.at(-1).async === true && result === 'bg result'
+    );
+    ok('...and the report counts it as a deferred, background creation', gov.report().async === 1 && gov.report().sync === 0);
+    b.utils.createRenderPipeline(precip, null);
+    ok('...and the moment it returns, small pipelines are synchronous again', b.requests.at(-1).async === false);
+
+    const bake = pipeline(4_000, 'bake');
+    markCompileSyncOnly(bake.material, 'one-shot');
+    gov.background(() => b.utils.createRenderPipeline(bake, null));
+    ok('a one-shot pass is still created synchronously in background mode (a skipped draw would lose it)', b.requests.at(-1).async === false);
+
+    const flame = pipeline(4_000, 'flame');
+    gov.background(() => gov.blocking(() => b.utils.createRenderPipeline(flame, null)));
+    ok('blocking() inside background() wins: the floor-prepare guarantee holds', b.requests.at(-1).async === false);
+    gov.blocking(() => gov.background(() => b.utils.createRenderPipeline(flame, null)));
+    ok('...whichever way they nest', b.requests.at(-1).async === false);
+
+    gov.background(() => gov.background(() => b.utils.createRenderPipeline(precip, null)));
+    ok('background() nests', b.requests.at(-1).async === true);
+    try {
+      gov.background(() => {
+        throw new Error('inside');
+      });
+    } catch (_) {
+      // expected
+    }
+    b.utils.createRenderPipeline(precip, null);
+    ok('a throw inside background() cannot leave the governor stuck asynchronous', b.requests.at(-1).async === false);
+  }
+
   // ── A HEAVY PIPELINE IS NEVER SYNCHRONOUS, EVEN INSIDE A BLOCKING BLOCK ──
   {
     const b = fakeBackend();

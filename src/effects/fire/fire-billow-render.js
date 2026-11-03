@@ -131,6 +131,14 @@ export const BILLOW_LOOK = Object.freeze({
   /** Smoke is drawn OVER the flame: how far up its life it fades in, and how opaque it is where it crosses the flame. */
   smokeFadeIn: 0.12, // (v2 0.3 -> 0.12: a clear young billow left a gap between the flame and its column)
   smokeOverFlame: 0.55,
+  /**
+   * THE FIRE LIGHTS ITS OWN SMOKE FROM BELOW (2026-11-03, author: "Fires should illuminate their smoke from the base upwards
+   * and the smoke should be immune to being lit by the point light it creates"). `smokeFireLight` is how strongly the fire
+   * lights the base of its column (scene-light units: 1 = as bright as noon on that smoke's own paint), `smokeFireReach` how
+   * far up the column's life the light carries before it has faded to nothing (0..1 of the age).
+   */
+  smokeFireLight: 1.6,
+  smokeFireReach: 0.75,
   /** Shading light direction (screen space, up-left). */
   lightX: -0.55,
   lightY: -0.55,
@@ -297,10 +305,16 @@ export function createBillowRenderer({
     smokeFadeIn: num('smokeFadeIn'),
     coreBloom: num('coreBloom'),
     smokeOverFlame: num('smokeOverFlame'),
+    smokeFireLight: num('smokeFireLight'),
+    smokeFireReach: num('smokeFireReach'),
     light: uniform(vec2(BILLOW_LOOK.lightX, BILLOW_LOOK.lightY)),
     hue: uniform(float(0)),
     tint: uniform(vec3(1, 1, 1)),
     ambient: uniform(vec3(1, 1, 1)),
+    // THE SKY'S LIGHT (sRGB, the scene's illumination with no lamp in it: the ambient floor, global light, sun and moon). The
+    // smoke reads the scene's light no brighter than this, so no lamp pool (above all its own fire's, cut off by every wall
+    // the fire stands behind) is stamped onto a cloud that floats over those walls. Default: no cap.
+    smokeSky: uniform(vec3(64, 64, 64)),
     expectedDepth: uniform(float(0)),
     // THE SUN'S SHADOW (2026-11-01, the shadow consistency pass): xy = the shadow's unit
     // direction on the map (away from the sun), z = its length as a share of the box's
@@ -716,7 +730,9 @@ export function createBillowRenderer({
     sRgb = mix(sRgb, smokeHi, steam.mul(0.85));
     // HOW BRIGHT THE SCENE IS HERE (noon, a well lit room): pale smoke on a pale floor is a mist, not smoke, so a bright scene greys
     // the smoke, strengthens its rim and its shadow (a night scene needs none of that: the dark floor does the work)
-    const illum = lighting?.illumTexNode ? lighting.illumTexNode.sample(screenUV).rgb : null;
+    // (2026-11-03: the scene's light here, with every lamp pool taken out — `smokeSky` above. The fire's own light is clipped
+    // by the walls round it, so reading it stamped a hard red line across the column wherever it crossed a wall.)
+    const illum = lighting?.illumTexNode ? min(lighting.illumTexNode.sample(screenUV).rgb, U.smokeSky) : null;
     const illumLum = illum ? dot(illum, vec3(0.2126, 0.7152, 0.0722)) : float(0);
     const bright = smoothstep(float(0.55), float(1.0), illumLum);
     // the line: the first `smokeLinePx` px inside the silhouette, warm near-black
@@ -737,20 +753,27 @@ export function createBillowRenderer({
       .mul(U.smokeShadow)
       .mul(float(1).add(bright.mul(0.9)))
       .mul(U.sunShadow.w);
+    // THE FIRE'S OWN LIGHT ON ITS SMOKE (2026-11-03). The fire lights its column from below: full at the youngest billows,
+    // fading smoothly up the column's life (the field's tone is the density-weighted age, so this follows the column wherever
+    // the wind takes it) and gone by `smokeFireReach`. It is the fire's warm light (in the flame's tint), it multiplies the
+    // smoke's own paint (a charcoal column takes less of it than a pale one), and it is the only lamp the smoke sees: no wall
+    // stands between a fire and the smoke rising out of it. A noon sky drowns it, as it drowns a fire's light on the floor.
+    const fireLitAmt = float(1)
+      .sub(smoothstep(float(0), max(U.smokeFireReach, float(0.02)), toneS))
+      .mul(U.smokeFireLight)
+      .mul(float(1).sub(bright.mul(0.75)));
+    const fireLight = vec3(1.0, 0.58, 0.3).mul(U.tint).mul(fireLitAmt);
     let smokeLinear;
     if (illum) {
-      const coloration = lighting.colorationTexNode ? lighting.colorationTexNode.sample(screenUV).rgb : vec3(0, 0, 0);
       // the smoke is never lit brighter than its own paint, and in a bright scene it goes greyer so it stands off the floor
       const illumC = illum.mul(min(float(1), float(0.95).div(max(illumLum, float(0.001)))));
       const dayDark = bright.mul(U.smokeDayDark);
-      // the scene's own composite: lit = EOTF(OETF(albedo) * illum + coloration); the painted smoke colours are sRGB albedo
-      smokeLinear = sRGBTransferEOTF(
-        sRGBTransferOETF(sRgb.mul(float(1).sub(dayDark)))
-          .mul(illumC)
-          .add(coloration)
-      );
+      // the scene's own composite: lit = EOTF(OETF(albedo) * illum + coloration); the painted smoke colours are sRGB albedo.
+      // (2026-11-03: the scene's coloration — every lamp's coloured pool, its own fire's above all — is no longer added: it is
+      // as wall-clipped as the illumination. The fire's light on its smoke is `fireLight`.)
+      smokeLinear = sRGBTransferEOTF(sRGBTransferOETF(sRgb.mul(float(1).sub(dayDark))).mul(illumC.add(fireLight)));
     } else {
-      smokeLinear = sRgb.mul(U.ambient);
+      smokeLinear = sRGBTransferEOTF(sRGBTransferOETF(sRgb.mul(U.ambient)).mul(float(1).add(fireLight)));
     }
 
     // ───────────── COMPOSE (premultiplied): flame over smoke, glow and coals added ─────────────

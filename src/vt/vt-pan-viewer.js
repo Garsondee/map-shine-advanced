@@ -5910,6 +5910,16 @@ async function startVtPanViewerUnserialized({
       // THE SHARED SHADOW (2026-11-01): the smoke's ground shadow follows the sun. A getter —
       // `shadowHandle` is declared further down and reassigned whenever the sky changes.
       getShadowHandle: () => shadowHandle,
+      // THE SMOKE'S SKY (2026-11-03, author: "the smoke should be immune to being lit by the point light it creates"): the
+      // brightest the scene's light gets with no lamp in it — the room's floor (ambient + global light) and the open sky's
+      // (sun-tinted, plus the moon) — with 2% headroom so a half-float illum texel equal to it is never clipped. The smoke
+      // reads the lighting buffers no brighter than this; its own fire lights it from below instead.
+      getSmokeSkyRgb: () => {
+        if (!lastAmbientColors) return null;
+        const indoor = maxRgb(lastAmbientColors.background, lastGlobalLightFloor);
+        const sky = maxRgb(indoor, windowOutdoorLightRgb() ?? indoor);
+        return [sky[0] * 1.02, sky[1] * 1.02, sky[2] * 1.02];
+      },
       // ⚠️ MISNAMED, AND KNOWINGLY LEFT THAT WAY FOR NOW (2026-09-04,
       // mythica-machina-press#498). `distancePixels` is pixels per DISTANCE
       // UNIT (per foot on a feet-authored scene), not per metre — verified

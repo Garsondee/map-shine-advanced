@@ -231,6 +231,8 @@ export function run(t) {
         smokeCoverage: 'smokeOutline',
         smokeBody: 'smokeVeil',
         smokeBrightGrey: 'smokeDayDark',
+        smokeFirelight: 'smokeFireLight',
+        smokeFirelightReach: 'smokeFireReach',
       },
     };
     let ok = true;

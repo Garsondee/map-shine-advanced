@@ -102,7 +102,10 @@ function makeFakeRendererFactory({ flameCapacity = 4096, smokeCapacity = 2048 } 
       smokeLobes,
       flameCapacity,
       smokeCapacity,
-      uniforms: { expectedDepth: { value: -1 } },
+      uniforms: {
+        expectedDepth: { value: -1 },
+        smokeSky: { value: { v: [64, 64, 64], set: (...a) => (seen.smokeSky = a) } },
+      },
       setCounts(f, s) {
         seen.counts = { flame: f, smoke: s };
       },
@@ -1395,6 +1398,21 @@ export function run(t) {
         open.weather[0].wind > 0.9 &&
         'openness' in open.weather[0] &&
         'stress' in open.weather[0]
+    );
+  }
+
+  // ── THE SMOKE'S SKY (2026-11-03): the most of the scene's light the smoke reads, so its own fire's wall-clipped pool is
+  // never stamped on it. It reaches the renderer each frame; a malformed one is ignored (the cap stays where it was) ────
+  {
+    const e = makeEngine();
+    e.engine.update({ ...ctxOf(), smokeSky: [0.14, 0.14, 0.29] });
+    const got = e.seen.smokeSky;
+    e.seen.smokeSky = null;
+    e.engine.update({ ...ctxOf(), smokeSky: [0.1, NaN, 0.2] });
+    e.engine.update({ ...ctxOf(), smokeSky: null });
+    t.ok(
+      `the sky light reaches the smoke's cap (${got}) and a broken or absent one leaves it alone`,
+      Array.isArray(got) && got[0] === 0.14 && got[2] === 0.29 && e.seen.smokeSky === null
     );
   }
 

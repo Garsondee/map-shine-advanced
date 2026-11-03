@@ -19,7 +19,6 @@
  * @module tools/shader-lab/fire-billow-lab
  */
 import * as THREE from '../../src/vendor/three/three.webgpu.js';
-import { createBillowRenderer, billowSmokeScale, BILLOW_LOOK } from '../../src/effects/fire/fire-billow-render.js';
 import { emitFireLobes, BILLOW_TUNE, LOBE_STRIDE, maxLobesPerFire } from '../../src/effects/fire/fire-billow-geometry.js';
 import { fireScaleChain } from '../../src/effects/fire/fire-geometry.js';
 import { saveCanvasPng, makeRunId } from './contract.js';
@@ -29,6 +28,15 @@ const q = new URLSearchParams(location.search);
 const PRESENT = q.get('present') !== '0';
 const STAGE_W = Number(q.get('w') ?? 960);
 const STAGE_H = Number(q.get('h') ?? 720);
+// THE ROOM (`?room=1`, 2026-11-03): a night scene's lighting buffers for the smoke to read, built the way the scene builds
+// them — a sky floor, plus the fire's own light pool and its warm coloration, both cut off dead at a WALL line (a fire
+// stood just outside a room). The ground is lit through the same buffers. Without it the smoke is lit by `uAmbient` alone.
+const ROOM = q.get('room') === '1';
+// `?render=<path under src/effects/fire/>` loads another copy of the renderer (an A/B against an older version).
+const RENDER_FILE = q.get('render') ?? 'fire-billow-render.js';
+if (!/^[\w.-]+\.js$/.test(RENDER_FILE)) throw new Error(`?render= takes a file name in src/effects/fire/, not ${RENDER_FILE}`);
+const RENDER_URL = `../../src/effects/fire/${RENDER_FILE}`;
+const { createBillowRenderer, billowSmokeScale, BILLOW_LOOK } = await import(RENDER_URL);
 const statusEl = document.getElementById('status');
 const say = (m) => {
   if (statusEl) statusEl.textContent = m;
@@ -96,7 +104,55 @@ async function main() {
     rt.texture.name = name;
     return rt;
   };
-  const billow = createBillowRenderer({ THREE, createTarget: makeTarget, disposeTarget: (rt) => rt.dispose() });
+  // ── the room's lighting buffers (`?room=1`): illumination (sRGB, MAX of the sky and the lamp) and coloration (added) ──
+  const room = {
+    sky: TSL.uniform(TSL.vec3(0.14, 0.14, 0.28)),
+    pool: TSL.uniform(TSL.vec3(1.0, 0.9, 0.78)),
+    col: TSL.uniform(TSL.vec3(0.5, 0.16, 0.04)),
+    fire: TSL.uniform(TSL.vec2(2000, 2000)),
+    radius: TSL.uniform(TSL.float(240)),
+    wallY: TSL.uniform(TSL.float(1940)),
+  };
+  const illumRT = makeTarget('room.illum', STAGE_W, STAGE_H);
+  const colRT = makeTarget('room.coloration', STAGE_W, STAGE_H);
+  const roomFall = TSL.Fn(() => {
+    const p = TSL.positionWorld.xy;
+    const k = TSL.clamp(TSL.float(1).sub(TSL.length(p.sub(room.fire)).div(room.radius)), 0, 1);
+    // the wall: the fire's light stops dead on the far side of it (y < wallY is inside the room, behind the wall)
+    return k.mul(k).mul(TSL.step(room.wallY, p.y));
+  });
+  const roomPlane = new THREE.PlaneGeometry(1, 1);
+  const makeRoomMesh = (colorNode) => {
+    const m = new THREE.NodeMaterial();
+    m.colorNode = colorNode;
+    m.depthTest = false;
+    m.depthWrite = false;
+    m.side = THREE.DoubleSide;
+    m.toneMapped = false;
+    const mesh = new THREE.Mesh(roomPlane, m);
+    mesh.frustumCulled = false;
+    const scene = new THREE.Scene();
+    scene.add(mesh);
+    return { scene, mesh };
+  };
+  const illumQuad = makeRoomMesh(TSL.vec4(TSL.max(room.sky, room.pool.mul(roomFall())), TSL.float(1)));
+  const colQuad = makeRoomMesh(TSL.vec4(room.col.mul(roomFall()), TSL.float(1)));
+  const illumTexNode = TSL.texture(illumRT.texture);
+  const colorationTexNode = TSL.texture(colRT.texture);
+  /** The scene's composite on a ground colour (linear): EOTF(OETF(albedo) * illum + coloration). */
+  const roomLit = (rgb) =>
+    TSL.sRGBTransferEOTF(
+      TSL.sRGBTransferOETF(rgb)
+        .mul(illumTexNode.sample(TSL.screenUV).rgb)
+        .add(colorationTexNode.sample(TSL.screenUV).rgb)
+    );
+
+  const billow = createBillowRenderer({
+    THREE,
+    createTarget: makeTarget,
+    disposeTarget: (rt) => rt.dispose(),
+    lighting: ROOM ? { illumTexNode, colorationTexNode } : null,
+  });
   function runFieldJobs(jobs) {
     const prevTarget = renderer.getRenderTarget();
     const prevAuto = renderer.autoClear;
@@ -155,7 +211,7 @@ async function main() {
   const groundScene = new THREE.Scene();
   const bgMaterial = new THREE.NodeMaterial();
   const uBg = TSL.uniform(TSL.vec3(0.02, 0.03, 0.025));
-  bgMaterial.colorNode = TSL.vec4(uBg, TSL.float(1));
+  bgMaterial.colorNode = TSL.vec4(ROOM ? roomLit(uBg) : uBg, TSL.float(1));
   bgMaterial.depthTest = false;
   bgMaterial.depthWrite = false;
   bgMaterial.side = THREE.DoubleSide;
@@ -186,7 +242,7 @@ async function main() {
     const mat = new THREE.NodeMaterial();
     const node = TSL.texture(rec.tex);
     const c = node.sample(TSL.uv());
-    mat.colorNode = TSL.vec4(c.rgb, c.a);
+    mat.colorNode = TSL.vec4(ROOM ? roomLit(c.rgb) : c.rgb, c.a);
     mat.transparent = true;
     mat.depthTest = false;
     mat.depthWrite = false;
@@ -285,6 +341,29 @@ async function main() {
       bgMesh.visible = true;
     }
 
+    if (ROOM) {
+      // the room's buffers, drawn over the view rect (the scene draws them before anything post-lit reads them)
+      const R0 = S.room ?? {};
+      room.sky.value.set(...(R0.sky ?? [0.14, 0.14, 0.28]));
+      room.pool.value.set(...(R0.pool ?? [1.0, 0.9, 0.78]));
+      room.col.value.set(...(R0.col ?? [0.5, 0.16, 0.04]));
+      room.fire.value.set(S.fire.x, S.fire.y);
+      room.radius.value = R0.radius ?? S.fire.radius * 8;
+      room.wallY.value = S.fire.y + (R0.wallDy ?? -S.fire.radius * 2.2);
+      // what the viewer hands the smoke as its sky light: the floor with no lamp in it
+      if (billow.uniforms.smokeSky) billow.uniforms.smokeSky.value.set(...(R0.smokeSky ?? R0.sky ?? [0.14, 0.14, 0.28]));
+      for (const q2 of [illumQuad, colQuad]) {
+        q2.mesh.position.set((rect.minX + rect.maxX) / 2, (rect.minY + rect.maxY) / 2, 0);
+        q2.mesh.scale.set(rect.maxX - rect.minX, rect.maxY - rect.minY, 1);
+      }
+      renderer.setClearColor(new THREE.Color(0, 0, 0), 1);
+      renderer.autoClear = true;
+      renderer.setRenderTarget(illumRT);
+      renderer.render(illumQuad.scene, camera);
+      renderer.setRenderTarget(colRT);
+      renderer.render(colQuad.scene, camera);
+    }
+
     renderer.setRenderTarget(stage);
     renderer.setClearColor(new THREE.Color(0, 0, 0), 1);
     renderer.autoClear = true;
@@ -353,6 +432,16 @@ async function main() {
     async frame(cfg) {
       if (cfg) S = deepMerge(S, cfg);
       return renderFrame();
+    },
+    /** Render the current state (patched by `cfg`) and hand back the 8-bit sRGB canvas, for measuring pixels. */
+    async canvas(cfg) {
+      if (cfg) S = deepMerge(S, cfg);
+      await renderFrame();
+      return stageCanvas();
+    },
+    /** The view rect of the current state (world px), for turning a world point into a canvas pixel. */
+    viewRect() {
+      return viewRect();
     },
     /** Render the current state and save one PNG. */
     async shot(name = 'shot', cfg) {

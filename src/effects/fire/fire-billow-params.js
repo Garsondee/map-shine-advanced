@@ -80,6 +80,8 @@ const DIRECT = {
   smokeCoverage: ['look', 'smokeOutline', 0.42, 0.15, 1.2],
   smokeBody: ['look', 'smokeVeil', 2.4, 0.5, 6],
   smokeBrightGrey: ['look', 'smokeDayDark', 0.69, 0, 0.9],
+  smokeFirelight: ['look', 'smokeFireLight', 1.6, 0, 4],
+  smokeFirelightReach: ['look', 'smokeFireReach', 0.75, 0.1, 1],
   smokeLineWidth: ['scale', 'smokeLineWidth', 0.1, 0, 3],
   buildingSmokeHeight: ['tune', 'massRise', 6, 0.5, 6],
   spitThrow: ['tune', 'spitRange', 2.6, 0.5, 8],

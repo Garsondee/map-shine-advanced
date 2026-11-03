@@ -592,6 +592,7 @@ export function createBillowEngine({
      * @param {number} [ctx.quality=1] the tier's lobe budget scale
      * @param {number} [ctx.expectedDepth=0]
      * @param {number[]} [ctx.sunShadow] [dirX, dirY, length 0..1, darkness vs clear noon] — the smoke's ground shadow
+     * @param {number[]} [ctx.smokeSky] [r, g, b] sRGB — the scene's light with no lamp in it (the smoke reads no more than this)
      * @returns {{lifeByFire: Map<string,{vitality:number,coal:number,phase:string,stress01:number}>}}
      */
     update(ctx) {
@@ -1002,6 +1003,11 @@ export function createBillowEngine({
       // the smoke's ground shadow follows the shared sun (2026-11-01); absent = the old fixed look
       if (Array.isArray(ctx.sunShadow) && ctx.sunShadow.length === 4 && ctx.sunShadow.every(Number.isFinite)) {
         renderer.uniforms.sunShadow.value.set(...ctx.sunShadow);
+      }
+      // the sky's light (sRGB, no lamp in it): the most of the scene's light the smoke reads, so no lamp pool — its own
+      // fire's, cut off by the walls round it — is stamped onto it (2026-11-03); absent = no cap
+      if (Array.isArray(ctx.smokeSky) && ctx.smokeSky.length === 3 && ctx.smokeSky.every(Number.isFinite)) {
+        renderer.uniforms.smokeSky.value.set(...ctx.smokeSky);
       }
       jobs = nf + ns > 0 ? renderer.prepareField(rect, { pxPerWorld, timeSec }) : [];
       renderer.scene.visible = nf + ns > 0;

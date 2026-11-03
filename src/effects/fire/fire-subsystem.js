@@ -180,6 +180,9 @@ function buildFireLightSamples(cloud, fires, windHandle) {
  * @param {(cfg:object) => object} [deps.createBillow] - the billow engine factory; injected so the orchestration can be
  *   tested without a GPU (the default is `createBillowEngine`).
  * @param {{illumTexNode?:*, colorationTexNode?:*}} [deps.lighting] - the scene's own light, which lights the smoke.
+ * @param {() => (number[]|null)} [deps.getSmokeSkyRgb] - the scene's light with no lamp in it (sRGB: ambient floor, global
+ *   light, sun and moon). The smoke reads the lighting buffers no brighter than this, so its own fire's wall-clipped pool is
+ *   never stamped on it; the fire lights its smoke itself, from the base up (fire-billow-render.js). Absent = no cap.
  * @param {*} [deps.profiler] - so `sync()` can bracket its own per-frame cost (`light.fireSync`).
  * @param {*} [deps.depthTexNode] - `buf:scene.depth`'s DEPTH attachment — the depth-authority occlusion gate every
  *   post-lit draw uses (mythica-machina-press#469). Omitted → the gates compile out.
@@ -215,6 +218,7 @@ export function createFireSubsystem({
   getPrecip01 = null,
   getBloomState = null,
   getShadowHandle = null,
+  getSmokeSkyRgb = null,
   createEngine = null,
   createTarget = null,
   disposeTarget = null,
@@ -450,6 +454,7 @@ export function createFireSubsystem({
         expectedDepth,
         eye,
         sunShadow: smokeSunShadow(getShadowHandle?.() ?? null),
+        smokeSky: getSmokeSkyRgb?.() ?? null,
       });
       lifeByFire = res.lifeByFire;
     }

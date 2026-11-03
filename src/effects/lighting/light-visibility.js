@@ -129,12 +129,18 @@ function degToRad(deg) {
  * @param {*} [args.cloudGate] - where the cloud may shade (outdoors, open to the sky).
  * @returns {*|null} the visibility to multiply the ambient by, or null for "no term".
  */
-export function buildSunAndCloudVisNode(TSL, { sunVis = null, cloudVisRaw = null, fillShare = null, depth = null, cloudGate = null }) {
+export function buildSunAndCloudVisNode(
+  TSL,
+  { sunVis = null, cloudVisRaw = null, fillShare = null, depth = null, cloudGate = null }
+) {
   const { float, mix, min } = TSL;
   const shared = !!(cloudVisRaw && fillShare && depth);
   let cloud = cloudVisRaw;
   if (shared) {
-    const opacity = float(1).sub(cloudVisRaw).div(float(1).sub(fillShare).max(float(1e-3))).clamp(0, 1);
+    const opacity = float(1)
+      .sub(cloudVisRaw)
+      .div(float(1).sub(fillShare).max(float(1e-3)))
+      .clamp(0, 1);
     cloud = float(1).sub(depth.mul(opacity));
   }
   if (cloud && cloudGate) cloud = mix(float(1), cloud, cloudGate);

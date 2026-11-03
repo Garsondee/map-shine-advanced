@@ -23,7 +23,10 @@ export function run(t) {
   t.ok('cloud rain: the dial at 0 unlinks', cloudRainLinkWeight(0.6, 0) === 0);
   t.ok('cloud rain: the dial scales linearly', Math.abs(cloudRainLinkWeight(0.4, 0.5) - 0.5) < 1e-9);
   t.ok('cloud rain: the ramp rises monotonically', cloudRainLinkWeight(0.03, 1) < cloudRainLinkWeight(0.08, 1));
-  t.ok('cloud rain: heavy overcast eases the link (no dry views)', cloudRainLinkWeight(0.85, 1) <= 0.21 && cloudRainLinkWeight(0.85, 1) > 0);
+  t.ok(
+    'cloud rain: heavy overcast eases the link (no dry views)',
+    cloudRainLinkWeight(0.85, 1) <= 0.21 && cloudRainLinkWeight(0.85, 1) > 0
+  );
   t.ok('cloud rain: mid cover keeps the full link', Math.abs(cloudRainLinkWeight(0.5, 1) - 1) < 1e-9);
   t.ok('cloud rain: junk in => 0, never NaN', cloudRainLinkWeight(NaN, undefined) === 0);
   t.ok('cloud rain: the depth window is ordered', CLOUD_RAIN_DEPTH_LO < CLOUD_RAIN_DEPTH_HI);
@@ -33,7 +36,10 @@ export function run(t) {
   const v = virtualRainDeck(1000, { minX: 0, minY: 0, maxX: 2000, maxY: 1000 });
   t.ok('virtual deck: flat at its share of the eye', v.baseHeight === VIRTUAL_DECK_SHARE * 1000 && v.domeHeight === 0);
   t.ok('virtual deck: no fill (so no link)', v.fill === 0 && cloudRainLinkWeight(v.fill, 1) === 0);
-  t.ok('virtual deck: height is the same everywhere', storybookDeckHeightAt(v, 0, 0) === storybookDeckHeightAt(v, 1900, 50));
+  t.ok(
+    'virtual deck: height is the same everywhere',
+    storybookDeckHeightAt(v, 0, 0) === storybookDeckHeightAt(v, 1900, 50)
+  );
 
   // The storybook dome: highest at the board's centre, the base at the dome's rim, never below 0.
   const board = { minX: 0, minY: 0, maxX: 6000, maxY: 4000 };
@@ -48,16 +54,25 @@ export function run(t) {
   const rain = PRECIP_SPECIES.rain.fall;
   const snow = PRECIP_SPECIES.snow.fall;
   const hail = PRECIP_SPECIES.hail.fall;
-  t.ok('fall: rain 2-9 m/s (Gunn & Kinzer)', rain.terminalMps[0] >= 1.5 && rain.terminalMps[1] <= 9.5 && rain.dropLaw === true);
+  t.ok(
+    'fall: rain 2-9 m/s (Gunn & Kinzer)',
+    rain.terminalMps[0] >= 1.5 && rain.terminalMps[1] <= 9.5 && rain.dropLaw === true
+  );
   t.ok('fall: snow 0.5-1.5 m/s', snow.terminalMps[0] >= 0.3 && snow.terminalMps[1] <= 2);
   t.ok('fall: hail falls fastest', hail.terminalMps[0] > rain.terminalMps[1] * 0.9);
   t.ok('fall: hail leaves the cloud with only part of the wind', hail.birthCarry01 > 0 && hail.birthCarry01 < 1);
   // The drop law's own end points (Atlas et al. 1973): 0.5 mm -> ~2.0 m/s, 4.5 mm -> ~8.9 m/s.
   const law = (d) => 9.65 - 10.3 * Math.exp(-0.6 * d);
-  t.ok('fall: drop law matches the table ends', Math.abs(law(0.5) - rain.terminalMps[0]) < 0.15 && Math.abs(law(4.5) - rain.terminalMps[1]) < 0.15);
+  t.ok(
+    'fall: drop law matches the table ends',
+    Math.abs(law(0.5) - rain.terminalMps[0]) < 0.15 && Math.abs(law(4.5) - rain.terminalMps[1]) < 0.15
+  );
 
   // The push dial: the fall reads it relative to its shipped default, so the two must agree.
-  t.ok('push: the fall\'s reference is the card\'s default', WIND_PUSH_SHIPPED_PXS === PRECIPITATION_PARAMS.windAirSpeedPxS.default);
+  t.ok(
+    "push: the fall's reference is the card's default",
+    WIND_PUSH_SHIPPED_PXS === PRECIPITATION_PARAMS.windAirSpeedPxS.default
+  );
   t.ok('fall speed dial: 1 = real terminal speed by default', PRECIPITATION_PARAMS.fallSpeedScale.default === 1);
   t.ok('cloud link dial: on by default', PRECIPITATION_PARAMS.cloudLink.default === 1);
 }

@@ -84,8 +84,18 @@ export function run(t) {
     t.ok('smoke shadow: clear noon keeps the author’s own darkness exactly', Math.abs(noon[3] - 1) < 1e-9);
     t.ok('smoke shadow: golden hour is darker than noon, as every shadow is', evening[3] > noon[3]);
     t.ok('smoke shadow: none at night', night[3] === 0);
-    t.ok('smoke shadow: a low sun fills the box’s shadow room, a high one leaves part of it', evening[2] === 1 && noon[2] < 1 && noon[2] >= 0.35);
-    t.ok('smoke shadow: the darkness is the shared one, relative to clear noon', Math.abs(evening[3] - createShadowHandle({ sun: { elevationDeg: 4, azimuthDeg: 265, golden01: 0.9 } }).depth01 / SHADOW_NOON_REFERENCE_DEPTH) < 1e-12);
+    t.ok(
+      'smoke shadow: a low sun fills the box’s shadow room, a high one leaves part of it',
+      evening[2] === 1 && noon[2] < 1 && noon[2] >= 0.35
+    );
+    t.ok(
+      'smoke shadow: the darkness is the shared one, relative to clear noon',
+      Math.abs(
+        evening[3] -
+          createShadowHandle({ sun: { elevationDeg: 4, azimuthDeg: 265, golden01: 0.9 } }).depth01 /
+            SHADOW_NOON_REFERENCE_DEPTH
+      ) < 1e-12
+    );
   }
   const engineInstances = [];
   const makeFakeEngine = (kind, archetype, renderOrder, extra = {}) => {

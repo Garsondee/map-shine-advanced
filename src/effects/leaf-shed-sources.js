@@ -389,7 +389,13 @@ export function planShedBirths({
 }
 
 /** The broad-leaf toggles, in the shader's form order (`leaf-shed-shape.js#BROAD_LEAF_FORM_NAMES`). */
-export const BROAD_FORM_PARAMS = Object.freeze(['dropPalmate', 'dropTrifoliate', 'dropCordate', 'dropHastate', 'dropSerrated']);
+export const BROAD_FORM_PARAMS = Object.freeze([
+  'dropPalmate',
+  'dropTrifoliate',
+  'dropCordate',
+  'dropHastate',
+  'dropSerrated',
+]);
 
 /**
  * What a canopy sheds for one roll in 0..1, honouring which designs this map allows (a missing toggle

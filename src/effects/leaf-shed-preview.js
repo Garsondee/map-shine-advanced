@@ -55,7 +55,8 @@ export function renderShedPreview(designId, params = {}, size = 56) {
   const design = SHED_DESIGNS.find((d) => d.id === designId) ?? SHED_DESIGNS[0];
   const S = SHIM;
   const knobs = {};
-  for (const [k, def] of Object.entries(SHAPE_KNOB_DEFAULTS)) knobs[k] = S.float(Number.isFinite(params[k]) ? params[k] : def);
+  for (const [k, def] of Object.entries(SHAPE_KNOB_DEFAULTS))
+    knobs[k] = S.float(Number.isFinite(params[k]) ? params[k] : def);
   BROAD_FORM_KNOBS.forEach((k, i) => (knobs[k] = S.float(design.form === i ? 1 : 0)));
   const ls = Number.isFinite(params.leafSize) ? params.leafSize : 1;
   const outline = Number.isFinite(params.outline) ? params.outline : 1;

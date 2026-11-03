@@ -15,7 +15,10 @@ function fakeFoundry() {
   const local = new Map();
   const worldDocs = new Map();
   const counts = { builds: 0 };
-  const localStorage = { getItem: (k) => (local.has(k) ? local.get(k) : null), setItem: (k, v) => local.set(k, String(v)) };
+  const localStorage = {
+    getItem: (k) => (local.has(k) ? local.get(k) : null),
+    setItem: (k, v) => local.set(k, String(v)),
+  };
   const world = { getSetting: (id) => worldDocs.get(id) };
   const settings = {
     settings: registry,
@@ -59,11 +62,17 @@ export function run(t) {
       const f = fakeFoundry();
       globalThis.game = f.game;
       f.register('msa.profile', 'client', 'standard');
-      ok('first read of a client setting builds the document once and returns the default', readSetting('msa', 'profile') === 'standard' && f.counts.builds === 1);
+      ok(
+        'first read of a client setting builds the document once and returns the default',
+        readSetting('msa', 'profile') === 'standard' && f.counts.builds === 1
+      );
       for (let i = 0; i < 50; i++) readSetting('msa', 'profile');
       ok('fifty more reads build nothing', f.counts.builds === 1);
       f.local.set('msa.profile', JSON.stringify('low'));
-      ok('a changed raw value is seen on the very next read (no stale value)', readSetting('msa', 'profile') === 'low' && f.counts.builds === 2);
+      ok(
+        'a changed raw value is seen on the very next read (no stale value)',
+        readSetting('msa', 'profile') === 'low' && f.counts.builds === 2
+      );
       ok('and is then cached again', readSetting('msa', 'profile') === 'low' && f.counts.builds === 2);
       f.local.set('msa.profile', JSON.stringify('standard'));
       ok('changing it back is seen too', readSetting('msa', 'profile') === 'standard');
@@ -78,8 +87,14 @@ export function run(t) {
       globalThis.game = f.game;
       f.register('msa.flag', 'client', false);
       f.register('msa.zero', 'client', 0);
-      ok('false is returned, and cached (falsy is not "missing")', readSetting('msa', 'flag') === false && readSetting('msa', 'flag') === false && f.counts.builds === 1);
-      ok('0 is returned, and cached', readSetting('msa', 'zero') === 0 && readSetting('msa', 'zero') === 0 && f.counts.builds === 2);
+      ok(
+        'false is returned, and cached (falsy is not "missing")',
+        readSetting('msa', 'flag') === false && readSetting('msa', 'flag') === false && f.counts.builds === 1
+      );
+      ok(
+        '0 is returned, and cached',
+        readSetting('msa', 'zero') === 0 && readSetting('msa', 'zero') === 0 && f.counts.builds === 2
+      );
       f.local.set('msa.flag', 'true');
       ok('a falsy cached value flips to the new one', readSetting('msa', 'flag') === true);
     }
@@ -93,7 +108,10 @@ export function run(t) {
       const a = readSetting('msa', 'blob');
       a.a = 99;
       const b = readSetting('msa', 'blob');
-      ok('an object setting is rebuilt per read, so one caller cannot corrupt another', b.a === 1 && a !== b && f.counts.builds === 2);
+      ok(
+        'an object setting is rebuilt per read, so one caller cannot corrupt another',
+        b.a === 1 && a !== b && f.counts.builds === 2
+      );
     }
 
     // --- world scope: a saved document is Foundry's own cheap lookup; an unsaved one is remembered -----------------------

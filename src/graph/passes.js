@@ -644,7 +644,7 @@ export const PASSES = [
       'lit by cloud-shade.js#buildCloudTopsNode, magnified about the view centre by the physical "rising through ' +
       'the decks" parallax (doc 02 §9). ⚠️ POSITIONED AFTER surface.precipitation (2026-11-03, author: rain under the clouds): the ' +
       'tops only draw once the eye has risen above the deck, so from there a cloud is IN FRONT of the rain ' +
-      'falling from its base, and the rain shows where it streams out past the cloud edges. '+
+      'falling from its base, and the rain shows where it streams out past the cloud edges. ' +
       '(It used to draw before, on the reading that clouds above rain means rain in front of them.) ⚠️ ZOOM-GATED AT THE PASS ITSELF (Effects.md Law 4): below the gate, ' +
       'the scene this pass would render is never constructed, so the submitted draw list genuinely shrinks — ' +
       "not a uniform faded to zero. Fails ASLEEP (the opposite of precipitation's own zoom gate, which fails " +

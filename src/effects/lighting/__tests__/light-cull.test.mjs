@@ -33,10 +33,22 @@ export function run(t) {
   ok('a light far below the view is dropped', !lightFootprintTouchesView(mesh(1500, 4000, 200), view));
 
   const reach = 200 * LIGHT_CULL_RADIUS_SLACK + LIGHT_CULL_MARGIN_PX;
-  ok('a light whose reach just crosses the left edge is kept', lightFootprintTouchesView(mesh(1000 - reach + 1, 1400, 200), view));
-  ok('a light whose reach just misses the left edge is dropped', !lightFootprintTouchesView(mesh(1000 - reach - 1, 1400, 200), view));
-  ok('a light whose reach just crosses the bottom edge is kept', lightFootprintTouchesView(mesh(1500, 1800 + reach - 1, 200), view));
-  ok('a light whose reach just misses the bottom edge is dropped', !lightFootprintTouchesView(mesh(1500, 1800 + reach + 1, 200), view));
+  ok(
+    'a light whose reach just crosses the left edge is kept',
+    lightFootprintTouchesView(mesh(1000 - reach + 1, 1400, 200), view)
+  );
+  ok(
+    'a light whose reach just misses the left edge is dropped',
+    !lightFootprintTouchesView(mesh(1000 - reach - 1, 1400, 200), view)
+  );
+  ok(
+    'a light whose reach just crosses the bottom edge is kept',
+    lightFootprintTouchesView(mesh(1500, 1800 + reach - 1, 200), view)
+  );
+  ok(
+    'a light whose reach just misses the bottom edge is dropped',
+    !lightFootprintTouchesView(mesh(1500, 1800 + reach + 1, 200), view)
+  );
 
   // An oval (the flashlight's cookie) is bounded by its LONG axis, in either orientation.
   ok('an oval is bounded by its long axis (x long)', lightFootprintTouchesView(mesh(700, 1400, 600, 60), view));
@@ -80,11 +92,20 @@ export function run(t) {
 
   // Wiring, read from the source (the pool builds real three meshes, so it is not constructed in Node).
   const src = readFileSync(fileURLToPath(new URL('../point-light-pool.js', import.meta.url)), 'utf8');
-  ok('a light is only dropped after it has drawn once', /entry\.hasDrawn === true &&\s*!lightFootprintTouchesView/.test(src));
-  ok('the first frame of a light always draws (hasDrawn is set when it is not culled)', /else \{\s*entry\.hasDrawn = true;/.test(src));
+  ok(
+    'a light is only dropped after it has drawn once',
+    /entry\.hasDrawn === true &&\s*!lightFootprintTouchesView/.test(src)
+  );
+  ok(
+    'the first frame of a light always draws (hasDrawn is set when it is not culled)',
+    /else \{\s*entry\.hasDrawn = true;/.test(src)
+  );
   ok('an unsized view means draw everything', /cullRect\.z > cullRect\.x && cullRect\.w > cullRect\.y/.test(src));
   ok("the kill switch is localStorage 'msa.lightCull' = '0'", /getItem\('msa\.lightCull'\) !== '0'/.test(src));
-  ok('the cull hides BOTH meshes of the entry', /entry\.mesh\.visible = false;\s*entry\.colorationMesh\.visible = false;\s*lightCullReadout\.culled/.test(src));
+  ok(
+    'the cull hides BOTH meshes of the entry',
+    /entry\.mesh\.visible = false;\s*entry\.colorationMesh\.visible = false;\s*lightCullReadout\.culled/.test(src)
+  );
 
   // The light geometry buffers must not be DYNAMIC: three's WebGPU backend re-sends a dynamic attribute on every render
   // call (`Attributes.update`, `usage === DynamicDrawUsage`), which made a still scene upload ~146 vertex buffers a frame.
@@ -92,7 +113,16 @@ export function run(t) {
   const batchSrc = readFileSync(fileURLToPath(new URL('../point-light-batch-mesh.js', import.meta.url)), 'utf8');
   ok('the per-light pool sets no dynamic usage on its buffers', !/setUsage\(\s*THREE\.DynamicDrawUsage/.test(src));
   ok('the batch buckets set no dynamic usage on their buffers', !/setUsage\(\s*THREE\.DynamicDrawUsage/.test(batchSrc));
-  ok('the pool flags needsUpdate when it rewrites a fan and its penumbra buffer', /entry\.positionAttribute\.needsUpdate = true;/.test(src) && /entry\.penBuffer\.needsUpdate = true;/.test(src));
-  ok('the bucket flags needsUpdate on a geometry or value write', /geometry\.attributes\[name\]\.needsUpdate = true;/.test(batchSrc));
-  ok('the bucket skips re-triangulating a member that has not moved', /prev\.vertexCount !== undefined &&\s*!placementChanged\(m\.sourceId, m\)/.test(batchSrc));
+  ok(
+    'the pool flags needsUpdate when it rewrites a fan and its penumbra buffer',
+    /entry\.positionAttribute\.needsUpdate = true;/.test(src) && /entry\.penBuffer\.needsUpdate = true;/.test(src)
+  );
+  ok(
+    'the bucket flags needsUpdate on a geometry or value write',
+    /geometry\.attributes\[name\]\.needsUpdate = true;/.test(batchSrc)
+  );
+  ok(
+    'the bucket skips re-triangulating a member that has not moved',
+    /prev\.vertexCount !== undefined &&\s*!placementChanged\(m\.sourceId, m\)/.test(batchSrc)
+  );
 }

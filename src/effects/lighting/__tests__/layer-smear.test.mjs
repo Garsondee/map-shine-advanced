@@ -820,8 +820,20 @@ export function run(t) {
       if (Math.hypot(x, y) <= WALL_RADIUS) a[LAYER_WALLS] = 1;
       return a;
     };
-    const partialAndWall = layerSmearVisibility({ ...at, sampleLayers: halfBandsWallHere, resolved: seriesResolved, strengths, steps: 32 });
-    const partialOnly = layerSmearVisibility({ ...at, sampleLayers: halfBands, resolved: seriesResolved, strengths, steps: 32 });
+    const partialAndWall = layerSmearVisibility({
+      ...at,
+      sampleLayers: halfBandsWallHere,
+      resolved: seriesResolved,
+      strengths,
+      steps: 32,
+    });
+    const partialOnly = layerSmearVisibility({
+      ...at,
+      sampleLayers: halfBands,
+      resolved: seriesResolved,
+      strengths,
+      steps: 32,
+    });
     t.ok(
       `a wall beside a PARTIAL stack still darkens it — partial occluders compound ` +
         `(${partialAndWall.toFixed(4)} < ${partialOnly.toFixed(4)})`,

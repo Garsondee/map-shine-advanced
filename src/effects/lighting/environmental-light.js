@@ -470,8 +470,21 @@ export function buildEnvironmentalLightMaterials({
   // floor with no mask of its own reads as wholly outdoors. `null` = no term.
   skyCoverPlaceholder = null,
 }) {
-  const { uniform, texture, uv, vec2, vec3, vec4, float, mix, smoothstep, step, sRGBTransferEOTF, sRGBTransferOETF, min } =
-    THREE.TSL;
+  const {
+    uniform,
+    texture,
+    uv,
+    vec2,
+    vec3,
+    vec4,
+    float,
+    mix,
+    smoothstep,
+    step,
+    sRGBTransferEOTF,
+    sRGBTransferOETF,
+    min,
+  } = THREE.TSL;
 
   // ═══════════════════════════════════════════════════════════════════════
   // THE SKY LIGHT (docs/planning/Sky.md) — atmosphere as LIGHT, not a grade.

@@ -141,12 +141,21 @@ export const SHIM = Object.freeze({
     for (let i = 0; i < A.length; i++) s += A[i] * (B.length === 1 ? B[0] : B[i]);
     return new V([s]);
   },
-  mix: (a, b, t) => zip(zip(a, b, (x, y) => [x, y]), t, ([x, y], k) => x + (y - x) * k),
+  mix: (a, b, t) =>
+    zip(
+      zip(a, b, (x, y) => [x, y]),
+      t,
+      ([x, y], k) => x + (y - x) * k
+    ),
   smoothstep: (e0, e1, x) =>
-    zip(zip(e0, e1, (a, b) => [a, b]), x, ([a, b], t) => {
-      const k = Math.min(1, Math.max(0, (t - a) / (b - a)));
-      return k * k * (3 - 2 * k);
-    }),
+    zip(
+      zip(e0, e1, (a, b) => [a, b]),
+      x,
+      ([a, b], t) => {
+        const k = Math.min(1, Math.max(0, (t - a) / (b - a)));
+        return k * k * (3 - 2 * k);
+      }
+    ),
   select: (cond, a, b) => {
     const C = v(cond).c;
     return C[0] ? v(a) : v(b);

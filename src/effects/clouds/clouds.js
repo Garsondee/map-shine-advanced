@@ -62,7 +62,7 @@ export const CLOUD_LOOK_PARAMS = Object.freeze({
     default: 'storybook',
     category: 'Look',
     label: 'Cloud style',
-    help: 'Storybook: distinct, inked, cel-shaded clouds in the maps\' own painted style, coloured by the hour, drifting over the whole table with sky between them. Realistic: the soft noise deck with physically lit tops. Both the ground shadows and the zoomed-out cloud tops follow this.',
+    help: "Storybook: distinct, inked, cel-shaded clouds in the maps' own painted style, coloured by the hour, drifting over the whole table with sky between them. Realistic: the soft noise deck with physically lit tops. Both the ground shadows and the zoomed-out cloud tops follow this.",
   },
   storybookShadowDensity: {
     type: 'float',

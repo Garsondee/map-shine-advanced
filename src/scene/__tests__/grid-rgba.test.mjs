@@ -68,10 +68,16 @@ export function run(t) {
   };
   const every = Uint8Array.from({ length: 256 }, (_, i) => i);
   const e1 = expandGridToRgba(every, 16, 16, 0);
-  ok('all 256 byte values expand exactly as the byte loop does', reference(every, 16, 16, 0).every((v, i) => v === e1[i]));
+  ok(
+    'all 256 byte values expand exactly as the byte loop does',
+    reference(every, 16, 16, 0).every((v, i) => v === e1[i])
+  );
   let s = 12345;
-  const rand = () => ((s = (Math.imul(s, 1103515245) + 12345) >>> 0) >>> 24);
+  const rand = () => (s = (Math.imul(s, 1103515245) + 12345) >>> 0) >>> 24;
   const big = Uint8Array.from({ length: 300 * 200 - 37 }, rand);
   const e2 = expandGridToRgba(big, 300, 200, 131);
-  ok('a random 300x200 grid with a short tail matches the byte loop', reference(big, 300, 200, 131).every((v, i) => v === e2[i]));
+  ok(
+    'a random 300x200 grid with a short tail matches the byte loop',
+    reference(big, 300, 200, 131).every((v, i) => v === e2[i])
+  );
 }

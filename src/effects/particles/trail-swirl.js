@@ -202,7 +202,11 @@ export function buildTrailSwirlNodes(TSL, { hash, uSwirl, uSwirlVar, lifeMs, age
   const sign = h(3).greaterThan(float(0.5)).select(one, float(-1));
   const loops = h(0).lessThan(float(TRAIL_SWIRL_LOOP_SHARE).mul(S.min(one)));
   const mean = S.max(one).mul(one.add(v.mul(float(0.8)).mul(centred(1))));
-  const turnsRaw = mean.add(float(0.5)).add(v.mul(h(2).sub(float(0.5)))).floor().clamp(one, float(TRAIL_SWIRL_MAX_TURNS));
+  const turnsRaw = mean
+    .add(float(0.5))
+    .add(v.mul(h(2).sub(float(0.5))))
+    .floor()
+    .clamp(one, float(TRAIL_SWIRL_MAX_TURNS));
   const turns = loops.select(turnsRaw, float(0));
   const turnSec = float(TRAIL_SWIRL_TURN_SEC)
     .mul(pow(two, v.mul(float(TRAIL_SWIRL_TURN_SPREAD)).mul(centred(4))))
@@ -212,13 +216,19 @@ export function buildTrailSwirlNodes(TSL, { hash, uSwirl, uSwirlVar, lifeMs, age
     .mul(loops.select(pow(turnsRaw, float(0.8)), float(1.5)))
     .min(lifeMs.mul(float(TRAIL_SWIRL_MAX_DUR)));
   const startFrac = float(TRAIL_SWIRL_START).add(v.mul(float(TRAIL_SWIRL_START_SPREAD)).mul(centred(5)));
-  const startMs = startFrac.mul(lifeMs).min(lifeMs.mul(float(TRAIL_SWIRL_END_BY)).sub(durMs)).max(float(0));
+  const startMs = startFrac
+    .mul(lifeMs)
+    .min(lifeMs.mul(float(TRAIL_SWIRL_END_BY)).sub(durMs))
+    .max(float(0));
   const wobble = v.mul(float(TRAIL_SWIRL_MAX_WOBBLE)).mul(float(0.35).add(float(0.65).mul(h(6))));
   const harmonic = one.add(h(7).mul(h(7)).mul(float(3)).floor());
   const phase = float(TAU).mul(h(8));
   const wave = loops.select(
     float(0),
-    S.min(one).mul(v).mul(float(TRAIL_SWIRL_MAX_WAVE)).mul(float(0.3).add(float(0.7).mul(h(6))))
+    S.min(one)
+      .mul(v)
+      .mul(float(TRAIL_SWIRL_MAX_WAVE))
+      .mul(float(0.3).add(float(0.7).mul(h(6))))
   );
   const figure8 = turns.equal(two).and(h(9).lessThan(v.mul(float(TRAIL_SWIRL_FIGURE8_SHARE))));
   const surge = v.mul(float(TRAIL_SWIRL_MAX_SURGE)).mul(centred(10));
@@ -228,7 +238,11 @@ export function buildTrailSwirlNodes(TSL, { hash, uSwirl, uSwirlVar, lifeMs, age
   const twoPiK = float(TAU).mul(harmonic);
   const g = s.sub(wobble.mul(sin(twoPiK.mul(s).add(phase)).sub(sin(phase))).div(twoPiK));
   const turned = figure8.select(one.sub(g.mul(two).sub(one).abs()), turns.mul(g));
-  const theta = sign.mul(float(TAU).mul(turned).add(wave.mul(sin(float(TAU).mul(s)))));
+  const theta = sign.mul(
+    float(TAU)
+      .mul(turned)
+      .add(wave.mul(sin(float(TAU).mul(s))))
+  );
   const bell = sin(float(Math.PI).mul(u));
   const speed = one.add(surge.mul(bell.mul(bell)));
   return { theta, speed };

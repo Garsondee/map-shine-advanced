@@ -18,7 +18,10 @@ export function run(t) {
   ok('a light of another level is off the shown floor', isLightOffShownFloor({ levelId: 'B' }, 'A') === true);
   ok('a light of the shown level is on it', isLightOffShownFloor({ levelId: 'A' }, 'A') === false);
   ok('a light with no level is treated as on the shown floor', isLightOffShownFloor({}, 'A') === false);
-  ok('a light with a null level is treated as on the shown floor', isLightOffShownFloor({ levelId: null }, 'A') === false);
+  ok(
+    'a light with a null level is treated as on the shown floor',
+    isLightOffShownFloor({ levelId: null }, 'A') === false
+  );
   ok('no identified floor means every light is on it', isLightOffShownFloor({ levelId: 'B' }, null) === false);
   ok('a missing light does not throw', isLightOffShownFloor(undefined, 'A') === false);
 
@@ -39,7 +42,9 @@ export function run(t) {
   });
   const saved = globalThis.canvas;
   try {
-    globalThis.canvas = { effects: { lightSources: [source('AmbientLight.a', { id: 'LVL1' }), source('AmbientLight.b', undefined)] } };
+    globalThis.canvas = {
+      effects: { lightSources: [source('AmbientLight.a', { id: 'LVL1' }), source('AmbientLight.b', undefined)] },
+    };
     const { lights } = readActiveLightSources(0.5);
     const a = lights.find((l) => l.sourceId === 'AmbientLight.a');
     const b = lights.find((l) => l.sourceId === 'AmbientLight.b');
@@ -51,9 +56,21 @@ export function run(t) {
   }
 
   const src = readFileSync(fileURLToPath(new URL('../point-light-pool.js', import.meta.url)), 'utf8');
-  ok('an off-floor light is tested against no aperture walls', /offShownFloor \? NO_SEGMENTS : apertureWallSegments/.test(src));
+  ok(
+    'an off-floor light is tested against no aperture walls',
+    /offShownFloor \? NO_SEGMENTS : apertureWallSegments/.test(src)
+  );
   ok('an off-floor light gets no window reach', /if \(!offShownFloor && windowReachOn/.test(src));
-  ok('the guard compares against the floor the pool already resolved this frame', /const offShownFloor = OFF_FLOOR_GUARD && isLightOffShownFloor\(light, currentFloorId\);/.test(src));
-  ok("the kill switch is localStorage 'msa.offFloorLightGuard' = '0'", /getItem\('msa\.offFloorLightGuard'\) !== '0'/.test(src));
-  ok('the batching admission still reads the (now guarded) counts', /canBatchLight\(\{ apertureCount, windowReachCount, falloffModel/.test(src));
+  ok(
+    'the guard compares against the floor the pool already resolved this frame',
+    /const offShownFloor = OFF_FLOOR_GUARD && isLightOffShownFloor\(light, currentFloorId\);/.test(src)
+  );
+  ok(
+    "the kill switch is localStorage 'msa.offFloorLightGuard' = '0'",
+    /getItem\('msa\.offFloorLightGuard'\) !== '0'/.test(src)
+  );
+  ok(
+    'the batching admission still reads the (now guarded) counts',
+    /canBatchLight\(\{ apertureCount, windowReachCount, falloffModel/.test(src)
+  );
 }

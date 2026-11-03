@@ -71,7 +71,10 @@ const END_STRETCH = (stretchToReach01(LIGHT_EXCESS_REACH) - stretchToReach01(LIG
 export function run(t) {
   t.ok('the floor fade is 1 everywhere the light still adds', lightFloorFade01(LIGHT_EXCESS_REACH) === 1);
   t.ok('...and exactly 0 at the rim', lightFloorFade01(1) === 0);
-  t.ok('the stretch puts the reach at the end of the curve', Math.abs(stretchToReach01(LIGHT_EXCESS_REACH) - 1) < 1e-12);
+  t.ok(
+    'the stretch puts the reach at the end of the curve',
+    Math.abs(stretchToReach01(LIGHT_EXCESS_REACH) - 1) < 1e-12
+  );
   t.ok('...and barely touches the inner half', stretchToReach01(0.5) / 0.5 < 1.015);
   t.ok(`...at the price of a ${END_STRETCH.toFixed(2)}× steeper end`, END_STRETCH < 1.4);
   t.ok('the band is a narrow rim, not half the light', LIGHT_FLOOR_FADE_WIDTH <= 0.08);
@@ -99,7 +102,8 @@ export function run(t) {
     // the source itself and the bright core are Foundry's
     t.ok(`att ${att}: identical at the source`, Math.abs(shaped(L, AMBIENT)(0) - f(0)) < 1e-12);
     let worst = 0;
-    for (let d = 0; d <= 0.5; d += 0.01) worst = Math.max(worst, Math.abs(shaped(L, AMBIENT)(d) - f(d)) / (f(d) - AMBIENT || 1));
+    for (let d = 0; d <= 0.5; d += 0.01)
+      worst = Math.max(worst, Math.abs(shaped(L, AMBIENT)(d) - f(d)) / (f(d) - AMBIENT || 1));
     t.ok(`att ${att}: within ${(worst * 100).toFixed(1)}% of Foundry's light over the inner half`, worst < 0.03);
   }
 
@@ -107,9 +111,15 @@ export function run(t) {
   // at ~0.7 with a hard slope break. Kept as a check that the measure above can see it.
   const bench = lamp(0.5);
   const vOldBench = visible(old(bench, AMBIENT), AMBIENT);
-  t.ok('the old envelope really did stop the lamp at ~0.7 of its radius', Math.abs(reachOf(vOldBench, AMBIENT) - 0.7) < 0.06);
+  t.ok(
+    'the old envelope really did stop the lamp at ~0.7 of its radius',
+    Math.abs(reachOf(vOldBench, AMBIENT) - 0.7) < 0.06
+  );
   t.ok('...with a slope break the new edge does not have', edgeKink(vOldBench, AMBIENT) > 0.3);
-  t.ok('the bench lamp is still lit at 0.85 of its radius', visible(shaped(bench, AMBIENT), AMBIENT)(0.85) > AMBIENT + 0.02);
+  t.ok(
+    'the bench lamp is still lit at 0.85 of its radius',
+    visible(shaped(bench, AMBIENT), AMBIENT)(0.85) > AMBIENT + 0.02
+  );
 
   // a floor brighter than the real ambient (indoor lamp spilling onto golden-hour grass):
   // no pale fan cut off at the polygon — the floor is gone at the rim.
@@ -125,7 +135,9 @@ export function run(t) {
     t.ok(
       `${file.slice(3)} shapes its output through shapeIlluminationOutput with the run-out falloff`,
       /illumReach: LIGHT_EXCESS_REACH/.test(src) &&
-        /shapeIlluminationOutput\(THREE\.TSL, \{\s*backgroundFloor,\s*litColor: \w+,\s*falloff: illumFalloff\w*,/.test(src) &&
+        /shapeIlluminationOutput\(THREE\.TSL, \{\s*backgroundFloor,\s*litColor: \w+,\s*falloff: illumFalloff\w*,/.test(
+          src
+        ) &&
         !/softEdgeEnvelope/.test(src)
     );
   }
@@ -135,7 +147,12 @@ export function run(t) {
     const { float, vec3 } = THREE.TSL;
     built =
       !!lightFloorFade(THREE.TSL, float(0.95)) &&
-      !!shapeIlluminationOutput(THREE.TSL, { backgroundFloor: vec3(0.19), litColor: vec3(0.39), falloff: float(0.5), dist: float(0.5) });
+      !!shapeIlluminationOutput(THREE.TSL, {
+        backgroundFloor: vec3(0.19),
+        litColor: vec3(0.39),
+        falloff: float(0.5),
+        dist: float(0.5),
+      });
   } catch (_) {
     built = false;
   }

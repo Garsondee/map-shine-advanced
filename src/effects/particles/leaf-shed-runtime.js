@@ -486,7 +486,11 @@ export function createLeafShedEngine({
           dirBlend.div(max(dirBlend.length(), 1e-3)),
           dirTarget
         );
-        const v1raw = select(spRelaxed.greaterThan(1e-3).and(targetLen.greaterThan(1e-3)), dirTurned.mul(spRelaxed), vRelaxed);
+        const v1raw = select(
+          spRelaxed.greaterThan(1e-3).and(targetLen.greaterThan(1e-3)),
+          dirTurned.mul(spRelaxed),
+          vRelaxed
+        );
         const speedRaw = v1raw.length();
         // The jink can throw a leaf as fast as it flies: the wall look-ahead must cover that too.
         const jinkReach = speedRaw.mul(0.4).add(pixelsPerMetreNode.mul(2.4));
@@ -547,7 +551,9 @@ export function createLeafShedEngine({
         const shut = outdoorsAt(pos).lessThan(0.5);
         // Falling: a leaf glides in pulses (it sinks fastest on each swing's turn) and an updraft can
         // lift it back up — the lift term goes past zero, so a gust genuinely throws a leaf into the air.
-        const fallMps = byKind(kind, KIND_FALL_MPS).mul(float(0.8).add(r(6.1).mul(0.4))).mul(uFall);
+        const fallMps = byKind(kind, KIND_FALL_MPS)
+          .mul(float(0.8).add(r(6.1).mul(0.4)))
+          .mul(uFall);
         const updraft = sin(a.mul(float(1.7).add(r(27).mul(1.5))).add(phase(28)))
           .mul(0.6)
           .add(sin(a.mul(float(4.1).add(r(29).mul(2))).add(phase(30))).mul(0.4));
@@ -574,7 +580,11 @@ export function createLeafShedEngine({
         // Turning: spin and flip while airborne (in bursts, as the turbulence comes and goes); on the ground
         // it rolls with its speed and settles flat.
         const spinSign = select(r(8.3).greaterThan(0.5), float(1), float(-1));
-        const spinBurst = float(1).add(sin(a.mul(3.7).add(phase(31))).mul(0.8).mul(turbK.min(1.5)));
+        const spinBurst = float(1).add(
+          sin(a.mul(3.7).add(phase(31)))
+            .mul(0.8)
+            .mul(turbK.min(1.5))
+        );
         const spin = spinSign
           .mul(float(1.5).add(r(9.1).mul(3.5)))
           .mul(spinBurst)
@@ -652,12 +662,7 @@ export function createLeafShedEngine({
   // This leaf's four dice (fixed for life: the stamp is unique per birth) — they bend its outline's form and seed its brush.
   const vRnd = Fn(() => {
     const st = iRec0.z.mul(0.6180339);
-    return vec4(
-      hash11(st.add(41.3)),
-      hash11(st.add(43.9)),
-      hash11(st.add(47.1)),
-      hash11(st.add(53.7))
-    );
+    return vec4(hash11(st.add(41.3)), hash11(st.add(43.9)), hash11(st.add(47.1)), hash11(st.add(53.7)));
   })().toVarying('vLeafRnd');
   const vWorld = Fn(() => world)().toVarying('vLeafWorld');
   // How soft the cast shadow is: a high leaf's is a blur, a landed one's is crisp (in leaf units).
@@ -711,11 +716,7 @@ export function createLeafShedEngine({
   // sliding over an edge fades out along it instead of popping.
   let outdoorsGate = float(1);
   if (outdoorsTexNode && uOutdoorsRect) {
-    const uvw = clamp(
-      vWorld.sub(uOutdoorsRect.xy).div(max(uOutdoorsRect.zw.sub(uOutdoorsRect.xy), vec2(1, 1))),
-      0,
-      1
-    );
+    const uvw = clamp(vWorld.sub(uOutdoorsRect.xy).div(max(uOutdoorsRect.zw.sub(uOutdoorsRect.xy), vec2(1, 1))), 0, 1);
     outdoorsGate = smoothstep(0.3, 0.7, outdoorsTexNode.sample(uvw).r);
   }
   material.colorNode = lit.mul(leafA.div(max(outA, 1e-4)));
@@ -803,8 +804,10 @@ export function createLeafShedEngine({
       if (Number.isFinite(p.turbulence)) uTurb.value = p.turbulence;
       if (Number.isFinite(p.followTrees)) uFollow.value = p.followTrees;
       if (Number.isFinite(p.treeGustTurbulence)) uTreeGust.value = Math.max(0, p.treeGustTurbulence);
-      if (Number.isFinite(p.treeClumpSizePx) && p.treeClumpSizePx > 0) uClumpPx.value = p.treeClumpSizePx * TREE_CLUMP_SIZE_MUL;
-      if (Number.isFinite(p.treeClumpDirSpread)) uClumpTurnRad.value = (Math.max(0, p.treeClumpDirSpread) * Math.PI) / 180;
+      if (Number.isFinite(p.treeClumpSizePx) && p.treeClumpSizePx > 0)
+        uClumpPx.value = p.treeClumpSizePx * TREE_CLUMP_SIZE_MUL;
+      if (Number.isFinite(p.treeClumpDirSpread))
+        uClumpTurnRad.value = (Math.max(0, p.treeClumpDirSpread) * Math.PI) / 180;
       if (Number.isFinite(p.fallSpeed)) uFall.value = p.fallSpeed;
       if (Number.isFinite(p.spin)) uSpin.value = p.spin;
       if (Number.isFinite(p.groundGrip)) uGrip.value = Math.max(0.05, p.groundGrip);

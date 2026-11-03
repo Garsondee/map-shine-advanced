@@ -136,8 +136,25 @@ export const GATE_AA_LOD = 0;
  * }}
  */
 export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTexture = null, steps = 32 }) {
-  const { uniform, texture, uv, vec2, vec4, float, int, max, min, mix, select, log2, smoothstep, pow, Fn, fract, Loop } =
-    THREE.TSL;
+  const {
+    uniform,
+    texture,
+    uv,
+    vec2,
+    vec4,
+    float,
+    int,
+    max,
+    min,
+    mix,
+    select,
+    log2,
+    smoothstep,
+    pow,
+    Fn,
+    fract,
+    Loop,
+  } = THREE.TSL;
 
   const STEPS = Number.isFinite(steps) ? Math.max(4, Math.floor(steps)) : 32;
 
@@ -308,7 +325,9 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // No extra fetches. The CPU twin (`layer-smear.js`) keeps the un-dithered stations —
     // it is the reference the dither averages to.
     const ditherPx = world.div(max(texelWorldPx, float(1e-3)));
-    const stationDither = fract(float(52.9829189).mul(fract(ditherPx.x.mul(0.06711056).add(ditherPx.y.mul(0.00583715)))));
+    const stationDither = fract(
+      float(52.9829189).mul(fract(ditherPx.x.mul(0.06711056).add(ditherPx.y.mul(0.00583715))))
+    );
     // The walls the receiver's OWN coverage cannot explain, gathered per station (see the
     // self block after the loop for why it must be per station, not from the final max).
     // NEAR STATIONS ONLY (2026-11-01, author's third report: "the lighter band around the bottom
@@ -486,7 +505,9 @@ export function buildLayerSmearBakeMaterial({ THREE, layerTexture, lowerFieldTex
     // building, or this building's solid interior — counts in full, with its own fade.
     // Far mass counts raw unless the receiver is CLEARLY inside a building (the gate's curve).
     const outsideHere = smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), float(1).sub(selfWallsHere));
-    occ[LAYER_WALLS].assign(max(max(wallsNear.mul(float(1).sub(selfWallsHere)), wallsBeyondSelf), wallsFar.mul(outsideHere)));
+    occ[LAYER_WALLS].assign(
+      max(max(wallsNear.mul(float(1).sub(selfWallsHere)), wallsBeyondSelf), wallsFar.mul(outsideHere))
+    );
     const selfCoverageOverhead = channelOf(here, LAYER_OVERHEAD);
     // SNAPSHOT BEFORE THE EXCLUSION — the "tile is faded away" twin. While an
     // overhead tile is opaque its own footprint must not be darkened by its own

@@ -235,7 +235,8 @@ export function createPrecipSplashEngine({
   fed = false,
 }) {
   const TSL = THREE.TSL;
-  const { Fn, If, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, atan, fract, uv, mix, positionGeometry } = TSL;
+  const { Fn, If, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, atan, fract, uv, mix, positionGeometry } =
+    TSL;
 
   const resolved = resolveSpecies(speciesId);
   const S = resolved.ok ? resolved.species : null;
@@ -531,7 +532,10 @@ export function createPrecipSplashEngine({
     const best = vec2(first).toVar();
     const bestW = landGateAt(rainTexCompute, first).toVar();
     for (let k = 1; k < CLOUD_RAIN_CANDIDATES; k++) {
-      const cand = spawnAt(h1.mul(float(1.29 + 0.13 * k)).add(float(5.7 * k)), h2.mul(float(0.83 + 0.09 * k)).add(float(2.3 * k)));
+      const cand = spawnAt(
+        h1.mul(float(1.29 + 0.13 * k)).add(float(5.7 * k)),
+        h2.mul(float(0.83 + 0.09 * k)).add(float(2.3 * k))
+      );
       const w = landGateAt(rainTexCompute, cand);
       const better = w.greaterThan(bestW.add(float(1e-3)));
       best.assign(better.select(cand, best));

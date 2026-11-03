@@ -362,12 +362,18 @@ export async function run(t) {
       envRef.value = rainyEnv({ tMs: 1000 });
       sub.sync(0);
       let f = sub.getStatus().rain.flow;
-      ok('rain-worker: the first rain asks the worker and does not derive on the frame', posted.length === 1 && f.derived === false && f.attempts === 1);
+      ok(
+        'rain-worker: the first rain asks the worker and does not derive on the frame',
+        posted.length === 1 && f.derived === false && f.attempts === 1
+      );
       for (let i = 0; i < 10; i++) {
         envRef.value = rainyEnv({ tMs: 1016 + i * 16 });
         sub.sync(0);
       }
-      ok('rain-worker: one question while the answer is pending, not one per frame', posted.length === 1 && created === 1);
+      ok(
+        'rain-worker: one question while the answer is pending, not one per frame',
+        posted.length === 1 && created === 1
+      );
       answer(posted[0]);
       f = sub.getStatus().rain.flow;
       ok('rain-worker: the answer is uploaded', f.derived === true && f.litCells > 0 && f.levels >= 1);

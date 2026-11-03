@@ -73,7 +73,11 @@ export function buildLeafShedStrip({ getParams, setParam }) {
   head.append(title, hint, compare);
 
   const grid = document.createElement('div');
-  Object.assign(grid.style, { display: 'grid', gridTemplateColumns: `repeat(${SHED_DESIGNS.length}, 1fr)`, gap: '4px' });
+  Object.assign(grid.style, {
+    display: 'grid',
+    gridTemplateColumns: `repeat(${SHED_DESIGNS.length}, 1fr)`,
+    gap: '4px',
+  });
   /** @type {Map<string, {btn: HTMLButtonElement, canvas: HTMLCanvasElement}>} */
   const cells = new Map();
   for (const d of SHED_DESIGNS) {

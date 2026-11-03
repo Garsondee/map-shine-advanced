@@ -62,14 +62,23 @@ export function run(t) {
       { fire: a, cover: open },
       { fire: b, cover: open },
     ]);
-    t.ok('two lower floors both contribute', contributors === 2 && g.data[1 * SPEC.w + 1] === 255 && g.data[7 * SPEC.w + 7] === 255);
+    t.ok(
+      'two lower floors both contribute',
+      contributors === 2 && g.data[1 * SPEC.w + 1] === 255 && g.data[7 * SPEC.w + 7] === 255
+    );
   }
 
   // Nothing to add keeps the caller's grid object, so identity-keyed caches hold.
   {
     t.ok('no lower floors returns the own grid itself', unionVisibleFireGrid(empty, []).grid === empty);
-    t.ok('a floor with no fire paint contributes nothing', unionVisibleFireGrid(empty, [{ fire: grid([]), cover: open }]).grid === empty);
-    t.ok('missing cover (cannot prove it is in view) contributes nothing', unionVisibleFireGrid(empty, [{ fire: grid(blob(2, 2)), cover: null }]).grid === empty);
+    t.ok(
+      'a floor with no fire paint contributes nothing',
+      unionVisibleFireGrid(empty, [{ fire: grid([]), cover: open }]).grid === empty
+    );
+    t.ok(
+      'missing cover (cannot prove it is in view) contributes nothing',
+      unionVisibleFireGrid(empty, [{ fire: grid(blob(2, 2)), cover: null }]).grid === empty
+    );
     t.ok('missing fire grid is skipped', unionVisibleFireGrid(empty, [{ fire: null, cover: open }]).grid === empty);
     t.ok('null lowers is fine', unionVisibleFireGrid(empty, null).grid === empty);
   }
@@ -78,7 +87,10 @@ export function run(t) {
   {
     const other = { ...SPEC, w: 5, h: 5 };
     const odd = grid(blob(0, 0), other);
-    t.ok('a grid at another resolution is skipped', unionVisibleFireGrid(empty, [{ fire: odd, cover: odd }]).grid === empty);
+    t.ok(
+      'a grid at another resolution is skipped',
+      unionVisibleFireGrid(empty, [{ fire: odd, cover: odd }]).grid === empty
+    );
   }
 
   // No own grid at all: the lower floor still shows.

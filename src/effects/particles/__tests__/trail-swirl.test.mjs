@@ -48,7 +48,11 @@ export function run(t) {
       const plan = planTrailSwirl(hashSeq(s, 11), { swirl, variation, lifeMs, sizeLen: 1 });
       worstStart = Math.max(worstStart, Math.abs(trailSwirlHeading(plan, 0)));
       worstEnd = Math.max(worstEnd, Math.abs(offWind(trailSwirlHeading(plan, lifeMs))));
-      speedOff = Math.max(speedOff, Math.abs(trailSwirlSpeed(plan, 0) - 1), Math.abs(trailSwirlSpeed(plan, lifeMs) - 1));
+      speedOff = Math.max(
+        speedOff,
+        Math.abs(trailSwirlSpeed(plan, 0) - 1),
+        Math.abs(trailSwirlSpeed(plan, lifeMs) - 1)
+      );
       for (let a = 0; a <= lifeMs; a += 25) speedMin = Math.min(speedMin, trailSwirlSpeed(plan, a));
       if (!Number.isInteger(plan.turns)) wholeTurns = false;
       if (plan.startMs + plan.durMs > TRAIL_SWIRL_END_BY * lifeMs + 1e-6) lateLoops++;
@@ -63,7 +67,10 @@ export function run(t) {
       }
     }
     ok(`⭐ ${tag}: every trail is born heading along the wind`, worstStart < 1e-9);
-    ok(`⭐ ${tag}: every trail leaves its swirl along the wind (worst ${worstEnd.toExponential(1)} rad)`, worstEnd < 1e-6);
+    ok(
+      `⭐ ${tag}: every trail leaves its swirl along the wind (worst ${worstEnd.toExponential(1)} rad)`,
+      worstEnd < 1e-6
+    );
     ok(`${tag}: loops are whole turns`, wholeTurns);
     ok(`${tag}: a loop never turns back on itself`, reverses === 0);
     ok(`${tag}: every swirl is finished before the trail fades`, lateLoops === 0);
@@ -132,8 +139,14 @@ export function run(t) {
       } else if (p.wave > 0) waves++;
     }
     const spread = (xs) => Math.max(...xs) / Math.min(...xs);
-    ok(`⭐ "include loops occasionally": about half the trails loop (${loopers}/${N})`, loopers > N * 0.35 && loopers < N * 0.65);
-    ok(`some loops turn once, some more (turn counts ${[...turns].sort().join(',')})`, turns.size >= 2 && Math.max(...turns) <= TRAIL_SWIRL_MAX_TURNS);
+    ok(
+      `⭐ "include loops occasionally": about half the trails loop (${loopers}/${N})`,
+      loopers > N * 0.35 && loopers < N * 0.65
+    );
+    ok(
+      `some loops turn once, some more (turn counts ${[...turns].sort().join(',')})`,
+      turns.size >= 2 && Math.max(...turns) <= TRAIL_SWIRL_MAX_TURNS
+    );
     ok(`⭐ loops of different sizes: time per turn spreads ${spread(durs).toFixed(1)}×`, spread(durs) > 3);
     ok(`loops start at different moments (${spread(starts).toFixed(1)}× spread)`, spread(starts) > 1.5);
     ok(`⭐ "less perfect": many loops are lopsided (${lopsided}/${loopers})`, lopsided > loopers * 0.4);
@@ -153,7 +166,10 @@ export function run(t) {
     }
     const loopLen = plan.durMs; // path length of the loop itself
     ok(`one loop: it ends well downwind of its start (x ${x.toFixed(0)})`, x > lifeMs * 0.5);
-    ok(`one loop: a round loop barely shifts the line (y ${y.toFixed(1)} vs loop ${loopLen.toFixed(0)})`, Math.abs(y) < loopLen * 0.25);
+    ok(
+      `one loop: a round loop barely shifts the line (y ${y.toFixed(1)} vs loop ${loopLen.toFixed(0)})`,
+      Math.abs(y) < loopLen * 0.25
+    );
   }
 
   // Sizes: a much wider variety, and none at variation 0.

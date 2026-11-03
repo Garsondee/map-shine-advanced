@@ -357,7 +357,10 @@ export function run(t) {
     const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
     const c90 = cachedWindShadow(s, 90);
     ok('cached shadow: the same values as deriving it', same(c90, east));
-    ok('cached shadow: asked again for the same direction, the same array (no re-derive)', cachedWindShadow(s, 90) === c90);
+    ok(
+      'cached shadow: asked again for the same direction, the same array (no re-derive)',
+      cachedWindShadow(s, 90) === c90
+    );
     const c270 = cachedWindShadow(s, 270);
     ok('cached shadow: a new direction derives again', c270 !== c90 && same(c270, west));
     const s2 = bakeWindStructure({ walls: b.walls, gridSpec: specFor() });
@@ -369,7 +372,10 @@ export function run(t) {
     const s3 = bakeWindStructure({ walls: b.walls, gridSpec: specFor() });
     primeWindStructure(s3, { speed01: 0.3, directionDeg: 45 });
     const primed = cachedWindShadow(s3, 45);
-    ok('prime: derives ahead, so the later read is the primed array', cachedWindShadow(s3, 45) === primed && same(primed, deriveWindShadow(s3, 45)));
+    ok(
+      'prime: derives ahead, so the later read is the primed array',
+      cachedWindShadow(s3, 45) === primed && same(primed, deriveWindShadow(s3, 45))
+    );
   }
 
   // ── structure bake products are the right shape ────────────────────────────

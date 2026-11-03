@@ -258,14 +258,20 @@ export async function run(t) {
       'inside background(), a small unmarked pipeline is created asynchronously (a 19k shader was a 230-400 ms freeze in play)',
       b.requests.at(-1).async === true && result === 'bg result'
     );
-    ok('...and the report counts it as a deferred, background creation', gov.report().async === 1 && gov.report().sync === 0);
+    ok(
+      '...and the report counts it as a deferred, background creation',
+      gov.report().async === 1 && gov.report().sync === 0
+    );
     b.utils.createRenderPipeline(precip, null);
     ok('...and the moment it returns, small pipelines are synchronous again', b.requests.at(-1).async === false);
 
     const bake = pipeline(4_000, 'bake');
     markCompileSyncOnly(bake.material, 'one-shot');
     gov.background(() => b.utils.createRenderPipeline(bake, null));
-    ok('a one-shot pass is still created synchronously in background mode (a skipped draw would lose it)', b.requests.at(-1).async === false);
+    ok(
+      'a one-shot pass is still created synchronously in background mode (a skipped draw would lose it)',
+      b.requests.at(-1).async === false
+    );
 
     const flame = pipeline(4_000, 'flame');
     gov.background(() => gov.blocking(() => b.utils.createRenderPipeline(flame, null)));

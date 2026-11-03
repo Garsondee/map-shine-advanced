@@ -206,9 +206,13 @@ export function run(t) {
   );
   ok(
     '⭐ the corner seam is 45°',
-    wide.minX - wideOuter.minX === wide.minY - wideOuter.minY && wideOuter.maxX - wide.maxX === wideOuter.maxY - wide.maxY
+    wide.minX - wideOuter.minX === wide.minY - wideOuter.minY &&
+      wideOuter.maxX - wide.maxX === wideOuter.maxY - wide.maxY
   );
-  ok('a tall map pads by its narrow side too', tableOuterRect({ minX: 400, minY: 900, maxX: 1600, maxY: 5100 }, { width: 2000, height: 6000 }).pad === 400);
+  ok(
+    'a tall map pads by its narrow side too',
+    tableOuterRect({ minX: 400, minY: 900, maxX: 1600, maxY: 5100 }, { width: 2000, height: 6000 }).pad === 400
+  );
   ok('an uneven right side still caps the pad', tableOuterRect(wide, { width: 5200, height: 3000 }).pad === 200);
   ok('no canvas ⇒ the fallback pad', tableOuterRect(wide, null, 321).pad === 321);
   ok('never zero', tableOuterRect(wide, { width: 5000, height: 2500 }).pad === 1);

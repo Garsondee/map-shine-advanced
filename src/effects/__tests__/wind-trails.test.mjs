@@ -97,7 +97,16 @@ export function run(t) {
   );
   // The author's 2026-10-31 defaults, pasted from her card.
   {
-    const want = { density: 0.35, widthPx: 8, lengthSec: 0.2, swirl: 1.2, opacity: 0.5, lifeSec: 1.55, minSpeedMps: 5, color: '#ffffff' };
+    const want = {
+      density: 0.35,
+      widthPx: 8,
+      lengthSec: 0.2,
+      swirl: 1.2,
+      opacity: 0.5,
+      lifeSec: 1.55,
+      minSpeedMps: 5,
+      color: '#ffffff',
+    };
     const bad = Object.entries(want).filter(([k, x]) => WIND_TRAILS_PARAMS[k].default !== x);
     ok(`the author's 2026-10-31 defaults (${bad.map(([k]) => k).join(', ') || 'all match'})`, bad.length === 0);
   }

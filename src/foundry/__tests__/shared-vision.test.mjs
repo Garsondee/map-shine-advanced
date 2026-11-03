@@ -66,8 +66,8 @@ export function run(t) {
     const blind = new FakeToken(['u1'], { sight: false });
     FakeToken.layer.controlled = [a];
     ok('GM: the selected token stays a source', a._isVisionSource() === true);
-    ok('GM: the same player\'s other token joins', b._isVisionSource() === true);
-    ok('GM: another player\'s token does not', c._isVisionSource() === false);
+    ok("GM: the same player's other token joins", b._isVisionSource() === true);
+    ok("GM: another player's token does not", c._isVisionSource() === false);
     ok('GM: a token without sight never does', blind._isVisionSource() === false);
 
     FakeToken.layer.controlled = [];

@@ -13,6 +13,7 @@ import {
   floorPoint,
   resolveTableFrame,
   srgbHexToLinear,
+  tableOuterRect,
 } from '../table-model.js';
 import { sceneEyeHeight } from '../../../scene/index.js';
 
@@ -193,4 +194,22 @@ export function run(t) {
     'the table top is unchanged by the depth',
     traceTablePixel({ x: 800, y: 2500 }, eyeC, 4000, 80, rect2, 50, null, 0, 600).kind === 'velvet'
   );
+
+  // One padding on every side: a wide map padded 25% of each axis (1000 across, 500 down) gets a
+  // table 500 wide all round, so the corner seams (rim corner to table corner) are exactly 45°.
+  const wide = { minX: 1000, minY: 500, maxX: 5000, maxY: 2500 };
+  const { outer: wideOuter, pad: widePad } = tableOuterRect(wide, { width: 6000, height: 3000 });
+  ok('⭐ the pad is the smallest of the four sides', widePad === 500);
+  ok(
+    '⭐ the outer edge is the board grown by that pad on every side',
+    wideOuter.minX === 500 && wideOuter.minY === 0 && wideOuter.maxX === 5500 && wideOuter.maxY === 3000
+  );
+  ok(
+    '⭐ the corner seam is 45°',
+    wide.minX - wideOuter.minX === wide.minY - wideOuter.minY && wideOuter.maxX - wide.maxX === wideOuter.maxY - wide.maxY
+  );
+  ok('a tall map pads by its narrow side too', tableOuterRect({ minX: 400, minY: 900, maxX: 1600, maxY: 5100 }, { width: 2000, height: 6000 }).pad === 400);
+  ok('an uneven right side still caps the pad', tableOuterRect(wide, { width: 5200, height: 3000 }).pad === 200);
+  ok('no canvas ⇒ the fallback pad', tableOuterRect(wide, null, 321).pad === 321);
+  ok('never zero', tableOuterRect(wide, { width: 5000, height: 2500 }).pad === 1);
 }

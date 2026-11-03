@@ -38,6 +38,29 @@ export function rectDistance(x, y, r) {
 }
 
 /**
+ * THE TABLE'S OUTER EDGE — the board grown by ONE padding on every side. Foundry pads each axis by
+ * a share of its own length, so a wide map has a thin top and bottom and a deep left and right; the
+ * velvet's corner seams, which run from the brass's corners to the table's corners, then leaned off
+ * 45° (2026-11-03: "the corner panel lines are always 45 degree lines"). The table takes the
+ * smallest of the four paddings instead, so every corner seam is a true 45° mitre and every side is
+ * the same width of velvet. Whatever canvas lies beyond is the void: it is not part of the table.
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect - the board.
+ * @param {{width:number,height:number}|null} canvasSize - the padded canvas, origin 0,0; null = no canvas known.
+ * @param {number} fallbackPad - the padding to use when no canvas is known (the scene's own offset).
+ * @returns {{outer:{minX:number,minY:number,maxX:number,maxY:number}, pad:number}}
+ */
+export function tableOuterRect(rect, canvasSize, fallbackPad = 0) {
+  const sides = canvasSize
+    ? [rect.minX, rect.minY, canvasSize.width - rect.maxX, canvasSize.height - rect.maxY]
+    : [fallbackPad, fallbackPad];
+  const pad = Math.max(1, Math.min(...sides.filter(Number.isFinite), 1e12));
+  return {
+    pad,
+    outer: { minX: rect.minX - pad, minY: rect.minY - pad, maxX: rect.maxX + pad, maxY: rect.maxY + pad },
+  };
+}
+
+/**
  * Trace one pixel. `p` is where the orthographic viewer puts the pixel ON THE
  * BOARD (z = 0); the ray runs from the eye at (`eye`, `eyeH`) through p.
  *

@@ -15,7 +15,7 @@
  * @module effects/table/table-subsystem
  */
 
-import { resolveTableFrame, tableEffectsRect } from './table-model.js';
+import { resolveTableFrame, tableEffectsRect, tableOuterRect } from './table-model.js';
 import {
   createTableUniforms,
   applyTableFrame,
@@ -173,11 +173,13 @@ export function createTableSubsystem({ THREE, markCompileDeferrable, uViewRect }
         topHeightPx: stack?.topHeightPx,
         floorDepthPx: stack?.floorDepthPx,
       });
+      // One padding on every side, so the corner seams are true 45° lines (`tableOuterRect`).
+      const { outer, pad } = tableOuterRect(rect, canvasSize, Math.min(sceneRect.x, sceneRect.y));
       applyTableFrame(u, frame, {
         rect,
-        outer: canvasSize ? { minX: 0, minY: 0, maxX: canvasSize.width, maxY: canvasSize.height } : null,
-        padX: sceneRect.x,
-        padY: sceneRect.y,
+        outer,
+        padX: pad,
+        padY: pad,
         worldPerPx: h / Math.max(1, drawHeightPx),
       });
       // The effects reach out to the brass's inner edge while parallax raises layers over the wall;

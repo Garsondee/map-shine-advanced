@@ -287,8 +287,9 @@ export function buildTableShading(TSL, tr, u) {
   // Panels are split by the seams, which run from the rim's outer corners to
   // the table's corners; each panel's pile runs outward from the board.
   const ov = oq.sub(rimW);
-  const padV = max(pad.sub(rimW), vec2(1, 1));
-  const xPanel = ov.x.mul(padV.y).greaterThan(ov.y.mul(padV.x));
+  // The table's padding is the same on every side (`table-model.js#tableOuterRect`), so the
+  // corner seams are exact 45° mitres and the two panels meet where the overhangs are equal.
+  const xPanel = ov.x.greaterThan(ov.y);
   const napDir = xPanel.select(vec2(q.x.sub(centre.x).sign(), 0), vec2(0, q.y.sub(centre.y).sign()));
   const napSize = u.felt.y;
   const napFade = float(1).sub(smoothstep(float(0.35), float(1.2), wpp.div(napSize)));
@@ -317,7 +318,7 @@ export function buildTableShading(TSL, tr, u) {
   // SEAMS. The corner seams run from the rim's outer corners to the table's corners; the
   // middle panel lines run straight out from the midpoint of each side of the board. Each is a
   // crease with a lifted fold beside it and a line of stitches either side.
-  const seamDir = normalize(padV);
+  const seamDir = vec2(Math.SQRT1_2, Math.SQRT1_2);
   const inCorner = ov.x.greaterThan(0).and(ov.y.greaterThan(0)).select(float(1), float(0));
   const seamSigned = ov.x.mul(seamDir.y).sub(ov.y.mul(seamDir.x));
   const seamAlong = dot(ov, seamDir);

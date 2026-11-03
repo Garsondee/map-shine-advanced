@@ -631,7 +631,7 @@ import {
 } from '../effects/index.js';
 import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC, perfNowMs } from '../core/frame-clock.js';
 import { createPipelineGovernor } from './pipeline-governor.js';
-import { createRendererKeeper } from './kept-renderer.js';
+import { createRendererKeeper, hdrOutputRequested } from './kept-renderer.js';
 import { planWeatherWarmUp, formatWeatherWarmDetail } from './weather-warm-plan.js';
 import { markCompileDeferrable } from '../core/compile-policy.js';
 import {
@@ -2120,7 +2120,17 @@ async function startVtPanViewerUnserialized({
       // it reported false on hardware that supports timestamp queries perfectly
       // well. Requesting it here does NOT turn measurement on; see the two lines
       // after init().
-      renderer = new THREE.WebGPURenderer({ canvas, antialias: false, requiredLimits, trackTimestamp: true });
+      // HDR OUTPUT (opt-in, mmp-8gf.4): a half-float canvas in WebGPU's `extended` tone-mapping mode, so a pixel
+      // brighter than 1 reaches an HDR display brighter than SDR white (an SDR display clips it, as before).
+      // Fixed for the renderer's life — a kept device (vt/kept-renderer.js) keeps the choice it was born with.
+      const hdrOutput = hdrOutputRequested();
+      renderer = new THREE.WebGPURenderer({
+        canvas,
+        antialias: false,
+        requiredLimits,
+        trackTimestamp: true,
+        ...(hdrOutput ? { outputType: THREE.HalfFloatType } : null),
+      });
       startRenderer = renderer;
       onLoadProgress?.({ phase: 'device', done: 0, total: 1, detail: 'creating the graphics device' });
       await renderer.init(); // REQUIRED before any use — the backend is chosen here

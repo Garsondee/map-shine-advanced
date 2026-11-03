@@ -8,6 +8,7 @@ import {
   unpinPipelines,
   KEEP_SCENES,
   rendererIsKeepable,
+  hdrOutputRequested,
 } from '../kept-renderer.js';
 
 function fakeRenderer() {
@@ -164,6 +165,18 @@ export function run(t) {
     store.set('msa.keepDevice', '0');
     const k = createRendererKeeper();
     t.ok('msa.keepDevice = 0 turns keeping off', k.prepareToPark(fakeRenderer()) === false);
+    globalThis.localStorage = prev;
+  }
+  // HDR output is opt-in: only the exact value '1'
+  {
+    const store = new Map();
+    const prev = globalThis.localStorage;
+    globalThis.localStorage = { getItem: (k) => store.get(k) ?? null };
+    t.ok('HDR output is off by default', hdrOutputRequested() === false);
+    store.set('msa.hdrOutput', '1');
+    t.ok("msa.hdrOutput = '1' asks for HDR output", hdrOutputRequested() === true);
+    store.set('msa.hdrOutput', 'true');
+    t.ok('anything but 1 does not', hdrOutputRequested() === false);
     globalThis.localStorage = prev;
   }
   // a second park never strands the first renderer

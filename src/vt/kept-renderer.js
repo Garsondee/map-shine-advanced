@@ -44,6 +44,19 @@ export function keepDeviceEnabled() {
   }
 }
 
+/**
+ * HDR output asked for (epic mmp-8gf.4): localStorage `msa.hdrOutput` = '1', then reload. Off by default. Read when
+ * a renderer is CREATED; a kept renderer keeps the choice it was born with, so a change needs a reload.
+ * @returns {boolean}
+ */
+export function hdrOutputRequested() {
+  try {
+    return globalThis.localStorage?.getItem('msa.hdrOutput') === '1';
+  } catch {
+    return false;
+  }
+}
+
 /** A renderer worth keeping: WebGPU, initialised, device not lost. */
 export function rendererIsKeepable(renderer) {
   return (

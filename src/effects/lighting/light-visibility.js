@@ -92,6 +92,14 @@ export const DEFAULT_WORKSPACE_LIGHT = Object.freeze({
   offsetScale: 5,
 });
 
+/**
+ * Cloud shadows' share of the shared shadow darkness (2026-11-03, author: "halve the
+ * current effect of cloud shadows on external spaces darkness ... far too strong").
+ * Applied once, here, so the ambient fill and every point light's edge floor keep
+ * agreeing to the texel. Buildings/walls keep the full darkness; only the cloud is eased.
+ */
+export const CLOUD_SHADOW_DEPTH_SCALE = 0.5;
+
 /** @param {number} x @returns {number} clamped to [0,1]; non-finite → 0 */
 export function clamp01(x) {
   const n = Number(x);
@@ -141,7 +149,7 @@ export function buildSunAndCloudVisNode(
       .sub(cloudVisRaw)
       .div(float(1).sub(fillShare).max(float(1e-3)))
       .clamp(0, 1);
-    cloud = float(1).sub(depth.mul(opacity));
+    cloud = float(1).sub(depth.mul(opacity).mul(float(CLOUD_SHADOW_DEPTH_SCALE)));
   }
   if (cloud && cloudGate) cloud = mix(float(1), cloud, cloudGate);
   if (sunVis && cloud) return shared ? min(sunVis, cloud) : sunVis.mul(cloud);

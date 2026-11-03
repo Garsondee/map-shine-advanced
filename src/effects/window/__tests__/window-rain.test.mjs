@@ -227,7 +227,11 @@ export function run(t) {
     const twice = resolveRainFrame({ rain01: 0.25, wet01: 0.4, look: { ...look, splatDensity: 2 } });
     const half = resolveRainFrame({ rain01: 0.25, wet01: 0.4, look: { ...look, splatDensity: 1 } });
     t.ok(
-      'rain: splat density scales how many drops there are (' + half.cover.toFixed(3) + ' -> ' + twice.cover.toFixed(3) + ')',
+      'rain: splat density scales how many drops there are (' +
+        half.cover.toFixed(3) +
+        ' -> ' +
+        twice.cover.toFixed(3) +
+        ')',
       Math.abs(twice.cover / half.cover - 2) < 1e-9
     );
     // splashes on the glass at once = cover x live share: that product must follow the rain, not saturate or dip

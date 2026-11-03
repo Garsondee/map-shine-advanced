@@ -209,6 +209,18 @@ const smoothstep = (a, b, x) => {
   return t * t * (3 - 2 * t);
 };
 export const DIRECTION_MIX_WIND_LO = 0.5;
+
+/**
+ * Whether a cell's drop is alive, 0..1, for a uniform hash `h`: a soft band CENTRED on the cover and never wider
+ * than the cover, so the expected share alive is EXACTLY `cover` at every amount. (A band [cover - soft, cover]
+ * cut a fixed soft/2 off: a drizzle's cover 0.05 showed about a fifth of its drops, and the count was not linear.)
+ * The shader twin is spelled out at each use.
+ * @param {number} cover @param {number} h @param {number} soft @returns {number}
+ */
+export function aliveShare(cover, h, soft) {
+  const s = Math.max(Math.min(soft, cover), 1e-5) * 0.5;
+  return 1 - smoothstep(cover - s, cover + s, h);
+}
 const modp = (x, m) => x - m * Math.floor(x / m);
 
 /**
@@ -303,8 +315,7 @@ export function resolveRainFrame({ rain01, wet01, look, windSpeed01 = 0, gust01 
   // that saturates early or dips as the drops' lives shorten. Only water the glass holds beyond what the current
   // rain keeps there (the lingering after-rain beads) is added on top.
   const lingering = Math.max(0, wet - clamp01(rain * 1.6));
-  const cover =
-    clamp01(rain * dens * (0.6 / live) + 0.26 * lingering * dens) * (1 - RAIN_TUNE.beadWindCut * windPush);
+  const cover = clamp01(rain * dens * (0.6 / live) + 0.26 * lingering * dens) * (1 - RAIN_TUNE.beadWindCut * windPush);
   // coverage of the 4x finer run grid: the old coverage x boost/grid, so the running count is `boost` x the old one
   const runBoost = lerp(RAIN_TUNE.runBoostCalm, RAIN_TUNE.runBoostGale, windPush);
   const slider =
@@ -380,7 +391,7 @@ export function evalSplatLayer({ x, y, octave, clock, frame, look, ddx, ddy, pan
   const h3 = hash2(cx, cy, kw, seed * 4 + 3);
 
   const cover = clamp01(frame.cover * exposure * lerp(0.75, 1.25, paneH));
-  const alive = 1 - smoothstep(cover - T.aliveSoft, cover, h2[0]);
+  const alive = aliveShare(cover, h2[0], T.aliveSoft);
   const life = a / frame.live;
   const lifeFade = 1 - smoothstep(0.65, 1, life);
   const vis = alive * lifeFade * (1 - (life >= 1 ? 1 : 0)) * lod;
@@ -850,6 +861,68 @@ export function evalWindowRainPixel({
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
+ * The rain's integer hash and value noise as SHARED layout functions (`hashU32`, `hash2`, `vnoise` in nodes),
+ * for every window shader that wants the same bits as the twin: the rain and `window-snow.js`. Built once per TSL
+ * namespace (`sharedFn`), so two callers in one shader share one copy.
+ * @param {*} TSL
+ */
+export function rainHashNodes(TSL) {
+  const { float, int, uint, vec2, mix, floor } = TSL;
+  const F = (x) => float(x);
+  // ── the integer hash: `hashU32` in u32 nodes. Wrapping multiplies, so it is bit-exact against the twin. ─────
+  // Every helper this shader calls more than once is a LAYOUT function (`core/tsl-fn.js`): emitted once, called
+  // everywhere. Inlined, the hash alone was pasted ~90 times and the whole rain was 169k chars of WGSL.
+  // An i32 argument reaches a u32 parameter as `u32(x)`, the same bit-preserving cast `uint(x)` made inline.
+  const U = (n) => uint(n);
+  const hashUT = sharedFn(
+    TSL,
+    'msaRainHash',
+    { a: 'uint', b: 'uint', c: 'uint', d: 'uint' },
+    'uint',
+    ({ a, b, c, d }) => {
+      const h0 = a
+        .mul(U(0x9e3779b1))
+        .bitXor(b.mul(U(0x85ebca77)))
+        .bitXor(c.mul(U(0xc2b2ae3d)))
+        .bitXor(d.mul(U(0x27d4eb2f)))
+        .toVar();
+      const h1 = h0
+        .bitXor(h0.shiftRight(U(16)))
+        .mul(U(0x7feb352d))
+        .toVar();
+      const h2 = h1
+        .bitXor(h1.shiftRight(U(15)))
+        .mul(U(0x846ca68b))
+        .toVar();
+      return h2.bitXor(h2.shiftRight(U(16)));
+    }
+  );
+  const unit24T = (h) => float(h.shiftRight(U(8))).div(16777216);
+  /** Smooth value noise in [0, 1) - `vnoise`. */
+  const vnoiseT = sharedFn(
+    TSL,
+    'msaRainValueNoise',
+    { x: 'float', y: 'float', seed: 'uint' },
+    'float',
+    ({ x, y, seed }) => {
+      const x0 = floor(x);
+      const y0 = floor(y);
+      const fx = x.sub(x0);
+      const fy = y.sub(y0);
+      const sx = fx.mul(fx).mul(F(3).sub(fx.mul(2)));
+      const sy = fy.mul(fy).mul(F(3).sub(fy.mul(2)));
+      const ix = int(x0);
+      const iy = int(y0);
+      const hv = (i, j) => unit24T(hashUT(i, j, seed, U(7)));
+      return mix(mix(hv(ix, iy), hv(ix.add(1), iy), sx), mix(hv(ix, iy.add(1)), hv(ix.add(1), iy.add(1)), sx), sy);
+    }
+  );
+  const hash2T = (a, b, c, d) =>
+    vec2(unit24T(hashUT(a, b, c, U(d))), unit24T(hashUT(a, b, c, U(d).add(U(0x632be5ab)))));
+  return { hashUT, unit24T, vnoiseT, hash2T };
+}
+
+/**
  * Build the rain handle: its uniforms, its setters, and `build()`, which
  * constructs the shader nodes. `build()` may be called more than once (the glass
  * cookie is built ungated for the debug material and again, deferred, inside the
@@ -860,9 +933,14 @@ export function evalWindowRainPixel({
  * @param {*} args.flowDirsTexture - the `dirs` texture of `window-rain-field.js` (a 1x1 neutral one until a field lands).
  * @param {*} args.flowAuxTexture - the `aux` texture.
  * @param {*} [args.viewSpanNode] - world px across the view; fades the small detail out when zoomed far out.
+ * @param {ReturnType<import('./window-snow.js').createWindowSnow>|null} [args.snow] - the snow handle. A JS-TIME
+ *   branch like the rain itself: `null` constructs no snow node, so the shader is exactly the rain's own. With it,
+ *   `build` also returns `snow: {offsetPx, gain, desat, tint}`, from its own `Fn` sharing this handle's flow
+ *   textures. Kept apart from the rain's offset and gain on purpose: the renderer applies the snow's gain AFTER the
+ *   highlight shoulder (a shadow on blown-out light must still show) and its offset without the prism split.
  * @returns {{build: Function, setLook: Function, setFrame: Function, setFlow: Function, flowTexNodeCount: Function}}
  */
-export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewSpanNode = null }) {
+export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewSpanNode = null, snow = null }) {
   const TSL = THREE.TSL;
   const {
     float,
@@ -938,56 +1016,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   let liveAux = flowAuxTexture;
   const flowTexNodes = [];
 
-  // ── the integer hash: `hashU32` in u32 nodes. Wrapping multiplies, so it is bit-exact against the twin. ─────
-  // Every helper this shader calls more than once is a LAYOUT function (`core/tsl-fn.js`): emitted once, called
-  // everywhere. Inlined, the hash alone was pasted ~90 times and the whole rain was 169k chars of WGSL.
-  // An i32 argument reaches a u32 parameter as `u32(x)`, the same bit-preserving cast `uint(x)` made inline.
   const U = (n) => uint(n);
-  const hashUT = sharedFn(
-    TSL,
-    'msaRainHash',
-    { a: 'uint', b: 'uint', c: 'uint', d: 'uint' },
-    'uint',
-    ({ a, b, c, d }) => {
-      const h0 = a
-        .mul(U(0x9e3779b1))
-        .bitXor(b.mul(U(0x85ebca77)))
-        .bitXor(c.mul(U(0xc2b2ae3d)))
-        .bitXor(d.mul(U(0x27d4eb2f)))
-        .toVar();
-      const h1 = h0
-        .bitXor(h0.shiftRight(U(16)))
-        .mul(U(0x7feb352d))
-        .toVar();
-      const h2 = h1
-        .bitXor(h1.shiftRight(U(15)))
-        .mul(U(0x846ca68b))
-        .toVar();
-      return h2.bitXor(h2.shiftRight(U(16)));
-    }
-  );
-  const unit24T = (h) => float(h.shiftRight(U(8))).div(16777216);
-  /** Smooth value noise in [0, 1) - `vnoise`. */
-  const vnoiseT = sharedFn(
-    TSL,
-    'msaRainValueNoise',
-    { x: 'float', y: 'float', seed: 'uint' },
-    'float',
-    ({ x, y, seed }) => {
-      const x0 = floor(x);
-      const y0 = floor(y);
-      const fx = x.sub(x0);
-      const fy = y.sub(y0);
-      const sx = fx.mul(fx).mul(F(3).sub(fx.mul(2)));
-      const sy = fy.mul(fy).mul(F(3).sub(fy.mul(2)));
-      const ix = int(x0);
-      const iy = int(y0);
-      const hv = (i, j) => unit24T(hashUT(i, j, seed, U(7)));
-      return mix(mix(hv(ix, iy), hv(ix.add(1), iy), sx), mix(hv(ix, iy.add(1)), hv(ix.add(1), iy.add(1)), sx), sy);
-    }
-  );
-  const hash2T = (a, b, c, d) =>
-    vec2(unit24T(hashUT(a, b, c, U(d))), unit24T(hashUT(a, b, c, U(d).add(U(0x632be5ab)))));
+  const { hashUT, unit24T, vnoiseT, hash2T } = rainHashNodes(TSL);
 
   /** The flow fetch: both facets, the blend weight, the confidence and the pane height. */
   const fetchFlow = (P) => {
@@ -1102,7 +1132,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     const h3 = hash2T(cx, cy, kw, seedK(3));
 
     const cover = sat(uCover.mul(exposure).mul(mix(F(0.75), F(1.25), paneH)));
-    const alive = F(1).sub(smoothstep(cover.sub(T.aliveSoft), cover, h2.x));
+    const aSoft = max(min(F(T.aliveSoft), cover), F(1e-5)).mul(0.5);
+    const alive = F(1).sub(smoothstep(cover.sub(aSoft), cover.add(aSoft), h2.x));
     const life = a.div(uLive);
     const lifeFade = F(1).sub(smoothstep(F(0.65), F(1), life));
     const vis = alive
@@ -1493,6 +1524,21 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     });
     const packed = body().toVar();
 
+    // THE SNOW (window-snow.js): its own branch, its own flow fetch - it falls whether or not it rains.
+    let snowNodes = null;
+    if (snow) {
+      const sp = Fn(() => {
+        const P = positionWorld.xy;
+        const fl = fetchFlow(P);
+        const off = vec2(0, 0).toVar();
+        const gain = F(1).toVar();
+        const desat = F(0).toVar();
+        snow.buildInto({ P, fl, off, gain, desat, unitOrDownT });
+        return TSL.vec4(off.x, off.y, gain, desat);
+      })().toVar();
+      snowNodes = { offsetPx: vec2(sp.x, sp.y), gain: sp.z, desat: sp.w, tint: snow.tintNode };
+    }
+
     // The instrument's two views, built from their own fetch so they read the flow even while the pane is dry.
     const flowView = Fn(() => {
       const fl = fetchFlow(positionWorld.xy);
@@ -1507,6 +1553,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     return {
       offsetPx: vec2(packed.x, packed.y),
       gain: packed.z,
+      snow: snowNodes,
       debugFlow: flowView,
       debugAux: auxView,
       debugDrops: vec3(
@@ -1520,6 +1567,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   const num = (v, d) => (Number.isFinite(v) ? v : d);
   return {
     build,
+    /** The snow handle this rain was built with (or null): the subsystem pushes the snow's weather to it. */
+    snow,
     /** The author's dials. @param {Partial<typeof WINDOW_RAIN_DEFAULTS>} look */
     setLook(look = {}) {
       uScale.value = Math.max(0.5, num(look.dropScalePx, D.dropScalePx));

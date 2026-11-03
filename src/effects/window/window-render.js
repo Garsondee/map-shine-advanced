@@ -680,6 +680,9 @@ export function buildWindowSurfaceMaterial({
     // Built HERE, inside this function, on purpose: the gated build calls this again inside an `Fn()`, and the
     // rain nodes (with their own `If()`s and flow-texture taps) must be constructed in that same context.
     const rainNodes = rain ? rain.build({ maskGated: () => sampleCookieAt(maskUv, 'winRainGate').gated }) : null;
+    // THE SNOW'S SCATTER moves every tap alike, outside the prism split: a whiteout softens the light's edges
+    // without throwing an orange/blue fringe off each wobble.
+    const tapUv = rainNodes?.snow ? maskUv.add(rainNodes.snow.offsetPx.mul(uUvPerWorldPx)).toVar('winSnowUv') : maskUv;
 
     if (glass) {
       const glassScaleSafe = max(uGlassScale, float(1));
@@ -750,9 +753,9 @@ export function buildWindowSurfaceMaterial({
       const dispersionK = uGlassDispersion.mul(float(GLASS_DISPERSION_SPREAD)).toVar('winGlassDispK');
 
       warpUv = baseOffsetUv;
-      const tapR = sampleCookieAt(maskUv.add(baseOffsetUv.mul(float(1).sub(dispersionK))), 'winR');
-      tapG = sampleCookieAt(maskUv.add(baseOffsetUv), 'winG');
-      const tapB = sampleCookieAt(maskUv.add(baseOffsetUv.mul(float(1).add(dispersionK))), 'winB');
+      const tapR = sampleCookieAt(tapUv.add(baseOffsetUv.mul(float(1).sub(dispersionK))), 'winR');
+      tapG = sampleCookieAt(tapUv.add(baseOffsetUv), 'winG');
+      const tapB = sampleCookieAt(tapUv.add(baseOffsetUv.mul(float(1).add(dispersionK))), 'winB');
 
       // ⚠️ PRESENCE IS PER-CHANNEL, AND THAT IS THE WHOLE PRISM. Taking a
       // single shared silhouette would keep the cookie's EDGE monochrome and
@@ -809,7 +812,7 @@ export function buildWindowSurfaceMaterial({
       // effect, and a visibly smaller compiled shader.
       // No glass, so no warp to add the drops' lens to: read the mask displaced by it directly.
       warpUv = rainNodes ? rainNodes.offsetPx.mul(uUvPerWorldPx).toVar('winRainOffsetUv') : null;
-      tapG = sampleCookieAt(warpUv ? maskUv.add(warpUv).toVar('winRainMaskUv') : maskUv, 'win');
+      tapG = sampleCookieAt(warpUv ? tapUv.add(warpUv).toVar('winRainMaskUv') : tapUv, 'win');
       cookie = tapG.cookie.mul(tapG.presence).toVar('winCookie');
     }
 
@@ -845,6 +848,7 @@ export function buildWindowSurfaceMaterial({
       debugGlassOffset,
       rainNodes,
       rainGain: rainNodes ? rainNodes.gain : null,
+      snow: rainNodes ? rainNodes.snow : null,
     };
   }
 
@@ -856,6 +860,19 @@ export function buildWindowSurfaceMaterial({
   // shader stays byte-identical to before this existed, not just
   // numerically the same.
   const debugGlass = buildGlassCookie();
+
+  /**
+   * SNOW'S COLOUR (window-snow.js): the light drains toward its own grey by the snow's desaturation (stuck flakes,
+   * the drift, the whiteout) - a colour move, so it is safe before the shoulder. The snow's GAIN rides out beside
+   * the cookie (`.w`) to be applied AFTER the shoulder, and its cool lean grades the light let in (`target`). A
+   * JS-time branch: a build with no snow handle returns `lit` untouched, so its shader is exactly what it was.
+   */
+  function snowColour(g, lit) {
+    if (!g.snow) return lit;
+    const luma = lit.r.mul(0.2126).add(lit.g.mul(0.7152)).add(lit.b.mul(0.0722));
+    return vec4(mix(lit, vec3(luma, luma, luma), g.snow.desat), g.snow.gain);
+  }
+  const hasSnow = !!debugGlass.snow;
 
   // ── THE FLOOR GATE — THE DEPTH AUTHORITY (2026-08-05) ────────────────────
   // Moved ahead of the gated glass build below (2026-08-12): the whole point
@@ -954,21 +971,26 @@ export function buildWindowSurfaceMaterial({
   // value is the zero vector, and 0 is exactly what `cookieTinted * coverage`
   // already produced there before this existed (`rawLight` below still
   // multiplies by `coverage` regardless of which path built `cookieTinted`).
-  const cookieTinted =
+  const cookieTintedPacked =
     gateGlass && depthTexture
       ? Fn(() => {
-          const out = vec3(0, 0, 0).toVar('winCookieTintedGated');
+          const out = (hasSnow ? vec4(0, 0, 0, 1) : vec3(0, 0, 0)).toVar('winCookieTintedGated');
           If(visibility01.greaterThan(float(0)), () => {
             const gated = buildGlassCookie();
             const gatedLit = gated.cookie.mul(gated.causticGain);
-            out.assign(gated.rainGain ? gatedLit.mul(gated.rainGain) : gatedLit);
+            out.assign(snowColour(gated, gated.rainGain ? gatedLit.mul(gated.rainGain) : gatedLit));
           });
           return out;
-        })().toVar('winCookieTinted')
-      : (debugGlass.rainGain
-          ? debugGlass.cookie.mul(debugGlass.causticGain).mul(debugGlass.rainGain)
-          : debugGlass.cookie.mul(debugGlass.causticGain)
-        ).toVar('winCookieTinted');
+        })().toVar('winCookieTintedPacked')
+      : snowColour(
+          debugGlass,
+          debugGlass.rainGain
+            ? debugGlass.cookie.mul(debugGlass.causticGain).mul(debugGlass.rainGain)
+            : debugGlass.cookie.mul(debugGlass.causticGain)
+        ).toVar('winCookieTintedPacked');
+  const cookieTinted = hasSnow ? cookieTintedPacked.xyz.toVar('winCookieTinted') : cookieTintedPacked;
+  /** The snow's gain (flake shadows, stuck flakes, the drift, the whiteout lift) - applied after the shoulder. */
+  const snowGain = hasSnow ? cookieTintedPacked.w.toVar('winSnowGain') : null;
 
   // ── THE CLOUD SEAM — see this module's header ────────────────────────────
   //
@@ -1031,7 +1053,11 @@ export function buildWindowSurfaceMaterial({
   const rawPeak = max(max(rawLight.r, rawLight.g), rawLight.b).toVar('winRawPeak');
   const rawPeakSafe = max(rawPeak, float(1e-5));
   const fillPeak = float(1).sub(exp(rawPeakSafe.mul(float(-WINDOW_FILL_RATE))));
-  const shoulderedLight = rawLight.mul(fillPeak.div(rawPeakSafe)).toVar('winFill');
+  // THE SNOW'S SHADOWS GO ON AFTER THE SHOULDER, like the weather: before it a white mask's raw light sits so far
+  // past the ceiling that a flake's shadow vanished (measured in the snow lab, 2026-11-03).
+  const shoulderedLight = (
+    snowGain ? rawLight.mul(fillPeak.div(rawPeakSafe)).mul(snowGain) : rawLight.mul(fillPeak.div(rawPeakSafe))
+  ).toVar('winFill');
 
   // ── THE DAYLIGHT TINT AND THE WEATHER — ON THE LIGHT LET IN, NOT THE FILL ─
   // The fill must see the same painted light at every hour (an orange tint
@@ -1047,7 +1073,12 @@ export function buildWindowSurfaceMaterial({
   // outdoors' match: `uTargetLight`, resolved in JS — so the daylight tint is
   // already folded in and `uDaylightTint` is now the debug channel's alone),
   // shaded by the cloud overhead and by the weather.
-  const target = uTargetLight.mul(cloudFactor).mul(weatherGain).toVar('winTarget');
+  // ...and by the snow's cool lean (a uniform: white when it is not snowing).
+  const target = (
+    hasSnow
+      ? uTargetLight.mul(cloudFactor).mul(weatherGain).mul(debugGlass.snow.tint)
+      : uTargetLight.mul(cloudFactor).mul(weatherGain)
+  ).toVar('winTarget');
   // THE CC (the card's Colour section) grades the light COMING IN — through the
   // project's ONE grade primitive (`window-grade.js`), identity at its defaults
   // — and only then is the indoor light it replaces taken away:

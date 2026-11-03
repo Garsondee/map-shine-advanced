@@ -57,6 +57,13 @@ import {
   WINDOW_RAIN_DEFAULTS,
   RAIN_TUNE,
 } from './window-rain.js';
+import {
+  createWindowSnow,
+  resolveSnowFrame,
+  snowKindWeight,
+  stepSnowPack,
+  WINDOW_SNOW_DEFAULTS,
+} from './window-snow.js';
 import { deriveWindowRainField, buildWindowPresenceGrid, RAIN_FIELD_DEFAULT_EASE_PX } from './window-rain-field.js';
 import { windFlowVector, windStrength01ForSpeed01 } from '../../world/index.js';
 import { createWindowRoomLight, resolveRoomLook, resolveRoomSunFrame } from './window-room-light.js';
@@ -117,6 +124,25 @@ function resolveRainLook(p) {
     maskFloorPct: n(p.rainMaskFloorPct, D.maskFloorPct),
     wobblePx: n(p.rainDropWobblePx, D.wobblePx),
     cornerEasePx: n(p.rainCornerEasePx, RAIN_FIELD_DEFAULT_EASE_PX),
+  };
+}
+
+/** The author's snow dials (`WINDOW_PARAMS.snow*`), defaults standing in for anything missing. */
+function resolveSnowLook(p) {
+  const D = WINDOW_SNOW_DEFAULTS;
+  const n = (v, d) => (Number.isFinite(v) ? v : d);
+  return {
+    response: n(p.snowResponse, D.response),
+    flakeCount: n(p.snowFlakeCount, D.flakeCount),
+    flakeSizePx: n(p.snowFlakeSizePx, D.flakeSizePx),
+    fallSpeed: n(p.snowFallSpeed, D.fallSpeed),
+    flutter: n(p.snowFlutter, D.flutter),
+    glint: n(p.snowGlint, D.glint),
+    stick: n(p.snowStick, D.stick),
+    sillDrift: n(p.snowSillDrift, D.sillDrift),
+    meltSec: n(p.snowMeltSec, D.meltSec),
+    flurry: n(p.snowFlurry, D.flurry),
+    whiteout: n(p.snowWhiteout, D.whiteout),
   };
 }
 
@@ -317,6 +343,12 @@ export function createWindowSurfaceSubsystem({
   let lastRainTMs = null;
   let rainLookKey = '';
   let rainReport = { rain01: 0, wet01: 0, presence: 0 };
+  // ── SNOW PAST THE GLASS (window-snow.js): its pack and its three CPU-integrated clocks, like the rain's.
+  let snowPack01 = 0;
+  let snowFallShift = 0;
+  let snowFlurryClock = 0;
+  const snowWindShift = [0, 0];
+  let snowReport = { snow01: 0, pack01: 0, presence: 0 };
   /** The window mask's decoded pixels (RGBA; the SAME array the texture wraps, never mutated) - what the flow
    * field pools window presence from. */
   let maskPixels = null;
@@ -403,6 +435,8 @@ export function createWindowSurfaceSubsystem({
     const { max, float } = THREE.TSL;
     return createWindowRain({
       THREE,
+      // Snow rides the rain's handle (one flow fetch, one branch per pixel); its uniforms live in window-snow.js.
+      snow: createWindowSnow({ THREE }),
       flowDirsTexture: neutralDirs,
       flowAuxTexture: neutralAux,
       // World px across the view, from the same view-rect uniform the floor gate maps screen UV with.
@@ -909,6 +943,44 @@ export function createWindowSurfaceSubsystem({
   }
 
   /**
+   * The snow, once per frame (from `syncRain`, which owns the time step): its pack, its clocks, its frame. Only
+   * uniforms are written. @returns {boolean} whether any snow shows (so the flow field is wanted).
+   */
+  function syncSnow(snow, state, weather, wind, dtSec, tMs) {
+    if (!snow) return false;
+    const look = resolveSnowLook(state.params ?? {});
+    snow.setLook(look);
+    const snow01 = clamp01(
+      (Number.isFinite(weather?.precip01) ? weather.precip01 : 0) *
+        snowKindWeight(weather?.precipKind, weather?.precipMixWeight) *
+        look.response
+    );
+    snowPack01 = stepSnowPack(snowPack01, snow01, dtSec, look.meltSec);
+    const frame = resolveSnowFrame({
+      snow01,
+      pack01: snowPack01,
+      look,
+      windSpeed01: Number.isFinite(wind?.speed01) ? windStrength01ForSpeed01(wind.speed01) : 0,
+      gust01: Number.isFinite(wind?.gustiness01) ? wind.gustiness01 : 0,
+    });
+    const dt = Math.min(Math.max(dtSec, 0), RAIN_SLIDE_DT_MAX_SEC);
+    const flow = windFlowVector(wind?.directionDeg);
+    snowFallShift = (snowFallShift + dt * frame.fallSpeedPx) % RAIN_WIND_SHIFT_WRAP_PX;
+    snowFlurryClock = (snowFlurryClock + dt * (40 + frame.windDriftPx)) % RAIN_WIND_SHIFT_WRAP_PX;
+    snowWindShift[0] = (snowWindShift[0] + flow.x * dt * frame.windDriftPx) % RAIN_WIND_SHIFT_WRAP_PX;
+    snowWindShift[1] = (snowWindShift[1] + flow.y * dt * frame.windDriftPx) % RAIN_WIND_SHIFT_WRAP_PX;
+    snow.setFrame(frame, {
+      clock: tMs === null ? 0 : (tMs / 1000) % RAIN_CLOCK_WRAP_SEC,
+      fallShift: snowFallShift,
+      flurryClock: snowFlurryClock,
+      windShift: snowWindShift,
+      windFlow: [flow.x, flow.y],
+    });
+    snowReport = { snow01, pack01: snowPack01, presence: frame.presence };
+    return frame.presence > 0;
+  }
+
+  /**
    * The rain, once per frame: the author's dials, the weather resolved to what the shader reads, the two clocks,
    * and (when it is raining) the flow field. Only uniforms are written - rain never rebuilds the material.
    * @param {number} floorIndex @param {object} state - the render state.
@@ -970,7 +1042,8 @@ export function createWindowSurfaceSubsystem({
       windFlow: [flow.x, flow.y],
     });
     rainReport = { rain01, wet01, presence: frame.presence };
-    if (frame.presence) ensureRainFlow(floorIndex, look);
+    const snowPresent = syncSnow(rain.snow, state, weather, wind, dtSec, tMs);
+    if (frame.presence || snowPresent) ensureRainFlow(floorIndex, look);
   }
 
   /**
@@ -1250,6 +1323,12 @@ export function createWindowSurfaceSubsystem({
             litCells: rainFlow.litCells,
             levels: rainFlow.levels,
           },
+        },
+        // SNOW PAST THE GLASS: how hard it snows at the window, how much lies on the sill, the uniforms as pushed.
+        snow: {
+          compiled: !!surface.rain?.snow,
+          ...snowReport,
+          uniforms: surface.rain?.snow ? surface.rain.snow.snapshot() : null,
         },
         // SUN & ROOMS: is it compiled, did the room map land, and what the sun is doing to it right now.
         rooms: {

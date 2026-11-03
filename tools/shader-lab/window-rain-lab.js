@@ -39,13 +39,19 @@ const WEATHER = [
   { key: 'windSpeed01', label: 'Wind speed', min: 0, max: 1, step: 0.01 },
   { key: 'windDirDeg', label: 'Wind bearing (deg)', min: 0, max: 359, step: 1 },
   { key: 'gust01', label: 'Gustiness', min: 0, max: 1, step: 0.01 },
+  { key: 'snow01', label: 'Snow', min: 0, max: 1, step: 0.01 },
+  { key: 'snowPack01', label: 'Snow on the sill', min: 0, max: 1, step: 0.01 },
+  { key: 'fallShift', label: 'Fall (px)', min: 0, max: 4000, step: 1 },
+  { key: 'flurryClock', label: 'Flurry sweep (px)', min: 0, max: 4000, step: 1 },
 ];
 
 /** The `Rain` category of `WINDOW_PARAMS`, keyed to the bench's `look` object. */
 const DIALS = Object.entries(WINDOW_PARAMS)
-  .filter(([, p]) => p.category === 'Rain')
+  .filter(([, p]) => p.category === 'Rain' || p.category === 'Snow')
   .map(([key, p]) => ({
     key,
+    // `snowFlakeCount` -> `state.snowLook.flakeCount` (both prefixes are four letters)
+    target: p.category === 'Snow' ? 'snowLook' : 'look',
     // `rainDropScalePx` -> `dropScalePx`, `rainCornerEasePx` -> bench `easePx` (a flow-field input, not a uniform)
     look: key === 'rainCornerEasePx' ? null : key.charAt(4).toLowerCase() + key.slice(5),
     label: p.label,
@@ -107,7 +113,7 @@ function buildWeather(host) {
 function buildDials(host) {
   for (const d of DIALS) {
     slider(host, { ...d, title: d.help }, (v) => {
-      if (d.look) bench.state.look[d.look] = v;
+      if (d.look) bench.state[d.target][d.look] = v;
       else bench.setEase(v);
       queueRefresh();
     });
@@ -139,6 +145,9 @@ function playLoop(now) {
   lastTick = now;
   bench.state.clock += dt;
   bench.state.slideClock += dt * (0.55 + 0.95 * bench.state.rain01);
+  // the fall at the default speed (55 px/s, hurried by the wind), the flurry bands at their floor + wind
+  bench.state.fallShift += dt * 55 * (1 + 0.8 * bench.state.windSpeed01);
+  bench.state.flurryClock += dt * (40 + 180 * bench.state.windSpeed01);
   weatherSliders.clock.input.value = String(bench.state.clock % 200);
   weatherSliders.slideClock.input.value = String(bench.state.slideClock % 200);
   bench

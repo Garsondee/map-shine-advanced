@@ -48,6 +48,12 @@ import {
   buildWindowPresenceGrid,
   sampleWindowRainField,
 } from '../../src/effects/window/window-rain-field.js';
+import {
+  createWindowSnow,
+  resolveSnowFrame,
+  stepSnowPack,
+  WINDOW_SNOW_DEFAULTS,
+} from '../../src/effects/window/window-snow.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../src/scene/index.js';
 import { WINDOW_DEBUG_CHANNELS } from '../../src/effects/window/window.js';
 
@@ -144,8 +150,9 @@ export function createWindowRainBench({ THREE, log }) {
   let field = null;
   /** Readback row order, established empirically. Never assumed. */
   let orientation = null;
-  let builtFor = { glass: null, withRain: null };
+  let builtFor = { glass: null, withRain: null, withSnow: null };
   let lastFrame = null;
+  let lastSnowFrame = null;
 
   const spec = { x: 0, y: 0, width: DIM, height: DIM, w: GRID, h: GRID, texelW: CELL, texelH: CELL };
   const outdoors = buildOutdoors();
@@ -165,6 +172,13 @@ export function createWindowRainBench({ THREE, log }) {
     windShift: [0, 0],
     gust01: 0,
     look: { ...WINDOW_RAIN_DEFAULTS },
+    // SNOW (window-snow.js): built into the rain handle unless `withSnow` is false
+    withSnow: true,
+    snow01: 0,
+    snowPack01: 0,
+    fallShift: 0,
+    flurryClock: 0,
+    snowLook: { ...WINDOW_SNOW_DEFAULTS },
     easePx: 96,
     /** Fields stamped over the resolved frame, to isolate one regime (e.g. sliders only). */
     override: {},
@@ -243,6 +257,7 @@ export function createWindowRainBench({ THREE, log }) {
           flowDirsTexture: neutralDirs,
           flowAuxTexture: neutralAux,
           viewSpanNode: max(uViewRect.z.sub(uViewRect.x), float(1)),
+          snow: state.withSnow ? createWindowSnow({ THREE }) : null,
         })
       : null;
     surface = buildWindowSurfaceMaterial({
@@ -275,7 +290,7 @@ export function createWindowRainBench({ THREE, log }) {
     surface.setMaskUvBounds({ minU: 0, minV: 0, maxU: 1, maxV: 1 });
     surface.setUvPerWorldPx(1 / (WORLD.maxX - WORLD.minX), 1 / (WORLD.maxY - WORLD.minY));
     rain?.setFlow({ dirsTexture: flowDirs, auxTexture: flowAux, rect: { x: 0, y: 0, width: DIM, height: DIM } });
-    builtFor = { glass: state.glass, withRain: state.withRain };
+    builtFor = { glass: state.glass, withRain: state.withRain, withSnow: state.withSnow };
   }
 
   /** Push the live state through the real setters, the same calls the subsystem makes every sync. */
@@ -308,11 +323,35 @@ export function createWindowRainBench({ THREE, log }) {
       windFlow: [wind.x, wind.y],
       windShift: state.windShift,
     });
+    if (rain.snow) {
+      rain.snow.setLook(state.snowLook);
+      const sf = resolveSnowFrame({
+        snow01: state.snow01,
+        pack01: state.snowPack01,
+        look: state.snowLook,
+        windSpeed01: state.windSpeed01,
+        gust01: state.gust01,
+      });
+      lastSnowFrame = sf;
+      rain.snow.setFrame(sf, {
+        clock: state.clock,
+        fallShift: state.fallShift,
+        flurryClock: state.flurryClock,
+        windShift: state.windShift,
+        windFlow: [wind.x, wind.y],
+      });
+    }
   }
 
   async function renderFrame() {
     await ensureRenderer();
-    if (!scene || builtFor.glass !== state.glass || builtFor.withRain !== state.withRain) buildScene();
+    if (
+      !scene ||
+      builtFor.glass !== state.glass ||
+      builtFor.withRain !== state.withRain ||
+      builtFor.withSnow !== state.withSnow
+    )
+      buildScene();
     pushState();
     const prev = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClearColor;
@@ -329,7 +368,12 @@ export function createWindowRainBench({ THREE, log }) {
 
   /** Apply overrides, render, restore. Keeps scenarios from leaking state. */
   async function renderWith(overrides) {
-    const saved = { ...state, look: { ...state.look }, override: { ...state.override } };
+    const saved = {
+      ...state,
+      look: { ...state.look },
+      snowLook: { ...state.snowLook },
+      override: { ...state.override },
+    };
     Object.assign(state, overrides);
     try {
       return await renderFrame();
@@ -1151,6 +1195,151 @@ export function createWindowRainBench({ THREE, log }) {
   });
 
   // ═══════════════════════════════════════════════════════════════════════
+  // SNOW (window-snow.js). The flakes are LINEAR in the snow; every stage shows; no snow is no change.
+  /** The pack after `minutes` of steady snow at `s` (the drift a GM would see after that long). */
+  const packAfter = (s, minutes) => {
+    let p = 0;
+    for (let i = 0; i < minutes * 60; i++) p = stepSnowPack(p, s, 1, WINDOW_SNOW_DEFAULTS.meltSec);
+    return p;
+  };
+  const SNOW_DRY = { rain01: 0, wet01: 0, snow01: 0, snowPack01: 0 };
+
+  scenarios.set('snow-dry-is-identity', {
+    name: 'snow-dry-is-identity',
+    summary: 'With no snow, a material built WITH the snow handle draws byte-for-byte what one without it draws.',
+    async run() {
+      const checks = [];
+      const out = {};
+      for (const glass of [true, false]) {
+        const a = await renderWith({ ...SNOW_DRY, glass, withSnow: false });
+        const b = await renderWith({ ...SNOW_DRY, glass, withSnow: true });
+        let diff = 0;
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff++;
+        const snowy = await renderWith({ ...SNOW_DRY, glass, withSnow: true, snow01: 0.6, snowPack01: 0.5 });
+        out[glass ? 'glass' : 'cookie'] = { differingBytes: diff, snowChanges: +changedFraction(a, snowy).toFixed(4) };
+      }
+      checks.push(
+        evaluate('no-snow-is-identity', () => ({
+          ok: out.glass.differingBytes === 0 && out.cookie.differingBytes === 0,
+          measured: out,
+          expected: '0 differing bytes at both tiers',
+        }))
+      );
+      checks.push(
+        evaluate('snow-does-change-the-picture', () => ({
+          ok: out.glass.snowChanges > 0.01 && out.cookie.snowChanges > 0.01,
+          measured: out,
+          expected: 'snow 0.6 changes over 1% of the lit pixels (so identity is not vacuous)',
+        }))
+      );
+      return { checks, calibration: 'n/a', inputs: {}, stats: out };
+    },
+  });
+
+  scenarios.set('snow-ladder', {
+    name: 'snow-ladder',
+    summary:
+      'A few flakes to a whiteout on the real material. Falling flakes only: the changed share of the lit picture ' +
+      'grows in a line with the snow. Then the whole look (stuck flakes, a drift after 5 min) at six levels, saved.',
+    async run(ctx) {
+      const checks = [];
+      try {
+        await calibrated(true);
+      } catch (err) {
+        checks.push(check({ id: 'orientation-calibrated', status: 'UNMEASURED', measured: String(err.message) }));
+        return { checks, calibration: 'FAILED', inputs: {}, stats: {} };
+      }
+      const dry = await renderWith(SNOW_DRY);
+      const flakeLevels = [0.05, 0.1, 0.2, 0.35, 0.5];
+      const flakeOnly = { ...WINDOW_SNOW_DEFAULTS, stick: 0, sillDrift: 0, glint: 0 };
+      const stats = { flakes: [], look: [] };
+      for (const s of flakeLevels) {
+        // against the SAME snow with no flakes, so the colour lean (the same everywhere) is not counted as flakes;
+        // averaged over four moments of the fall (a light snow is a handful of flakes per frame: counting noise)
+        const ref = await renderWith({ ...SNOW_DRY, snow01: s, snowLook: { ...flakeOnly, flakeCount: 0 }, clock: 40 });
+        let c = 0;
+        for (const fallShift of [777, 1931, 3307, 5113]) {
+          const b = await renderWith({ ...SNOW_DRY, snow01: s, snowLook: flakeOnly, fallShift, clock: 40 });
+          c += changedFraction(ref, b, 3) / 4;
+        }
+        stats.flakes.push({ snow01: s, changed: +c.toFixed(4), perSnow: +(c / s).toFixed(4) });
+      }
+      const per = stats.flakes.map((f) => f.perSnow);
+      const mean = per.reduce((a, b) => a + b, 0) / per.length;
+      checks.push(
+        evaluate('flakes-follow-the-snow-in-a-line', () => ({
+          ok: per.every((v) => Math.abs(v / mean - 1) < 0.25),
+          measured: per,
+          expected: 'changed share / snow within 25% of its mean at every level (overlap bends it a little)',
+        }))
+      );
+      checks.push(
+        evaluate('a-few-flakes-at-the-lightest', () => ({
+          ok: stats.flakes[0].changed > 0 && stats.flakes[0].changed < 0.08,
+          measured: stats.flakes[0].changed,
+          expected: 'snow 0.05 touches some, but under 8%, of the lit pixels',
+        }))
+      );
+      const levels = [0.02, 0.1, 0.3, 0.5, 0.8, 1.0];
+      const frames = [];
+      const dryLit = litStats(dry);
+      for (const s of levels) {
+        const pack = packAfter(s, 5);
+        const b = await renderWith({
+          ...SNOW_DRY,
+          snow01: s,
+          snowPack01: pack,
+          fallShift: 777,
+          flurryClock: 300,
+          clock: 40,
+          gust01: 0.6,
+        });
+        frames.push(b);
+        const lit = litStats(b);
+        stats.look.push({
+          snow01: s,
+          pack01: +pack.toFixed(3),
+          changed: +changedFraction(dry, b).toFixed(4),
+          meanRatio: +(lit.mean / dryLit.mean).toFixed(4),
+        });
+      }
+      const ch = stats.look.map((l) => l.changed);
+      checks.push(
+        evaluate('the-whole-look-ramps', () => {
+          let mono = true;
+          for (let i = 1; i < ch.length; i++) if (ch[i] < ch[i - 1] - 0.002) mono = false;
+          return {
+            ok: mono && ch[5] > ch[0] * 5,
+            measured: ch,
+            expected: 'monotone, and the whiteout far above a few flakes',
+          };
+        })
+      );
+      checks.push(
+        evaluate('whiteout-is-not-a-blackout', () => ({
+          ok: stats.look[5].meanRatio > 0.75,
+          measured: stats.look.map((l) => l.meanRatio),
+          expected: 'full snow keeps over 75% of the dry mean brightness (dramatic, never dull)',
+        }))
+      );
+      const artifacts = [];
+      const crops = (x0, y0, x1, y1) =>
+        montage(
+          [
+            cropCanvas(dry, x0, y0, x1, y1, 2, 'dry'),
+            ...frames.map((f, i) => cropCanvas(f, x0, y0, x1, y1, 2, `snow ${levels[i]}`)),
+          ],
+          2
+        );
+      const a1 = await saveCanvasPng(ctx.runId, 'snow-ladder-south.png', crops(320, 700, 704, 860));
+      if (a1) artifacts.push(a1);
+      const a2 = await saveCanvasPng(ctx.runId, 'snow-ladder-west.png', crops(176, 368, 304, 624));
+      if (a2) artifacts.push(a2);
+      return { checks, calibration: 'OK', artifacts, inputs: { flakeLevels, levels }, stats };
+    },
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
   scenarios.set('cookie-tier-rain', {
     name: 'cookie-tier-rain',
     summary: 'The no-glass build (one mask tap): rain still shows, by displacing the mask read directly.',
@@ -1351,11 +1540,13 @@ export function createWindowRainBench({ THREE, log }) {
       paint(
         bytes,
         label ??
-          `rain=${state.rain01} wet=${state.wet01} t=${state.clock.toFixed(1)} slide=${state.slideClock.toFixed(1)} wind=${state.windSpeed01}@${state.windDirDeg} ch=${state.debugChannel}`
+          `rain=${state.rain01} wet=${state.wet01} snow=${state.snow01} pack=${state.snowPack01} t=${state.clock.toFixed(1)} slide=${state.slideClock.toFixed(1)} wind=${state.windSpeed01}@${state.windDirDeg} ch=${state.debugChannel}`
       );
       return litStats(bytes);
     },
     compareRegion,
+    /** The last snow frame pushed (stage amounts), for the page's status line. */
+    lastSnowFrame: () => lastSnowFrame,
     /** Re-derive the flow field (the author nudged Corner blend), in place. */
     setEase(px) {
       deriveFlow(px);

@@ -25,6 +25,7 @@ import { run as runWindowRainField } from './window-rain-field.test.mjs';
 import { run as runWindowRain } from './window-rain.test.mjs';
 import { run as runWindowRainSubsystem } from './window-rain-subsystem.test.mjs';
 import { run as runWindowRoomLight } from './window-room-light.test.mjs';
+import { run as runWindowSnow } from './window-snow.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -67,6 +68,7 @@ const suites = [
   ['window-rain', runWindowRain],
   ['window-rain-subsystem', runWindowRainSubsystem],
   ['window-room-light', runWindowRoomLight],
+  ['window-snow', runWindowSnow],
 ];
 // AWAITED, not called-and-dropped — the subsystem suite lets a mask load
 // settle before asserting on visibility, same reasoning as specular's own

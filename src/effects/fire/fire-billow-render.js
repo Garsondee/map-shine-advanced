@@ -109,13 +109,23 @@ export const BILLOW_LOOK = Object.freeze({
   smokeSoot: 0.0,
   /** The darkened rim round the cloud (px wide, 0 = none) and how dark it is (0..1): the pigment pooling at a painted edge. */
   smokeLinePx: 2.4,
-  smokeLineA: 0.4,
+  smokeLineA: 0.15,
   /** The soft ground shadow under the smoke (0..1 darkening). Its offset and the crescents' width follow the billows' size per box. */
   smokeShadow: 0.26,
   /** How steeply the cloud's overall shape tilts its shading (the shaded and lit crescents). */
   smokeRelief: 2.4,
   /** The smoke kernel: 0 = a soft bump (one smooth blob), 1 = a flat-topped disc (a scalloped cloud of round billows). */
-  smokeCrisp: 0.7,
+  smokeCrisp: 0.35,
+  /**
+   * THE PAINTERLY EDGE (2026-11-03, author: "something more diffuse and dithered... artistic and impressionistic"):
+   * `smokeGrain` breaks the silhouette into brushed dabs (a world-anchored noise added to the density the edge is cut from),
+   * `smokeDither` stipples the half-covered fringe into dots the size of `smokeDitherPx` field px (a screen door, not a gradient),
+   * and `smokeDabs` breaks the colour into warm and cool patches. All 0 = the earlier cel-shaded cloud.
+   */
+  smokeGrain: 0.6,
+  smokeDither: 0.55,
+  smokeDitherPx: 2,
+  smokeDabs: 0.4,
   /** How much greyer the smoke goes in a fully bright scene (so it stands off a pale floor). */
   smokeDayDark: 0.69,
   /** Smoke is drawn OVER the flame: how far up its life it fades in, and how opaque it is where it crosses the flame. */
@@ -279,6 +289,10 @@ export function createBillowRenderer({
     smokeShadow: num('smokeShadow'),
     smokeRelief: num('smokeRelief'),
     smokeCrisp: num('smokeCrisp'),
+    smokeGrain: num('smokeGrain'),
+    smokeDither: num('smokeDither'),
+    smokeDitherPx: num('smokeDitherPx'),
+    smokeDabs: num('smokeDabs'),
     smokeDayDark: num('smokeDayDark'),
     smokeFadeIn: num('smokeFadeIn'),
     coreBloom: num('coreBloom'),
@@ -388,6 +402,8 @@ export function createBillowRenderer({
   const smokeDeep = lin(BILLOW_SMOKE_RAMP.deep);
   const smokeLit = lin(BILLOW_SMOKE_RAMP.lit);
   const smokeInk = lin(BILLOW_SMOKE_RAMP.ink);
+  const smokeDabWarm = lin(BILLOW_SMOKE_RAMP.dabWarm);
+  const smokeDabCool = lin(BILLOW_SMOKE_RAMP.dabCool);
   const smokeCharcoal = lin(BILLOW_SMOKE_RAMP.charcoal);
   const step1 = (x) => min(x.mul(1000), float(1));
   const flipUV = (p) => (flipV ? vec2(p.x, float(1).sub(p.y)) : p);
@@ -609,24 +625,47 @@ export function createBillowRenderer({
     const sL = smokeNode.sample(p.sub(ex));
     const sD2 = smokeNode.sample(p.add(ey));
     const sU = smokeNode.sample(p.sub(ey));
-    const S = s0.x;
-    const toneS = s0.y.div(max(S, float(0.001))).clamp(0, 1);
+    // PAINTERLY GRAIN: two octaves of world-anchored noise (broad strokes, fine tooth) nudge the density the silhouette is cut
+    // from, so the edge is a ragged run of dabs rather than a clean contour. Only the cut moves: tone, steam and soot keep the
+    // true density (S0), and the solid body (density well above the outline) stays solid.
+    const S0 = s0.x;
+    const grainBroad = mx_noise_float(vec3(local.x.mul(0.035), local.y.mul(0.035), tt.mul(0.25).add(21.7)));
+    const grainFine = mx_noise_float(vec3(local.x.mul(0.16).add(13.1), local.y.mul(0.16), tt.mul(0.6).add(4.2)));
+    const grain = grainBroad.mul(0.65).add(grainFine.mul(0.35));
+    const S = S0.add(grain.mul(U.smokeGrain).mul(0.7));
+    const toneS = s0.y.div(max(S0, float(0.001))).clamp(0, 1);
     // the field's B channel is steam (+) or soot (-), density weighted
-    const bSig = s0.z.div(max(S, float(0.001)));
+    const bSig = s0.z.div(max(S0, float(0.001)));
     const steam = clamp(bSig, float(0), float(1));
     const sootL = clamp(bSig.negate(), float(0), float(1));
     const sGrad = vec2(sR.x.sub(sL.x), sD2.x.sub(sU.x)).mul(0.5);
     const sGradLen = length(sGrad);
     // the painted plumes thin out and feather as they age: the top of a column dissolves into the air instead of ending at a hard edge
     const age = smoothstep(float(0.5), float(1.0), toneS);
-    const sAA = clamp(sGradLen, float(0.02), float(0.5)).add(U.smokeSoft).add(age.mul(0.22));
+    const sAA = clamp(sGradLen, float(0.02), float(0.5))
+      .add(U.smokeSoft)
+      .add(age.mul(0.22))
+      .add(U.smokeDither.mul(0.18));
     const sCover0 = smoothstep(U.smokeOutline.sub(sAA), U.smokeOutline.add(sAA), S);
     const dens = clamp(S.sub(U.smokeOutline).div(1.6), float(0), float(1));
     // a thin rim or tail is see-through, the body is solid
-    const sCover = sCover0
+    const sCoverSoft = sCover0
       .mul(U.smokeOpacity)
       .mul(mix(float(0.72), float(1), smoothstep(float(0), float(0.3), dens)))
       .mul(float(1).sub(age.mul(0.35)));
+    // THE DITHERED FRINGE: where the smoke is part-covered (the feather, the thin tails) the alpha becomes dots: a pixel is
+    // either smoke or not, with the share of smoke pixels following the coverage (interleaved-gradient noise on a world-anchored
+    // grid, so the screen door stays put while the smoke drifts through it). The solid body and the clear air are untouched.
+    const ditherCell = floor(local.div(max(U.smokeDitherPx, float(1))));
+    const ign = fract(fract(dot(ditherCell, vec2(0.06711056, 0.00583715))).mul(52.9829189));
+    const fringe = smoothstep(float(0.02), float(0.18), sCoverSoft).mul(
+      float(1).sub(smoothstep(float(0.6), float(0.97), sCoverSoft))
+    );
+    const sCover = mix(
+      sCoverSoft,
+      select(sCoverSoft.greaterThan(ign), float(0.9), float(0)),
+      U.smokeDither.mul(fringe)
+    );
     // how many px inside the silhouette this is: (density above the edge) / (density change per px; the taps are 1.5 texels each side)
     const edgePx = max(S.sub(U.smokeOutline), float(0)).div(max(sGradLen.mul(0.6667), float(0.0005)));
     // THE BIG SHAPE'S SHADING: the density's slope at a distance of `vLook.x` px (the billows' own size), relative to the density
@@ -648,12 +687,22 @@ export function createBillowRenderer({
     sRgb = mix(sRgb, smokeShade, smoothstep(float(0.45), float(0.95), toneS).mul(0.85));
     sRgb = mix(sRgb, smokeDeep, float(1).sub(dens).mul(0.35));
     sRgb = mix(smokeLit, sRgb, smoothstep(float(0.0), float(0.22), toneS));
+    // BROKEN COLOUR: broad patches of warm peach and dusty mauve, strongest in the thin parts (the body keeps the ramp's value,
+    // the wisps pick up the hue of the air round them), always at the ramp's own brightness so they never read as a stain
+    // (the strokes run up the page, taller than wide, like a loaded brush dragged along a column)
+    const dabN = mx_noise_float(vec3(local.x.mul(0.05).add(51.3), local.y.mul(0.02), tt.mul(0.12)))
+      .mul(0.65)
+      .add(mx_noise_float(vec3(local.x.mul(0.11).add(7.7), local.y.mul(0.045), tt.mul(0.2).add(3.3))).mul(0.35));
+    const dabT = smoothstep(float(-0.22), float(0.22), dabN);
+    const dabThin = float(1).sub(smoothstep(float(0.0), float(0.7), dens));
+    sRgb = mix(sRgb, mix(smokeDabCool, smokeDabWarm, dabT), U.smokeDabs.mul(float(0.5).add(dabThin.mul(0.5))));
+    sRgb = sRgb.mul(float(1).add(dabN.mul(U.smokeDabs).mul(0.14)));
     // the big shape's crescents, soft: the flank facing away from the light darker, the one facing it lighter
     sRgb = mix(sRgb, sRgb.mul(0.7), shadeBand.mul(0.8));
     sRgb = mix(sRgb, smokeHi, hiBand.mul(0.5));
     // painterly mottling: slow noise lifts and sinks the value a little, so a billow is a brushed shape, not a flat fill
     const sMottle = mx_noise_float(vec3(local.x.mul(0.05), local.y.mul(0.05), tt.mul(0.35).add(9.1)));
-    sRgb = sRgb.mul(float(1).add(sMottle.mul(0.12)));
+    sRgb = sRgb.mul(float(1).add(sMottle.mul(0.2)));
     // a sooty fuel's smoke, and a whole burning building's, is charcoal with its own bands
     const sootAmt = clamp(sootL.add(U.smokeSoot.mul(toneS)), float(0), float(1));
     const charcoalBanded = smokeCharcoal.mul(mix(mix(float(1.05), float(0.62), shadeBand), float(1.5), hiBand));
@@ -670,7 +719,8 @@ export function createBillowRenderer({
       .sub(smoothstep(U.smokeLinePx.sub(0.6), U.smokeLinePx.add(0.6), edgePx))
       .mul(clamp(U.smokeLineA.mul(float(1).add(bright.mul(1.2))), float(0), float(0.9)))
       .mul(smoothstep(float(0.0), float(0.6), U.smokeLinePx));
-    sRgb = mix(sRgb, smokeInk, lineA);
+    // (the rim is pigment pooling, not a pen line: half ink, half the ramp's dusty deep tone)
+    sRgb = mix(sRgb, mix(smokeInk, smokeDeep, 0.5), lineA);
     // the shadow on the ground: the same field, offset AWAY FROM THE SUN (2026-11-01 — it was
     // fixed down-right whatever the hour), as long as the shared length allows inside the box's
     // own shadow room (`vLook.y`), and as dark as every other shadow relative to clear noon

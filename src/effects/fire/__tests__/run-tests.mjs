@@ -15,6 +15,7 @@ import { run as runFire } from './fire.test.mjs';
 import { run as runFireMask } from './fire-mask.test.mjs';
 import { run as runFireSprite } from './fire-sprite.test.mjs';
 import { run as runFireSpawnPoints } from './fire-spawn-points.test.mjs';
+import { run as runFireFloorUnion } from './fire-floor-union.test.mjs';
 import { run as runFireSubsystem } from './fire-subsystem.test.mjs';
 import { run as runFireBillowGeometry } from './fire-billow-geometry.test.mjs';
 import { run as runFireBillowState } from './fire-billow-state.test.mjs';
@@ -55,6 +56,7 @@ const suites = [
   ['fire-mask', runFireMask],
   ['fire-sprite', runFireSprite],
   ['fire-spawn-points', runFireSpawnPoints],
+  ['fire-floor-union', runFireFloorUnion],
   ['fire-subsystem', runFireSubsystem],
   ['fire-billow-geometry', runFireBillowGeometry],
   ['fire-billow-state', runFireBillowState],

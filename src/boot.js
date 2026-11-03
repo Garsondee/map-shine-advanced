@@ -34,6 +34,7 @@
 // THE NODE BUILD (docs/planning/Shaders.md). It does NOT export WebGLRenderer —
 // which is why the TSL port was all-or-nothing: one import, and every renderer
 // moves at once. WebGPURenderer picks WebGPU or WebGL2 itself.
+import { unionVisibleFireGrid } from './effects/fire/fire-floor-union.js';
 import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
@@ -6830,10 +6831,44 @@ function install() {
    */
   const fireSpawnCacheByFloor = new Map();
   const fireMaskCacheByFloor = new Map();
+  /**
+   * THE FIRE GRID A VIEWED FLOOR READS: its own `_Fire` paint plus every lower floor's, wherever no art covers it
+   * (2026-11-03). Fire is read from ONE grid per viewed floor, so a fire painted on the middle floor of the Town River
+   * Bridge vanished on the roof although the roof looks straight down on it. `coverAbove` of a lower floor is the art
+   * between it and the sky, so a fire under a roof stays hidden. `effects/fire/fire-floor-union.js` is the pure part.
+   *
+   * Memoised on the IDENTITY of every grid it reads (the authority hands back the same objects until something
+   * changes), so the per-frame callers below stay cache hits. A cover grid that cannot be read hides that floor's fire:
+   * we cannot prove it is in view, and a fire burning through a solid floor is the worse error.
+   */
+  const visibleFireGridMemo = new Map();
+  const getVisibleFireGrid = (floorIndex) => {
+    const own = maskAuthority.getDerived('fire', floorIndex)?.grid ?? null;
+    const lowerIndices = (lastKnownFloors ?? []).map((f) => f.index).filter((i) => i < floorIndex);
+    if (lowerIndices.length === 0) return own;
+    const lowers = [];
+    for (const i of lowerIndices) {
+      let fire = null;
+      let cover = null;
+      try {
+        fire = maskAuthority.getDerived('fire', i)?.grid ?? null;
+        if (fire) cover = maskAuthority.getDerived('coverAbove', i)?.grid ?? null;
+      } catch (err) {
+        log.warn('fire: could not read floor', i, 'for the floors above it', err);
+      }
+      lowers.push({ fire, cover });
+    }
+    const inputs = [own, ...lowers.flatMap((l) => [l.fire, l.cover])];
+    const memo = visibleFireGridMemo.get(floorIndex);
+    if (memo && memo.inputs.length === inputs.length && memo.inputs.every((g, k) => g === inputs[k])) return memo.grid;
+    const { grid } = unionVisibleFireGrid(own, lowers);
+    visibleFireGridMemo.set(floorIndex, { inputs, grid });
+    return grid;
+  };
   const getFireSpawnCloud = (floorIndex) => {
     let grid = null;
     try {
-      grid = maskAuthority.getDerived('fire', floorIndex)?.grid ?? null;
+      grid = getVisibleFireGrid(floorIndex);
     } catch {
       return null;
     }
@@ -6876,7 +6911,7 @@ function install() {
   const getMaskDrivenFires = (floorIndex) => {
     let grid = null;
     try {
-      grid = maskAuthority.getDerived('fire', floorIndex)?.grid ?? null;
+      grid = getVisibleFireGrid(floorIndex);
     } catch (err) {
       // An absent `_Fire` mask is the common case, not an error — most scenes
       // have no fire painted at all. Anything else is worth saying once.
@@ -7167,7 +7202,7 @@ function install() {
   // own try/catch, never the required-mask loud throw above.
   const getFireMaskGrid = (floorIndex) => {
     try {
-      return maskAuthority.getDerived('fire', floorIndex)?.grid ?? null;
+      return getVisibleFireGrid(floorIndex);
     } catch {
       return null;
     }
@@ -15049,6 +15084,15 @@ function install() {
     return saveLooksLibrary(looksLibrary.filter((l) => l.id !== id));
   }
 
+  /** Does the live value of a colour channel match what a Look stored? A hue (degrees) compares round the
+   * wheel, a colour compares as text. @param {*} stored @param {*} live */
+  function optionOnScreen(stored, live) {
+    if (typeof stored === 'string') return typeof live === 'string' && stored.toLowerCase() === live.toLowerCase();
+    if (!Number.isFinite(stored) || !Number.isFinite(live)) return false;
+    const d = Math.abs((((stored - live) % 360) + 540) % 360 - 180);
+    return d <= 2;
+  }
+
   /**
    * Re-pick one of a Look's options (its colour button) from the palette, save it
    * for every map, and — if that Look is the one on screen — fade to the new colour.
@@ -15059,8 +15103,12 @@ function install() {
     if (!look) return { ok: false, reason: `no Look with id '${id}'` };
     const next = setLookOption(look, key, paletteId);
     if (next === look) return { ok: false, reason: 'that Look has no such option' };
+    // Is this Look what the scene is showing? `activeLook` is only memory of the last button pressed, so it
+    // is empty after a reload while the scene still wears the Look; the old colour sitting on screen says
+    // the same thing, and a new colour must fade in either way (author, 2026-11-02).
+    const showing = activeLook?.id === id || optionOnScreen(look.values?.[key], LOOK_ADAPTERS[key]?.read());
     const result = await saveLooksLibrary(looksLibrary.map((l) => (l.id === id ? next : l)));
-    if (activeLook?.id === id) playLookById(id, overMs);
+    if (showing) playLookById(id, overMs);
     return result;
   }
 

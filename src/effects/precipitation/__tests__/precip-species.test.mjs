@@ -409,9 +409,15 @@ export function run(t) {
     const rainHalf = evalCurve(rain.respond.count, 0.5);
     t.ok('⭐ rain at half precip has a QUARTER of its bodies (quadratic)', Math.abs(rainHalf - 0.25) < 1e-9);
     const snowHalf = evalCurve(snow.respond.count, 0.5);
+    // 2026-11-03: front-loaded (pow 0.7), not linear — a light snow at 0.15 drew a handful of specks on screen,
+    // nothing like the "gentle winter wonderland" the author wants the low end to be. Still the OPPOSITE of rain.
     t.ok(
-      '⭐ snow at half precip has HALF its bodies (linear, deliberately unlike rain)',
-      Math.abs(snowHalf - 0.5) < 1e-9
+      '⭐ snow at half precip has MORE than half its bodies (front-loaded, deliberately unlike rain)',
+      snowHalf > 0.55 && snowHalf < 0.75
+    );
+    t.ok(
+      'snow still starts at nothing and ends at everything',
+      evalCurve(snow.respond.count, 0) === 0 && Math.abs(evalCurve(snow.respond.count, 1) - 1) < 1e-9
     );
     t.ok('the two count curves genuinely differ at the same input', rainHalf !== snowHalf);
     // "heavy rain falls harder, not just thicker"

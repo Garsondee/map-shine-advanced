@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Snow Lab</title>
+    <style>
+      body {
+        margin: 0;
+        background: #0d0f13;
+        color: #e8e8ea;
+        font:
+          13px ui-monospace,
+          monospace;
+        padding: 12px;
+      }
+      #log {
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="log">booting…</div>
+    <script type="module">
+      import * as THREE from '/src/vendor/three/three.webgpu.js';
+      import { SnowLabDriver, SNOW_LADDER, LAB_MAPS, PRECIP_DEFAULTS } from './snow-lab.js';
+      const log = (m) => {
+        document.getElementById('log').textContent = String(m);
+      };
+      try {
+        const driver = new SnowLabDriver({ THREE });
+        await driver.ready;
+        window.THREE = THREE;
+        // `snow.job(fn)` runs an async job in the background (a pane tool call dies at 45 s); poll `snow.last`.
+        window.snow = {
+          driver,
+          SNOW_LADDER,
+          LAB_MAPS,
+          PRECIP_DEFAULTS,
+          last: null,
+          job(fn) {
+            snow.last = 'pending';
+            Promise.resolve()
+              .then(fn)
+              .then(
+                (v) => (snow.last = v),
+                (e) => (snow.last = 'ERROR ' + String((e && e.stack) || e))
+              );
+            return 'started';
+          },
+        };
+        log(`ready — backend: ${driver.backend}`);
+      } catch (e) {
+        log('FAILED: ' + (e && e.stack ? e.stack : e));
+      }
+    </script>
+  </body>
+</html>

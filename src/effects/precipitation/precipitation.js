@@ -319,7 +319,19 @@ export const PRECIPITATION_PARAMS = Object.freeze({
     default: 0.3,
     category: 'Veil',
     label: 'Storm-fog strength',
-    help: 'How strongly a genuine downpour or blizzard reduces visibility outdoors — rain greys the air, snow whites it out. Only rises once the weather is already severe; ordinary rain/snow never triggers it.',
+    help: 'How strongly a genuine downpour reduces visibility outdoors — heavy rain greys the air. Only rises once the weather is already severe; ordinary rain never triggers it. Snow has its own dial (Whiteout strength).',
+  }),
+  // ⭐ 2026-11-03 — snow's share of the same storm-fog quad (`storm-fog-render.js#uWindBorne01`). Its own dial
+  // because the one above is the author's RAIN tuning: at 0.3 it held a blizzard's whiteout to a few percent.
+  snowWhiteoutStrength: Object.freeze({
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Veil',
+    label: 'Whiteout strength',
+    help: 'How far a blizzard whites out the map. Rises with heavy snow, and wind thickens it into blowing streamers; 0 = never, 1 = a full blizzard leaves the map only just readable.',
   }),
 
   // ── GROUND — the mantle, i.e. accumulation (mantle-runtime.js) ───────────

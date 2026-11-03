@@ -279,6 +279,35 @@ const GRAVITY_MPS2 = 9.81;
 const ROUGHNESS = 0.3;
 
 /**
+ * The ragged clump (`body.shape: 'clump'`, snow) — lobe radii and offset in the quad's −1..1 space, the noise
+ * that frays the edge, and the shaded rim's colour. Tuned in `tools/shader-lab/snow-lab.js` (crops at 5×).
+ */
+const CLUMP = Object.freeze({
+  bodyR: 0.5,
+  satR: 0.31,
+  lobeOffset: 0.38,
+  crumbR: 0.17,
+  crumbOffset: 0.58,
+  noiseFreq: 3.8,
+  rag: 0.85,
+  /** Quad width in screen px where the fray starts, and where it is full. */
+  ragFromPx: 4,
+  ragFullPx: 11,
+  /** A clump's opacity never falls below this share of full, whatever its brightness draw. */
+  alphaFloor: 0.55,
+  /** ...and its colour never below this share of white. */
+  colourFloor: 0.82,
+  /** The stretch cap in still air (`maxStretch` is the full gale's). */
+  calmStretch: 1.15,
+  edge: 0.16,
+  edgeSoftMin: 0.05,
+  edgeSoftSpan: 0.25,
+  aaPx: 1.5,
+  coreAt: 0.85,
+  rimRgb: [0.7, 0.75, 0.84],
+});
+
+/**
  * How hard a lit body brightens per unit of scene luminance.
  *
  * Deliberately modest: the point is a GLINT as a drop crosses a lamp's pool,
@@ -360,6 +389,22 @@ export function createPrecipEngine({
    * (`feedback_mode_forks_silently_drop_features`).
    */
   const isPellet = S ? S.body.mode === 'mote' : false;
+  /**
+   * ⭐ A RAGGED CLUMP — snow's own silhouette (2026-11-03), opted into by the row's `body.shape: 'clump'`.
+   *
+   * Author: *"The shape of snow should be simple, ragged, not circles and not snowflake shapes."* A falling
+   * snowflake is an AGGREGATE — a loose clump of crystals — so it is drawn as three offset soft lobes summed
+   * (they merge like metaballs) whose threshold is eroded by value noise: irregular, lopsided, frayed at the
+   * edge, different for every flake, and with no angular harmonic anywhere, so it can never resolve into either
+   * a disc or a rosette. Every other flake-mode body (ash, petal, spore, mote, ember) keeps the harmonic shape.
+   */
+  const isClump = S ? S.body.shape === 'clump' : false;
+  /** A clump's motion blur is capped at `maxStretch` × its own width: snow driven by a gale smears into a short
+   * soft dash, it does not thin into a rain streak (the deck exposure is the same for every species). */
+  const MAX_STRETCH = isClump && Number.isFinite(S.body.maxStretch) ? S.body.maxStretch : 0;
+  /** `respondStorm.size` (snow): the body's size follows the storm. Build-time, so other rows' graphs are unchanged. */
+  const hasStormSize = Boolean(S?.respondStorm?.size);
+  const uStormSizeMul = uniform(float(1));
   /**
    * ⭐ DOES THIS SPECIES WALK A PHASE MACHINE? (§4.4). BUILD-TIME, like every
    * other species branch — a body never changes species mid-life, so a stone's
@@ -645,9 +690,7 @@ export function createPrecipEngine({
     });
   /** How much rain falls from over `p`, 0..1 — `mix(1, field, link)`, so link 0 is exactly "everywhere". */
   const cloudGateAt = (texNode, p) =>
-    texNode
-      ? mix(float(1), sampleCloudRainNode(TSL, { texNode, rect: uRainRect, worldXY: p }), uDeck2.z)
-      : float(1);
+    texNode ? mix(float(1), sampleCloudRainNode(TSL, { texNode, rect: uRainRect, worldXY: p }), uDeck2.z) : float(1);
 
   /**
    * ⭐ THE ENGINE'S **OWN** WIND UNIFORMS, PUSHED PER FRAME — not the wind
@@ -872,7 +915,10 @@ export function createPrecipEngine({
     const best = vec2(first).toVar();
     const bestW = cloudGateAt(rainTexCompute, first).toVar();
     for (let k = 1; k < CLOUD_RAIN_CANDIDATES; k++) {
-      const cand = spawnAt(h1.mul(float(1.37 + 0.11 * k)).add(float(7.3 * k)), h2.mul(float(0.89 + 0.07 * k)).add(float(3.1 * k)));
+      const cand = spawnAt(
+        h1.mul(float(1.37 + 0.11 * k)).add(float(7.3 * k)),
+        h2.mul(float(0.89 + 0.07 * k)).add(float(3.1 * k))
+      );
       const w = cloudGateAt(rainTexCompute, cand);
       const better = w.greaterThan(bestW.add(float(1e-3)));
       best.assign(better.select(cand, best));
@@ -889,6 +935,7 @@ export function createPrecipEngine({
   const GRAV_MAX = S ? S.fall.gravityMul[1] : 1;
   const SIZE_MIN = S ? S.body.sizePx[0] : 0;
   const SIZE_MAX = S ? S.body.sizePx[1] : 0;
+  const SIZE_SKEW = S && Number.isFinite(S.body.sizeSkewExp) && S.body.sizeSkewExp > 0 ? S.body.sizeSkewExp : 1;
   /**
    * Deck mode's fall: the species' TERMINAL VELOCITY in m/s (`fall.terminalMps`; a row without one reads its V2
    * px/s at the default 65.6 px/m, which is already near-physical for every slow species). Rain's `dropLaw`
@@ -961,7 +1008,9 @@ export function createPrecipEngine({
      * mix.
      */
     const mass = hash11(entropy.mul(float(2.3)).add(float(11))).pow(float(0.7));
-    const sizePx = mix(float(SIZE_MIN), float(SIZE_MAX), mass);
+    // `body.sizeSkewExp` (snow) bends only the SIZE of that shared draw: most flakes small, a long tail of big soft
+    // ones. Speed still follows `mass` itself, so the size/speed ordering is kept. Build-time; absent ⇒ unchanged.
+    const sizePx = mix(float(SIZE_MIN), float(SIZE_MAX), SIZE_SKEW !== 1 ? mass.pow(float(SIZE_SKEW)) : mass);
     // A small INDEPENDENT jitter on top, so two drops of the same size still
     // separate over their lives — the variety `gravityMul` was always for,
     // without re-introducing the slow-fat body it used to permit.
@@ -1055,7 +1104,10 @@ export function createPrecipEngine({
 
     // Deck mode's fall is world-real (m/s x px/m in `c.z`): the deck already rises with the eye, so the old
     // per-view pacing would scale the speed twice.
-    const speed = c.z.mul(uSpeedMul).mul(uFallSpeedScale).mul(mix(uViewScale, float(1), uDeckOn));
+    const speed = c.z
+      .mul(uSpeedMul)
+      .mul(uFallSpeedScale)
+      .mul(mix(uViewScale, float(1), uDeckOn));
 
     // ── THE FALL: height integrates DOWN. This is the lifecycle. ──
     // The body clock and its per-body phase, hoisted ABOVE the vertical churn
@@ -1240,7 +1292,10 @@ export function createPrecipEngine({
     // air (it formed in it), see the respawn below. Snow and the flutterers keep the direct drift: tau ~0.1 s,
     // and their sway is in the same buffer.
     if (!hasFlutter) {
-      const tauSec = c.z.div(uPixelsPerMetre.max(float(1))).div(float(GRAVITY_MPS2)).max(float(0.02));
+      const tauSec = c.z
+        .div(uPixelsPerMetre.max(float(1)))
+        .div(float(GRAVITY_MPS2))
+        .max(float(0.02));
       const keep = TSL.exp(uDtSec.negate().div(tauSec)).mul(uDeckOn);
       drift = mix(drift, velocity.element(i), keep);
     }
@@ -1436,9 +1491,7 @@ export function createPrecipEngine({
 
     position.element(i).assign(landed.select(respawnPos, nextPos));
     // Reborn already moving with the air it formed in (the target, not the relaxed drift — see INERTIA).
-    velocity
-      .element(i)
-      .assign(landed.select(mix(drift, airTarget.mul(float(BIRTH_CARRY)), uDeckOn), drift));
+    velocity.element(i).assign(landed.select(mix(drift, airTarget.mul(float(BIRTH_CARRY)), uDeckOn), drift));
     custom
       .element(i)
       .assign(landed.select(vec4(fresh.brightness, fresh.sizePx, fresh.speed, respawnH), vec4(c.x, c.y, c.z, nextH)));
@@ -1447,9 +1500,9 @@ export function createPrecipEngine({
     // A respawned stone starts falling again — the phase must reset with it, or
     // it would be reborn mid-bounce at the top of the sky.
     if (hasPhases) phaseBuf.element(i).assign(landed.select(float(PHASE_FALL), phaseBuf.element(i)));
-    lifeBuf.element(i).assign(
-      landed.select(respawnH.div(fresh.speed.max(float(1))).mul(float(1000)), lifeBuf.element(i))
-    );
+    lifeBuf
+      .element(i)
+      .assign(landed.select(respawnH.div(fresh.speed.max(float(1))).mul(float(1000)), lifeBuf.element(i)));
   })().compute(capacity);
 
   // ── THE DRAW ─────────────────────────────────────────────────────────────
@@ -1476,12 +1529,18 @@ export function createPrecipEngine({
    * consumer (a flake's spin) lives in `positionNode`, which is vertex-stage
    * and reads the storage buffer directly. Spending a varying slot on a value
    * nothing downstream reads, while the gate needed one, was the trade to make.
+   *
+   * ⚠️ A CLUMP'S `x` IS ITS IDENTITY, NOT ITS FALL PROGRESS. Nothing in the fragment stage reads fall progress,
+   * and a clump needs a per-flake constant to build its shape from. `y` cannot be it: brightness is multiplied by
+   * the torch pickup, so a shape built from `y` re-rolled itself every time a flake crossed lamplight.
    */
   const vBody = Fn(() => {
     const i = instanceIndex;
     const c = custom.element(i);
     const top = mix(spawnH(), deckHeightAt(position.element(i)), uDeckOn).max(float(1));
-    const fall01 = float(1).sub(c.w.div(top)).clamp(float(0), float(1));
+    const fall01 = isClump
+      ? hash11(seed.element(i).mul(float(0.618034)).add(float(0.371)))
+      : float(1).sub(c.w.div(top)).clamp(float(0), float(1));
     const alive = float(i).lessThan(uActiveCount).select(float(1), float(0));
 
     // ⭐ THE BIRTH FADE — the author's own diagnosis, and it was right:
@@ -1682,7 +1741,8 @@ export function createPrecipEngine({
     // miss 61% of the rain it should have stopped.
     const { xy: parallaxed, persp } = parallaxOf(centre, c.w);
 
-    const width = c.y.mul(uSizeScale).mul(uViewScale).mul(alive).mul(persp);
+    let width = c.y.mul(uSizeScale).mul(uViewScale).mul(alive).mul(persp);
+    if (hasStormSize) width = width.mul(uStormSizeMul);
 
     // ⭐⭐ WIND SHIFTS THE VANISHING POINT — IT DOES NOT ADD A SECOND VELOCITY.
     //
@@ -1816,7 +1876,13 @@ export function createPrecipEngine({
       float(DECK_STREAK_EXPOSURE_SEC / 3).mul(uStreakScale),
       uDeckOn
     );
-    const length = width.add(speedLen.mul(exposure).mul(uLengthMul));
+    let length = width.add(speedLen.mul(exposure).mul(uLengthMul));
+    // The cap itself follows the wind: in still air a clump stays a clump (its fall parallax alone drew aligned
+    // dashes), and only a real wind smears it out toward `maxStretch`.
+    if (MAX_STRETCH > 0) {
+      const windK = windStrength01Node(TSL, uWindSpeed01).clamp(float(0), float(1));
+      length = length.min(width.mul(mix(float(CLUMP.calmStretch), float(MAX_STRETCH), windK)));
+    }
     // Perpendicular, for the width axis.
     const perp = vec2(dir.y.negate(), dir.x);
     return { parallaxed, width, dir, length, perp };
@@ -2002,13 +2068,80 @@ export function createPrecipEngine({
     return k.mul(k);
   };
 
+  /**
+   * ⭐ THE CLUMP FIELD — see `isClump`. Built once per stage (colour and opacity each call it), from the quad's own
+   * uv and the flake's identity in `vBody.x`. Returns `cover` (the silhouette, soft-edged) and `core` (0 at the
+   * frayed rim, 1 in the dense middle) — the rim is what keeps a white flake legible over white ground.
+   */
+  const clumpField = () => {
+    const { floor, smoothstep } = TSL;
+    const id = vBody.x;
+    const p = uv().sub(float(0.5)).mul(float(2));
+    const h1 = hash11(id.mul(float(17.31)).add(float(0.13)));
+    const h2 = hash11(id.mul(float(29.71)).add(float(0.57)));
+    const h3 = hash11(id.mul(float(41.13)).add(float(0.91)));
+    const lobe = (c, r) => {
+      const d = p.sub(c);
+      const q = float(1)
+        .sub(d.dot(d).div(r.mul(r)))
+        .max(float(0));
+      return q.mul(q);
+    };
+    // One body lobe, slightly off-centre, and two satellites on different sides of it — never opposite, so the
+    // clump is lopsided rather than a symmetric peanut.
+    const a1 = h1.mul(float(Math.PI * 2));
+    const a2 = a1.add(float(1.9)).add(h2.mul(float(2.4)));
+    const d1 = float(CLUMP.lobeOffset).mul(h2.mul(float(0.45)).add(float(0.75)));
+    const d2 = float(CLUMP.lobeOffset).mul(h3.mul(float(0.4)).add(float(0.8)));
+    // A third, small "crumb" further out on its own bearing, so no flake is a symmetric two-lobe heart.
+    const a3 = a1.sub(float(1.6)).sub(h3.mul(float(1.3)));
+    const d3 = float(CLUMP.crumbOffset).mul(h1.mul(float(0.3)).add(float(0.85)));
+    const f = lobe(vec2(h3.sub(0.5).mul(0.16), h1.sub(0.5).mul(0.16)), h3.mul(float(0.14)).add(float(CLUMP.bodyR)))
+      .add(lobe(vec2(cos(a1).mul(d1), sin(a1).mul(d1)), h1.mul(float(0.12)).add(float(CLUMP.satR))))
+      .add(lobe(vec2(cos(a2).mul(d2), sin(a2).mul(d2)), h2.mul(float(0.12)).add(float(CLUMP.satR * 0.8))))
+      .add(lobe(vec2(cos(a3).mul(d3), sin(a3).mul(d3)), h2.mul(float(0.08)).add(float(CLUMP.crumbR))));
+    // Two octaves of value noise erode the threshold: the ragged, frayed edge.
+    const hash21 = (q) => fract(sin(q.dot(vec2(127.1, 311.7))).mul(float(43758.5453)));
+    const vnoise = (q) => {
+      const cell = floor(q);
+      const fr = fract(q);
+      const s = fr.mul(fr).mul(float(3).sub(fr.mul(float(2))));
+      const a = hash21(cell);
+      const b = hash21(cell.add(vec2(1, 0)));
+      const c = hash21(cell.add(vec2(0, 1)));
+      const d = hash21(cell.add(vec2(1, 1)));
+      return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+    };
+    const off = vec2(h1.mul(float(37.0)), h2.mul(float(23.0)));
+    const n = vnoise(p.mul(float(CLUMP.noiseFreq)).add(off))
+      .mul(float(0.62))
+      .add(vnoise(p.mul(float(CLUMP.noiseFreq * 2.3)).add(off.yx)).mul(float(0.38)));
+    // ⚠️ THE FRAY SCALES WITH THE FLAKE'S SIZE ON SCREEN. Eroding a 3-px flake ate most of its coverage and left
+    // faint specks (the light-snow end vanished); a far flake is a soft dot anyway, a near one shows its rag.
+    const quadPx = float(2).div(TSL.fwidth(p.x).max(TSL.fwidth(p.y)).max(float(1e-4)));
+    const rag = smoothstep(float(CLUMP.ragFromPx), float(CLUMP.ragFullPx), quadPx).mul(float(CLUMP.rag));
+    const g = f.sub(n.sub(float(0.5)).mul(rag));
+    // ⚠️ THE EDGE IS NEVER NARROWER THAN A PIXEL AND A HALF. Most flakes are a few pixels across, so an edge set
+    // in uv alone landed inside one pixel and drew hard, aliased 1-px speckles that shimmered like dust.
+    const soft = float(CLUMP.edgeSoftMin + CLUMP.edgeSoftSpan * SOFT).max(TSL.fwidth(g).mul(float(CLUMP.aaPx)));
+    const cover = smoothstep(float(CLUMP.edge), float(CLUMP.edge).add(soft), g);
+    const core = smoothstep(float(CLUMP.edge), float(CLUMP.coreAt), g);
+    return { cover, core };
+  };
+
   material.colorNode = Fn(() => {
-    const bright = vBody.y;
+    // A clump's brightness draw is lifted toward white (a dim flake is a slightly greyer one, not a dark speck —
+    // it keeps its opacity, see `alphaFloor`); a torch's pickup above 1 still passes through untouched.
+    const bright = isClump
+      ? vBody.y.max(vBody.y.mul(float(1 - CLUMP.colourFloor)).add(float(CLUMP.colourFloor)))
+      : vBody.y;
     // Head-to-tail along the quad's own long axis: `uv().y` is 1 at the
     // leading end. A flake's ramp is nearly flat (its two stops are close),
     // so the same expression serves both bodies without a branch.
     const t = uv().y;
-    const rgb = mix(vec3(TAIL[0], TAIL[1], TAIL[2]), vec3(HEAD[0], HEAD[1], HEAD[2]), t);
+    let rgb = mix(vec3(TAIL[0], TAIL[1], TAIL[2]), vec3(HEAD[0], HEAD[1], HEAD[2]), t);
+    // A clump's frayed rim is the cool grey of a flake's own shaded underside; the dense core is the body colour.
+    if (isClump) rgb = rgb.mul(mix(vec3(...CLUMP.rimRgb), vec3(1, 1, 1), clumpField().core));
     /**
      * ⭐ P7 — `body.emissive01` FINALLY HAS A CONSUMER. P6 shipped `spore` and
      * `mote` carrying values authored ABOVE bloom's 4.0 threshold (§3.5: an
@@ -2090,6 +2223,8 @@ export function createPrecipEngine({
         .sub(uv().sub(vec2(0.42, 0.42)).length().mul(float(3.4)))
         .clamp(float(0), float(1));
       edge = edge.add(hi.pow(float(2)).mul(float(0.45))).clamp(float(0), float(1));
+    } else if (isClump) {
+      edge = clumpField().cover;
     } else {
       /**
        * ⭐ A ROUGH, IRREGULAR CRYSTAL — NOT A ROUND DOT.
@@ -2139,7 +2274,9 @@ export function createPrecipEngine({
     // exactly 1 (see the gate's own note) — an `if` would be a second place the
     // polarity could be got backwards.
     const skyGate = vBody.w;
-    const baseAlpha = alpha.mul(edge).mul(bright).mul(uAlphaMul).mul(alive).mul(skyGate);
+    // A clump's brightness draw still varies its colour, but no longer fades half the flakes to nothing.
+    const alphaBright = isClump ? bright.mul(float(1 - CLUMP.alphaFloor)).add(float(CLUMP.alphaFloor)) : bright;
+    const baseAlpha = alpha.mul(edge).mul(alphaBright).mul(uAlphaMul).mul(alive).mul(skyGate);
     if (!vGlint) return baseAlpha;
     // ⭐ mmp-row — rain is thin and mostly transparent, so colour alone would
     // not show: the glint also adds opacity, along the same gradient and across
@@ -2484,6 +2621,7 @@ export function createPrecipEngine({
       else uSkyTint.value.set(1, 1, 1);
       if (Number.isFinite(frame.sceneLight01)) uSceneLight.value = frame.sceneLight01;
       if (Number.isFinite(frame.flutterMul)) uFlutterMul.value = frame.flutterMul;
+      if (hasStormSize && Number.isFinite(frame.sizeMul)) uStormSizeMul.value = frame.sizeMul;
     },
 
     /**

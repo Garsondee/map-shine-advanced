@@ -994,7 +994,17 @@ export const PRECIP_SPECIES = Object.freeze({
 
     body: Object.freeze({
       mode: 'flake',
-      sizePx: Object.freeze([2.2, 6.5]),
+      /** ⭐ A RAGGED CLUMP, not the harmonic crystal (`precip-runtime.js#isClump`). Author, 2026-11-03: *"simple,
+       * ragged, not circles and not snowflake shapes."* */
+      shape: 'clump',
+      /** A gale smears a clump into a short soft dash at most this many widths long — never a rain streak. */
+      maxStretch: 2.4,
+      /** On screen ≈ `sizePx × sizeScale (0.55) × screenW / 2000` whatever the zoom — 3..10 px on a 1920 screen.
+       * The old 2.2..6.5 drew 1-2 px specks: no shape can read at that size, and light snow vanished. */
+      sizePx: Object.freeze([6, 30]),
+      /** Most flakes near the small end, a long tail of big soft ones drifting through — the depth a low cloud
+       * deck's perspective cannot give on its own. Median ≈ 13, top decile ≈ 26. */
+      sizeSkewExp: 2.4,
       /**
        * ⚠️ NO LONGER ZERO, AND THE ZERO WAS THE BUG THE AUTHOR REPORTED
        * (*"snow isn't yet affected by wind"*).
@@ -1017,7 +1027,7 @@ export const PRECIP_SPECIES = Object.freeze({
        */
       streakPerPxS: 0.0016,
       headRgba: Object.freeze([1.0, 1.0, 1.0, 0.95]),
-      tailRgba: Object.freeze([0.86, 0.9, 0.98, 0.75]),
+      tailRgba: Object.freeze([0.92, 0.95, 1.0, 0.85]),
       brightnessSkewExp: 0.85,
       emissive01: 0,
       /** Soft-edged — a flake is a blurred dot, not a hard pellet (that is
@@ -1029,7 +1039,10 @@ export const PRECIP_SPECIES = Object.freeze({
       /** ⚠️ LINEAR, deliberately UNLIKE rain's quadratic (§2.3). Light snow
        * is genuinely a thin, even scatter — the sparse-then-dense shape that
        * makes drizzle read correctly makes light snow read as broken. */
-      count: Object.freeze({ kind: 'linear', from: 0, to: 1 }),
+      /** 2026-11-03: `pow 0.7` rather than linear — the low end gets a little MORE, the opposite of rain's sparse
+       * start. A light fall at 0.15 drew 3000 bodies across the whole spawn rect, which on screen was a handful of
+       * specks and nothing like the "gentle winter wonderland" the author asked the low end to be. */
+      count: Object.freeze({ kind: 'pow', exp: 0.7, from: 0, to: 1 }),
       length: Object.freeze({ kind: 'linear', from: 1, to: 1 }),
       speed: Object.freeze({ kind: 'linear', from: 0.85, to: 1.1 }),
       veil: Object.freeze({ kind: 'threshold', at: 0.45, from: 0, to: 1 }),
@@ -1047,11 +1060,26 @@ export const PRECIP_SPECIES = Object.freeze({
      * table reads the same axis (`feedback_one_input_two_extractions_two_thresholds`). */
     respondStorm: Object.freeze({
       flutter: Object.freeze({ kind: 'linear', from: 1, to: 0.15 }),
+      /** 2026-11-03 — the physics and the look agree: still air near freezing builds big soft aggregates (the
+       * "winter wonderland" flakes), while a blizzard's flakes are small, broken and driven. */
+      size: Object.freeze({ kind: 'linear', from: 1.3, to: 0.7 }),
     }),
+
+    /**
+     * ⭐ THE WHITEOUT (2026-11-03) — the author's *"all the way up to a full whiteout blizzard"*. The storm fog
+     * read this sky as rain mist: wind THINNED it to 15% and its ceiling was 0.25 × the rain-tuned 0.3 dial, so
+     * the shipped "whiteout" was 1-2% opacity and the map stayed perfectly legible. A row with this block makes
+     * the storm fog blowing snow instead (`storm-fog-field.js`): wind thickens it and combs it into streamers,
+     * the ceiling rises to `maxAlpha` and the snow dial (`snowWhiteoutStrength`) sets its strength. Short of 1 —
+     * a token must still be just about made out in the worst of it.
+     */
+    whiteout: Object.freeze({ maxAlpha: 0.8 }),
 
     light: Object.freeze({
       dayAlphaMul: 1.62,
-      dayRgbMul: 0.5,
+      /** ⚠️ NOT RAIN'S 0.5. Rain is clear water and reads as a dimmer streak; a flake is white ice lit from above,
+       * and at 0.5 every flake drew DARKER than the snowy ground it fell onto — grey specks on white. */
+      dayRgbMul: 0.95,
       nightAlphaMul: 0.34,
       nightRgbMul: 0.24,
       flashAlphaMul: 6,
@@ -1105,8 +1133,11 @@ export const PRECIP_SPECIES = Object.freeze({
 
     capacity: 20000,
     /** Flakes are bigger than streaks are wide, so snow stays legible further
-     * out than rain and sleeps LATER. */
-    zoomSleepPxPerBody: 1.2,
+     * out than rain and sleeps LATER.
+     *
+     * ⚠️ MEASURED AGAINST `body.sizePx[1]` (rain's row explains). 1.2 was set for a 6.5 px widest flake; the
+     * 2026-11-03 clump's widest is 30, so 1.2 × 30 / 6.5 ≈ 5.5 keeps the original sleep zoom. */
+    zoomSleepPxPerBody: 5.5,
   }),
 });
 
@@ -1320,6 +1351,8 @@ export function resolveSpeciesFrame(species, axes, tierScale = 1) {
     /** Snow only — 1 at calm, →0.15 in a blizzard. `1` for species with no
      * storm response, so the kernel multiplies unconditionally. */
     flutterMul: species.respondStorm?.flutter ? evalCurve(species.respondStorm.flutter, storm01) : 1,
+    /** Body size against the storm (snow: big soft aggregates in still air, fine driven flakes in a gale). */
+    sizeMul: species.respondStorm?.size ? evalCurve(species.respondStorm.size, storm01) : 1,
     /** V2's scalar lighting, day/night-blended and flash-boosted. The flash
      * is a LERP toward the boosted value, so a half-strength flash is half a
      * flash rather than an on/off. */

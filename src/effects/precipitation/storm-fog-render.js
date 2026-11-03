@@ -98,6 +98,14 @@ export function createStormFog({
   /** The golden-hour colour of the light (`sky-access.js#lightGoldenTint`), (1,1,1) when none. */
   const uSkyTint = uniform(vec3(1, 1, 1));
   const uAlphaMul = uniform(float(1));
+  /**
+   * ⭐ THE WHITEOUT (2026-11-03). `uWindBorne01` = the share of the sky that is snow (the subsystem's weighted sum
+   * of rows with a `whiteout` block). It flips the field from rain's wind-thinned mist to blowing snow
+   * (`storm-fog-field.js`), lifts the ceiling from {@link MAX_FOG_ALPHA} toward the snow row's own, and hands the
+   * strength to the snow dial — the storm-fog dial is the author's RAIN tuning (0.3) and stays exactly that.
+   */
+  const uWindBorne01 = uniform(float(0));
+  const uMaxAlpha = uniform(float(MAX_FOG_ALPHA));
 
   const uSkyReachRect = uniform(vec4(0, 0, 1, 1));
   const uSkyReachHasBake = uniform(float(0));
@@ -123,6 +131,7 @@ export function createStormFog({
     windDirDeg: uWindDirDeg,
     windSpeed01: uWindSpeed01,
     advection: uAdvection,
+    windBorne01: uWindBorne01,
   });
 
   const uSceneLight = uniform(float(1));
@@ -149,13 +158,7 @@ export function createStormFog({
       const sampled = skyReachTex.sample(vec2(sx.clamp(float(0), float(1)), sy.clamp(float(0), float(1)))).r;
       gate = mix(float(1), sampled, uSkyReachHasBake.mul(inside.select(float(1), float(0))));
     }
-    return mist01
-      .mul(uIntensity01)
-      .mul(gate)
-      .mul(uStrength)
-      .mul(uAlphaMul)
-      .mul(float(MAX_FOG_ALPHA))
-      .clamp(float(0), float(1));
+    return mist01.mul(uIntensity01).mul(gate).mul(uStrength).mul(uAlphaMul).mul(uMaxAlpha).clamp(float(0), float(1));
   })();
 
   material.transparent = true;
@@ -175,6 +178,13 @@ export function createStormFog({
   scene.add(mesh);
 
   let intensity01 = 0;
+  let windBorne01 = 0;
+  let fogStrength = uStrength.value;
+  let whiteoutStrength = 1;
+  /** Rain's dial for the rain share, the snow dial for the snow share — see {@link uWindBorne01}. */
+  const applyStrength = () => {
+    uStrength.value = fogStrength + (whiteoutStrength - fogStrength) * windBorne01;
+  };
 
   return {
     scene,
@@ -205,6 +215,11 @@ export function createStormFog({
       else uSkyTint.value.set(1, 1, 1);
       if (Number.isFinite(frame?.alphaMul)) uAlphaMul.value = frame.alphaMul;
       if (Number.isFinite(frame?.sceneLight01)) uSceneLight.value = frame.sceneLight01;
+      windBorne01 = Number.isFinite(frame?.windBorne01) ? Math.max(0, Math.min(1, frame.windBorne01)) : 0;
+      const snowCeiling = Number.isFinite(frame?.whiteoutMaxAlpha) ? frame.whiteoutMaxAlpha : MAX_FOG_ALPHA;
+      uWindBorne01.value = windBorne01;
+      uMaxAlpha.value = MAX_FOG_ALPHA + (snowCeiling - MAX_FOG_ALPHA) * windBorne01;
+      applyStrength();
     },
 
     setSkyReachTexture(texture, rect) {
@@ -221,7 +236,9 @@ export function createStormFog({
     },
 
     setTuning(t = {}) {
-      if (Number.isFinite(t.stormFogStrength)) uStrength.value = t.stormFogStrength;
+      if (Number.isFinite(t.stormFogStrength)) fogStrength = t.stormFogStrength;
+      if (Number.isFinite(t.snowWhiteoutStrength)) whiteoutStrength = t.snowWhiteoutStrength;
+      applyStrength();
     },
 
     /** Is there anything to draw? Zero intensity is the common case (below
@@ -236,7 +253,8 @@ export function createStormFog({
         intensity01,
         visible: this.hasContent,
         tint: [uTint.value.x, uTint.value.y, uTint.value.z],
-        maxAlpha: MAX_FOG_ALPHA,
+        maxAlpha: uMaxAlpha.value,
+        windBorne01,
         strength: uStrength.value,
         wind: { speed01: uWindSpeed01.value, directionDeg: uWindDirDeg.value },
         skyGate: {

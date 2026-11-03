@@ -70,6 +70,18 @@ export const MIST_WIND_DRIFT_PX_PER_SEC = 70;
  * indistinguishable from "no fog axis at all". */
 export const MIST_WIND_THIN_FLOOR = 0.15;
 
+/** Blowing snow's streamers (`windBorne01`): world px along / across the wind, and how fast they evolve. */
+export const STREAMER_LENGTH_PX = 900;
+export const STREAMER_WIDTH_PX = 170;
+/** How far (world px) the streamers bend across the wind — braided, not ruled. */
+export const STREAMER_BEND_PX = 320;
+export const STREAMER_EVOLVE_PER_SEC = 0.15;
+/** Streamers travel with the snow the wind carries — much faster than a mist bank drifts. */
+export const STREAMER_CALM_PX_PER_SEC = 40;
+export const STREAMER_WIND_PX_PER_SEC = 900;
+/** Snow's air density in still air, as a share of its full-gale density (wind THICKENS a snow sky). */
+export const STREAMER_CALM_DENSITY = 0.55;
+
 /**
  * Build the storm-fog density field as a TSL node, 0..1.
  *
@@ -94,10 +106,13 @@ export const MIST_WIND_THIN_FLOOR = 0.15;
  *   field ever gets"; the caller's own intensity uniform is what decides how
  *   opaque that reads.
  */
-export function buildStormFogField(TSL, { worldXY: rawXY, timeMs, windDirDeg, windSpeed01: dialSpeed01, advection }) {
+export function buildStormFogField(
+  TSL,
+  { worldXY: rawXY, timeMs, windDirDeg, windSpeed01: dialSpeed01, advection, windBorne01 = null }
+) {
   // Beaufort strength — tuned on the old dial (2026-10-27).
   const windSpeed01 = windStrength01Node(TSL, dialSpeed01);
-  const { float, mx_fractal_noise_float: fbm, clamp } = TSL;
+  const { float, mx_fractal_noise_float: fbm, clamp, mix } = TSL;
 
   const toward = windFlowVectorNode(TSL, windDirDeg);
   const t = timeMs.mul(float(0.001));
@@ -131,5 +146,60 @@ export function buildStormFogField(TSL, { worldXY: rawXY, timeMs, windDirDeg, wi
     float(MIST_WIND_THIN_FLOOR),
     float(1)
   );
-  return density01.mul(windThin);
+  if (!windBorne01) return density01.mul(windThin);
+
+  /**
+   * ⭐ BLOWING SNOW (2026-11-03) — `windBorne01` is the share of the sky that is snow.
+   *
+   * Rain mist is blown AWAY by wind (#314, above). Snow is the opposite: the wind is what makes a whiteout — it
+   * lifts and carries the snow, so the air thickens and combs into long streamers running downwind. At
+   * `windBorne01 = 1` the thinning becomes a thickening, and a second, strongly anisotropic noise (long along the
+   * wind, narrow across it) scrolling at a gust's pace takes over the field as the wind rises.
+   */
+  const { smoothstep, vec2, vec3 } = TSL;
+  const across = vec2(toward.y.negate(), toward.x);
+  const streamDrift = advection
+    ? advection.flowSec
+        .mul(float(STREAMER_CALM_PX_PER_SEC))
+        .add(advection.strengthFlowSec.mul(float(STREAMER_WIND_PX_PER_SEC)))
+        .add(
+          toward
+            .mul(float(STREAMER_CALM_PX_PER_SEC).add(windSpeed01.mul(float(STREAMER_WIND_PX_PER_SEC))))
+            .mul(windAdvectionDtSecNode(TSL, timeMs, advection))
+        )
+    : toward.mul(t.mul(float(STREAMER_CALM_PX_PER_SEC).add(windSpeed01.mul(float(STREAMER_WIND_PX_PER_SEC)))));
+  const q = rawXY.sub(streamDrift);
+  const along = q.dot(toward);
+  // ⚠️ WARPED ACROSS THE WIND, AND BROKEN ALONG IT. Straight anisotropic noise drew long parallel ribbons that read
+  // as light shafts, not snow: the warp bends and braids them, the gust patches make each one come and go.
+  const bend = fbm(vec2(along.div(float(1900)), q.dot(across).div(float(1100))), 2, 2.0, 0.5, 1.0);
+  const side = q.dot(across).add(bend.mul(float(STREAMER_BEND_PX)));
+  const tt = t.mul(float(STREAMER_EVOLVE_PER_SEC));
+  const body = fbm(
+    vec3(along.div(float(STREAMER_LENGTH_PX)), side.div(float(STREAMER_WIDTH_PX)), tt),
+    3,
+    2.0,
+    0.5,
+    1.0
+  );
+  const wisp = fbm(
+    vec3(along.div(float(STREAMER_LENGTH_PX * 0.3)), side.div(float(STREAMER_WIDTH_PX * 0.2)), tt.mul(float(3))),
+    2,
+    2.0,
+    0.5,
+    1.0
+  );
+  const gust = smoothstep(
+    float(-0.35),
+    float(0.45),
+    TSL.mx_noise_float(vec3(along.div(float(2600)), side.div(float(1400)), tt.mul(float(0.5))))
+  );
+  const streak01 = smoothstep(float(-0.3), float(0.7), body)
+    .mul(float(0.7))
+    .add(smoothstep(float(0.05), float(0.75), wisp).mul(float(0.4)))
+    .mul(gust.mul(float(0.65)).add(float(0.35)));
+  const windy = smoothstep(float(0.12), float(0.75), windSpeed01).mul(windBorne01);
+  const snowDensity = mix(density01, density01.mul(float(0.55)).add(streak01.mul(float(0.85))), windy);
+  const thicken = float(STREAMER_CALM_DENSITY).add(windSpeed01.mul(float(1 - STREAMER_CALM_DENSITY)));
+  return clamp(mix(density01.mul(windThin), snowDensity.mul(thicken), windBorne01), float(0), float(1));
 }

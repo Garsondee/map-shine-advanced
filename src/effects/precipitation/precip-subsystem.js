@@ -954,6 +954,10 @@ export function createPrecipitationSubsystem({
       let fogRgbMulUnlit = 1;
       let fogSceneLight01 = st.sceneLight01 ?? 1;
       let fogAlphaMul = 1;
+      // ⭐ THE WHITEOUT's share — snow's (any row with a `whiteout` block) weight in the sky, a QUANTITY like the
+      // fog itself, so a half-and-half sleet is half blowing snow. See `storm-fog-render.js#uWindBorne01`.
+      let fogWindBorne01 = 0;
+      let fogWhiteoutMaxAlpha = null;
 
       for (const { speciesId, weight } of activePopulations) {
         const species = PRECIP_SPECIES[speciesId] ?? PRECIP_COMPANIONS[speciesId] ?? null;
@@ -988,6 +992,10 @@ export function createPrecipitationSubsystem({
         // awake, exactly like the curtain: fog is atmosphere, not a specimen.
         fogIntensity01 += base.fog01 * weight;
         torrentIntensity01 += (base.torrent01 ?? 0) * weight;
+        if (species.whiteout) {
+          fogWindBorne01 += weight;
+          fogWhiteoutMaxAlpha = species.whiteout.maxAlpha;
+        }
         if (speciesId === dominant.speciesId) {
           fogTint = VEIL_TINT[speciesId] ?? DEFAULT_TINT;
           fogRgbMul = base.rgbMul;
@@ -1024,6 +1032,8 @@ export function createPrecipitationSubsystem({
           skyTintRgb: st.skyTintRgb,
           sceneLight01: fogSceneLight01,
           alphaMul: fogAlphaMul,
+          windBorne01: fogWindBorne01,
+          whiteoutMaxAlpha: fogWhiteoutMaxAlpha ?? undefined,
         });
         stormFogQuad.step(nowMs, getWindHandle());
       }

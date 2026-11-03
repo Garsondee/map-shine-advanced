@@ -135,6 +135,9 @@ const TIER0_WIND_HANDLE = createWindHandle();
  */
 const SPAWN_MARGIN_FRAC = 0.12;
 
+/** A fed splash slot nobody has landed on yet (or whose splash finished): an age past any life. */
+const FED_DEAD_MS = 1e9;
+
 /** Splash size on the viewed floor's own ground, relative to the old uniform size
  * (author, 2026-10-27: "half the current scale"). Raised surfaces grow back from
  * here — see STRIKE HEIGHT in `createPrecipSplashEngine`. */
@@ -223,9 +226,16 @@ export function createPrecipSplashEngine({
   openSkyTexture = null,
   /** `buf:scene.illum` — a splash in a building's shadow darkens like the ground. Absent ⇒ compiled out. */
   illumTexture = null,
+  /**
+   * ⭐ FED BY THE FALL (2026-11-03, author: *"link the rain splashes to actual particles"*). true = this engine
+   * never places a splash itself: the fall's kernel writes each landing drop's point into `sink` (position +
+   * age = -1) and this kernel births a splash there. The statistical carpet argued for in the header stays the
+   * behaviour when false (the benches, a species with no fall engine to feed it). BUILD-TIME.
+   */
+  fed = false,
 }) {
   const TSL = THREE.TSL;
-  const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, atan, fract, uv, mix, positionGeometry } = TSL;
+  const { Fn, If, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, atan, fract, uv, mix, positionGeometry } = TSL;
 
   const resolved = resolveSpecies(speciesId);
   const S = resolved.ok ? resolved.species : null;
@@ -589,7 +599,7 @@ export function createPrecipSplashEngine({
     // together, then leaves the ground bare until the next — a strobing
     // pavement rather than rain landing. The fall staggers HEIGHT for exactly
     // this reason; here age is the lifecycle, so age is what staggers.
-    age.element(i).assign(hash11(fi.mul(float(7.3)).add(float(2.2))).mul(b.lifeMs));
+    age.element(i).assign(fed ? float(FED_DEAD_MS) : hash11(fi.mul(float(7.3)).add(float(2.2))).mul(b.lifeMs));
   })().compute(capacity);
 
   // ── UPDATE KERNEL — §4.1's *"trivial kernel (age, no motion)"* ────────────
@@ -638,6 +648,17 @@ export function createPrecipSplashEngine({
       entropy.mul(float(0.83)).add(float(19.1))
     );
 
+    if (fed) {
+      // FED: a landing drop wrote this slot's point and age -1 (`precip-runtime.js`, THE TOUCHDOWN). Born HERE,
+      // with this life's constants from where it landed; otherwise age on, and a finished splash stays dead
+      // (`FED_DEAD_MS`) until the next drop lands on its slot. It does not drift once wet ground has it.
+      const born = age.element(i).lessThan(float(0));
+      position.element(i).assign(born.select(position.element(i), pos));
+      custom.element(i).assign(born.select(vec4(b.idx, b.sizePx, b.peak, b.phase), c));
+      lifeBuf.element(i).assign(born.select(b.lifeMs, life));
+      age.element(i).assign(born.select(float(0), done.select(float(FED_DEAD_MS), nextAge)));
+      return;
+    }
     position.element(i).assign(done.select(respawned, pos));
     custom.element(i).assign(done.select(vec4(b.idx, b.sizePx, b.peak, b.phase), c));
     lifeBuf.element(i).assign(done.select(b.lifeMs, life));
@@ -727,7 +748,10 @@ export function createPrecipSplashEngine({
     const tri = float(1)
       .sub(t.mul(float(2)).sub(float(1)).abs())
       .clamp(float(0), float(1));
-    const alive = float(i).lessThan(uActiveCount).select(float(1), float(0));
+    const alive = float(i)
+      .lessThan(uActiveCount)
+      .and(age.element(i).lessThan(lifeBuf.element(i)))
+      .select(float(1), float(0));
     const alpha = tri.mul(c.z).mul(uPeakBoost).mul(uAlphaScale).mul(alive).toVar();
 
     // The scene clip — splashes must not appear in the void around the map.
@@ -768,7 +792,8 @@ export function createPrecipSplashEngine({
     // disabling an unrelated guarantee, which is the same shape the fall
     // runtime already fixed once for its scene clip.
     // Where the rain lands (setCloudDeck): fades a splash whose shower has moved on. 1 with no link.
-    alpha.assign(alpha.mul(landGateAt(rainTexDraw, p)));
+    // (Fed splashes are already where real drops landed; the field fade is for the statistical carpet.)
+    if (!fed) alpha.assign(alpha.mul(landGateAt(rainTexDraw, p)));
     if (!skyReachTex) {
       alpha.assign(alpha.mul(squallAt(p)));
       return vec4(alpha, pick(K_RING_R, hot), pick(K_RING_W, hot), pick(K_ROUGHEN, hot));
@@ -1199,6 +1224,13 @@ export function createPrecipSplashEngine({
    */
   function applyCount() {
     if (!splashes) return;
+    if (fed) {
+      // FED: the rate is the real landings (the fall decides which make a splash); every slot may hold one.
+      liveCount = rateFrac > 0 ? capacity : 0;
+      uActiveCount.value = liveCount;
+      geometry.instanceCount = Math.max(1, liveCount);
+      return;
+    }
     const w = Math.max(1, lastRect.maxX - lastRect.minX) * (1 + 2 * SPAWN_MARGIN_FRAC);
     const h = Math.max(1, lastRect.maxY - lastRect.minY) * (1 + 2 * SPAWN_MARGIN_FRAC);
     const wanted = Math.round(PER_MEGAPIXEL * ((w * h) / 1e6) * rateFrac * rateScale);
@@ -1216,6 +1248,8 @@ export function createPrecipSplashEngine({
 
   return {
     scene,
+    /** FED mode: the two buffers the fall's kernel writes a landing into (`precip-runtime.js#splashSink`). */
+    sink: fed && splashes ? { position, age, capacity } : null,
     capacity,
     speciesId,
     /** False when the species does not splash — the caller can skip it whole. */

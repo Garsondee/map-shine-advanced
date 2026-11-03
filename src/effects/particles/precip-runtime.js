@@ -327,6 +327,12 @@ export function createPrecipEngine({
    * set to zero), so a caller that does not supply it pays nothing at all.
    */
   illumTexture = null,
+  /**
+   * ⭐ THE SPLASHES THIS RAIN MAKES (2026-11-03) — a fed splash engine's `sink` (`precip-splash-runtime.js`,
+   * `fed`). When given, every drop that touches down writes its landing point into a splash slot, so each splash
+   * is a real drop's. Two more storage buffers: rain binds 8 of 8 (hail, at 7, has no splashes). BUILD-TIME.
+   */
+  splashSink = null,
 }) {
   const TSL = THREE.TSL;
   const { Fn, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, atan, fract, uv, mix, positionGeometry } = TSL;
@@ -504,6 +510,8 @@ export function createPrecipEngine({
    * and corrupt the gust response. 1.0 = exactly today's speed.
    */
   const uFallSpeedScale = uniform(float(1.15));
+  /** The chance a landing drop makes a splash (fed splashes only): the Splash density dial / its max. */
+  const uSplashChance = uniform(float(1));
 
   // ── ⭐ THE SKY-REACH GATE (Precipitation.md LAW 3) ────────────────────────
   //
@@ -1407,6 +1415,24 @@ export function createPrecipEngine({
     const fresh = bodyConstants(entropy);
     const respawnPos = spawnUnderCloud(entropy, entropy.mul(float(1.9)).add(float(4.4)));
     const respawnH = birthHeight(respawnPos, entropy);
+
+    // ⭐ THE TOUCHDOWN — a drop that reached the ground (not one blown out of the rect, not an idle slot) hands
+    // its landing point to a splash slot (`i mod` the splash arena), which the splash kernel births this same
+    // frame. A slot still showing a young splash (< 250 ms) is left alone rather than cut short; the
+    // Splash density dial is the chance a landing splashes at all.
+    if (splashSink && !hasPhases) {
+      const k = instanceIndex.mod(TSL.uint(splashSink.capacity));
+      const touch = nextH
+        .lessThanEqual(float(0))
+        .and(escaped.not())
+        .and(float(i).lessThan(uActiveCount))
+        .and(hash11(entropy.mul(float(7.7)).add(float(2.9))).lessThan(uSplashChance))
+        .and(splashSink.age.element(k).greaterThan(float(250)));
+      TSL.If(touch, () => {
+        splashSink.position.element(k).assign(nextPos);
+        splashSink.age.element(k).assign(float(-1));
+      });
+    }
 
     position.element(i).assign(landed.select(respawnPos, nextPos));
     // Reborn already moving with the air it formed in (the target, not the relaxed drift — see INERTIA).
@@ -2492,6 +2518,7 @@ export function createPrecipEngine({
       // `uSpeedMul`'s sibling term), and the floor there assumes a positive
       // scale reaching it, not a zero or negative one.
       if (Number.isFinite(t.fallSpeedScale)) uFallSpeedScale.value = Math.max(0.01, t.fallSpeedScale);
+      if (Number.isFinite(t.splashRateScale)) uSplashChance.value = Math.max(0, Math.min(1, t.splashRateScale / 3));
     },
 
     /** What the debug panel and the lab legend print. */

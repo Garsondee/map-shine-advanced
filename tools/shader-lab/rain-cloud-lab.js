@@ -239,6 +239,16 @@ export class RainCloudDriver {
   engine(id) {
     if (this.engines.has(id)) return this.engines.get(id);
     const THREE = this.THREE;
+    // The production order: the fed splash engine first, its sink built into the fall's kernel.
+    const s = createPrecipSplashEngine({
+      THREE,
+      speciesId: id,
+      windHandle: this.windHandle,
+      renderOrder: 9,
+      openSkyTexture: this.openSky,
+      fed: true,
+    });
+    if (s.ok) s.init(this.renderer);
     const e = createPrecipEngine({
       THREE,
       speciesId: id,
@@ -246,17 +256,10 @@ export class RainCloudDriver {
       renderOrder: 10,
       openSkyTexture: this.openSky,
       pxPerMeter: WIND_DEFAULT_PIXELS_PER_METRE,
+      splashSink: s.sink ?? null,
     });
     e.init(this.renderer);
     this.engines.set(id, e);
-    const s = createPrecipSplashEngine({
-      THREE,
-      speciesId: id,
-      windHandle: this.windHandle,
-      renderOrder: 9,
-      openSkyTexture: this.openSky,
-    });
-    if (s.ok) s.init(this.renderer);
     this.splashes.set(id, s);
     return e;
   }
@@ -519,7 +522,7 @@ export class RainCloudDriver {
     const s = this.splashes.get(st.species);
     const drawFall = () => {
       if (s?.ok && layers !== 'fall') r.render(s.scene, this.camera);
-      r.render(e.scene, this.camera);
+      if (layers !== 'ground') r.render(e.scene, this.camera);
     };
     if (exposureFrames > 0) {
       // Long exposure: step and draw without clearing.

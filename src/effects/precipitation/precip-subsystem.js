@@ -673,7 +673,11 @@ export function createPrecipitationSubsystem({
   /** Build one species' engine on first use — a clear map never allocates. */
   function engineFor(speciesId) {
     if (engines.has(speciesId)) return engines.get(speciesId);
+    // ⭐ The splashes first: a fed splash engine's sink is built into the fall's kernel, so every splash is a
+    // real landing drop's (2026-11-03). A species that settles or bounces has none (`sink` null).
+    const splash = splashEngineFor(speciesId);
     const engine = createPrecipEngine({
+      splashSink: splash.sink ?? null,
       THREE,
       speciesId,
       // Resolved HERE, at first engine build — long after `startVtPanViewer`
@@ -712,6 +716,8 @@ export function createPrecipitationSubsystem({
     const engine = createPrecipSplashEngine({
       THREE,
       speciesId,
+      // Fed by the fall's own landings (see `engineFor`).
+      fed: true,
       windHandle: getWindHandle() ?? undefined,
       // ⚠️ BEHIND the fall, deliberately. Splashes are ON the ground and the
       // rain is between them and the eye; drawing them after would put water

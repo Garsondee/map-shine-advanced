@@ -236,11 +236,12 @@ export const STORYBOOK_DECK_DEFAULTS = Object.freeze({
   storybookBulge: 0.5,
   storybookDomain: 0.55,
   storybookLine: 2.4,
-  storybookInk: 0.65,
+  storybookInk: 0,
   storybookRim: 0.45,
   storybookBands: 0.07,
-  storybookBrush: 1,
+  storybookBrush: 0.5,
   storybookShadowDensity: 0.85,
+  storybookTails: 1,
 });
 
 /**
@@ -305,6 +306,8 @@ export function resolveStorybookDeck({ cover01, scalePx, anisotropy = 1, board, 
     bands: Math.max(0.002, p('storybookBands')),
     brush: Math.max(0, p('storybookBrush')),
     shadowDensity: Math.max(0, p('storybookShadowDensity')),
+    tails: Math.max(0, p('storybookTails')),
+    cover: Math.max(0, Math.min(1, Number.isFinite(cover01) ? cover01 : 0)),
   };
 }
 
@@ -328,14 +331,14 @@ export function createStorybookUniforms(TSL) {
     domeCentre: uniform(vec2(0, 0)),
     /** minX, minY, maxX, maxY — where clouds may live */
     domain: uniform(vec4(-1e9, -1e9, 1e9, 1e9)),
-    /** domainFade (px), clipToBoard (0/1), shadowDensity, unused */
+    /** domainFade (px), clipToBoard (0/1), shadowDensity, cover01 */
     domain2: uniform(vec4(1, 0, 0.85, 0)),
     board: uniform(vec4(-1e9, -1e9, 1e9, 1e9)),
     eye: uniform(vec3(0, 0, 10000)),
     light: uniform(vec3(0.5, 0.3, 0.8)),
     /** line (screen px), ink, rim, bands */
-    style: uniform(vec4(2.4, 0.65, 0.45, 0.07)),
-    /** brush, footprint (world px per screen px), fisheye lens, unused */
+    style: uniform(vec4(2.4, 0, 0.45, 0.07)),
+    /** brush, footprint (world px per screen px), fisheye lens, tails */
     style2: uniform(vec4(1, 4, 0, 0)),
     hi: uniform(vec3(1, 0.98, 0.94)),
     body: uniform(vec3(0.76, 0.8, 0.86)),
@@ -355,12 +358,12 @@ export function pushStorybookUniforms(u, { deck, palette, light, eye, board, foo
   u.deck2.value.set(deck.baseHeight, deck.domeHeight, deck.domeRadius, timeSec);
   u.domeCentre.value.set(deck.domeCentre[0], deck.domeCentre[1]);
   u.domain.value.set(...deck.domain);
-  u.domain2.value.set(deck.domainFade, deck.clipToBoard ? 1 : 0, deck.shadowDensity, 0);
+  u.domain2.value.set(deck.domainFade, deck.clipToBoard ? 1 : 0, deck.shadowDensity, deck.cover ?? 0);
   if (board) u.board.value.set(board.minX, board.minY, board.maxX, board.maxY);
   if (eye) u.eye.value.set(eye.x, eye.y, Math.max(1, eye.height));
   if (light) u.light.value.set(light[0], light[1], light[2]);
   u.style.value.set(deck.line, deck.ink, deck.rim, deck.bands);
-  u.style2.value.set(deck.brush, Math.max(1e-3, footprintPx || 1), deck.lens ?? 0, 0);
+  u.style2.value.set(deck.brush, Math.max(1e-3, footprintPx || 1), deck.lens ?? 0, deck.tails ?? 1);
   if (palette) {
     u.hi.value.set(...palette.hi);
     u.body.value.set(...palette.body);
@@ -390,7 +393,7 @@ function hashLobe(TSL, cell, li, salt) {
  * strongly is it faded by the domain edge. Inlined at each use (cheap ALU; the loops are real loops).
  */
 function cloudOf(TSL, u, wind, cell) {
-  const { float, vec2, smoothstep, mix, max, min, cos, sin, dot, sqrt } = TSL;
+  const { float, vec2, smoothstep, mix, max, min, cos, sin, dot, sqrt, select } = TSL;
   const spacing = u.deck.x;
   const h0 = hash3(TSL, cell, 0.37);
   const jx = hash3(TSL, cell, 1.91).sub(0.5).mul(STORYBOOK_JITTER);
@@ -417,9 +420,13 @@ function cloudOf(TSL, u, wind, cell) {
   const edgeFade = smoothstep(float(0), max(u.domain2.x, float(1)), inset);
   // A cloud near the domain's edge SHRINKS away (a puff dissolving) and only fades in its last third — a
   // half-transparent cartoon cloud reads as a grey ghost, not as a cloud far away.
-  const R = R0.mul(mix(float(0.3), float(1), edgeFade));
+  // FRAGMENTS: some empty cells hold a small torn scrap of cloud instead (the reference's little shards between
+  // the big heads) - variety of size is half of what reads as depth. None at cover 0.
+  const fragShare = min(u.domain2.w.mul(4), float(1)).mul(0.3);
+  const isFrag = h0.greaterThanEqual(u.deck.z);
+  const R = R0.mul(mix(float(0.3), float(1), edgeFade)).mul(select(isFrag, float(0.32), float(1)));
   const fade = smoothstep(float(0), float(0.35), edgeFade);
-  const exists = h0.lessThan(u.deck.z).and(fade.greaterThan(float(0.001)));
+  const exists = h0.lessThan(u.deck.z.add(fragShare)).and(fade.greaterThan(float(0.001)));
   return { exists, centre, R, along, across, stretch, z, fade, seed: h0 };
 }
 
@@ -470,6 +477,79 @@ function lobeOf(TSL, u, cloud, cell, li) {
   const xy = cloud.centre.add(cloud.along.mul(lx.mul(cloud.R))).add(cloud.across.mul(ly.mul(cloud.R)));
   const r = rUnit.mul(cloud.R).mul(breathe).mul(kept).mul(cloud.stretch.sqrt());
   return { C: vec3(xy.x, xy.y, cloud.z.add(zUnit.mul(cloud.R))), r };
+}
+
+/**
+ * A cloud's TAILS (2026-11-03, author, with a reference sky: *"Shapes should allow for long trailing points and
+ * tails"*): a long ragged comet tail trailing UPWIND from the head and a short one leading downwind, both
+ * sweeping in a slight curve, their edges torn into long spikes by noise stretched along the cloud's axis (the
+ * "trailing points" of the reference). Evaluated in 2-D, in the plane a little below the head, at `xy`.
+ * Returns vec2(coverage 0..1, inner light streak 0..1). Tail length grows with cover and the Tails dial, capped
+ * so a tail stays inside the 3x3 cells the tail pass tests.
+ */
+function tailOf(TSL, u, cloud, cell, xy) {
+  const { float, vec2, vec3, mix, clamp, min, max, abs, pow, smoothstep, select, dot, mx_noise_float } = TSL;
+  const R = max(cloud.R, float(1));
+  const rel = xy.sub(cloud.centre);
+  const sAx = dot(rel, cloud.along).div(R);
+  const aAx = dot(rel, cloud.across).div(R);
+  const hT = hash3(TSL, cell, 6.13);
+  const hB = hash3(TSL, cell, 6.71);
+  const tails = u.style2.w.mul(mix(float(0.55), float(1.3), u.domain2.w));
+  const Lb = min(mix(float(1.8), float(3.6), hT).mul(tails), u.deck.x.mul(0.8).div(R)).max(float(0.2));
+  const Lf = mix(float(0.45), float(1.1), hB).mul(tails).max(float(0.1));
+  const behind = sAx.lessThan(float(0));
+  const t = clamp(select(behind, sAx.negate().div(Lb), sAx.div(Lf)), 0, 1.3);
+  const bend = hB.sub(0.5).mul(1.6);
+  const centre = select(behind, bend, bend.mul(-0.5)).mul(t).mul(t);
+  const off = aAx.sub(centre);
+  // A broad body that thins toward the tip; the noise is stretched along the axis so the edge tears into long
+  // fingers, and a low-frequency split noise carves gaps along the axis so the tip divides into several points.
+  const w = pow(float(1).sub(min(t, float(1))), float(1.05)).mul(0.95);
+  const nA = mx_noise_float(vec3(sAx.mul(0.7), off.mul(3.2), cloud.seed.mul(13.7)));
+  const nB = mx_noise_float(vec3(sAx.mul(1.9), off.mul(8.0), cloud.seed.mul(7.1).add(3.3)));
+  const split = mx_noise_float(vec3(sAx.mul(0.35), off.mul(2.4), cloud.seed.mul(5.3).add(9.1)));
+  const ragged = w.mul(float(0.6).add(nA.mul(0.6)).add(nB.mul(0.3)));
+  const gap = smoothstep(float(0.05), float(0.35), split).mul(smoothstep(float(0.25), float(0.75), t));
+  const edge = ragged.sub(abs(off)).sub(gap.mul(w).mul(0.9));
+  const cov = smoothstep(float(0), float(0.05), edge).mul(float(1).sub(smoothstep(float(0.95), float(1.15), t)));
+  const streak = smoothstep(float(0.1), float(0.45), nA).mul(smoothstep(float(0.04), float(0.2), edge));
+  return vec2(cov, streak);
+}
+
+/** How far (cloud radii) a tail can reach from its cloud's centre: the tail pass's bounding test. */
+function tailReach(TSL, u, cloud) {
+  const { float, min, max, mix } = TSL;
+  const tails = u.style2.w.mul(mix(float(0.55), float(1.3), u.domain2.w));
+  return min(float(3.6).mul(tails), u.deck.x.mul(0.8).div(max(cloud.R, float(1)))).add(1.6);
+}
+
+/**
+ * THE BACK SHEET: as cover climbs past half, a streaky translucent layer of cloud along the wind fills in
+ * beneath the distinct clouds (the layered bands at the foot of the reference) - at cover 1 it carries most of
+ * the sky, still torn with gaps. Exactly nothing below half cover. Drifts at 0.8x the deck (it is further
+ * away: slower, and lower, so it slides less as the view pans - depth by motion as well as by size).
+ * @returns {*} coverage 0..1.
+ */
+function sheetAt(TSL, u, wind, xy) {
+  const { float, vec2, vec3, mix, max, min, smoothstep, dot, sqrt, mx_fractal_noise_float } = TSL;
+  const amount = smoothstep(float(0.5), float(1.0), u.domain2.w);
+  const q = xy.sub(wind.drift.mul(0.8));
+  const perp = vec2(wind.dir.y.negate(), wind.dir.x);
+  const along0 = dot(q, wind.dir).div(max(u.deck.x.mul(1.4), float(1)));
+  const across0 = dot(q, perp).div(max(u.deck.x.mul(0.32), float(1)));
+  // Domain-warped, so the bands meander and break like piled stratocumulus rather than ruled slashes.
+  const wv = mx_fractal_noise_float(vec3(along0.mul(0.6), across0.mul(0.25), float(2.7)), 2, 2, 0.5, 1);
+  const along = along0.add(wv.mul(0.8));
+  const across = across0.add(wv.mul(1.1));
+  const n = mx_fractal_noise_float(vec3(along, across, float(4.4)), 3, 2, 0.5, 1)
+    .mul(0.6)
+    .add(mx_fractal_noise_float(vec3(along.mul(0.35), across.mul(0.2), float(9.2)), 2, 2, 0.5, 1).mul(0.5));
+  const thr = mix(float(0.7), float(0.05), amount);
+  const d = u.domain;
+  const inset = min(min(xy.x.sub(d.x), d.z.sub(xy.x)), min(xy.y.sub(d.y), d.w.sub(xy.y)));
+  const fade = smoothstep(float(0), max(u.domain2.x.mul(1.5), float(1)), inset);
+  return smoothstep(thr, thr.add(0.3), n).mul(sqrt(amount)).mul(fade);
 }
 
 /**
@@ -705,13 +785,62 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     // Feathered, not cut: the edge softens over a few screen px, dithered by the paper grain.
     const aaW = px.mul(float(0.8).add(u.style2.x.mul(1.6))).max(float(0.5));
     const cover = float(1).sub(smoothstep(aaW.negate(), aaW, sdfR.add(grain.mul(aaW).mul(8))));
-    const rgb = select(hit, col, u.ink);
+    // No ink round the AA band any more (author: "The ink outline is probably not needed"): the band takes the
+    // head's own light tone.
+    const headRgb = select(hit, col, mix(u.body, u.hi, float(0.6)));
     const fade = select(hit, bestFade, sdfFade);
+    const headA = cover.mul(fade);
+
+    // THE TAILS (middle layer): 3x3 cells (a tail reaches past its own cell), each tested in the plane a
+    // little below its head, where THIS pixel's ray crosses that height - so tails hang lower than heads and
+    // slide against them as the view pans.
+    const tailCov = float(0).toVar('sbTailCov');
+    const tailHi = float(0).toVar('sbTailHi');
+    const q3 = Pm.sub(wind.drift).div(u.deck.x);
+    const base3 = floor(q3).sub(vec2(1, 1)).toVar('sbTailBase');
+    If(u.style2.w.greaterThan(float(0.001)), () => {
+      Loop({ start: 0, end: 9, type: 'int', name: 'sbt' }, ({ sbt }) => {
+        const ti = float(sbt);
+        const ty = floor(ti.div(3));
+        const cell = base3.add(vec2(ti.sub(ty.mul(3)), ty));
+        const cloud = cloudOf(TSL, u, wind, cell);
+        const zt = cloud.z.sub(cloud.R.mul(0.3)).max(float(0));
+        const Pt = G.xy.add(D.xy.mul(zt.div(max(D.z, float(0.05)))));
+        If(cloud.exists.and(length(Pt.sub(cloud.centre)).lessThan(tailReach(TSL, u, cloud).mul(cloud.R).mul(cloud.stretch))), () => {
+          const tl = tailOf(TSL, u, cloud, cell, Pt);
+          const c = tl.x.mul(cloud.fade);
+          If(c.greaterThan(tailCov), () => {
+            tailCov.assign(c);
+            tailHi.assign(tl.y);
+          });
+        });
+      });
+    });
+
+    // THE BACK SHEET (back layer), lower still.
+    const zs = u.deck2.x.mul(0.7);
+    const Ps = G.xy.add(D.xy.mul(zs.div(max(D.z, float(0.05)))));
+    const sheet = sheetAt(TSL, u, wind, Ps);
+
+    // Premultiplied "over", back to front: sheet, tails, heads. The sheet and tails are the light shadow tone,
+    // translucent; the tails carry a white streak down their middle like the reference's.
+    const sheetA = sheet.mul(0.5);
+    const sheetC = mix(u.body, u.hi, float(0.3));
+    const tailA = tailCov.mul(0.72);
+    const tailC = mix(mix(u.body, u.hi, float(0.25)), u.hi, tailHi.mul(0.85));
+    const accC = sheetC.mul(sheetA).toVar('sbAccC');
+    const accA = sheetA.toVar('sbAccA');
+    accC.assign(tailC.mul(tailA).add(accC.mul(float(1).sub(tailA))));
+    accA.assign(tailA.add(accA.mul(float(1).sub(tailA))));
+    accC.assign(headRgb.mul(headA).add(accC.mul(float(1).sub(headA))));
+    accA.assign(headA.add(accA.mul(float(1).sub(headA))));
+    const rgb = accC.div(max(accA, float(1e-4)));
+
     // The padding rule without a Table: no cloud over the scene padding (the ground under the pixel decides).
     const bd = u.board;
     const inBoard = step(bd.x, groundXY.x).mul(step(groundXY.x, bd.z)).mul(step(bd.y, groundXY.y)).mul(step(groundXY.y, bd.w));
     const boardGate = mix(float(1), inBoard, u.domain2.y);
-    let alpha = cover.mul(fade).mul(boardGate).mul(u.opacity);
+    let alpha = accA.mul(boardGate).mul(u.opacity);
     if (visibility) alpha = alpha.mul(visibility);
     return TSL.vec4(rgb, clamp(alpha, 0, 1));
   })();
@@ -770,7 +899,22 @@ export function buildStorybookShadowNode(TSL, { worldXY, u, wind, offset, blur, 
         });
       });
     });
-    const cov = float(1).sub(smoothstep(softAt.negate(), softAt, sdf)).mul(fadeAt);
+    const headCov = float(1).sub(smoothstep(softAt.negate(), softAt, sdf)).mul(fadeAt);
+    // Tails and the back sheet cast lighter shadows (they are thinner cloud), from the same shapes the tops draw.
+    const tailCov = float(0).toVar('sbsTail');
+    const base3 = floor(p.sub(wind.drift).div(u.deck.x)).sub(vec2(1, 1)).toVar('sbsTailBase');
+    If(u.style2.w.greaterThan(float(0.001)), () => {
+      Loop({ start: 0, end: 9, type: 'int', name: 'sbst' }, ({ sbst }) => {
+        const ti = float(sbst);
+        const ty = floor(ti.div(3));
+        const cell = base3.add(vec2(ti.sub(ty.mul(3)), ty));
+        const cloud = cloudOf(TSL, u, wind, cell);
+        If(cloud.exists.and(length(p.sub(cloud.centre)).lessThan(tailReach(TSL, u, cloud).mul(cloud.R).mul(cloud.stretch))), () => {
+          tailCov.assign(max(tailCov, tailOf(TSL, u, cloud, cell, p).x.mul(cloud.fade)));
+        });
+      });
+    });
+    const cov = max(max(headCov, tailCov.mul(0.5)), sheetAt(TSL, u, wind, p).mul(0.35));
     return mix(float(1), fillShare, cov.mul(u.domain2.z));
   })();
 }

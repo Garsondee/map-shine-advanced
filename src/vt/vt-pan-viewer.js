@@ -8932,9 +8932,36 @@ async function startVtPanViewerUnserialized({
     };
     const temperatureNoisePlaceholder = makeTemperatureNoiseTexture(new Uint8Array([0, 128, 128, 128]), 1);
     let temperatureNoiseTexture = null;
+    // The tile is baked in a worker, started the first frame the effect is enabled (2026-11-03: baking it here was a
+    // ~150 ms JavaScript block in a frame). Not back yet when wanted = built here as before. Revert: localStorage
+    // `msa.temperatureNoiseWorker` = '0'.
+    let temperatureNoisePrebuilt = null;
+    let temperatureNoisePrebuildStarted = false;
+    function prebuildTemperatureNoise() {
+      if (temperatureNoisePrebuildStarted || temperatureNoiseTexture) return;
+      temperatureNoisePrebuildStarted = true;
+      try {
+        if (typeof Worker !== 'function' || globalThis.localStorage?.getItem('msa.temperatureNoiseWorker') === '0') return;
+        const worker = new Worker(new URL('../effects/temperature/temperature-noise.worker.js', import.meta.url), {
+          type: 'module',
+        });
+        worker.onmessage = (e) => {
+          if (e.data?.data) temperatureNoisePrebuilt = e.data;
+          worker.terminate();
+        };
+        worker.onerror = (e) => {
+          e?.preventDefault?.();
+          worker.terminate();
+        };
+        worker.postMessage({});
+      } catch (err) {
+        log.debug?.('temperature noise worker unavailable, it will be baked on first use:', err);
+      }
+    }
     function ensureTemperatureNoise() {
       if (temperatureNoiseTexture) return;
-      const { data, size } = buildTemperatureNoiseData();
+      const { data, size } = temperatureNoisePrebuilt ?? buildTemperatureNoiseData();
+      temperatureNoisePrebuilt = null;
       temperatureNoiseTexture = makeTemperatureNoiseTexture(data, size);
       gradePresent.setTemperatureNoise(temperatureNoiseTexture);
       log.info(`temperature effects: baked the ${size}² frost/ripple tile`);
@@ -13693,6 +13720,7 @@ async function startVtPanViewerUnserialized({
      */
     function pushTemperatureEffects(env) {
       const st = getTemperatureEffectsRenderState();
+      if (st?.enabled) prebuildTemperatureNoise();
       const W = Math.max(1, canvasW);
       const H = Math.max(1, canvasH);
       const viewRect = view ? viewToWorldRect(view, W / H) : null;

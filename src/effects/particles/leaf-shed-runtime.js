@@ -352,7 +352,7 @@ export function createLeafShedEngine({
    * mask a little AHEAD of its heading is indoors. Returns `cancel(v)` — v with whatever of it points into the
    * black removed (the rest slides along the wall) and a small push out — plus `inside` and `nOut`.
    */
-  const wallSense = (pos, heading, stepPx, overRoofs) => {
+  const wallSense = (pos, heading, stepPx, pushOut) => {
     if (!hasOutdoors) return { cancel: (v) => v, inside: float(0), blocked: float(0) };
     const span = uOutdoorsRect.zw.sub(uOutdoorsRect.xy);
     const size = vec2(textureSize(outdoorsTexNode, int(0)));
@@ -369,13 +369,59 @@ export function createLeafShedEngine({
     const nOut = select(gl.greaterThan(0.05), g.div(max(gl, 1e-4)), vec2(0, 0));
     const ahead = outdoorsAt(pos.add(heading.mul(reach)));
     const inside = m0.lessThan(0.5);
-    // A leaf lofted over the roofs blows across them; the walls only steer what is below the canopy.
-    const blocked = select(inside.or(ahead.lessThan(0.5)), float(1), float(0)).mul(float(1).sub(overRoofs));
+    const blocked = select(inside.or(ahead.lessThan(0.5)), float(1), float(0));
     const cancel = (v) => {
       const into = max(dot(v, nOut.negate()), 0);
-      return v.add(nOut.mul(into.add(pixelsPerMetreNode.mul(0.35))).mul(blocked));
+      return v.add(nOut.mul(into.add(pixelsPerMetreNode.mul(0.35).mul(pushOut))).mul(blocked));
     };
     return { cancel, inside: select(inside, float(1), float(0)), blocked };
+  };
+
+  // ── THE WALL IS A WALL: a swept, per-step veto ───────────────────────────
+  // (The author, 2026-11-03: a leaf must never cross the indoor/outdoor line — "preventing them from
+  // teleporting through the walls is critical" — and ideally "pile up against the side of a building".)
+  // `wallSense` only STEERS, from taps a reach away: a thin wall falls between the taps, a gust-thrown leaf
+  // outruns the look-ahead, a hitch frame skips a whole room. So the position update itself is vetoed: the
+  // step is walked in SWEEP_N samples (spaced under one mask texel, so no painted texel can be skipped) and a
+  // body stops on the last sample still outdoors. If the whole step is blocked it SLIDES — x then y, and y
+  // then x, keeping whichever goes further — so it runs along the wall and settles against it. The velocity
+  // component that hit is zeroed, which is what lets the landed ones lie in a pile along the wall's foot.
+  // A step longer than SWEEP_N texels (a 0.05 s hitch frame at gale speed) is shortened to that, never
+  // sampled more thinly. It holds at EVERY height: a storm-lofted leaf does not cross a building either
+  // (before 2026-11-03 anything above the crowns did, and the lab found every stray sample up there).
+  const SWEEP_N = 6;
+  const clearFraction = (from, delta) => {
+    let f = float(1);
+    for (let k = 1; k <= SWEEP_N; k++) {
+      const m = outdoorsAt(from.add(delta.mul(k / SWEEP_N)));
+      f = min(f, select(m.lessThan(0.5), float((k - 1) / SWEEP_N), float(1)));
+    }
+    return f;
+  };
+  const guardedStep = (pos, d0) => {
+    const never = float(0).greaterThan(1);
+    if (!hasOutdoors) return { next: pos.add(d0), hitX: never, hitY: never };
+    const texel = uOutdoorsRect.zw.sub(uOutdoorsRect.xy).div(vec2(textureSize(outdoorsTexNode, int(0))));
+    const maxTravel = min(texel.x, texel.y).mul(0.9 * SWEEP_N);
+    const d = d0.mul(min(float(1), maxTravel.div(max(d0.length(), 1e-4))));
+    const dx = vec2(d.x, 0);
+    const dy = vec2(0, d.y);
+    const fFull = clearFraction(pos, d);
+    const straight = pos.add(d.mul(fFull));
+    const p1 = pos.add(dx.mul(clearFraction(pos, dx)));
+    const viaX = p1.add(dy.mul(clearFraction(p1, dy)));
+    const p2 = pos.add(dy.mul(clearFraction(pos, dy)));
+    const viaY = p2.add(dx.mul(clearFraction(p2, dx)));
+    const lenOf = (q) => q.sub(pos).length();
+    const slid = select(lenOf(viaX).greaterThan(lenOf(viaY)), viaX, viaY);
+    const best = select(lenOf(slid).greaterThan(lenOf(straight)), slid, straight);
+    const next = select(fFull.greaterThanEqual(0.9999), pos.add(d), best);
+    const moved = next.sub(pos);
+    return {
+      next,
+      hitX: abs(moved.x.sub(d.x)).greaterThan(0.05),
+      hitY: abs(moved.y.sub(d.y)).greaterThan(0.05),
+    };
   };
 
   // ── the kernel ──────────────────────────────────────────────────────────
@@ -446,8 +492,7 @@ export function createLeafShedEngine({
         const jinkReach = speedRaw.mul(0.4).add(pixelsPerMetreNode.mul(2.4));
         const headingRaw = select(speedRaw.greaterThan(1e-3), v1raw.div(max(speedRaw, 1e-3)), vec2(1, 0));
         // Walls of the painted `_Outdoors` mask: steer round them (the part of the velocity pointing into the black goes).
-        const overRoofs = smoothstep(uCrownPx.mul(0.9), uCrownPx.mul(1.1), c.x);
-        const sense = wallSense(pos, headingRaw, speedRaw.add(jinkReach).mul(dt), overRoofs);
+        const sense = wallSense(pos, headingRaw, speedRaw.add(jinkReach).mul(dt), select(airborne, float(1), float(0)));
         const v1 = sense.cancel(v1raw);
         const speed = v1.length();
         const dir = select(speed.greaterThan(1e-3), v1.div(max(speed, 1e-3)), vec2(1, 0));
@@ -495,7 +540,11 @@ export function createLeafShedEngine({
         }
         // The jink must not carry it back into the black either.
         move = sense.cancel(move);
-        const next = pos.add(move.mul(dt));
+        // The mask is a hard wall (see guardedStep): the step can never end indoors.
+        const step = guardedStep(pos, move.mul(dt));
+        const next = step.next;
+        // Already indoors (the floor's mask changed under it): it ends here. The draw's gate has it hidden already.
+        const shut = outdoorsAt(pos).lessThan(0.5);
         // Falling: a leaf glides in pulses (it sinks fastest on each swing's turn) and an updraft can
         // lift it back up — the lift term goes past zero, so a gust genuinely throws a leaf into the air.
         const fallMps = byKind(kind, KIND_FALL_MPS).mul(float(0.8).add(r(6.1).mul(0.4))).mul(uFall);
@@ -543,11 +592,12 @@ export function createLeafShedEngine({
           .or(next.y.greaterThan(uRectMax.y));
         position.element(i).assign(next);
         // It hits the ground, it does not glide in: most of the flight speed goes at the moment of landing.
-        velocity.element(i).assign(select(landsNow, v1.mul(byKind(kind, KIND_GROUND_KEEP)), v1));
+        const vKept = vec2(select(step.hitX, float(0), v1.x), select(step.hitY, float(0), v1.y));
+        velocity.element(i).assign(select(landsNow, vKept.mul(byKind(kind, KIND_GROUND_KEEP)), vKept));
         custom.element(i).assign(vec4(h2, angle.mod(6.2832), flip.mod(6.2832), c.w));
         age.element(i).assign(a.add(dt));
         // Leaving the scene ends it (nothing renders in the padding).
-        life.element(i).assign(select(out, a, lf1));
+        life.element(i).assign(select(out.or(shut), a, lf1));
       });
     });
   })().compute(capacity);
@@ -669,7 +719,7 @@ export function createLeafShedEngine({
     outdoorsGate = smoothstep(0.3, 0.7, outdoorsTexNode.sample(uvw).r);
   }
   material.colorNode = lit.mul(leafA.div(max(outA, 1e-4)));
-  material.opacityNode = outA.mul(gate).mul(max(outdoorsGate, vAbove));
+  material.opacityNode = outA.mul(gate).mul(outdoorsGate);
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.frustumCulled = false;

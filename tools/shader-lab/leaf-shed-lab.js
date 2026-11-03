@@ -205,6 +205,12 @@ async function main() {
     outTex.needsUpdate = true;
   }
   paintOutdoors(true);
+  /** The painted texel the kernel itself reads at a world point (white 255 outdoors, black 0 indoors). */
+  function maskAt(wx, wy) {
+    const x = Math.min(OUT_N - 1, Math.max(0, Math.floor((wx / SPAN) * OUT_N)));
+    const y = Math.min(OUT_N - 1, Math.max(0, Math.floor((wy / SPAN) * OUT_N)));
+    return outData[(y * OUT_N + x) * 4];
+  }
   const outdoorsTexNode = TSL.texture(outTex);
   const uOutdoorsRect = TSL.uniform(new THREE.Vector4(0, 0, SPAN, SPAN));
   // The rooms, tinted so a shot shows where the black is (the viewer has the lighting to do that).
@@ -455,12 +461,14 @@ async function main() {
       for (let i = 0; i <= steps; i++) {
         step(1 / 30);
         if (i % 3 === 0) {
-          const [pos, cus, vel] = await Promise.all([read(b.position), read(b.custom), read(b.velocity)]);
+          const [pos, cus, vel, lifeA, ageA] = await Promise.all([read(b.position), read(b.custom), read(b.velocity), read(b.life), read(b.age)]);
           for (let k = 0; k < n; k++) {
             const j = (start + k) % engine.capacity;
             if (cus[j * 4 + 3] < 0.5) continue;
             const t = tracks[k];
-            const pt = { x: pos[j * 2], y: pos[j * 2 + 1], h: cus[j * 4], sp: Math.hypot(vel[j * 2], vel[j * 2 + 1]) };
+            // `dead`: its life has ended (landed and faded, or killed in the black): the buffer keeps the last position, nothing draws it.
+            const dead = lifeA[j] >= 0 && ageA[j] >= lifeA[j];
+            const pt = { x: pos[j * 2], y: pos[j * 2 + 1], h: cus[j * 4], sp: Math.hypot(vel[j * 2], vel[j * 2 + 1]), dead };
             if (!t.landed && pt.h <= 0) t.landed = { ...pt, i: t.pts.length };
             t.pts.push(pt);
           }
@@ -480,7 +488,8 @@ async function main() {
         const L = Math.max(net, 1);
         let acc = 0;
         for (const q of air) acc += (((q.x - a0.x) * (a1.y - a0.y) - (q.y - a0.y) * (a1.x - a0.x)) / L) ** 2;
-        const inRoom = t.pts.filter((q) => ROOMS.some(([x0, y0, x1, y1]) => q.x >= x0 && q.x < x1 && q.y >= y0 && q.y < y1)).length;
+        // The mask the kernel reads, not the nominal room rectangles: the 150-texel mask lands up to half a texel off them.
+        const inRoom = t.pts.filter((q) => !q.dead && maskAt(q.x, q.y) < 128).length;
         rows.push({
           insideFrac: +(inRoom / t.pts.length).toFixed(3),
           wanderPx: +Math.sqrt(acc / air.length).toFixed(0),

@@ -193,7 +193,13 @@ export function run(t) {
 
     const rt = readFileSync(new URL('../particles/leaf-shed-runtime.js', new URL('.', import.meta.url)), 'utf8');
     ok('⭐ lofting: dials exist, starting at half the wind dial (35 m/s) by default', LEAF_SHED_PARAMS.loft?.default > 0 && LEAF_SHED_PARAMS.loftStartsAboveMps?.default === 35);
-    ok('⭐ lofting: above a tree\'s height a leaf is drawn over the canopies and roofs', /max\(occlusionGate\(/.test(rt) && /max\(outdoorsGate, vAbove\)/.test(rt));
+    ok('⭐ lofting: above a tree\'s height a leaf is drawn over the canopies (the depth gate yields) but never over the _Outdoors black', /max\(occlusionGate\(/.test(rt) && /mul\(outdoorsGate\)/.test(rt) && !/max\(outdoorsGate, vAbove\)/.test(rt));
+    // THE WALL IS A WALL (2026-11-03): the position step itself is vetoed by the mask, at every height.
+    ok('⭐ walls: the step is swept through the mask and can never end indoors, at any height', /const step = guardedStep\(pos, move\.mul\(dt\)\)/.test(rt) && /const next = step\.next/.test(rt) && /SWEEP_N = 6/.test(rt) && /0\.9 \* SWEEP_N/.test(rt));
+    ok('walls: no roof exemption is left in the steering', !/overRoofs/.test(rt));
+    ok('walls: a body already in the black ends (the floor\'s mask changed under it)', /select\(out\.or\(shut\), a, lf1\)/.test(rt) && /const shut = outdoorsAt\(pos\)\.lessThan\(0\.5\)/.test(rt));
+    ok('walls: the velocity that hit is zeroed, so landed leaves pile along the wall', /select\(step\.hitX, float\(0\), v1\.x\)/.test(rt) && /select\(step\.hitY, float\(0\), v1\.y\)/.test(rt));
+    ok('walls: the outward nudge is for airborne bodies only, so a landed one can lie against the wall', /pixelsPerMetreNode\.mul\(0\.35\)\.mul\(pushOut\)/.test(rt));
     ok('lofting: the lift stops after LOFT_SEC, so everything comes down', /LOFT_SEC = \d+/.test(rt) && /smoothstep\(LOFT_SEC - 2, LOFT_SEC, a\)/.test(rt));
     ok('lofting: a lull never snaps a lofted leaf down (the ceiling is never below it)', /max\(rise, c\.x\)/.test(rt));
     ok('pick: the broad-leaf forms follow their toggles in the shader', /BROAD_FORM_KNOBS\.forEach\(\(k, i\) => \(uKnobs\[k\]\.value = p\[BROAD_FORM_PARAMS\[i\]\] === false \? 0 : 1\)\)/.test(rt));

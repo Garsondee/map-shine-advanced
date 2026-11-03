@@ -18,7 +18,9 @@ import {
   resolveAnchorElevationRank,
   memoCandleLightSources,
   applyLightFootprint,
+  applyParallaxToFootprint,
 } from '../point-light-pool.js';
+import { displacePoint } from '../../parallax/parallax-model.js';
 import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL, elevationRank } from '../point-light-illumination.js';
 
 const FLOORS = [
@@ -301,5 +303,32 @@ export function run(t) {
     const tiny = makeMesh();
     applyLightFootprint(tiny, { x: 0, y: 0, radius: 30, ellipseAlongPx: 5, ellipseAngleRad: 0 });
     ok('the long axis is never shorter than the radius', tiny.scale.x === 30);
+
+    // ====================================================================
+    // applyParallaxToFootprint — a light on another floor rides that floor's
+    // scale about the eye, the same move Parallax gives the floor's art
+    // (parallax-model.js#displacePoint), so a brazier and its glow agree.
+    // ====================================================================
+    const eye = { x: 1000, y: 500 };
+    const lowered = makeMesh();
+    applyLightFootprint(lowered, { x: 1400, y: 700, radius: 100 });
+    applyParallaxToFootprint(lowered, eye, 0.9);
+    const art = displacePoint({ x: 1400, y: 700 }, eye, 0.9);
+    ok(
+      'a lowered light lands exactly where its floor art lands',
+      Math.abs(lowered.position.x - art.x) < 1e-9 && Math.abs(lowered.position.y - art.y) < 1e-9
+    );
+    ok(
+      'its pool shrinks with the floor',
+      Math.abs(lowered.scale.x - 90) < 1e-9 && Math.abs(lowered.scale.y - 90) < 1e-9
+    );
+    const atEye = makeMesh();
+    applyLightFootprint(atEye, { x: 1000, y: 500, radius: 60 });
+    applyParallaxToFootprint(atEye, eye, 0.8);
+    ok('a light at the eye does not slide', atEye.position.x === 1000 && atEye.position.y === 500);
+    const oval2 = makeMesh();
+    applyLightFootprint(oval2, { x: 0, y: 0, radius: 40, ellipseAlongPx: 100, ellipseAngleRad: 1 });
+    applyParallaxToFootprint(oval2, eye, 0.5);
+    ok('an oval keeps its shape and angle', oval2.scale.x === 50 && oval2.scale.y === 20 && oval2.rotation.z === 1);
   }
 }

@@ -452,6 +452,19 @@ export function lightFootprintTouchesView(mesh, view) {
 }
 
 /**
+ * Move a placed footprint the way Parallax moves its floor's art: scaled by `s` about the eye
+ * (`effects/parallax/parallax-model.js#displacePoint`). Run after `applyLightFootprint`, which
+ * rewrites the transform every frame, so the scale never compounds.
+ * @param {*} mesh @param {{x:number, y:number}} eye @param {number} s
+ */
+export function applyParallaxToFootprint(mesh, eye, s) {
+  mesh.position.x = eye.x + (mesh.position.x - eye.x) * s;
+  mesh.position.y = eye.y + (mesh.position.y - eye.y) * s;
+  mesh.scale.x *= s;
+  mesh.scale.y *= s;
+}
+
+/**
  * `buildCandleLightSources`, memoized (2026-10-14, per-frame GC churn). Its
  * result is a pure function of the anchors array and five scalar params, and
  * boot.js's `getCandleRenderState` hands back the SAME anchors array until an
@@ -969,6 +982,9 @@ export function createPointLightPool({
   // advances is a correct, if permanently uncached-against-edits, degraded
   // mode rather than a crash.
   getWallStructureVersion = () => 0,
+  /** `() => {eye:{x,y}, scaleOf(light) => number}|null` — Parallax's per-light scale this frame (1 on the
+   * viewed floor), null while Parallax is off. Optional: un-wired rigs keep every light where it stands. */
+  getLightParallax = () => null,
   uGlobalTimeMs,
   resolveExpectedDepth,
   // PERF-INSTRUMENTATION-AUDIT-2026-08-12 — this file had ZERO internal
@@ -1489,6 +1505,8 @@ export function createPointLightPool({
     // by the SAME floor value — one read, both consumers, never two floor
     // values disagreeing about which is "current" this frame.
     const currentFloorId = currentFloor?.id ?? null;
+    // Parallax's view of this frame (null while off), read once like every other per-frame input.
+    const lightParallax = getLightParallax();
     // THE OFF-SCREEN CULL's view, read once per frame (`lightFootprintTouchesView`). A rect that is not yet
     // sized (the warm-up draws before the first view exists) means "draw everything", never "draw nothing".
     const cullRect = LIGHT_CULL_ENABLED ? (envLight.uViewRect?.value ?? null) : null;
@@ -2220,8 +2238,15 @@ export function createPointLightPool({
       // UNCHANGED per-light path below, which is ALSO Stage 2's own safety
       // slide: flag OFF makes `canBatch` false for every light, byte-
       // identical to before this branch existed).
+      // PARALLAX (2026-10-31): a light on a floor other than the viewed one rides that floor's scale about
+      // the eye, so its pool stays on the art it lights (the author: a lower floor's light "moves at a
+      // different parallax pace to the albedo"). Batched geometry is baked in world px, so a moved light
+      // takes the per-light path, where the move is one mesh transform.
+      const plxScale = lightParallax ? lightParallax.scaleOf(light) : 1;
+      const plxMoved = Math.abs(plxScale - 1) >= 1e-5;
       const canBatch =
         pointLightBatchingEnabled &&
+        !plxMoved &&
         canBatchLight({ apertureCount, windowReachCount, falloffModel, cookiePattern: light.cookiePattern });
       if (!canBatch) {
         if (!pointLightBatchingEnabled) perLightWhy.batchingOff += 1;
@@ -2527,6 +2552,7 @@ export function createPointLightPool({
       // to local unit-radius space by triangulateLightFan, then
       // positioned/scaled back out to world space by applyLightFootprint.
       applyLightFootprint(entry.mesh, light);
+      if (plxMoved) applyParallaxToFootprint(entry.mesh, lightParallax.eye, plxScale);
       entry.mesh.visible = true;
       // APERTURE SHADOW DEBUG — round 10: the ONE surviving standalone
       // Object3D (shares `geometry` with `entry.mesh` but needs its OWN
@@ -2538,6 +2564,7 @@ export function createPointLightPool({
       if (entry.apertureShadowDebugMesh) {
         entry.apertureShadowDebugMesh.position.set(light.x, light.y, 0);
         entry.apertureShadowDebugMesh.scale.set(light.radius, light.radius, 1);
+        if (plxMoved) applyParallaxToFootprint(entry.apertureShadowDebugMesh, lightParallax.eye, plxScale);
         entry.apertureShadowDebugMesh.visible = apertureGoboDebugChannel === 'pattern';
       }
       // PER-LIGHT REGION-AWARE AMBIENT — see this function's own header for
@@ -2682,6 +2709,7 @@ export function createPointLightPool({
       entry.colorationMesh.position.set(light.x, light.y, 0);
       // Same rotated oval footprint as the illumination mesh (see above).
       applyLightFootprint(entry.colorationMesh, light);
+      if (plxMoved) applyParallaxToFootprint(entry.colorationMesh, lightParallax.eye, plxScale);
       entry.colorationMesh.visible = true;
       // SAME unfloored value as the illumination mesh above — coloration's
       // falloff uses the identical formula, so both channels harden/soften

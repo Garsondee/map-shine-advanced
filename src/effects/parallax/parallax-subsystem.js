@@ -124,6 +124,10 @@ export function createParallaxSubsystem({ fovDeg = 45 } = {}) {
     snapNext: () => glide.settle(lastFloorPos),
     /** The scale a layer at `elevation` gets this frame (1 when off). */
     scaleAt: (elevation) => (on ? frame.scaleOf(elevation) : 1),
+    /** The scale floor `index`'s plane gets this frame — what its art and the lights painted on it share (1 when off). */
+    floorScale: (index) => (on ? frame.scaleOf(frame.floorBase(index)) : 1),
+    /** The shared eye this frame's scales are about (the view centre). */
+    eye: () => eye,
     /**
      * How big floor `fromIndex`'s plane looks from floor `toIndex` (1 = the same size; below 1 = it has
      * receded, above 1 = it has risen toward the eye). The floor-change transition uses it to move the

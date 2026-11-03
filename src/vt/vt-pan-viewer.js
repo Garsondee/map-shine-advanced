@@ -4835,6 +4835,16 @@ async function startVtPanViewerUnserialized({
     let frameSceneEye = null;
     /** Whether the last frame moved any mesh, so turning the effect off restores them once and then costs nothing. */
     let parallaxWasOn = false;
+    /** The scene's floors as `syncParallaxForFrame` last read them — what a light's elevation is resolved against. */
+    let parallaxLightFloors = [];
+    /** What the light pool reads each frame (one object, reused): the shared eye, and the scale a light's floor gets. */
+    const parallaxLightRig = {
+      eye: { x: 0, y: 0 },
+      scaleOf(light) {
+        const hit = resolveElevationFloorIndex(parallaxLightFloors, Number.isFinite(light?.elevation) ? light.elevation : 0);
+        return hit ? parallaxSubsystem.floorScale(hit.index) : 1;
+      },
+    };
     /** The OS "reduce motion" setting, read once: it makes a floor change snap instead of glide. */
     let parallaxReducedMotion = false;
     try {
@@ -6380,6 +6390,13 @@ async function startVtPanViewerUnserialized({
           outdoors01: sampleWindExposureAt(x, y),
         }),
       getWallStructureVersion,
+      // PARALLAX: a light rides the plane of the floor it lights, exactly as that floor's art does, so a
+      // brazier on a lower floor and its glow slide together as the view pans.
+      getLightParallax: () => {
+        if (!parallaxSubsystem.isOn()) return null;
+        parallaxLightRig.eye = parallaxSubsystem.eye();
+        return parallaxLightRig;
+      },
       envLight,
       blendSunVisibilityAcrossFloors,
       sceneColor,
@@ -22389,6 +22406,7 @@ async function startVtPanViewerUnserialized({
       }
       const floorsRes = wantOn ? getActiveSceneFloors(globalThis.canvas?.scene ?? null) : null;
       const floors = floorsRes?.ok ? floorsRes.floors : [];
+      parallaxLightFloors = floors;
       const vegState = getVegetationRenderState();
       const treeKind = VEGETATION_KINDS.find((k) => k.id === 'tree');
       const params = parallaxReducedMotion ? { ...(plx?.params ?? {}), glideSec: 0 } : plx?.params;

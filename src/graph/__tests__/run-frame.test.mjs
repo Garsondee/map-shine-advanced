@@ -144,7 +144,7 @@ export function run(t) {
     // physically in front" reasoning surface.precipitation's own comment
     // above already states for its relationship to vision.gate).
     const expected =
-      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.prism,surface.iridescence,surface.water,surface.particles,surface.cloudTops,surface.precipitation,vision.gate,post.bloom,post.dof,post.taaResolve,post.lens,present.composite';
+      'masks.occlusion,geometry.world,light.accumulate,surface.response,surface.prism,surface.iridescence,surface.water,surface.particles,surface.precipitation,surface.cloudTops,vision.gate,post.bloom,post.dof,post.taaResolve,post.lens,present.composite';
     ok(`today's real masks..present plan is exactly [${expected}] (got: ${ids.join(',')})`, ids.join(',') === expected);
     ok(
       'surface.response is planned AFTER light.accumulate — it reads what that pass writes',

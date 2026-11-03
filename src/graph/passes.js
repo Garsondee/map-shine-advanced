@@ -595,30 +595,6 @@ export const PASSES = [
       'flame). Per-pixel gating is a higher rung.',
   },
   {
-    id: 'surface.cloudTops',
-    stage: 'surface',
-    kind: 'gpu',
-    status: 'live',
-    owns: 'reference/clouds/02-cloud-tops-shading-and-parallax.md (effects/clouds/cloud-tops.js#CLOUD_TOPS)',
-    creates: [],
-    // Same `res:env` only, same reasoning as `surface.precipitation` right
-    // below: the field/recipe/drift state this reads is CPU-resolved from
-    // `res:env` each frame (world/cloud-field.js), not a graph resource of
-    // its own — no bake, no render target, so nothing else to declare here.
-    reads: ['res:env'],
-    modifies: ['buf:scene.color'],
-    absorbs: ['CloudEffectV2(tops draw)', 'CloudSprite(parallax layers)'],
-    note:
-      'One lazily-built, view-sized quad sampling the SAME field the ground shadow reads (world/cloud-field.js), ' +
-      'lit by cloud-shade.js#buildCloudTopsNode, magnified about the view centre by the physical "rising through ' +
-      'the decks" parallax (doc 02 §9). ⚠️ POSITIONED BEFORE surface.precipitation, deliberately: clouds sit ' +
-      "physically above rain, so rain must draw on top of/in front of them, mirroring precipitation's own " +
-      '§3.5 rule one layer further out. ⚠️ ZOOM-GATED AT THE PASS ITSELF (Effects.md Law 4): below the gate, ' +
-      'the scene this pass would render is never constructed, so the submitted draw list genuinely shrinks — ' +
-      "not a uniform faded to zero. Fails ASLEEP (the opposite of precipitation's own zoom gate, which fails " +
-      "awake) — see cloudTopsGate's own header for why the two effects want opposite defaults.",
-  },
-  {
     id: 'surface.precipitation',
     stage: 'surface',
     kind: 'gpu',
@@ -648,6 +624,31 @@ export const PASSES = [
       "tools/shader-lab bench 'precip', scenario law3-no-rain-indoors. A clear day (precip01 = 0) " +
       'submits no draw at all (Effects.md Law 4). Runtime: a closure in the viewer, mirroring ' +
       'surface.particles and the candle flame.',
+  },
+  {
+    id: 'surface.cloudTops',
+    stage: 'surface',
+    kind: 'gpu',
+    status: 'live',
+    owns: 'reference/clouds/02-cloud-tops-shading-and-parallax.md (effects/clouds/cloud-tops.js#CLOUD_TOPS)',
+    creates: [],
+    // Same `res:env` only, same reasoning as `surface.precipitation` right
+    // below: the field/recipe/drift state this reads is CPU-resolved from
+    // `res:env` each frame (world/cloud-field.js), not a graph resource of
+    // its own — no bake, no render target, so nothing else to declare here.
+    reads: ['res:env'],
+    modifies: ['buf:scene.color'],
+    absorbs: ['CloudEffectV2(tops draw)', 'CloudSprite(parallax layers)'],
+    note:
+      'One lazily-built, view-sized quad sampling the SAME field the ground shadow reads (world/cloud-field.js), ' +
+      'lit by cloud-shade.js#buildCloudTopsNode, magnified about the view centre by the physical "rising through ' +
+      'the decks" parallax (doc 02 §9). ⚠️ POSITIONED AFTER surface.precipitation (2026-11-03, author: rain under the clouds): the ' +
+      'tops only draw once the eye has risen above the deck, so from there a cloud is IN FRONT of the rain ' +
+      'falling from its base, and the rain shows where it streams out past the cloud edges. '+
+      '(It used to draw before, on the reading that clouds above rain means rain in front of them.) ⚠️ ZOOM-GATED AT THE PASS ITSELF (Effects.md Law 4): below the gate, ' +
+      'the scene this pass would render is never constructed, so the submitted draw list genuinely shrinks — ' +
+      "not a uniform faded to zero. Fails ASLEEP (the opposite of precipitation's own zoom gate, which fails " +
+      "awake) — see cloudTopsGate's own header for why the two effects want opposite defaults.",
   },
   {
     id: 'vision.gate',

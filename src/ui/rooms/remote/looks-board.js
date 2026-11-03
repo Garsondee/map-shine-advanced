@@ -161,6 +161,12 @@ export function renderLooksBoard(container, ctx, env) {
   let menuFor = null;
   let formOpen = false;
 
+  /** A sheet is pinned to the bottom of the Play pane, which sits below the fold of the
+   * Remote's scrolling body: scroll it into view or the colour button seems dead. */
+  function revealSheet(sheet) {
+    sheet.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }
+
   function closeMenu() {
     menuFor = null;
     menuHost.replaceChildren();
@@ -213,8 +219,9 @@ export function renderLooksBoard(container, ctx, env) {
     // colour; it opens the palette. A span, like the corner menu button, because a
     // tile is itself a button.
     const options = lookOptions(look);
+    let dot = null;
     if (options.length > 0) {
-      const dot = el('span', 'msa-look-opt');
+      dot = el('span', 'msa-look-opt');
       dot.style.background = optionColour(look, options[0].key);
       dot.title = `${options[0].label}: pick another colour`;
       dot.addEventListener('click', (e) => {
@@ -228,7 +235,25 @@ export function renderLooksBoard(container, ctx, env) {
     if (isActive && ctx.isFading()) t.dataset.fading = 'true';
     const timeNote = ctx.isWorldClock() && facets.includes('time') ? ' (hour skipped: World clock)' : '';
     t.title = `${look.name} — ${describeLook(look, archetypeLabel)}${timeNote}\nClick: fade to it over the Fade Time. Right-click: more.`;
-    t.addEventListener('click', () => {
+    // The dot and the corner arrow are spans INSIDE this button. Some browsers (Firefox) hand a click on a
+    // button's child to the button itself, so their own handlers never run: the tile would play the Look
+    // instead of opening the palette. Ask WHERE the click landed, not what it targeted.
+    const more = el('span', 'msa-look-more');
+    const landedOn = (e, node) => {
+      if (!node || (e.clientX === 0 && e.clientY === 0)) return false;
+      const r = node.getBoundingClientRect();
+      return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    };
+    t.addEventListener('click', (e) => {
+      if (landedOn(e, dot)) {
+        openOptions(look);
+        return;
+      }
+      if (landedOn(e, more)) {
+        if (menuFor === look.id) closeMenu();
+        else openMenu(look);
+        return;
+      }
       closeMenu();
       play(look.id, env.getFadeOverMs());
     });
@@ -237,7 +262,6 @@ export function renderLooksBoard(container, ctx, env) {
       openMenu(look);
     });
     // The menu also opens from a small corner button, for anyone who never right-clicks.
-    const more = el('span', 'msa-look-more');
     more.innerHTML = iconMarkup('chev');
     more.setAttribute('aria-hidden', 'true');
     more.addEventListener('click', (e) => {
@@ -299,6 +323,7 @@ export function renderLooksBoard(container, ctx, env) {
       el('div', 'msa-hint', 'Saved for every map. If this Look is playing, it fades to the new colour.')
     );
     menuHost.appendChild(sheet);
+    revealSheet(sheet);
   }
 
   function addTile() {
@@ -463,6 +488,7 @@ export function renderLooksBoard(container, ctx, env) {
     footRow.append(del);
     menu.append(head, describe, items, facetLabel, picker.root, applyFacets, renameRow, footRow);
     menuHost.appendChild(menu);
+    revealSheet(menu);
   }
 
   function paint() {

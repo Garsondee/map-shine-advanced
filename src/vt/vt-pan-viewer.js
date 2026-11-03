@@ -4171,11 +4171,13 @@ async function startVtPanViewerUnserialized({
         // already uses for its own per-entry material swap.
         cloudTopsMesh.material?.dispose?.();
         cloudTopsMesh.geometry?.dispose?.();
+        // The storybook decks ride as children of the main deck's mesh (see below).
+        for (const child of cloudTopsMesh.children) child.material?.dispose?.();
         cloudTopsScene = null;
         cloudTopsMesh = null;
       }
       if (wantedKey === 'storybook') {
-        // STORYBOOK TOPS (2026-11-03): one material, drawn straight into sceneLit at FULL resolution (the ink
+        // STORYBOOK TOPS (2026-11-03): drawn straight into sceneLit at FULL resolution (the ink
         // lines are a few screen px wide; the half-res target + bilinear composite the realistic tops use would
         // smear them), no self-shadow pre-pass (the lobe shadow is a second ray inside the same shader). The
         // deck bounds itself (its own domain fade, and the padding rule per pixel when the Table is off); only
@@ -4189,24 +4191,41 @@ async function startVtPanViewerUnserialized({
             worldXY: THREE.TSL.positionWorld.xy,
           })
         );
-        const sb = buildStorybookCloudNode(THREE.TSL, {
-          groundXY: THREE.TSL.positionWorld.xy,
-          u: sbU,
-          wind: sbWind,
-          visibility: openAboveSb,
-        });
-        const sbMaterial = new THREE.NodeMaterial();
-        sbMaterial.colorNode = sb.rgb;
-        sbMaterial.opacityNode = sb.alpha.mul(uTopsOpacity);
-        sbMaterial.transparent = true;
-        sbMaterial.depthTest = false;
-        sbMaterial.depthWrite = false;
-        sbMaterial.side = THREE.DoubleSide;
-        sbMaterial.blending = THREE.NormalBlending;
-        markCompileDeferrable(sbMaterial, 'cloud tops (storybook)');
-        cloudTopsMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), sbMaterial);
+        // THREE DECKS, THREE MATERIALS (2026-11-03): low, main (with its wisps), high — each its own small shader,
+        // drawn in that order so they composite back to front. One shader holding all three took 40-85 s to
+        // compile in the lab (FXC's cost grows faster than the shader); the side decks' own shaders are cheap.
+        const sbDeckMaterial = (deck, label) => {
+          const sb = buildStorybookCloudNode(THREE.TSL, {
+            groundXY: THREE.TSL.positionWorld.xy,
+            u: sbU,
+            wind: sbWind,
+            visibility: openAboveSb,
+            decks: [deck],
+          });
+          const m = new THREE.NodeMaterial();
+          m.colorNode = sb.rgb;
+          m.opacityNode = sb.alpha.mul(uTopsOpacity);
+          m.transparent = true;
+          m.depthTest = false;
+          m.depthWrite = false;
+          m.side = THREE.DoubleSide;
+          m.blending = THREE.NormalBlending;
+          markCompileDeferrable(m, label);
+          return m;
+        };
+        cloudTopsMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), sbDeckMaterial(1, 'cloud tops (storybook)'));
         cloudTopsMesh.frustumCulled = false;
         cloudTopsMesh.renderOrder = 19;
+        // The side decks are children, so they take the main mesh's per-frame view transform for free.
+        for (const [deck, order, label] of [
+          [0, 18.9, 'cloud tops (storybook low deck)'],
+          [2, 19.1, 'cloud tops (storybook high deck)'],
+        ]) {
+          const side = new THREE.Mesh(cloudTopsMesh.geometry, sbDeckMaterial(deck, label));
+          side.frustumCulled = false;
+          side.renderOrder = order;
+          cloudTopsMesh.add(side);
+        }
         cloudTopsScene = new THREE.Scene();
         cloudTopsScene.add(cloudTopsMesh);
         cloudTopsMeshBuiltForKey = wantedKey;

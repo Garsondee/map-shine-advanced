@@ -81,6 +81,16 @@ export class StorybookDriver {
     this.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), null);
     this.quad.frustumCulled = false;
     this.scene.add(this.quad);
+    // The three storybook decks as their OWN blended quads over the ground, low → main → high — exactly how the
+    // viewer draws them (one small shader each; one big one took 40-85 s to compile).
+    this.deckQuads = [0, 1, 2].map((n) => {
+      const q = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), null);
+      q.frustumCulled = false;
+      q.renderOrder = 1 + n;
+      q.visible = false;
+      this.scene.add(q);
+      return q;
+    });
     this.cloudU = createCloudUniforms(T);
     this.sbU = createStorybookUniforms(T);
     this.u = {
@@ -119,6 +129,27 @@ export class StorybookDriver {
     tex.flipY = false;
     this.textures.set(map, tex);
     return tex;
+  }
+
+  /** One deck's own material (straight colour + alpha, NormalBlending over the ground). */
+  deckMaterial(n) {
+    const key = `deck:${n}`;
+    if (this.materials.has(key)) return this.materials.get(key);
+    const THREE = this.THREE;
+    const T = THREE.TSL;
+    const u = this.u;
+    const worldXY = T.vec2(T.mix(u.view.x, u.view.z, T.uv().x), T.mix(u.view.w, u.view.y, T.uv().y));
+    const wind = { drift: this.cloudU.drift, dir: this.cloudU.windDir };
+    const tops = buildStorybookCloudNode(T, { groundXY: worldXY, u: this.sbU, wind, decks: [n] });
+    const mat = new THREE.MeshBasicNodeMaterial();
+    mat.colorNode = tops.rgb;
+    mat.opacityNode = tops.alpha;
+    mat.transparent = true;
+    mat.depthTest = false;
+    mat.depthWrite = false;
+    mat.blending = THREE.NormalBlending;
+    this.materials.set(key, mat);
+    return mat;
   }
 
   material(mode, tex, variant = 'both', groundKind = 'map') {
@@ -164,6 +195,8 @@ export class StorybookDriver {
         u: this.sbU,
         wind,
         debug: variant === 'debug' ? 'occ' : null,
+        // 'tops1': the main deck alone (compile timing).
+        layered: variant !== 'tops1',
       });
     } else {
       vis = buildCloudGroundVisNode(T, {
@@ -192,7 +225,7 @@ export class StorybookDriver {
       groundKind === 'sea' ? float(1) : inBoard
     );
     // `variant` (compile timing): 'tops' / 'shadow' build only that half, as production's two separate materials.
-    const lit = ground.mul(u.tint).mul(variant === 'tops' ? float(1) : shadowVis);
+    const lit = ground.mul(u.tint).mul(variant === 'tops' || variant === 'tops1' ? float(1) : shadowVis);
     const out = variant === 'shadow' ? lit : mix(lit, tops.rgb, clamp(tops.alpha, 0, 1));
     const mat = new THREE.MeshBasicNodeMaterial();
     // 'cov': the raw shadow transmittance (calibration: with fillShare 0 and a hard edge it is the coverage mask).
@@ -308,7 +341,13 @@ export class StorybookDriver {
       this.sbU.domain2.value.z = 1;
     }
     this.sbU.opacity.value = o.opacity ?? 1;
-    this.quad.material = this.material(mode, tex, o.variant ?? 'both', o.ground ?? 'map');
+    // Storybook 'both' = the ground (with its shadow) plus the three deck quads, as the viewer draws them.
+    const split = mode === 'storybook' && (o.variant ?? 'both') === 'both';
+    this.quad.material = this.material(mode, tex, split ? 'shadow' : (o.variant ?? 'both'), o.ground ?? 'map');
+    this.deckQuads.forEach((q, n) => {
+      q.visible = split;
+      if (split) q.material = this.deckMaterial(n);
+    });
     if (!this._rt || this._rt.width !== W || this._rt.height !== H) {
       this._rt?.dispose();
       this._rt = new THREE.RenderTarget(W, H, { type: THREE.UnsignedByteType, format: THREE.RGBAFormat });
@@ -345,6 +384,8 @@ export class StorybookDriver {
       ]) {
         const r = await this.render({
           variant: 'cov',
+          // The MAIN deck's coverage only: the table is the main deck's threshold.
+          params: { storybookLowAmount: 0, storybookHighAmount: 0 },
           ground: 'sea',
           cover: 0.5,
           zoom: 0.25,

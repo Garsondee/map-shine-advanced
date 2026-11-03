@@ -273,7 +273,9 @@ export const STORYBOOK_LIGHT_MIN_DEG = 6;
 export function storybookDensity(cover01) {
   const c = clamp01(Number.isFinite(cover01) ? cover01 : 0);
   if (c <= 0) return { fill: 0, size: 0 };
-  return { fill: Math.min(0.85, 0.74 * c ** 1.25), size: lerp(0.85, 1.12, smooth01(c)) };
+  // (Capped at 0.58: past that the decks above and below add the cover, and the main deck keeps gaps to see them —
+  // at 0.7 a full sky was one white sheet with the other decks lost in it.)
+  return { fill: Math.min(0.58, 0.74 * c ** 1.25), size: lerp(0.85, 1.12, smooth01(c)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +324,19 @@ export const STORYBOOK_DECK_DEFAULTS = Object.freeze({
   storybookLitSide: 1,
   storybookShadeSide: 1,
   storybookRim: 0.45,
+  // Layers
+  storybookLowHeight: 0.55,
+  storybookLowSize: 0.6,
+  storybookLowPace: 0.75,
+  storybookLowAmount: 0.6,
+  storybookLowOpacity: 0.9,
+  storybookLowShear: -10,
+  storybookHighHeight: 1.45,
+  storybookHighSize: 0.75,
+  storybookHighPace: 1.6,
+  storybookHighAmount: 0.6,
+  storybookHighOpacity: 0.8,
+  storybookHighShear: 18,
 });
 
 /**
@@ -414,6 +429,24 @@ export function resolveStorybookDeck({ cover01, scalePx, anisotropy = 1, board, 
     ),
     edgeDensity: Math.max(0.05, p('storybookEdgeDensity')),
     depth: Math.max(0.1, p('storybookDepth')),
+    layLow: [p('storybookLowHeight'), p('storybookLowSize'), p('storybookLowPace'), p('storybookLowAmount')].map((v) =>
+      Math.max(0, v)
+    ),
+    layHigh: [p('storybookHighHeight'), p('storybookHighSize'), p('storybookHighPace'), p('storybookHighAmount')].map(
+      (v) => Math.max(0, v)
+    ),
+    layOp: [
+      Math.max(0, p('storybookLowOpacity')),
+      Math.max(0, p('storybookHighOpacity')),
+      (p('storybookLowShear') * Math.PI) / 180,
+      (p('storybookHighShear') * Math.PI) / 180,
+    ],
+    // Decks drawn: the main one alone when both others are switched off (Amount or Opacity 0), else all three.
+    layers:
+      (p('storybookLowAmount') > 0 && p('storybookLowOpacity') > 0) ||
+      (p('storybookHighAmount') > 0 && p('storybookHighOpacity') > 0)
+        ? 3
+        : 1,
     cover: Math.max(0, Math.min(1, Number.isFinite(cover01) ? cover01 : 0)),
   };
 }
@@ -459,6 +492,14 @@ export function createStorybookUniforms(TSL) {
     light2: uniform(vec4(1, 1, 1, 1)),
     /** ambient, silver lining, contrast, mist */
     light3: uniform(vec4(1, 0.45, 1, 0.1)),
+    /** LAYERS (round 8). Low deck: height (× the main deck's), cloud scale, pace, amount */
+    layLow: uniform(vec4(0.55, 0.6, 0.75, 0.6)),
+    /** High deck: height, cloud scale, pace, amount */
+    layHigh: uniform(vec4(1.45, 0.75, 1.6, 0.6)),
+    /** low opacity, high opacity, low bearing (rad), high bearing (rad) */
+    layOp: uniform(vec4(0.9, 0.8, -0.17, 0.31)),
+    /** deck count (1 = main only, 3 = all), unused x3 — a uniform so the loop is never unrolled */
+    layOn: uniform(vec4(3, 0, 0, 0)),
     /** brush, footprint (world px per screen px), fisheye lens, tails (wisp amount) */
     style2: uniform(vec4(1, 4, 0, 1)),
     hi: uniform(vec3(1, 0.98, 0.94)),
@@ -490,7 +531,10 @@ export function pushStorybookUniforms(u, { deck, palette, light, eye, board, foo
   if (eye) u.eye.value.set(eye.x, eye.y, Math.max(1, eye.height));
   if (light) u.light.value.set(light[0], light[1], light[2]);
   u.style.value.set(deck.edgeDensity ?? 3.2, deck.depth ?? 3, 0, 0);
-  for (const k of ['shape', 'shape2', 'edge', 'light1', 'light2', 'light3']) if (deck[k]) u[k].value.set(...deck[k]);
+  for (const k of ['shape', 'shape2', 'edge', 'light1', 'light2', 'light3', 'layLow', 'layHigh', 'layOp']) {
+    if (deck[k]) u[k].value.set(...deck[k]);
+  }
+  u.layOn.value.set(deck.layers ?? 3, 0, 0, 0);
   u.style2.value.set(deck.brush, Math.max(1e-3, footprintPx || 1), deck.lens ?? 0, deck.tails ?? 1);
   if (palette) {
     u.hi.value.set(...palette.hi);
@@ -509,7 +553,8 @@ export function pushStorybookUniforms(u, { deck, palette, light, eye, board, foo
  * The cumulus field at world point `P` (on the deck), as nodes.
  * @param {object} TSL
  * @param {object} u
- * @param {{drift:*, dir:*}} wind
+ * @param {{drift:*, dir:*, S?:*, thr?:*, seed?:*, pace?:*}} wind - the layer: its drift and wind direction, and
+ *   optionally its own cloud scale, threshold, seed and evolve pace (the main layer leaves them to the uniforms).
  * @param {*} P - vec2 node, world px.
  * @param {{billows?:boolean, octaves?:number}} [o] - a cheap core (no billows, one octave) for scouting and the
  *   wisps' upwind samples; its mean sits `STORYBOOK_FIELD.cheapOffset` below the full one.
@@ -518,12 +563,18 @@ export function pushStorybookUniforms(u, { deck, palette, light, eye, board, foo
 function coreAt(TSL, u, wind, P, { billows = true, octaves = 2 } = {}) {
   const { float, vec2, dot, max, mx_noise_float, mx_fractal_noise_float, mx_worley_noise_float } = TSL;
   const F = STORYBOOK_FIELD;
-  const q0 = P.sub(wind.drift).div(u.deck.x);
+  const S = wind.S ?? u.deck.x;
+  const q0 = P.sub(wind.drift)
+    .div(S)
+    .add(wind.seed ? vec2(wind.seed.mul(37.1), wind.seed.mul(-23.7)) : vec2(0, 0));
   // Long clouds (the cirrus-ish recipes): squash along the wind. A projection, not a rotation, so a wind that
   // swings never swings the whole sky about the origin (at elong 0 it is exactly q0).
   const a = wind.dir;
   const q = q0.sub(a.mul(dot(q0, a).mul(u.deck.w.div(float(1).add(u.deck.w)))));
-  const tau = u.deck2.w.mul(u.field.y).mul(F.evolve);
+  const tau = u.deck2.w
+    .mul(u.field.y)
+    .mul(F.evolve)
+    .mul(wind.pace ?? float(1));
   const ev = vec2(tau, tau.mul(-0.7));
   // CLUSTERS: crowded sky here, open sea there.
   const cluster = mx_noise_float(q.mul(u.field.z).add(vec2(3.1, 7.3)).add(ev.mul(0.35)));
@@ -544,7 +595,7 @@ function coreAt(TSL, u, wind, P, { billows = true, octaves = 2 } = {}) {
   } else {
     core = core.add(float(F.cheapOffset));
   }
-  return { core, cluster, qb, w, ev };
+  return { core, cluster, qb, w, ev, thr: wind.thr ?? u.field.x };
 }
 
 /**
@@ -553,11 +604,18 @@ function coreAt(TSL, u, wind, P, { billows = true, octaves = 2 } = {}) {
  * the cloud (Schneider swirls his with curl noise). Never added to a cloud — SUBTRACTED from its edges (see
  * `densityOf`), so the edge frays into tufts and wisps while the core stays whole. ~0..1.
  */
-function detailAt(TSL, u, c) {
+function detailAt(TSL, u, c, lite = false) {
   const { float, vec2, mx_worley_noise_float } = TSL;
   const qd = c.qb.add(c.w.mul(u.shape2.y));
   const f = u.shape2.z.mul(9);
   const w1 = mx_worley_noise_float(qd.mul(f).sub(c.ev.mul(2.0)));
+  if (lite) {
+    // The side decks: one Worley and one Perlin octave (the full six tripled the shader: 85 s to compile).
+    const perL = TSL.mx_noise_float(qd.mul(f.mul(0.7)).add(vec2(9.1, 3.3)))
+      .mul(0.5)
+      .add(0.5);
+    return TSL.clamp(perL.mul(0.55).add(float(1).sub(w1).mul(0.45)), 0, 1);
+  }
   const w2 = mx_worley_noise_float(qd.mul(f.mul(2.03)).add(vec2(5.3, 1.7)).sub(c.ev.mul(3.1)));
   const w3 = mx_worley_noise_float(qd.mul(f.mul(4.11)).add(vec2(2.2, 8.8)).sub(c.ev.mul(4.3)));
   const wor = float(1).sub(w1).mul(0.625).add(float(1).sub(w2).mul(0.25)).add(float(1).sub(w3).mul(0.125));
@@ -574,15 +632,15 @@ function remap01(TSL, v, lo, hi) {
 }
 
 /** The base shape 0..1 from a core value: 0 at Scrap reach below the threshold, 1 a little above it. */
-function baseOf(TSL, u, core) {
-  return remap01(TSL, core, u.field.x.sub(u.edge.z), u.field.x.add(STORYBOOK_FIELD.baseRise));
+function baseOf(TSL, u, core, thr = u.field.x) {
+  return remap01(TSL, core, thr.sub(u.edge.z), thr.add(STORYBOOK_FIELD.baseRise));
 }
 
 /** A cloud's TOP HEIGHT 0..1 (of its thickness) from a core value: a broad dome rising over ~1 core unit, for the
  * shadow march. (`baseOf` saturates a short way inside every edge, so a march on it saw flat-topped plateaus that
  * could never shade themselves — round 7's first golden hour came out flat salmon.) */
-function heightOf(TSL, u, core) {
-  return remap01(TSL, core, u.field.x.sub(u.edge.z), u.field.x.add(STORYBOOK_FIELD.domeRise));
+function heightOf(TSL, u, core, thr = u.field.x) {
+  return remap01(TSL, core, thr.sub(u.edge.z), thr.add(STORYBOOK_FIELD.domeRise));
 }
 
 /**
@@ -593,7 +651,7 @@ function heightOf(TSL, u, core) {
  */
 function densityOf(TSL, u, c, detail, tuft) {
   const { float, mix } = TSL;
-  const base = baseOf(TSL, u, c.core);
+  const base = baseOf(TSL, u, c.core, c.thr);
   // In the thin skirt the contrast-stretched tufts erode it, so whole scraps survive (the soft detail there ate
   // the skirt evenly away and left no fragments).
   const body = TSL.smoothstep(float(0.35), float(0.6), base);
@@ -611,6 +669,49 @@ function densityOf(TSL, u, c, detail, tuft) {
 }
 
 /**
+ * LAYERS (round 8, author: *"introduce layers of clouds at different heights ... improve the look at high 'Cloud'
+ * values and add some parallax to the camera movement and some different paces"*). Three decks — LOW (0), MAIN
+ * (1), HIGH (2) — each its own height (so each slides at its own rate as the view pans: real parallax), cloud
+ * scale, wind pace and bearing (wind shear: the high deck runs faster and veers), seed, and share of the cover
+ * (a deck's threshold sits above the main one's, and comes down as cover rises). The main deck is exactly the
+ * single deck of rounds 1-7.
+ * @param {object} TSL @param {object} u @param {{drift:*, dir:*}} wind @param {*} lf - float node, 0/1/2.
+ */
+function layerOf(TSL, u, wind, lf) {
+  const { float, vec2, select, mix, clamp, cos, sin } = TSL;
+  const isLow = lf.lessThan(float(0.5));
+  const isHigh = lf.greaterThan(float(1.5));
+  const pick = (lo, hi, main) => select(isLow, lo, select(isHigh, hi, float(main)));
+  const hMul = pick(u.layLow.x, u.layHigh.x, 1);
+  const sMul = pick(u.layLow.y, u.layHigh.y, 1);
+  const pace = pick(u.layLow.z, u.layHigh.z, 1);
+  const amount = pick(u.layLow.w, u.layHigh.w, 1);
+  const opacity = pick(u.layOp.x, u.layOp.y, 1);
+  const ang = pick(u.layOp.z, u.layOp.w, 0);
+  // Its own pace and bearing: the shared drift, scaled and turned (shear between decks).
+  const dr = wind.drift.mul(pace);
+  const ca = cos(ang);
+  const sa = sin(ang);
+  const drift = vec2(dr.x.mul(ca).sub(dr.y.mul(sa)), dr.x.mul(sa).add(dr.y.mul(ca)));
+  // Its share of the cover: a deck at Amount 1 matches the main deck at full cover and thins away below it.
+  const cover = u.domain2.w;
+  const off = mix(float(1.3), float(0.12), clamp(cover.mul(amount), 0, 1)).mul(
+    select(isLow.or(isHigh), float(1), float(0))
+  );
+  return {
+    drift,
+    dir: wind.dir,
+    S: u.deck.x.mul(sMul),
+    thr: u.field.x.add(off),
+    seed: lf,
+    pace,
+    hMul,
+    opacity: opacity.mul(select(amount.greaterThan(float(0.001)), float(1), float(0))),
+    isMain: lf.greaterThan(float(0.5)).and(lf.lessThan(float(1.5))),
+  };
+}
+
+/**
  * The lit storybook cloud tops for one ground pixel.
  *
  * @param {object} TSL
@@ -619,9 +720,15 @@ function densityOf(TSL, u, c, detail, tuft) {
  * @param {object} args.u - {@link createStorybookUniforms}.
  * @param {{drift:*, dir:*}} args.wind - the shared cloud field's `drift` (vec2, world px) and `windDir` (unit vec2).
  * @param {*} [args.visibility] - float node multiplied into alpha (e.g. the floors-above gate).
+ * @param {number[]} [args.decks] - which decks this material draws (0 low, 1 main + its wisps, 2 high); default
+ *   all three. The viewer gives each deck its OWN material (three small shaders compile far faster than one big
+ *   one — FXC's cost grows faster than the shader), drawn low → main → high so they composite in order.
  * @returns {{rgb:*, alpha:*}} rgb is straight (not premultiplied); composite with NormalBlending.
  */
-export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = null, debug = null }) {
+export function buildStorybookCloudNode(
+  TSL,
+  { groundXY, u, wind, visibility = null, debug = null, layered = true, decks = null }
+) {
   const { Fn, If, float, vec2, vec3, max, min, clamp, smoothstep, mix, normalize, dot, length, step } = TSL;
   const { mx_fractal_noise_float, mx_noise_float } = TSL;
   const F = STORYBOOK_FIELD;
@@ -649,149 +756,210 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
     const lxy = L.xy.div(lLen);
 
     // ── THE WISPS (back layer) — the field's thin, wind-torn edge ─────────────
-    const zW = zDeck.sub(T.mul(F.wispDrop)).max(float(0));
-    const Pw = at(zW).toVar('sbPw');
-    const a = wind.dir;
-    const thrC = thr;
-    const g1 = coreAt(TSL, u, wind, Pw.add(a.mul(S.mul(F.wispNear))), { billows: false, octaves: 1 }).core;
-    const g2 = coreAt(TSL, u, wind, Pw.add(a.mul(S.mul(F.wispFar))), { billows: false, octaves: 1 }).core;
-    const g0 = coreAt(TSL, u, wind, Pw, { billows: false, octaves: 1 }).core;
-    const halo = max(
-      max(smoothstep(thrC.sub(0.14), thrC.add(0.02), g0), smoothstep(thrC.sub(0.16), thrC.add(0.04), g1).mul(0.8)),
-      smoothstep(thrC.sub(0.16), thrC.add(0.04), g2).mul(0.5)
-    );
-    // Streaks in the wind's own frame, streaming along it faster than the clouds drift.
-    const qw = Pw.sub(wind.drift).div(S);
-    const across = dot(qw, vec2(a.y.negate(), a.x));
-    const along = dot(qw, a).add(u.deck2.w.mul(u.field.y).mul(F.evolve * F.wispStream));
-    const st = mx_fractal_noise_float(vec2(along.mul(0.6), across.mul(2.2)), 2, 2.1, 0.5, 1);
-    const wispA = halo
-      .mul(smoothstep(float(-0.2), float(0.45), st))
-      .mul(clamp(u.style2.w, 0, 2))
-      .mul(0.26)
-      .clamp(0, 1);
-    const wispC = mix(u.body, u.hi, float(0.35));
+    // (Built only into the material that draws the main deck — the wisps belong to it.)
+    const wisps = () => {
+      const zW = zDeck.sub(T.mul(F.wispDrop)).max(float(0));
+      const Pw = at(zW).toVar('sbPw');
+      const a = wind.dir;
+      const thrC = thr;
+      const g1 = coreAt(TSL, u, wind, Pw.add(a.mul(S.mul(F.wispNear))), { billows: false, octaves: 1 }).core;
+      const g2 = coreAt(TSL, u, wind, Pw.add(a.mul(S.mul(F.wispFar))), { billows: false, octaves: 1 }).core;
+      const g0 = coreAt(TSL, u, wind, Pw, { billows: false, octaves: 1 }).core;
+      const halo = max(
+        max(smoothstep(thrC.sub(0.14), thrC.add(0.02), g0), smoothstep(thrC.sub(0.16), thrC.add(0.04), g1).mul(0.8)),
+        smoothstep(thrC.sub(0.16), thrC.add(0.04), g2).mul(0.5)
+      );
+      // Streaks in the wind's own frame, streaming along it faster than the clouds drift.
+      const qw = Pw.sub(wind.drift).div(S);
+      const across = dot(qw, vec2(a.y.negate(), a.x));
+      const along = dot(qw, a).add(u.deck2.w.mul(u.field.y).mul(F.evolve * F.wispStream));
+      const st = mx_fractal_noise_float(vec2(along.mul(0.6), across.mul(2.2)), 2, 2.1, 0.5, 1);
+      const wispA = halo
+        .mul(smoothstep(float(-0.2), float(0.45), st))
+        .mul(clamp(u.style2.w, 0, 2))
+        .mul(0.26)
+        .clamp(0, 1);
+      const wispC = mix(u.body, u.hi, float(0.35));
+      return { wispA, wispC };
+    };
 
-    // ── THE CLOUD (front layer) — a density field, lit the way a volume is ──
-    const P0 = at(zDeck).toVar('sbP0');
-    const scout = coreAt(TSL, u, wind, P0, { billows: false, octaves: 1 }).core;
-    const coreC = vec3(0, 0, 0).toVar('sbCoreC');
-    const coreA = float(0).toVar('sbCoreA');
+    // ── THE CLOUDS — three decks, back to front (low, main, high), each a density field lit like a volume ──
+    // Straight-line, NOT a Loop over decks: a uniform-bound loop around this body took 84 s to compile in the lab
+    // (2026-11-03) against ~17 s for one deck; three straight-line decks, the side two lit by a lighter march, cost
+    // a fraction of that. Each deck is skipped at run time when it is off or this pixel is clear sky.
+    const accC = vec3(0, 0, 0).toVar('sbAccC');
+    const accA = float(0).toVar('sbAccA');
     const dbg = vec3(0, 0, 0).toVar('sbDbg');
-    If(scout.greaterThan(thr.sub(0.6)), () => {
-      const c1 = coreAt(TSL, u, wind, P0);
-      const detail = detailAt(TSL, u, c1);
-      // Contrast-stretched copy for the INSIDE and the light (the raw mix sits in ~0.4..0.7, too flat to break a
-      // cloud's inside up); the raw one erodes the body's edge (stretched, it cut a flat camouflage print), the
-      // stretched one only the thin skirt beyond it, into scraps.
-      const tuft = smoothstep(float(0.3), float(0.75), detail);
-      const dens = densityOf(TSL, u, c1, detail, tuft).toVar('sbDens');
-      // The INSIDE breaks up too (Inner break-up): the same billows ride across the whole cloud as density, so
-      // light and powder find tufts everywhere (author: "inside ... more painterly fluffy broken up").
-      const brk = u.shape2.w;
-      dens.assign(dens.mul(tuft.mul(brk).add(float(1.2).sub(brk))).clamp(0, 1));
-      // MIST: a diffuse, undefined veil round and between the clouds (thin enough to see the ground through).
-      const mist = smoothstep(thr.sub(0.5), thr.add(0.15), c1.core).mul(detail.mul(0.5).add(0.5)).mul(u.light3.w);
+    const tanE = L.z.div(lLen);
+    // GOLDEN-HOUR DRAMA: 0 with the sun above ~30°, 1 below ~10° (scaled by the dial). It lengthens the shadow
+    // march and pushes the lit and shaded sides apart.
+    const drama = float(1)
+      .sub(smoothstep(float(0.17), float(0.5), L.z))
+      .mul(u.light2.y)
+      .toVar('sbDrama');
+    const shadeDeck = (li, full) => {
+      const lf = float(li);
+      const lay = layerOf(TSL, u, wind, lf);
+      const Sl = lay.S;
+      const thrL = lay.thr;
+      const Tl = T.mul(lay.S.div(S));
+      // Its own height: higher decks sit nearer the eye, so they swell and slide faster as the view pans.
+      const zL = min(zDeck.mul(lay.hMul), u.eye.z.mul(0.82)).toVar(`sbZL${li}`);
+      const P0 = at(zL).toVar(`sbP0${li}`);
+      const scoutC = coreAt(TSL, u, lay, P0, { billows: false, octaves: 1 });
+      const scout = scoutC.core.toVar(`sbScout${li}`);
+      const coreC = vec3(0, 0, 0).toVar(`sbCoreC${li}`);
+      const coreA = float(0).toVar(`sbCoreA${li}`);
+      If(
+        scout
+          .greaterThan(thrL.sub(0.6))
+          .and(lay.opacity.greaterThan(float(0.001)))
+          .and(u.layOn.x.greaterThan(float(li === 1 ? -1 : 1.5))),
+        () => {
+          // The side decks are drawn from the scout's own cheap field (one octave, no puffs; the lite erosion detail
+          // frays its outline), one shadow step, no facing sample: three full-quality decks took 85 s to compile
+          // in the lab, and FXC's cost grows faster than the shader does.
+          const c1 = full ? coreAt(TSL, u, lay, P0) : scoutC;
+          const detail = detailAt(TSL, u, c1, !full);
+          // Contrast-stretched copy for the INSIDE and the light (the raw mix sits in ~0.4..0.7, too flat to break a
+          // cloud's inside up); the raw one erodes the body's edge (stretched, it cut a flat camouflage print), the
+          // stretched one only the thin skirt beyond it, into scraps.
+          const tuft = smoothstep(float(0.3), float(0.75), detail);
+          const dens = densityOf(TSL, u, c1, detail, tuft).toVar(`sbDens${li}`);
+          // The INSIDE breaks up too (Inner break-up): the same billows ride across the whole cloud as density, so
+          // light and powder find tufts everywhere (author: "inside ... more painterly fluffy broken up").
+          const brk = u.shape2.w;
+          dens.assign(dens.mul(tuft.mul(brk).add(float(1.2).sub(brk))).clamp(0, 1));
+          // MIST: a diffuse, undefined veil round and between the clouds (thin enough to see the ground through).
+          const mist = smoothstep(thrL.sub(0.5), thrL.add(0.15), c1.core).mul(detail.mul(0.5).add(0.5)).mul(u.light3.w);
 
-      // ── LIGHT ──────────────────────────────────────────────────────────────
-      // GOLDEN-HOUR DRAMA: 0 with the sun above ~30°, 1 below ~10° (scaled by the dial). It lengthens the shadow
-      // march and pushes the lit and shaded sides apart.
-      const tanE = L.z.div(lLen);
-      const drama = float(1)
-        .sub(smoothstep(float(0.17), float(0.5), L.z))
-        .mul(u.light2.y);
-      // THE SHADOW MARCH (2.5-D): step toward the sun; at each step the sun's ray has risen by distance·tan(elev)
-      // above this cloud's top; anything at that step that stands TALLER than the ray blocks it. Near steps catch a
-      // cloud's own billows (self-shadow), far steps catch neighbouring clouds (cascaded shadows). A low sun climbs
-      // slowly, so its shadows reach far — the long dramatic shadows of dusk and dawn.
-      // Measured on the SAME cheap field as the samples below (the full field's puffs sit higher on average, so a
-      // cloud's own top always cleared its sunward samples and nothing ever shaded).
-      const h0 = heightOf(TSL, u, scout);
-      // Cloud depth: how tall the clouds stand in the light (a taller dome shades more of its own far side).
-      const Td = T.mul(u.style.y);
-      const top0 = h0.mul(Td);
-      const reach = S.mul(u.light2.x).mul(float(1).add(drama.mul(1.5)));
-      const occ = float(0).toVar('sbOcc');
-      F.shadowSteps.forEach((k, i) => {
-        const d = reach.mul(k);
-        const b = heightOf(TSL, u, coreAt(TSL, u, wind, P0.add(lxy.mul(d)), { billows: false, octaves: 1 }).core);
-        const ray = top0.add(d.mul(tanE));
-        occ.assign(
-          occ.add(smoothstep(ray.sub(Td.mul(0.02)), ray.add(Td.mul(0.12)), b.mul(Td)).mul(F.shadowWeights[i]))
-        );
-      });
-      // Which way this bit of cloud faces: thinner toward the sun = its sunward flank (blazes at golden hour).
-      const b1 = heightOf(
-        TSL,
-        u,
-        coreAt(TSL, u, wind, P0.add(lxy.mul(S.mul(0.12))), { billows: false, octaves: 1 }).core
+          // ── LIGHT ────────────────────────────────────────────────────────────
+          // THE SHADOW MARCH (2.5-D): step toward the sun; at each step the sun's ray has risen by
+          // distance·tan(elev) above this cloud's top; anything there standing TALLER than the ray blocks it. Near
+          // steps catch a cloud's own billows (self-shadow), far steps its neighbours (cascaded shadows). A low sun
+          // climbs slowly, so its shadows reach far — the long dramatic shadows of dusk and dawn.
+          // Measured on the SAME cheap field as the samples (the full field's puffs sit higher on average, so a
+          // cloud's own top always cleared its sunward samples and nothing ever shaded).
+          const h0 = heightOf(TSL, u, scout, thrL);
+          // Cloud depth: how tall the clouds stand in the light (a taller dome shades more of its own far side).
+          const Td = Tl.mul(u.style.y);
+          const top0 = h0.mul(Td);
+          const reach = Sl.mul(u.light2.x).mul(float(1).add(drama.mul(1.5)));
+          const occ = float(0).toVar(`sbOcc${li}`);
+          // The side decks march two steps (their own lumps, and one neighbour), the main deck all five.
+          const steps = full ? F.shadowSteps.map((k, i) => [k, F.shadowWeights[i]]) : [[0.12, 3]];
+          let firstB = null;
+          steps.forEach(([k, wgt]) => {
+            const d = reach.mul(k);
+            const b = heightOf(
+              TSL,
+              u,
+              coreAt(TSL, u, lay, P0.add(lxy.mul(d)), { billows: false, octaves: 1 }).core,
+              thrL
+            );
+            if (!firstB) firstB = b;
+            const ray = top0.add(d.mul(tanE));
+            occ.assign(occ.add(smoothstep(ray.sub(Td.mul(0.02)), ray.add(Td.mul(0.12)), b.mul(Td)).mul(wgt)));
+          });
+          // THE DECK ABOVE shades this one: where this point's ray to the sun crosses the next deck up, is there
+          // cloud? (The low deck lies in the main deck's shadow, the main deck in the high deck's.)
+          if (li < 2) {
+            const up = layerOf(TSL, u, wind, float(li + 1));
+            const zUp = min(zDeck.mul(up.hMul), u.eye.z.mul(0.82));
+            const run = zUp
+              .sub(zL)
+              .max(float(0))
+              .div(max(tanE, float(0.08)))
+              .min(Sl.mul(3));
+            const above = coreAt(TSL, u, up, at(zUp).add(lxy.mul(run)), { billows: false, octaves: 1 }).core;
+            occ.assign(occ.add(smoothstep(up.thr.sub(0.05), up.thr.add(0.35), above).mul(up.opacity).mul(1.6)));
+          }
+          // Which way this bit of cloud faces: thinner toward the sun = its sunward flank (blazes at golden hour).
+          // (The side decks reuse their first march sample: one field evaluation fewer.)
+          const b1 = full
+            ? heightOf(
+                TSL,
+                u,
+                coreAt(TSL, u, lay, P0.add(lxy.mul(Sl.mul(0.12))), { billows: false, octaves: 1 }).core,
+                thrL
+              )
+            : firstB;
+          const facing = clamp(h0.sub(b1).mul(5), -1, 1);
+          if (debug && li === 1) dbg.assign(vec3(occ.div(4), facing.mul(0.5).add(0.5), h0));
+          const depth = occ
+            .mul(u.light1.w)
+            .mul(u.light1.x)
+            .add(dens.mul(0.4))
+            .add(float(1).sub(tuft).mul(1.2).mul(brk.div(0.75)));
+          // MULTIPLE SCATTERING, approximated by octaves (Wrenninge; skygl, Nubis): each octave lets light through
+          // more easily at half the energy, so thick cloud glows softly from inside instead of going flat grey.
+          // (A low sun lets less light wander round inside: the shade side must be able to go properly deep.)
+          const glow = u.light1.z.mul(float(1).sub(drama.mul(0.35)).max(0.2));
+          const beer = TSL.exp(depth.negate())
+            .add(TSL.exp(depth.mul(-0.4)).mul(glow.mul(0.5)))
+            .add(TSL.exp(depth.mul(-0.16)).mul(glow.mul(0.25)))
+            .div(glow.mul(0.75).add(1));
+          // POWDER: the edges facing the light lose energy, the dense middle gathers it.
+          const powder = float(1).sub(TSL.exp(dens.mul(-2.2)));
+          const sunRaw = beer.mul(mix(float(1), powder, u.light1.y));
+          // The sunward flank blazes, more so the lower the sun.
+          const sunLit = sunRaw.mul(float(1).add(facing.max(0).mul(u.light2.z).mul(drama.mul(0.9).add(0.15))));
+          // Contrast about the middle tone.
+          const sun = clamp(sunLit.sub(0.5).mul(u.light3.z).add(0.5), 0, 1.4);
+          // Ambient: the shade tone in thin cloud, the body tone where it is thick; the Ambient dial lifts or sinks it.
+          const ambBase = mix(mix(u.body, u.shadow, float(0.25)), u.body, smoothstep(float(0), float(0.8), dens));
+          const ambK = u.light3.x;
+          const amb0 = mix(u.shadow, ambBase, clamp(ambK, 0, 1)).mul(max(ambK, float(1)));
+          // THE SPLIT (golden hour): the march's own shadow decides the shade side directly — the side away from a
+          // low sun, and every cloud lying in a taller neighbour's (or a higher deck's) shadow — and it sinks into
+          // the cool shadow tone.
+          const occN = clamp(occ.div(2.5), 0, 1);
+          const shadeK = clamp(occN.mul(drama.add(0.25)).mul(u.light2.w).mul(1.1), 0, 0.92);
+          const amb = mix(amb0, u.shadow.mul(0.8), shadeK);
+          const col = mix(amb, u.hi, smoothstep(float(0.05), float(1.0), sun)).toVar(`sbCol${li}`);
+          col.assign(mix(col, u.shadow.mul(0.72), shadeK.mul(0.75)));
+          // ...and the flank facing the sun, out of every shadow, blazes in the hour's warm light.
+          const blaze = facing.max(0).mul(float(1).sub(occN)).mul(u.light2.z).mul(drama).mul(0.55);
+          col.assign(mix(col, u.rim.mul(1.12), clamp(blaze, 0, 0.85)));
+          // SILVER LINING: thin cloud on the sunward flank, backlit — strongest in a low sun.
+          const lining = float(1)
+            .sub(smoothstep(float(0), float(0.45), dens))
+            .mul(facing.max(0))
+            .mul(u.light3.y)
+            .mul(drama.add(0.3));
+          col.assign(mix(col, u.rim, clamp(lining, 0, 1)));
+          // A little broken colour, so it sits with painted art (Brush).
+          const bp = P0.div(Sl.mul(0.06));
+          const dab = mx_noise_float(vec2(bp.x.add(5.3), bp.y));
+          col.assign(col.mul(float(1).add(dab.mul(0.05).mul(u.style2.x))));
+          // OPACITY from optical thickness: thin cloud is see-through — the soft, fluffy edge is the volume's own.
+          const aCloud = float(1).sub(TSL.exp(dens.mul(u.style.x.negate())));
+          const aMist = mist.mul(float(1).sub(aCloud));
+          const mistC = mix(u.body, u.hi, float(0.5));
+          coreC.assign(
+            col
+              .mul(aCloud)
+              .add(mistC.mul(aMist))
+              .div(max(aCloud.add(aMist), float(1e-4)))
+          );
+          coreA.assign(aCloud.add(aMist).mul(lay.opacity));
+        }
       );
-      const facing = clamp(h0.sub(b1).mul(5), -1, 1);
-      if (debug) dbg.assign(vec3(occ.div(4), facing.mul(0.5).add(0.5), h0));
-      const depth = occ
-        .mul(u.light1.w)
-        .mul(u.light1.x)
-        .add(dens.mul(0.4))
-        .add(float(1).sub(tuft).mul(1.2).mul(brk.div(0.75)));
-      // MULTIPLE SCATTERING, approximated by octaves (Wrenninge; skygl, Nubis): each octave lets light through
-      // more easily at half the energy, so thick cloud glows softly from inside instead of going flat grey.
-      // (A low sun lets less light wander round inside: the shade side must be able to go properly deep.)
-      const glow = u.light1.z.mul(float(1).sub(drama.mul(0.35)).max(0.2));
-      const beer = TSL.exp(depth.negate())
-        .add(TSL.exp(depth.mul(-0.4)).mul(glow.mul(0.5)))
-        .add(TSL.exp(depth.mul(-0.16)).mul(glow.mul(0.25)))
-        .div(glow.mul(0.75).add(1));
-      // POWDER: the edges facing the light lose energy, the dense middle gathers it.
-      const powder = float(1).sub(TSL.exp(dens.mul(-2.2)));
-      const sunRaw = beer.mul(mix(float(1), powder, u.light1.y));
-      // The sunward flank blazes, more so the lower the sun.
-      const sunLit = sunRaw.mul(float(1).add(facing.max(0).mul(u.light2.z).mul(drama.mul(0.9).add(0.15))));
-      // Contrast about the middle tone.
-      const sun = clamp(sunLit.sub(0.5).mul(u.light3.z).add(0.5), 0, 1.4);
-      // Ambient: the shade tone in thin cloud, the body tone where it is thick; the Ambient dial lifts or sinks it.
-      const ambBase = mix(mix(u.body, u.shadow, float(0.25)), u.body, smoothstep(float(0), float(0.8), dens));
-      const ambK = u.light3.x;
-      const amb0 = mix(u.shadow, ambBase, clamp(ambK, 0, 1)).mul(max(ambK, float(1)));
-      // The shade side sinks into the cool shadow tone at golden hour (Shade side).
-      // THE SPLIT (golden hour): the march's own shadow decides the shade side directly — the side away from a
-      // low sun, and every cloud lying in a taller neighbour's shadow — and it sinks into the cool shadow tone.
-      const occN = clamp(occ.div(2.5), 0, 1);
-      const shadeK = clamp(occN.mul(drama.add(0.25)).mul(u.light2.w).mul(1.1), 0, 0.92);
-      const amb = mix(amb0, u.shadow.mul(0.8), shadeK);
-      const col = mix(amb, u.hi, smoothstep(float(0.05), float(1.0), sun)).toVar('sbCol');
-      col.assign(mix(col, u.shadow.mul(0.72), shadeK.mul(0.75)));
-      // ...and the flank facing the sun, out of every shadow, blazes in the hour's warm light.
-      const blaze = facing.max(0).mul(float(1).sub(occN)).mul(u.light2.z).mul(drama).mul(0.55);
-      col.assign(mix(col, u.rim.mul(1.12), clamp(blaze, 0, 0.85)));
-      // SILVER LINING: thin cloud on the sunward flank, backlit — strongest in a low sun.
-      const lining = float(1)
-        .sub(smoothstep(float(0), float(0.45), dens))
-        .mul(facing.max(0))
-        .mul(u.light3.y)
-        .mul(drama.add(0.3));
-      col.assign(mix(col, u.rim, clamp(lining, 0, 1)));
-      // A little broken colour, so it sits with painted art (Brush).
-      const bp = P0.div(S.mul(0.06));
-      const dab = mx_noise_float(vec2(bp.x.add(5.3), bp.y));
-      col.assign(col.mul(float(1).add(dab.mul(0.05).mul(u.style2.x))));
-      // OPACITY from optical thickness: thin cloud is see-through — the soft, fluffy edge is the volume's own.
-      const aCloud = float(1).sub(TSL.exp(dens.mul(u.style.x.negate())));
-      const aMist = mist.mul(float(1).sub(aCloud));
-      const mistC = mix(u.body, u.hi, float(0.5));
-      coreC.assign(
-        col
-          .mul(aCloud)
-          .add(mistC.mul(aMist))
-          .div(max(aCloud.add(aMist), float(1e-4)))
-      );
-      coreA.assign(aCloud.add(aMist));
-    });
-
-    // Back to front, premultiplied: wisps, then the cloud.
-    const accC = wispC.mul(wispA).toVar('sbAccC');
-    const accA = wispA.toVar('sbAccA');
-    accC.assign(coreC.mul(coreA).add(accC.mul(float(1).sub(coreA))));
-    accA.assign(coreA.add(accA.mul(float(1).sub(coreA))));
+      // Back to front, premultiplied "over".
+      accC.assign(coreC.mul(coreA).add(accC.mul(float(1).sub(coreA))));
+      accA.assign(coreA.add(accA.mul(float(1).sub(coreA))));
+    };
+    // Back to front: the low deck, the wisps (they belong to the main deck, just under it), the main deck, the
+    // high deck. The side decks only when the card has them on.
+    const want = decks ?? (layered ? [0, 1, 2] : [1]);
+    if (want.includes(0)) shadeDeck(0, false);
+    if (want.includes(1)) {
+      const { wispA, wispC } = wisps();
+      accC.assign(wispC.mul(wispA).add(accC.mul(float(1).sub(wispA))));
+      accA.assign(wispA.add(accA.mul(float(1).sub(wispA))));
+      shadeDeck(1, true);
+    }
+    if (want.includes(2)) shadeDeck(2, false);
     const rgb = accC.div(max(accA, float(1e-4)));
 
     // The padding rule without a Table: no cloud over the scene padding.
@@ -830,10 +998,22 @@ export function buildStorybookCloudNode(TSL, { groundXY, u, wind, visibility = n
 export function buildStorybookShadowNode(TSL, { worldXY, u, wind, offset, blur, fillShare }) {
   const { Fn, float, max, smoothstep, mix, step } = TSL;
   return Fn(() => {
-    const p = worldXY.sub(offset);
-    const c = coreAt(TSL, u, wind, p, { octaves: 2 });
-    const soft = max(blur.mul(0.5), float(0.04));
-    const cov = smoothstep(soft.negate().mul(0.5), soft, c.core.sub(u.field.x)).mul(step(float(1e-4), u.deck.z));
+    // Every deck casts (round 8): the higher a deck, the further its shadow falls from it. Transmittances multiply.
+    const trans = float(1).toVar('sbsTrans');
+    for (const li of [0, 1, 2]) {
+      const lay = layerOf(TSL, u, wind, float(li));
+      const p = worldXY.sub(offset.mul(lay.hMul));
+      const c = coreAt(TSL, u, lay, p, li === 1 ? { octaves: 2 } : { billows: false, octaves: 1 });
+      const soft = max(blur.mul(0.5), float(0.04));
+      const on = li === 1 ? float(1) : step(float(1.5), u.layOn.x);
+      const cov = smoothstep(soft.negate().mul(0.5), soft, c.core.sub(lay.thr)).mul(lay.opacity).mul(on);
+      trans.assign(trans.mul(float(1).sub(cov.mul(0.85))));
+    }
+    const cov = float(1)
+      .sub(trans)
+      .div(0.85)
+      .clamp(0, 1)
+      .mul(step(float(1e-4), u.deck.z));
     return mix(float(1), fillShare, cov.mul(u.domain2.z));
   })();
 }

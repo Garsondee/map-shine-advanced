@@ -666,6 +666,7 @@ import {
   bakeWindStructure,
   outdoorsGridSignature,
   createWindStructureMemo,
+  primeWindStructure,
   createWindGridState,
   WIND_SIM_DEFAULT_DECAY_PER_SECOND,
   WIND_SIM_DEFAULT_RELAX_ITERATIONS,
@@ -7364,7 +7365,9 @@ async function startVtPanViewerUnserialized({
           outdoors = null; // same fallback bakeWindField takes: geometry alone
           log.debug?.(`wind structure warm-up: no outdoors grid for floor ${floorIndex} (${err?.message ?? err})`);
         }
-        const { hit } = windStructureMemo.get(floorIndex, { walls, gridSpec, outdoors });
+        const { structure, hit } = windStructureMemo.get(floorIndex, { walls, gridSpec, outdoors });
+        // The dial-owned channels too (the wind shadow was ~22 ms of the commit frame on its own).
+        primeWindStructure(structure, currentWindAmbient());
         return { warmed: true, hit };
       } catch (err) {
         log.warn(`wind structure warm-up for floor ${floorIndex} failed — the commit will bake it instead:`, err);
@@ -11277,6 +11280,7 @@ async function startVtPanViewerUnserialized({
      * says the same thing a second way, belt-and-braces against a future
      * pass-plan reorder silently flipping the visual stacking.
      */
+    let cloudWarmPhase = -1;
     function runCloudTopsPass() {
       if (!cloudTopsAwake) return;
       const topsViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
@@ -11320,13 +11324,20 @@ async function startVtPanViewerUnserialized({
       // The self-shadow pre-pass (see `cloudTopsShadowRT`) — the SAME mesh,
       // transform and camera, march-only material, quarter-res target — so
       // the tops draw right after samples this frame's shadow at screenUV.
-      if (cloudTopsShadowMaterial) {
+      // (`cloudWarmPhase`: the weather warm-up runs the two halves in separate frames, 0 = this pre-pass only.)
+      if (cloudTopsShadowMaterial && cloudWarmPhase !== 1) {
         const topsMaterial = mesh.material;
         mesh.material = cloudTopsShadowMaterial;
         renderer.setRenderTarget(cloudTopsShadowRT);
         renderer.autoClearColor = true;
         renderer.render(cloudTopsScene, camera);
         mesh.material = topsMaterial;
+      }
+      if (cloudWarmPhase === 0) {
+        profiler?.end(Z.cloudTopsDraw);
+        renderer.autoClearColor = prevLowResAutoClear;
+        renderer.setRenderTarget(null);
+        return;
       }
       renderer.setRenderTarget(cloudTopsLowResRT);
       renderer.autoClearColor = true;
@@ -11376,6 +11387,9 @@ async function startVtPanViewerUnserialized({
       );
     }
 
+    // The weather warm-up draws ONE of the precipitation scenes per frame (-1 = all, the normal case): each scene
+    // builds its own shader graphs on first draw, and drawing them all in one frame was a 150-270 ms block.
+    let precipWarmSceneOnly = -1;
     function runSurfacePrecipitationPass() {
       const scenes = precipitationSubsystem.scenes;
       if (!scenes.length) return;
@@ -11389,7 +11403,10 @@ async function startVtPanViewerUnserialized({
       // carries no ownerEffectId. ONE bracket around the whole scene list —
       // it is a bare render() loop, nothing finer to split.
       profiler?.begin(Z.precipitationDraw);
-      for (const s of scenes) renderer.render(s, camera);
+      for (let i = 0; i < scenes.length; i++) {
+        if (precipWarmSceneOnly >= 0 && i !== precipWarmSceneOnly) continue;
+        renderer.render(scenes[i], camera);
+      }
       profiler?.end(Z.precipitationDraw);
       renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
@@ -15828,6 +15845,33 @@ async function startVtPanViewerUnserialized({
     // depthProxyEntries or depthPrepassEntries, and disposeSceneDepth()
     // below tears down both together.
     const depthProxyMaterialPool = createDepthProxyMaterialPool();
+    // THE OCCLUSION-RESPONSIVE (LIVE) DEPTH WRITERS, KEPT PER TILE (2026-11-03).
+    // These stay out of `depthProxyMaterialPool` on purpose (a per-tile
+    // uniform, see the 'occlusionResponsive' branch), but rebuilding one on
+    // every residency pass was the steady pan stutter: Mad Scientist rebuilt
+    // ONE identical 4.5k-char graph 886 times in an 18 s pan (2.3 s of main
+    // thread, bursts of 300-780 ms). Same mark-and-sweep pool, but every key
+    // carries the tile's own identity, so no two tiles ever share an entry.
+    const liveDepthMaterialPool = createDepthProxyMaterialPool();
+    // Revert switch: localStorage `msa.liveDepthKeep` = '0' builds a fresh one every pass again.
+    const liveDepthKeep = (() => {
+      try {
+        return globalThis.localStorage?.getItem('msa.liveDepthKeep') !== '0';
+      } catch (_) {
+        return true;
+      }
+    })();
+    const liveDepthIdentity = new WeakMap();
+    let liveDepthIdentityNext = 0;
+    const liveDepthIdOf = (obj) => {
+      if (obj == null) return 'none';
+      let id = liveDepthIdentity.get(obj);
+      if (id === undefined) {
+        id = ++liveDepthIdentityNext;
+        liveDepthIdentity.set(obj, id);
+      }
+      return id;
+    };
     /**
      * VEGETATION PROXY POSITION NODES, cached per overlay motion bag — see
      * `rebuildSceneDepthProxies`'s vegetation branch for the full account of
@@ -24978,7 +25022,29 @@ async function startVtPanViewerUnserialized({
           // synchronous ~19k-character precipitation shader compiled in the middle of play froze the page for
           // 230-400 ms apiece. The scenario's draw skips an object whose pipeline is not ready yet; `settleCompiles`
           // below waits for them, so what this leaves behind is the same set of ready pipelines.
-          pipelineGovernor.background(() => warmWeatherScenario(scenario));
+          //
+          // A precipitation scenario is drawn one scene per frame (2026-11-03): the JavaScript half of each shader
+          // (three's graph build) is what is left on this thread, and all scenes in one frame was a 150-270 ms
+          // block. Each slice re-forces the same storm and puts it away again inside its own synchronous block.
+          // Revert: localStorage `msa.weatherWarmSlices` = '0'.
+          if ((scenario.type === 'precip' || scenario.type === 'cloudTops') && weatherWarmSlicesOn) {
+            // Precipitation first PRIMES (-2: force the storm, step its compute kernels, put it away: no draw), then
+            // draws scene 0, 1, ... one per frame. Cloud tops runs its two halves (shadow pre-pass, tops + composite).
+            let slice = scenario.type === 'precip' ? -2 : 0;
+            let sceneCount = 1;
+            let firstSlice = true;
+            while (slice < sceneCount) {
+              if (!firstSlice) await nextAnimationFrame();
+              firstSlice = false;
+              const s = slice;
+              pipelineGovernor.background(() => {
+                sceneCount = warmWeatherScenario(scenario, s);
+              });
+              slice = slice === -2 ? 0 : slice + 1;
+            }
+          } else {
+            pipelineGovernor.background(() => warmWeatherScenario(scenario));
+          }
         } catch (err) {
           log.warn(`weather warm-up (${scenario.id}) failed — it will compile when first used:`, err);
         }
@@ -25003,11 +25069,21 @@ async function startVtPanViewerUnserialized({
     }
 
     /** One scenario of {@link warmUpWeatherStates}: force the gate, draw its pass(es), put the gate back. No `await`. */
-    function warmWeatherScenario(scenario) {
+    const weatherWarmSlicesOn = (() => {
+      try {
+        return globalThis.localStorage?.getItem('msa.weatherWarmSlices') !== '0';
+      } catch (_) {
+        return true;
+      }
+    })();
+    /** @param {number} [slice] - precipitation only: draw just this scene (the first slice also draws the world pass).
+     * @returns {number} how many scenes the storm has (precipitation), so the caller knows how many slices to run. */
+    function warmWeatherScenario(scenario, slice = -1) {
       const currentViewRect = viewToWorldRect(view, canvasW / canvasH);
       const windSpawnRect = clampRectToBounds(currentViewRect, dimensions.sceneRect);
       const tMs = uGlobalTimeMs.value;
       if (scenario.type === 'precip') {
+        let sceneCount = 1;
         try {
           precipitationSubsystem.sync(
             renderer,
@@ -25018,10 +25094,16 @@ async function startVtPanViewerUnserialized({
             frameSceneEye,
             { kind: scenario.kind }
           );
-          runPassPlan(scenario.passes, passImpls, {}, undefined);
+          sceneCount = Math.max(1, precipitationSubsystem.scenes.length);
+          if (slice !== -2) {
+            precipWarmSceneOnly = slice;
+            runPassPlan(slice > 0 ? ['surface.precipitation'] : scenario.passes, passImpls, {}, undefined);
+          }
         } finally {
+          precipWarmSceneOnly = -1;
           precipitationSubsystem.endWarm();
         }
+        return sceneCount;
       } else if (scenario.type === 'windTrails') {
         const calmWind = uWindSpeed01.value;
         if (!(calmWind > 0)) uWindSpeed01.value = 0.5;
@@ -25040,12 +25122,16 @@ async function startVtPanViewerUnserialized({
       } else if (scenario.type === 'cloudTops') {
         const wasAwake = cloudTopsAwake;
         cloudTopsAwake = true;
+        cloudWarmPhase = slice;
         try {
           runPassPlan(scenario.passes, passImpls, {}, undefined);
         } finally {
           cloudTopsAwake = wasAwake;
+          cloudWarmPhase = -1;
         }
+        return 2;
       }
+      return 1;
     }
 
     function sampleSceneSettle(nowMs) {
@@ -25094,6 +25180,7 @@ async function startVtPanViewerUnserialized({
       }
       depthPrepassEntries = [];
       depthProxyMaterialPool.beginPass();
+      liveDepthMaterialPool.beginPass();
       const maxRank = depthAuthority.maxRank;
       const sceneDoc = globalThis.canvas?.scene ?? null;
       const viewedFloorIndex = view?.floorIndex ?? 0;
@@ -25642,15 +25729,24 @@ async function startVtPanViewerUnserialized({
                   weights: t.appearance.uOcclusionWeights,
                 }
               : null;
-            const liveMaterial = buildSceneDepthWriterMaterial({
-              ...writerArgs,
-              liveOcclusionGate: true,
-              occlusionMaskGate,
-            });
+            // Kept per tile across passes (see liveDepthMaterialPool): the key is
+            // the shared signature plus this tile's own identity and every object
+            // the gate reads, so a changed input still builds a fresh material.
+            const liveSignature =
+              `${computeDepthProxyMaterialSignature(writerArgs)}|live:${liveDepthIdOf(t)}` +
+              `|gate:${liveDepthIdOf(occlusionMaskGate?.maskTexture)},${liveDepthIdOf(occlusionMaskGate?.elevation)},` +
+              `${liveDepthIdOf(occlusionMaskGate?.weights)}|uv:${t.uvScale?.[0] ?? 1},${t.uvScale?.[1] ?? 1}`;
+            const buildLive = () =>
+              buildSceneDepthWriterMaterial({
+                ...writerArgs,
+                liveOcclusionGate: true,
+                occlusionMaskGate,
+              });
+            const liveMaterial = liveDepthKeep ? liveDepthMaterialPool.get(liveSignature, buildLive) : buildLive();
             t.uDepthOcclusionAmount = liveMaterial.uLiveOcclusionAmount;
             const mesh = buildSceneDepthProxyMesh({ THREE, geometry: t.geometry, material: liveMaterial, z });
             depthScene.add(mesh);
-            depthProxyEntries.push({ mesh, material: liveMaterial, pooled: false });
+            depthProxyEntries.push({ mesh, material: liveMaterial, pooled: liveDepthKeep });
             continue;
           }
           // POOLED (DEFERRED-S1b) — tex/alphaThreshold/floorIndex/flags/
@@ -25745,6 +25841,7 @@ async function startVtPanViewerUnserialized({
       // changed) — evict and dispose it now, never before the loop had a
       // chance to reuse it.
       depthProxyMaterialPool.endPass((m) => m.dispose());
+      liveDepthMaterialPool.endPass((m) => m.dispose());
       // Last, after every tile material above has settled into its own state:
       // nothing in the world draw may write depth (see this function's own
       // header for the holes that would otherwise appear under tokens).
@@ -29583,6 +29680,7 @@ async function startVtPanViewerUnserialized({
           if (!entry.pooled) entry.material.dispose();
         }
         depthProxyMaterialPool.disposeAll((m) => m.dispose());
+        liveDepthMaterialPool.disposeAll((m) => m.dispose());
         depthProxyEntries = [];
         depthPrepassEntries = [];
       },

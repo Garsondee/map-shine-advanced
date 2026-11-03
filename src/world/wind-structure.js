@@ -421,6 +421,53 @@ export function deriveWindShadow(structure, directionDeg) {
 }
 
 /**
+ * THE DIAL-OWNED CHANNELS, REMEMBERED PER STRUCTURE (2026-11-03). A floor switch adopts the target floor's memoised
+ * structure on the commit frame, and the shadow alone (`upwindShelter`) was ~22 ms of a ~90 ms commit on Big Bank.
+ * Floor PREPARE calls {@link primeWindStructure} while the old floor is still on screen, so the commit finds the
+ * answer here. One entry per structure and channel (the latest dial value); the WeakMap lets a dropped structure go.
+ * The arrays are shared: callers copy them (`applyStructure` does), never write into them.
+ */
+const dialChannelCache = new WeakMap();
+
+function dialEntry(structure) {
+  let e = dialChannelCache.get(structure);
+  if (!e) {
+    e = { directionDeg: NaN, shadow: null, speed01: NaN, openness: null };
+    dialChannelCache.set(structure, e);
+  }
+  return e;
+}
+
+/** {@link deriveWindShadow}, remembered for this structure's latest direction. */
+export function cachedWindShadow(structure, directionDeg) {
+  const e = dialEntry(structure);
+  if (e.shadow === null || e.directionDeg !== directionDeg) {
+    e.shadow = deriveWindShadow(structure, directionDeg);
+    e.directionDeg = directionDeg;
+  }
+  return e.shadow;
+}
+
+/** {@link deriveWindOpenness}, remembered for this structure's latest speed. */
+export function cachedWindOpenness(structure, speed01) {
+  const e = dialEntry(structure);
+  if (e.openness === null || e.speed01 !== speed01) {
+    e.openness = deriveWindOpenness(structure, speed01);
+    e.speed01 = speed01;
+  }
+  return e.openness;
+}
+
+/**
+ * Derive a structure's dial-owned channels ahead of time (floor prepare), so adopting it later is a copy.
+ * @param {WindStructure} structure @param {{speed01: number, directionDeg: number}} ambient
+ */
+export function primeWindStructure(structure, { speed01, directionDeg }) {
+  cachedWindOpenness(structure, speed01);
+  cachedWindShadow(structure, directionDeg);
+}
+
+/**
  * Whether two grid specs describe the SAME grid. Consumers bake origin,
  * cellSize, cols and rows into their shader graphs as constants, so "same grid"
  * is precisely the condition under which a rebake can be written into the
@@ -503,13 +550,13 @@ export function createWindGridState({ textures, toHalf }) {
   let solidTexture = null;
 
   function writeOpenness(speed01) {
-    opennessValues.set(deriveWindOpenness(structure, speed01));
+    opennessValues.set(cachedWindOpenness(structure, speed01));
     writeHalfFloatChannel(opennessData, OPENNESS_TEXTURE_CHANNELS.openness, opennessValues, half, 1);
     opennessTexture.needsUpdate = true;
   }
 
   function writeShadow(directionDeg) {
-    shadowValues.set(deriveWindShadow(structure, directionDeg));
+    shadowValues.set(cachedWindShadow(structure, directionDeg));
     writeHalfFloatChannel(wallAvoidData, WALL_AVOID_TEXTURE_CHANNELS.shadow, shadowValues, half, 0);
     wallAvoidTexture.needsUpdate = true;
   }

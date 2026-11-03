@@ -19,6 +19,7 @@
  */
 import * as THREE from '../../../../src/vendor/three/three.webgpu.js';
 import { createWindowSurfaceSubsystem } from '../window-surface-subsystem.js';
+import { buildWindowPresenceGrid, deriveWindowRainField } from '../window-rain-field.js';
 
 const CELL = 20;
 const GRID = 128;
@@ -318,6 +319,81 @@ export async function run(t) {
     envRef.value = rainyEnv({ tMs: 3000 });
     sub.sync(0);
     ok('rain-flow: painting an outdoors mask later is picked up', sub.getStatus().rain.flow.derived === true);
+  }
+
+  // ── 6b. In the page the field is derived in a worker, never on the frame ──
+  {
+    const posted = [];
+    let created = 0;
+    let terminated = 0;
+    class FakeWorker {
+      constructor() {
+        created++;
+        this.onmessage = null;
+        this.onerror = null;
+      }
+      postMessage(data) {
+        posted.push({ worker: this, data });
+      }
+      terminate() {
+        terminated++;
+      }
+    }
+    // The worker's own body, run when the test says so.
+    const workerField = ({ mask, outdoors, spec, easePx }) => {
+      const presence = buildWindowPresenceGrid({ ...mask, spec });
+      return presence ? deriveWindowRainField({ outdoors, spec, presence, easePx }) : null;
+    };
+    const answer = (p) => {
+      p.worker.onmessage({ data: { job: p.data.job, field: workerField(p.data) } });
+    };
+    const hadWorker = 'Worker' in globalThis;
+    const prevWorker = globalThis.Worker;
+    globalThis.Worker = FakeWorker;
+    try {
+      const state = { enabled: true, params: {}, debugChannel: 0, perfTier: 1 };
+      const envRef = { value: null };
+      const outdoorsRef = { value: grid() };
+      const counters = { textures: 0 };
+      const sub = makeSubsystem({ state, house, envRef, outdoorsRef, counters });
+      sub.sync(0);
+      await Promise.resolve();
+      await Promise.resolve();
+      envRef.value = rainyEnv({ tMs: 1000 });
+      sub.sync(0);
+      let f = sub.getStatus().rain.flow;
+      ok('rain-worker: the first rain asks the worker and does not derive on the frame', posted.length === 1 && f.derived === false && f.attempts === 1);
+      for (let i = 0; i < 10; i++) {
+        envRef.value = rainyEnv({ tMs: 1016 + i * 16 });
+        sub.sync(0);
+      }
+      ok('rain-worker: one question while the answer is pending, not one per frame', posted.length === 1 && created === 1);
+      answer(posted[0]);
+      f = sub.getStatus().rain.flow;
+      ok('rain-worker: the answer is uploaded', f.derived === true && f.litCells > 0 && f.levels >= 1);
+
+      // A question overtaken by a newer one: the stale answer must not land.
+      state.params = { rainCornerEasePx: 120 };
+      envRef.value = rainyEnv({ tMs: 5000 });
+      sub.sync(0);
+      state.params = { rainCornerEasePx: 60 };
+      envRef.value = rainyEnv({ tMs: 5016 });
+      sub.sync(0);
+      ok('rain-worker: each change asks again', posted.length === 3);
+      // A marked stale answer: if it were uploaded, the status would show its impossible lit-cell count.
+      const staleData = posted[1].data;
+      const staleField = workerField(staleData);
+      staleField.stats = { ...staleField.stats, litCells: 999999 };
+      posted[1].worker.onmessage({ data: { job: staleData.job, field: staleField } });
+      ok('rain-worker: a stale answer is dropped', sub.getStatus().rain.flow.litCells !== 999999);
+      answer(posted[2]);
+      ok('rain-worker: the current answer lands', sub.getStatus().rain.flow.derived === true);
+      sub.dispose();
+      ok('rain-worker: dispose ends the worker', terminated === 1);
+    } finally {
+      if (hadWorker) globalThis.Worker = prevWorker;
+      else delete globalThis.Worker;
+    }
   }
 
   // ── 7. The author's dials ────────────────────────────────────────────────

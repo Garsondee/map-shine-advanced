@@ -238,6 +238,7 @@ export {
   computeFineConnectivity,
   deriveWindOpenness,
   deriveWindShadow,
+  primeWindStructure,
   sameWindGrid,
   writeHalfFloatChannel,
   writeSolidMaskData,

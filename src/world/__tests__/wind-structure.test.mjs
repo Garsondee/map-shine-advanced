@@ -30,6 +30,9 @@ import {
   computeFineConnectivity,
   deriveWindOpenness,
   deriveWindShadow,
+  cachedWindShadow,
+  cachedWindOpenness,
+  primeWindStructure,
   sameWindGrid,
   writeHalfFloatChannel,
   writeSolidMaskData,
@@ -349,6 +352,24 @@ export function run(t) {
       'no walls, no shadow',
       deriveWindShadow(bakeWindStructure({ walls: [], gridSpec: specFor() }), 90).every((v) => v === 0)
     );
+
+    // Remembered per structure (floor prepare primes it, the commit frame reads it).
+    const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+    const c90 = cachedWindShadow(s, 90);
+    ok('cached shadow: the same values as deriving it', same(c90, east));
+    ok('cached shadow: asked again for the same direction, the same array (no re-derive)', cachedWindShadow(s, 90) === c90);
+    const c270 = cachedWindShadow(s, 270);
+    ok('cached shadow: a new direction derives again', c270 !== c90 && same(c270, west));
+    const s2 = bakeWindStructure({ walls: b.walls, gridSpec: specFor() });
+    ok('cached shadow: kept per structure, never shared between two', cachedWindShadow(s2, 270) !== c270);
+    const o5 = cachedWindOpenness(s, 0.5);
+    ok('cached openness: the same values as deriving it', same(o5, deriveWindOpenness(s, 0.5)));
+    ok('cached openness: same speed, same array', cachedWindOpenness(s, 0.5) === o5);
+    ok('cached openness: a new speed derives again', cachedWindOpenness(s, 0.9) !== o5);
+    const s3 = bakeWindStructure({ walls: b.walls, gridSpec: specFor() });
+    primeWindStructure(s3, { speed01: 0.3, directionDeg: 45 });
+    const primed = cachedWindShadow(s3, 45);
+    ok('prime: derives ahead, so the later read is the primed array', cachedWindShadow(s3, 45) === primed && same(primed, deriveWindShadow(s3, 45)));
   }
 
   // ── structure bake products are the right shape ────────────────────────────

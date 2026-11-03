@@ -338,7 +338,57 @@ export function createWindowSurfaceSubsystem({
     levels: 0,
     /** How many times a derivation actually ran (the field is only re-derived when its inputs change). */
     attempts: 0,
+    /** The worker job whose answer is still wanted (0 = none), and the `source` it was asked for. */
+    job: 0,
+    jobSource: null,
   };
+  // THE FIELD IS DERIVED IN A WORKER when the page has one (2026-11-03): on the main thread the first rain frame was
+  // a 310-370 ms freeze. Node (the tests) has no `Worker` and derives inline, as before. Revert switch:
+  // localStorage `msa.rainFieldWorker` = '0'.
+  let rainFieldWorker = null;
+  let rainFieldWorkerBroken = false;
+  let disposed = false;
+  function getRainFieldWorker() {
+    if (rainFieldWorker || rainFieldWorkerBroken) return rainFieldWorker;
+    try {
+      if (typeof Worker !== 'function' || globalThis.localStorage?.getItem('msa.rainFieldWorker') === '0') {
+        rainFieldWorkerBroken = true;
+        return null;
+      }
+      rainFieldWorker = new Worker(new URL('./window-rain-field.worker.js', import.meta.url), { type: 'module' });
+    } catch (err) {
+      log.warn('rain field worker unavailable, deriving on the main thread', err);
+      rainFieldWorkerBroken = true;
+      return null;
+    }
+    rainFieldWorker.onmessage = (e) => {
+      const { job, field, error } = e.data || {};
+      if (disposed || job !== rainFlow.job || rainFlow.jobSource !== rainFlow.source) return;
+      rainFlow.job = 0;
+      rainFlow.jobSource = null;
+      if (error) {
+        log.warn(`rain field derivation failed in the worker: ${error}`);
+        uploadRainFlow(null);
+        return;
+      }
+      uploadRainFlow(field);
+    };
+    rainFieldWorker.onerror = (e) => {
+      // A worker that cannot load answers nothing: derive the outstanding job here instead, and every later one too.
+      log.warn('rain field worker failed, deriving on the main thread', e?.message ?? e);
+      e?.preventDefault?.();
+      rainFieldWorkerBroken = true;
+      rainFieldWorker?.terminate();
+      rainFieldWorker = null;
+      const pending = rainFlow.jobSource;
+      rainFlow.job = 0;
+      rainFlow.jobSource = null;
+      if (pending && pending === rainFlow.source) {
+        rainFlow.source = null; // the next rain frame derives it inline
+      }
+    };
+    return rainFieldWorker;
+  }
 
   function ensureNeutralFlowTextures() {
     if (neutralDirs) return;
@@ -826,6 +876,27 @@ export function createWindowSurfaceSubsystem({
           w: Math.max(2, Math.round((256 * rectW) / longSide)),
           h: Math.max(2, Math.round((256 * rectH) / longSide)),
         };
+    const worker = getRainFieldWorker();
+    if (worker) {
+      // Both halves run there (the presence grid samples the full-size mask: ~160 ms of the ~300 on its own); the
+      // mask is copied, never transferred, because its texture still wraps it. Until the answer lands the rain keeps
+      // whatever flow it had (neutral on the first rain, while the pane is still nearly dry).
+      rainFlow.job += 1;
+      rainFlow.jobSource = rainFlow.source;
+      worker.postMessage({
+        job: rainFlow.job,
+        mask: {
+          data: maskPixels.data,
+          width: maskPixels.width,
+          height: maskPixels.height,
+          rect: { ...loadedMaskRect },
+        },
+        outdoors: outdoors ? { spec: { ...outdoors.spec }, data: outdoors.data } : null,
+        spec: { ...spec },
+        easePx: look.cornerEasePx,
+      });
+      return;
+    }
     const presence = buildWindowPresenceGrid({
       data: maskPixels.data,
       width: maskPixels.width,
@@ -1235,6 +1306,9 @@ export function createWindowSurfaceSubsystem({
       surface.windowMaterial?.dispose?.();
       surface.debugMaterial?.dispose?.();
       maskTexture?.dispose?.();
+      disposed = true;
+      rainFieldWorker?.terminate();
+      rainFieldWorker = null;
       rainFlow.dirsTex?.dispose?.();
       rainFlow.auxTex?.dispose?.();
       neutralDirs?.dispose?.();

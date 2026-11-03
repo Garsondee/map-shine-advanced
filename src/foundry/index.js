@@ -31,6 +31,7 @@ export {
   getActiveSceneBackground,
   getActiveSceneFloors,
   computeVisibleFloorIndices,
+  visibleLevelIdsFor,
   resolveAssetUrl,
   isImageUrl,
   // VIDEO TILES (mythica-machina-press#430) — the sibling extension check

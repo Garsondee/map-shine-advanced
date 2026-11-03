@@ -12,6 +12,7 @@ import {
   getActiveSceneBackground,
   getActiveSceneFloors,
   computeVisibleFloorIndices,
+  visibleLevelIdsFor,
 } from '../active-scene-source.js';
 
 export function run(t) {
@@ -348,6 +349,81 @@ export function run(t) {
       'computeVisibleFloorIndices: unknown viewedIndex is a clean empty array, not a throw',
       computeVisibleFloorIndices(floors, 99).length === 0
     );
+  }
+
+  // --- visibleLevelIdsFor: visibility read LIVE, not from the start snapshot ---
+  // Big Bank (MSA), 2026-11-03: the basement listed the opaque ground floor
+  // above it as visible, so the ground covered it. Fixing the Level live did
+  // nothing until a page reload, because the redraw re-read the snapshot.
+  {
+    const bigBank = (undergroundSees) => {
+      const scene = {
+        name: 'Big Bank (MSA)',
+        levels: [
+          {
+            id: 'ground',
+            name: 'Ground Level',
+            elevation: { bottom: 0, top: 20 },
+            background: { src: 'm/ground.webp' },
+            visibility: { levels: new Set(['underground']) },
+          },
+          {
+            id: 'underground',
+            name: 'Underground Level',
+            elevation: { bottom: -20, top: 0 },
+            background: { src: 'm/underground.webp' },
+            visibility: { levels: new Set(undergroundSees) },
+          },
+        ],
+      };
+      return scene;
+    };
+    const scene = bigBank(['ground']);
+    const started = getActiveSceneFloors(scene).floors; // what a viewer captures at start
+    const ugIndex = started.find((f) => f.id === 'underground').index;
+    ok(
+      'visibleLevelIdsFor: before the edit, the basement draws the ground floor over itself (the reported bug)',
+      JSON.stringify(visibleLevelIdsFor(started, getActiveSceneFloors(scene).floors, ugIndex)) ===
+        JSON.stringify(['underground', 'ground'])
+    );
+    // The author's live fix: clear the basement's visible levels.
+    scene.levels[1].visibility.levels.clear();
+    const live = getActiveSceneFloors(scene).floors;
+    ok(
+      'visibleLevelIdsFor: after a LIVE visibility edit, the next draw follows it (no reload needed)',
+      JSON.stringify(visibleLevelIdsFor(started, live, ugIndex)) === JSON.stringify(['underground'])
+    );
+    ok(
+      'visibleLevelIdsFor: the start snapshot alone would still have drawn the ground floor (why this exists)',
+      JSON.stringify(computeVisibleFloorIndices(started, ugIndex).map((i) => started[i].id)) ===
+        JSON.stringify(['underground', 'ground'])
+    );
+    const groundIndex = started.find((f) => f.id === 'ground').index;
+    ok(
+      'visibleLevelIdsFor: the ground floor still sees down into the basement (its own setting untouched)',
+      JSON.stringify(visibleLevelIdsFor(started, live, groundIndex)) === JSON.stringify(['underground', 'ground'])
+    );
+  }
+  {
+    // A level added since start: indices shifted, so the started list is used.
+    const started = [
+      { index: 0, id: 'b', visibilityLevelIds: [] },
+      { index: 1, id: 'g', visibilityLevelIds: ['b'] },
+    ];
+    const reordered = [
+      { index: 0, id: 'cellar', visibilityLevelIds: [] },
+      { index: 1, id: 'b', visibilityLevelIds: ['cellar'] },
+      { index: 2, id: 'g', visibilityLevelIds: [] },
+    ];
+    ok(
+      'visibleLevelIdsFor: when the live floors no longer line up, the started list is used',
+      JSON.stringify(visibleLevelIdsFor(started, reordered, 1)) === JSON.stringify(['b', 'g'])
+    );
+    ok(
+      'visibleLevelIdsFor: a failed live read (null) falls back to the started list',
+      JSON.stringify(visibleLevelIdsFor(started, null, 1)) === JSON.stringify(['b', 'g'])
+    );
+    ok('visibleLevelIdsFor: no floors at all is a clean empty array', visibleLevelIdsFor(null, null, 0).length === 0);
   }
 
   // --- THE PER-FRAME CACHE (2026-10-14, GC churn) -----------------------------

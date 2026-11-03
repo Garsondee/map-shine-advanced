@@ -628,6 +628,7 @@ import { NotBuiltError } from './core/not-built.js';
 import {
   getActiveSceneFloors,
   computeVisibleFloorIndices,
+  visibleLevelIdsFor,
   collectSceneLayers,
   collectTokens,
   diagnoseTokens,
@@ -16914,8 +16915,12 @@ function install() {
     const allLevelIds = floors.map((f) => f.id).filter(Boolean);
 
     const buildItems = (viewedFloorIndex) => {
-      const visibleIndices = computeVisibleFloorIndices(floors, viewedFloorIndex);
-      const visibleLevelIds = visibleIndices.map((i) => floors[i]?.id).filter(Boolean);
+      // Visibility read LIVE, not from `floors` (captured at start): an edit to a
+      // Level's "visible levels" must show on the next redraw, not after a page
+      // reload (Big Bank basement, 2026-11-03 — see visibleLevelIdsFor's doc).
+      // getActiveSceneFloors is cached; this costs a comparison, not a rebuild.
+      const live = getActiveSceneFloors(sceneDoc);
+      const visibleLevelIds = visibleLevelIdsFor(floors, live.ok ? live.floors : null, viewedFloorIndex);
       const viewedLevelId = floors[viewedFloorIndex]?.id;
       // Tokens join the SAME flat list as level art and tiles, and are sorted by
       // the same law (scene/layer-order.js) — they are drawables with a different

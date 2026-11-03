@@ -447,3 +447,45 @@ export function computeVisibleFloorIndices(floors, viewedIndex) {
     .map((f) => f.index)
     .sort((a, b) => a - b);
 }
+
+/**
+ * The Level ids to DRAW with the viewed floor, reading each floor's
+ * `visibility.levels` from the LIVE scene instead of from the floor list a
+ * running viewer captured when it started.
+ *
+ * WHY (author-reported live, 2026-11-03, Big Bank (MSA)): the viewer's `floors`
+ * array is a snapshot taken once at start. A Level edit does fire a redraw
+ * (`updateLevel` is in SCENE_LAYER_DOCUMENTS), but the redraw re-read the OLD
+ * visibility set from that snapshot. So after the basement's "visible levels"
+ * was corrected (it listed the opaque ground floor ABOVE it, which then covered
+ * the whole basement), the ground floor kept being drawn over it on every floor
+ * switch until a full page reload.
+ *
+ * Only the visibility is taken live. If the live floors no longer line up with
+ * the started ones (a level added, removed or re-ordered by elevation), floor
+ * INDICES now mean something else, so the started list is used: that kind of
+ * change needs the full viewer restart a canvas redraw already gives it.
+ *
+ * @param {Array<{index:number, id:string, visibilityLevelIds?:string[]}>} startedFloors
+ *   the floors the viewer started with.
+ * @param {Array<{index:number, id:string, visibilityLevelIds?:string[]}>|null|undefined} liveFloors
+ *   `getActiveSceneFloors(scene).floors` read now (null when that read failed).
+ * @param {number} viewedFloorIndex
+ * @returns {string[]} Level ids, the viewed floor's included, elevation-ascending.
+ */
+export function visibleLevelIdsFor(startedFloors, liveFloors, viewedFloorIndex) {
+  const source = sameFloorOrder(startedFloors, liveFloors) ? liveFloors : startedFloors;
+  if (!Array.isArray(source)) return [];
+  return computeVisibleFloorIndices(source, viewedFloorIndex)
+    .map((i) => source.find((f) => f.index === i)?.id)
+    .filter(Boolean);
+}
+
+/** Same floors, same ids, same indices, same order: indices still mean the same Levels. */
+function sameFloorOrder(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]?.id !== b[i]?.id || a[i]?.index !== b[i]?.index) return false;
+  }
+  return true;
+}

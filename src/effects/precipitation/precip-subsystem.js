@@ -273,6 +273,8 @@ export function createPrecipitationSubsystem({
   /** Ash Disturbance's authored floor — the mantle's own `ashMask` input (`setAshMaskTexture` below). */
   let ashMask = { texture: null, rect: null };
   let lastTuning = null;
+  /** This frame's cloud deck + rain field (`setCloudDeck`, cloud-rain.js); null = the old fixed-height fall. */
+  let cloudDeck = null;
   /** ⭐ THE STAMP QUEUE'S OWN STATE — `id → {x, y}` as of the last SAMPLE (not
    * the last frame; sampling runs at the mantle's own cadence, see
    * `sampleTrampleStamps`). A fresh Map after a floor change (`notifyFloorChanged`
@@ -544,6 +546,8 @@ export function createPrecipitationSubsystem({
     }
     // THE SHARED EYE (scene/scene-eye.js) — after the rect, which still sets the pace and sizes.
     if (eye) engine.setEye(eye);
+    // THE CLOUD DECK (cloud-rain.js) — after the eye: born at the deck, seen by the clouds' own camera.
+    engine.setCloudDeck?.(cloudDeck);
     // The falling drops may reach past the map (`fallBounds`: the Table's effects extent, over a parallax
     // canopy overhanging the recess wall); the splashes below stay on the ground, inside the scene rect.
     const fallBounds = st.fallBounds !== undefined ? st.fallBounds : st.sceneBounds;
@@ -567,6 +571,8 @@ export function createPrecipitationSubsystem({
     }
     if (rect) splash.setWorldRect(rect);
     if (st.sceneBounds !== undefined) splash.setSceneBounds(st.sceneBounds);
+    // Splashes land where THIS rain lands: the fall's landing shift is fresh from its step above.
+    splash.setCloudDeck?.(cloudDeck ? { ...cloudDeck, landingShiftPx: engine.landingShiftPx?.() } : null);
     splash.setFrame(frame);
     // ⭐ THE SKY'S OWN COLOUR (day/night, whatever the scene's ambient is doing
     // right now) — a splash is standing water and ought to mirror it, the way
@@ -1238,6 +1244,17 @@ export function createPrecipitationSubsystem({
      * drips it sheds and a hover-faded roof shows them. Cheap; call whenever the
      * draw list is re-sorted.
      */
+    /**
+     * Where the rain comes from this frame — the cloud deck and its rain field (`cloud-rain.js`). Call before
+     * `sync`. Shape: `precip-runtime.js#setCloudDeck`'s. `null` returns every engine to the old fall.
+     * @param {object|null} c
+     */
+    setCloudDeck(c) {
+      // "Rain follows clouds" (the card's `cloudLink`) scales the link; 0 = rain everywhere, as before.
+      const dial = Number.isFinite(lastTuning?.cloudLink) ? Math.max(0, Math.min(1, lastTuning.cloudLink)) : 1;
+      cloudDeck = c ? { ...c, linkWeight: (c.linkWeight ?? 0) * dial } : null;
+    },
+
     setDripLayerOrder(order) {
       if (!Number.isFinite(order) || order === dripLayerOrder) return;
       dripLayerOrder = order;

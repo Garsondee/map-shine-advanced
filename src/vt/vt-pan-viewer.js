@@ -632,6 +632,10 @@ import {
   storybookLight,
   buildStorybookCloudNode,
   buildStorybookShadowNode,
+  // RAIN FROM THE CLOUDS (2026-11-03, effects/precipitation/cloud-rain.js).
+  buildStorybookRainFieldNode,
+  cloudRainLinkWeight,
+  virtualRainDeck,
   // The infravision hot-body recolour's slot count — the producer below must
   // agree with the node graph's own fixed unroll count.
   PLAYER_VISION_TOKEN_SLOTS,
@@ -4574,6 +4578,75 @@ async function startVtPanViewerUnserialized({
       }
       renderer.setRenderTarget(prevTarget);
       cloudShadowCacheHoldsClear = true;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RAIN FROM THE CLOUDS (2026-11-03, effects/precipitation/cloud-rain.js) — the rain field: how much cloud is
+    // straight above each point of the birth rect, so the fall and the splashes are born under the clouds. Small
+    // (the field is low-frequency) and drawn only while it rains; the cloud-shadow cache's uv->world quad, so
+    // write and read cannot disagree. The deck (storybook, or a flat virtual one) is handed over every frame.
+    // ═══════════════════════════════════════════════════════════════════
+    const CLOUD_RAIN_FIELD_W = 256;
+    const CLOUD_RAIN_FIELD_H = 160;
+    /** The field covers the birth rect padded this much per side: the fall's 25% margin plus upwind reach. */
+    const CLOUD_RAIN_FIELD_PAD = 0.75;
+    const cloudRainRT = allocator.create('precip.cloudRain', {
+      resolvedW: CLOUD_RAIN_FIELD_W,
+      resolvedH: CLOUD_RAIN_FIELD_H,
+      screenSized: false,
+      type: THREE.HalfFloatType,
+      colorSpace: THREE.NoColorSpace,
+      filter: 'linear',
+      depth: false,
+    });
+    const uCloudRainRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
+    const cloudRainMaterial = new THREE.NodeMaterial();
+    {
+      const { mix, uv, vec2, vec4, float } = THREE.TSL;
+      const r = uCloudRainRect;
+      const worldXY = vec2(mix(r.x, r.z, uv().x), mix(r.y, r.w, uv().y));
+      const f = buildStorybookRainFieldNode(THREE.TSL, { worldXY, u: sbU, wind: sbWind });
+      cloudRainMaterial.fragmentNode = vec4(f, float(0), float(0), float(1));
+    }
+    cloudRainMaterial.depthTest = false;
+    cloudRainMaterial.depthWrite = false;
+    const cloudRainQuad = new THREE.QuadMesh(cloudRainMaterial);
+    /** The storybook deck and the cloud drift velocity, stashed by the per-frame cloud block. */
+    let lastStorybookDeck = null;
+    let cloudDriftVelPxS = { x: 0, y: 0 };
+    /**
+     * Per frame, before `precipitationSubsystem.sync`: render the rain field (storybook clouds, raining) and hand
+     * the subsystem its deck. Realistic style or a clear sky: a flat virtual deck and no field (rain everywhere,
+     * physics unchanged).
+     * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} spawnRect @param {object|null} eye
+     * @param {number} precip01
+     */
+    function updateCloudRain(spawnRect, eye, precip01) {
+      if (!precipitationSubsystem || !spawnRect || !eye) return;
+      const board = sceneRectToMinMax(dimensions.sceneRect);
+      const sb = cloudStyleStorybook && lastStorybookDeck ? lastStorybookDeck : null;
+      const deck = sb ?? virtualRainDeck(eye.height, board);
+      // The card's "Rain follows clouds" dial is applied by the subsystem (it holds the tuning).
+      const linkWeight = sb ? cloudRainLinkWeight(sb.fill, 1) : 0;
+      let rect = null;
+      if (linkWeight > 0 && precip01 > 0) {
+        const mx = (spawnRect.maxX - spawnRect.minX) * CLOUD_RAIN_FIELD_PAD;
+        const my = (spawnRect.maxY - spawnRect.minY) * CLOUD_RAIN_FIELD_PAD;
+        rect = { minX: spawnRect.minX - mx, minY: spawnRect.minY - my, maxX: spawnRect.maxX + mx, maxY: spawnRect.maxY + my };
+        uCloudRainRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+        const prevTarget = renderer.getRenderTarget();
+        renderer.setRenderTarget(cloudRainRT);
+        cloudRainQuad.render(renderer);
+        renderer.setRenderTarget(prevTarget);
+      }
+      precipitationSubsystem.setCloudDeck({
+        deck,
+        eye,
+        texture: rect ? cloudRainRT.texture : null,
+        rect,
+        linkWeight: rect ? linkWeight : 0,
+        cloudVelPxS: cloudDriftVelPxS,
+      });
     }
 
     /**
@@ -13013,6 +13086,8 @@ async function startVtPanViewerUnserialized({
         });
         cloudDriftX += step.dx;
         cloudDriftY += step.dy;
+        // The deck's drift velocity, for the rain (a drop falls through air that outruns its cloud).
+        if (time.dtSec > 0) cloudDriftVelPxS = { x: step.dx / time.dtSec, y: step.dy / time.dtSec };
         cloudBoil += step.dBoil;
         // ⚠️ THE VISUAL CAP (`CLOUD_COVER_VISUAL_MAX`'s own header) — applied
         // HERE, at the live push, never inside `pushCloudUniforms` itself
@@ -13052,6 +13127,7 @@ async function startVtPanViewerUnserialized({
             eyeHeight: sbEye?.height,
             params: { ...sbTops, storybookShadowDensity: cp.storybookShadowDensity },
           });
+          lastStorybookDeck = sbDeck;
           pushStorybookUniforms(sbU, {
             deck: sbDeck,
             palette: storybookPalette(env.sun, {
@@ -23463,6 +23539,7 @@ async function startVtPanViewerUnserialized({
       // wall delta; `env.time.dtSec` is the sim one, and using it here would be
       // a genuine bug in the other direction.
       if (view && precipitationSubsystem) {
+        updateCloudRain(windSpawnRect, frameSceneEye, lastEnvSnapshot?.env?.weather?.precip01 ?? 0);
         precipitationSubsystem.sync(
           renderer,
           lastEnvSnapshot?.env?.time?.realDtSec ?? 0,

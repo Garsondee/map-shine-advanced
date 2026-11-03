@@ -162,6 +162,15 @@ export const PRECIP_SPECIES = Object.freeze({
       // 2026-10-16: floor raised 1400 -> 2800. Author: slow drops "look odd".
       // The slowest drop is now half the fastest, not a fifth.
       speedPxS: Object.freeze([2800, 5200]),
+      /**
+       * ⭐ THE REAL FALL (2026-11-03) — read when the fall is born at the cloud deck (`precip-runtime.js#
+       * setCloudDeck`, the viewer's normal case). Terminal velocity of a raindrop, Gunn & Kinzer (1949): 2.0 m/s
+       * for a 0.5 mm drizzle drop, 6.5 m/s at 2 mm, 8.9 m/s at 4.5 mm. `dropLaw` maps each drop's size to its
+       * speed through Atlas et al.'s fit, so a fat drop is a fast drop by physics, not by a shared hash alone.
+       * `speedPxS` above is the deck-less fall's (V2's screen-space numbers, 19-57 m/s at 65.6 px/m).
+       */
+      terminalMps: Object.freeze([2.0, 8.9]),
+      dropLaw: true,
       /** Rain leans with the wind but is not carried by it — it has mass.
        * (Hail will be ~0.1, spore ~1.0; this is the middle of that scale.) */
       windCarry01: 0.45,
@@ -490,6 +499,15 @@ export const PRECIP_SPECIES = Object.freeze({
     fall: Object.freeze({
       /** The fastest thing the table sends — mass beats drag. */
       speedPxS: Object.freeze([4200, 7400]),
+      /** The real fall (deck mode): pea hail ~9 m/s to golf-ball hail ~32 m/s. */
+      terminalMps: Object.freeze([9, 32]),
+      /**
+       * Deck mode's answer to the author's *"drop much more cleanly downwards, though it can be blown"*, in
+       * physics: a stone leaves the cloud from an updraft core with only a share of the surface wind's speed, and
+       * with a response time of 1-3 s (`tau = v_t / g`) it never catches up during its fall — so the sky leans
+       * and the hail comes down steeper through it.
+       */
+      birthCarry01: 0.3,
       /**
        * ⭐ ALMOST NO TURBULENCE — author: *"hail shouldn't be turbulent in the
        * way that snow is turbulent as it has enough weight to drop much more
@@ -956,6 +974,8 @@ export const PRECIP_SPECIES = Object.freeze({
        * slower than rain, which is why the same runtime reads as a completely
        * different weather with no new code. */
       speedPxS: Object.freeze([40, 115]),
+      /** The real fall (deck mode): single crystals ~0.5 m/s, aggregates ~1 m/s, rimed flakes ~1.5 m/s. */
+      terminalMps: Object.freeze([0.5, 1.5]),
       /** Flakes are nearly wind-borne — a gust genuinely carries them
        * sideways, where rain merely leans. */
       windCarry01: 0.85,

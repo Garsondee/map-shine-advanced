@@ -119,6 +119,18 @@ export const PRECIPITATION_PARAMS = Object.freeze({
     help: 'How strongly wind throws a splash`s crown downwind and asymmetric, rather than leaving it round. From directly above, a windier impact should look struck-from-one-side, not motion-blurred.',
   }),
 
+  // ── CLOUDS — where the rain comes from (cloud-rain.js, 2026-11-03) ───────
+  cloudLink: Object.freeze({
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: 1,
+    category: 'Fall',
+    label: 'Rain follows clouds',
+    help: 'How strongly rain and snow gather under the clouds: 1 = showers fall from the clouds and land downwind of them, with dry gaps between; 0 = an even fall everywhere. A clear sky always rains everywhere.',
+  }),
+
   // ── FALL — the falling body itself (precip-runtime.js) ───────────────────
   sizeScale: Object.freeze({
     type: 'float',
@@ -152,10 +164,12 @@ export const PRECIPITATION_PARAMS = Object.freeze({
     min: 0.1,
     max: 3,
     step: 0.05,
-    default: 0.6,
+    // 2026-11-03: 0.6 -> 1. Rain now falls from the cloud deck at REAL terminal velocities (precip-runtime.js
+    // #setCloudDeck), so 1 means "as fast as real drops fall"; the old 0.6 slowed a fall that was 3-8x too fast.
+    default: 1,
     category: 'Fall',
     label: 'Fall speed',
-    help: 'Scales how fast rain/snow falls, independent of size or streak length.',
+    help: 'Scales how fast rain/snow falls from the clouds. 1 = real terminal speed (raindrops 2-9 m/s, snow 0.5-1.5 m/s); with any wind this sets how far the rain leans, since a slower drop is blown further while it falls.',
   }),
   // ⭐ THE TORRENT (torrent-render.js, 2026-10-27) — screen-space wind-driven
   // rain sheets that only rise in the rain fader's last quarter (rain's own

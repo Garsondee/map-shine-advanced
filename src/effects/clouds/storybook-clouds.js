@@ -743,11 +743,13 @@ export function buildStorybookCloudNode(
       .div(max(D.z, float(0.05)))
       .toVar('sbInvDz');
     const at = (z) => lensXY.add(D.xy.mul(z.mul(invDz)));
-    const rel0 = lensXY.sub(u.domeCentre).div(max(u.deck2.z, float(1)));
-    const zDeck = u.deck2.x
-      .add(u.deck2.y.mul(float(1).sub(min(dot(rel0, rel0), float(1.7)))))
-      .max(float(0))
-      .toVar('sbZ');
+    const zDeck = storybookDeckHeightNode(TSL, {
+      xy: lensXY,
+      base: u.deck2.x,
+      dome: u.deck2.y,
+      centre: u.domeCentre,
+      radius: u.deck2.z,
+    }).toVar('sbZ');
     const S = u.deck.x;
     const T = u.deck.y;
     const thr = u.field.x;
@@ -1015,5 +1017,57 @@ export function buildStorybookShadowNode(TSL, { worldXY, u, wind, offset, blur, 
       .clamp(0, 1)
       .mul(step(float(1e-4), u.deck.z));
     return mix(float(1), fillShare, cov.mul(u.domain2.z));
+  })();
+}
+
+// ---------------------------------------------------------------------------
+// FOR THE RAIN (2026-11-03) — where the deck is, and how much cloud is over a point
+// ---------------------------------------------------------------------------
+
+/**
+ * The deck's base height (world px) over a deck point — the dome every storybook pixel casts to
+ * (`buildStorybookCloudNode`'s `zDeck`). Rain is born here (`precip-runtime.js#setCloudDeck`), so a drop starts
+ * at the very height the cloud above it is drawn at. CPU twin: {@link storybookDeckHeightAt}.
+ *
+ * @param {object} TSL
+ * @param {{xy:*, base:*, dome:*, centre:*, radius:*}} a - float/vec2 nodes: `deck2.x`, `deck2.y`, `domeCentre`,
+ *   `deck2.z` in the storybook uniforms.
+ */
+export function storybookDeckHeightNode(TSL, { xy, base, dome, centre, radius }) {
+  const { float, min, max, dot } = TSL;
+  const rel = xy.sub(centre).div(max(radius, float(1)));
+  return base.add(dome.mul(float(1).sub(min(dot(rel, rel), float(1.7))))).max(float(0));
+}
+
+/**
+ * {@link storybookDeckHeightNode} on the CPU, for the tests and the lab.
+ * @param {{baseHeight:number, domeHeight:number, domeCentre:number[], domeRadius:number}} deck
+ * @param {number} x @param {number} y
+ */
+export function storybookDeckHeightAt(deck, x, y) {
+  const r = Math.max(1, deck.domeRadius);
+  const dx = (x - deck.domeCentre[0]) / r;
+  const dy = (y - deck.domeCentre[1]) / r;
+  return Math.max(0, deck.baseHeight + deck.domeHeight * (1 - Math.min(dx * dx + dy * dy, 1.7)));
+}
+
+/**
+ * HOW MUCH CLOUD IS STRAIGHT ABOVE `worldXY` — the cloud's top height 0..1 of its full thickness (`heightOf`, the
+ * remap the shadow march reads): 0 out past the scraps, rising through the edge, 1 deep in a thick core. 0
+ * everywhere while the deck holds no cloud.
+ *
+ * No sun offset (that is the shadow's) and no eye parallax (that is the tops'): rain falls DOWN from the deck,
+ * so the cloud over a point is the one whose drops land near it. The same two-octave field the shadow cache
+ * reads, so a rain shaft and the shadow it walks beside come from one cloud.
+ *
+ * @param {object} TSL
+ * @param {{worldXY:*, u:object, wind:{drift:*, dir:*}}} a
+ * @returns {*} float node, 0..1.
+ */
+export function buildStorybookCloudDepthNode(TSL, { worldXY, u, wind }) {
+  const { Fn, float, step } = TSL;
+  return Fn(() => {
+    const c = coreAt(TSL, u, wind, worldXY, { octaves: 2 });
+    return heightOf(TSL, u, c.core).mul(step(float(1e-4), u.deck.z));
   })();
 }

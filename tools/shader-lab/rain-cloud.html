@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Rain Under Clouds Lab</title>
+    <style>
+      body {
+        margin: 0;
+        background: #0d0f13;
+        color: #e8e8ea;
+        font:
+          13px ui-monospace,
+          monospace;
+        padding: 12px;
+      }
+      #log {
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="log">booting…</div>
+    <script type="module">
+      import * as THREE from '/src/vendor/three/three.webgpu.js';
+      import { RainCloudDriver, LAB_MAPS, PRECIP_DEFAULTS } from './rain-cloud-lab.js';
+      const log = (m) => {
+        document.getElementById('log').textContent = String(m);
+      };
+      try {
+        const driver = new RainCloudDriver({ THREE });
+        await driver.ready;
+        window.THREE = THREE;
+        // `rc.job(fn)` runs an async job in the background (the pane's tool call dies at 45 s); poll `rc.last`.
+        window.rc = {
+          driver,
+          LAB_MAPS,
+          PRECIP_DEFAULTS,
+          last: null,
+          job(fn) {
+            rc.last = 'pending';
+            Promise.resolve()
+              .then(fn)
+              .then(
+                (v) => (rc.last = v),
+                (e) => (rc.last = 'ERROR ' + String((e && e.stack) || e))
+              );
+            return 'started';
+          },
+        };
+        log(`ready — backend: ${driver.backend}`);
+      } catch (e) {
+        log('FAILED: ' + (e && e.stack ? e.stack : e));
+      }
+    </script>
+  </body>
+</html>

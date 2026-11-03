@@ -120,6 +120,7 @@ import {
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
 import { buildSquallField } from '../precipitation/squall-field.js';
+import { CLOUD_RAIN_CANDIDATES, sampleCloudRainNode } from '../precipitation/cloud-rain.js';
 import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
 
 const log = createLogger('precip-splash');
@@ -381,6 +382,23 @@ export function createPrecipSplashEngine({
   const skyReachTex = openSkyPixel ? TSL.texture(openSkyPixel) : null;
 
   /**
+   * ⭐ WHERE THE RAIN LANDS (2026-11-03, `setCloudDeck`). The fall chooses its birthplaces under the clouds
+   * (`cloud-rain.js`); a splash is where one of those drops LANDS — the same rain field, read `uLandShift`
+   * upwind (the fall's `landingShiftPx`: the air outruns its cloud while a drop falls). Still statistical, as this
+   * header argues: the same best-of-N choice over the same field, so landings and splashes share one
+   * distribution. Link 0 / no field = exactly the uniform splash carpet.
+   */
+  const uRainLink = uniform(float(0));
+  const uRainRect = uniform(vec4(0, 0, 1, 1));
+  const uLandShift = uniform(vec2(0, 0));
+  const rainTexCompute = openSkyPixel ? TSL.texture(openSkyPixel) : null;
+  const rainTexDraw = openSkyPixel ? TSL.texture(openSkyPixel) : null;
+  const landGateAt = (texNode, p) =>
+    texNode
+      ? mix(float(1), sampleCloudRainNode(TSL, { texNode, rect: uRainRect, worldXY: p.sub(uLandShift) }), uRainLink)
+      : float(1);
+
+  /**
    * ⭐ STRIKE HEIGHT — a splash is drawn at the SCALE OF WHAT IT HITS.
    *
    * Water on the floor of the viewed level is the smallest splash
@@ -496,6 +514,22 @@ export function createPrecipSplashEngine({
     return vec2(origin.x.add(hash11(h1).mul(span.x)), origin.y.add(hash11(h2).mul(span.y)));
   };
 
+  /** The best of `CLOUD_RAIN_CANDIDATES` birthplaces by where the rain lands — the fall's own rule. */
+  const spawnWhereRainLands = (h1, h2) => {
+    const first = spawnAt(h1, h2);
+    if (!rainTexCompute) return first;
+    const best = vec2(first).toVar();
+    const bestW = landGateAt(rainTexCompute, first).toVar();
+    for (let k = 1; k < CLOUD_RAIN_CANDIDATES; k++) {
+      const cand = spawnAt(h1.mul(float(1.29 + 0.13 * k)).add(float(5.7 * k)), h2.mul(float(0.83 + 0.09 * k)).add(float(2.3 * k)));
+      const w = landGateAt(rainTexCompute, cand);
+      const better = w.greaterThan(bestW.add(float(1e-3)));
+      best.assign(better.select(cand, best));
+      bestW.assign(better.select(w, bestW));
+    }
+    return best;
+  };
+
   /**
    * ⭐ WHICH ARCHETYPE A BODY IS, from §2.1's `splashArchetype01`.
    *
@@ -544,7 +578,9 @@ export function createPrecipSplashEngine({
     const i = instanceIndex;
     const fi = float(i);
     seed.element(i).assign(fi);
-    position.element(i).assign(spawnAt(fi.mul(float(1.37)).add(float(5.9)), fi.mul(float(0.61)).add(float(11.3))));
+    position
+      .element(i)
+      .assign(spawnWhereRainLands(fi.mul(float(1.37)).add(float(5.9)), fi.mul(float(0.61)).add(float(11.3))));
     const b = bodyConstants(fi);
     custom.element(i).assign(vec4(b.idx, b.sizePx, b.peak, b.phase));
     lifeBuf.element(i).assign(b.lifeMs);
@@ -597,7 +633,10 @@ export function createPrecipSplashEngine({
       .add(pos.x.mul(float(0.011)))
       .add(pos.y.mul(float(0.013)));
     const b = bodyConstants(entropy);
-    const respawned = spawnAt(entropy.mul(float(1.11)).add(float(3.7)), entropy.mul(float(0.83)).add(float(19.1)));
+    const respawned = spawnWhereRainLands(
+      entropy.mul(float(1.11)).add(float(3.7)),
+      entropy.mul(float(0.83)).add(float(19.1))
+    );
 
     position.element(i).assign(done.select(respawned, pos));
     custom.element(i).assign(done.select(vec4(b.idx, b.sizePx, b.peak, b.phase), c));
@@ -728,6 +767,8 @@ export function createPrecipSplashEngine({
     // on an un-ingested floor) silently lost its bands too — one absent input
     // disabling an unrelated guarantee, which is the same shape the fall
     // runtime already fixed once for its scene clip.
+    // Where the rain lands (setCloudDeck): fades a splash whose shower has moved on. 1 with no link.
+    alpha.assign(alpha.mul(landGateAt(rainTexDraw, p)));
     if (!skyReachTex) {
       alpha.assign(alpha.mul(squallAt(p)));
       return vec4(alpha, pick(K_RING_R, hot), pick(K_RING_W, hot), pick(K_ROUGHEN, hot));
@@ -1233,6 +1274,24 @@ export function createPrecipSplashEngine({
       // teeth: no rain means no dispatch and no draw.
       if (uActiveCount.value <= 0) return;
       renderer.compute(updateKernel);
+    },
+
+    /**
+     * The cloud deck's rain field, so splashes land where the fall's rain lands (see `uRainLink`). Same object
+     * the fall takes, plus `landingShiftPx` (the fall engine's `landingShiftPx()`). `null` = the uniform carpet.
+     * @param {null|{texture?:*, rect?:object, linkWeight?:number, landingShiftPx?:{x:number,y:number}}} c
+     */
+    setCloudDeck(c) {
+      const hasField = Boolean(c?.texture && c?.rect && rainTexCompute);
+      uRainLink.value = hasField && Number.isFinite(c.linkWeight) ? Math.max(0, Math.min(1, c.linkWeight)) : 0;
+      if (rainTexCompute) {
+        const tex = hasField ? c.texture : openSkyPixel;
+        rainTexCompute.value = tex;
+        rainTexDraw.value = tex;
+      }
+      if (hasField) uRainRect.value.set(c.rect.minX, c.rect.minY, c.rect.maxX, c.rect.maxY);
+      uLandShift.value.set(c?.landingShiftPx?.x ?? 0, c?.landingShiftPx?.y ?? 0);
+      return { armed: uRainLink.value > 0 };
     },
 
     setWorldRect(rect) {

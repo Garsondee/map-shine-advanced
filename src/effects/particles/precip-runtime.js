@@ -119,10 +119,14 @@ import {
   createWindAdvectionUniforms,
   writeWindAdvectionUniforms,
   windAdvectionDtSecNode,
+  windFlowVector,
+  WIND_DIAL_MAX_METRES_PER_SECOND,
 } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
 import { buildSquallField } from '../precipitation/squall-field.js';
+import { CLOUD_RAIN_CANDIDATES, createCloudDeckUniforms, sampleCloudRainNode } from '../precipitation/cloud-rain.js';
+import { storybookDeckHeightNode } from '../clouds/storybook-clouds.js';
 import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
 import {
   LUMA,
@@ -216,6 +220,53 @@ const RAIN_EYE_REFERENCE_CAMERA = 1358;
  * near enough that the streak never degenerates into "point at the wind".
  */
 const WIND_OFFSET_MAX_CAM_HEIGHTS = 3;
+
+// ============================================================================
+// ⭐ THE CLOUD DECK (2026-11-03, `setCloudDeck`, `precipitation/cloud-rain.js`)
+// ============================================================================
+//
+// Author: *"rain/snow originates from the cloud height and falls to the ground to splash ... decide if the
+// current approach feels accurate to how real precipitation moves in everything from still conditions to a
+// hurricane."* Measured in `tools/shader-lab/rain-cloud.html` before this change (65.6 px/m, the shipped dials):
+// rain FELL at 19-57 m/s (real drops: 2-9) and so LEANED 15 / 50 / 68 deg at 10 / 28 / 70 m/s of wind (real:
+// 58 / 77 / 85 deg); snow was blown SIDEWAYS at 1.6-1.75x the wind's own speed (gusts to 306 m/s at 100%).
+//
+// With a deck the engine runs a second, physical mode (`uDeckOn`, every term below is `mix(old, new, uDeckOn)` so
+// the old mode is exactly today's numbers for the benches and tests that never call `setCloudDeck`):
+//   - a body is BORN AT THE DECK'S HEIGHT over its birthplace, under the scene eye itself (the clouds' camera);
+//   - it falls at its species' TERMINAL VELOCITY in m/s x the scene's px/m (rain from its drop size);
+//   - sideways it is carried at the WIND'S OWN SPEED (gusts included), reaching it with the drop's own response
+//     time tau = v_t / g (heavy drops lag a gust, fine ones ride it);
+//   - turbulence is a share of the wind (real near-ground turbulent intensity), at eddy rates, not a share of
+//     the fall speed at 3.5-10 Hz.
+// The lean then FOLLOWS: tan(lean) = wind / terminal velocity, which is the whole physics of slanting rain.
+
+/** With a deck, how far downwind the convergence point may run (camera heights): 12 = an 85 deg lean, a
+ * hurricane's horizontal rain. The old 3 (72 deg) existed for drops that fell slower than their siblings for no
+ * physical reason; here a slow drop really does lean further. */
+const WIND_OFFSET_MAX_CAM_HEIGHTS_DECK = 12;
+
+/** The Wind push dial's shipped default (`precipitation.js#windAirSpeedPxS`). With a deck a FALLING body reads the
+ * dial relative to it, so the default carries rain and snow at exactly the wind's real speed while splashes and
+ * drips keep the look they were tuned to. A test keeps the two numbers equal. */
+export const WIND_PUSH_SHIPPED_PXS = 6000;
+
+/** Turbulence with a deck: the chaos amplitude as a share of the local wind speed (peak, per axis). Real surface
+ * wind runs a turbulent intensity of 0.1-0.25 (rms); the two-sine shape peaks at 1, rms ~0.5, so 0.3 = 0.15 rms.
+ * Scaled by the Turbulence dial relative to its default (1.1). */
+const TURBULENCE_SHARE_OF_WIND = 0.3;
+const CHAOS_SCALE_DEFAULT = 1.1;
+
+/** With a deck the chaos sines run at eddy rates — 3.5 / 10 Hz becomes 0.8 / 2.2 Hz. */
+const EDDY_RATE = 0.22;
+
+/** With a deck, how long a streak's motion blur lasts (s) at the Streak length dial's default: ~1/25 s, the
+ * eye's persistence (and a film camera's shutter). A drop moving 10 m/s across the view draws ~26 px; the old
+ * constant was ~1/93 s, tuned against the too-fast fall. */
+const DECK_STREAK_EXPOSURE_SEC = 0.018;
+
+/** A body's response time to the air is tau = v_t / g (Stokes-Newton drag at terminal speed). */
+const GRAVITY_MPS2 = 9.81;
 
 /**
  * How deeply a flake's silhouette is notched by the angular harmonics — the
@@ -548,6 +599,48 @@ export function createPrecipEngine({
    */
   const skyReachTex = openSkyPixel ? TSL.texture(openSkyPixel) : null;
 
+  // ── THE CLOUD DECK (see the block above `WIND_OFFSET_MAX_CAM_HEIGHTS_DECK`) ──
+  /** 0 = the old fixed-camera, fixed-height fall; 1 = born at the deck, physical. Exactly 0 or 1. */
+  // Packed four vec4s (cloud-rain.js#createCloudDeckUniforms; this file is at the uniform cap):
+  //   deckA = base height, dome height, dome centre x, y (world px — `resolveStorybookDeck`'s numbers)
+  //   deckB = dome radius, fisheye lens, the rain field's link weight, ON (0 = the old fall, 1 = deck mode)
+  //   deckC = the deck's own drift (world px/s), the birth rect's UPWIND reach (world px, see `upwindReach`)
+  //   rainRect = the rain field target's world rect
+  // A drop falls through air that outruns its cloud; rain that will blow into the view is born upwind of it
+  // (measured before the reach: at 70 m/s a drop crosses ~2,700 px while falling, so only the view's downwind
+  // edge rained).
+  const D = createCloudDeckUniforms(TSL);
+  const uDeck = D.deckA;
+  const uDeck2 = D.deckB;
+  const uRainRect = D.rainRect;
+  const uDeckOn = uDeck2.w;
+  const uCloudVel = D.deckC.xy;
+  const uSpawnExt = D.deckC.zw;
+  /** The convergence cap, in camera heights (old 3, deck 12). */
+  const uOffsetCap = mix(float(WIND_OFFSET_MAX_CAM_HEIGHTS), float(WIND_OFFSET_MAX_CAM_HEIGHTS_DECK), uDeckOn);
+  /**
+   * The rain field, read twice: once in the COMPUTE stage (choosing a birthplace) and once in the DRAW (fading a
+   * body whose cloud has moved off) — two nodes, never one shared (`feedback_shared_texture_node_carries_the_wrong
+   * _uv`). The open-sky placeholder reads 1 = "rain here", so an unarmed field changes nothing. Compiled out with no
+   * placeholder, like the sky gate.
+   */
+  const rainTexCompute = openSkyPixel ? TSL.texture(openSkyPixel) : null;
+  const rainTexDraw = openSkyPixel ? TSL.texture(openSkyPixel) : null;
+  /** The deck's base height over a deck point (world px) — the storybook dome, one formula. */
+  const deckHeightAt = (xy) =>
+    storybookDeckHeightNode(TSL, {
+      xy,
+      base: uDeck.x,
+      dome: uDeck.y,
+      centre: vec2(uDeck.z, uDeck.w),
+      radius: uDeck2.x,
+    });
+  /** How much rain falls from over `p`, 0..1 — `mix(1, field, link)`, so link 0 is exactly "everywhere". */
+  const cloudGateAt = (texNode, p) =>
+    texNode
+      ? mix(float(1), sampleCloudRainNode(TSL, { texNode, rect: uRainRect, worldXY: p }), uDeck2.z)
+      : float(1);
+
   /**
    * ⭐ THE ENGINE'S **OWN** WIND UNIFORMS, PUSHED PER FRAME — not the wind
    * handle's, bound by reference.
@@ -732,7 +825,14 @@ export function createPrecipEngine({
   const parallaxOf = (worldXY, heightW) => {
     const h = heightW.clamp(float(0), uCamHeight.mul(float(0.6)));
     const persp = uCamHeight.div(uCamHeight.sub(h));
-    return { xy: uCamCentre.add(worldXY.sub(uCamCentre).mul(persp)), persp };
+    const q = worldXY.sub(uCamCentre).mul(persp);
+    // ⭐ THE STORYBOOK FISHEYE, UNDONE (deck mode only). The tops barrel-warp the deck about the eye
+    // (`buildStorybookCloudNode`'s `lens`), so a deck point is drawn `1 + lens·r²` closer to the centre than plain
+    // parallax puts it. A drop born there takes the same warp, fading out as it falls (0 at the ground, which no
+    // lens touches) — so it leaves the cloud where the cloud is drawn. With no deck the weight is exactly 0.
+    const lensW = uDeckOn.mul(uDeck2.y).mul(h.div(deckHeightAt(worldXY).max(float(1))).clamp(float(0), float(1)));
+    const r2 = q.dot(q).div(uCamHeight.mul(uCamHeight).mul(float(0.25)).max(float(1)));
+    return { xy: uCamCentre.add(q.div(float(1).add(lensW.mul(r2)))), persp };
   };
 
   /**
@@ -743,9 +843,34 @@ export function createPrecipEngine({
    */
   const spawnAt = (h1, h2) => {
     const margin = uRectSize.mul(float(SPAWN_MARGIN_FRAC));
-    const origin = uRectMin.sub(margin);
-    const span = uRectSize.add(margin.mul(float(2)));
+    // Widened UPWIND by `uSpawnExt` (deck mode, see `upwindReach`): rain that will blow into the view is born
+    // where its cloud is, outside it.
+    const origin = uRectMin.sub(margin).add(uSpawnExt.min(vec2(0, 0)));
+    const span = uRectSize.add(margin.mul(float(2))).add(uSpawnExt.abs());
     return vec2(origin.x.add(hash11(h1).mul(span.x)), origin.y.add(hash11(h2).mul(span.y)));
+  };
+
+  /**
+   * ⭐ WHERE A BODY IS BORN UNDER THE CLOUDS — the best of `CLOUD_RAIN_CANDIDATES` uniform candidates, weighed by
+   * the rain field (`cloud-rain.js`). Moving the birthplace instead of masking the opacity keeps the slider's
+   * whole population visible: it gathers under the clouds rather than being thrown away in the open. With the link
+   * at 0 (or no field) every candidate weighs exactly 1 and the first one wins — the uniform spawner, unchanged.
+   * Compute stage: the texture read is a `level(0)` sample (no derivatives exist here).
+   * @param {*} h1 @param {*} h2
+   */
+  const spawnUnderCloud = (h1, h2) => {
+    const first = spawnAt(h1, h2);
+    if (!rainTexCompute) return first;
+    const best = vec2(first).toVar();
+    const bestW = cloudGateAt(rainTexCompute, first).toVar();
+    for (let k = 1; k < CLOUD_RAIN_CANDIDATES; k++) {
+      const cand = spawnAt(h1.mul(float(1.37 + 0.11 * k)).add(float(7.3 * k)), h2.mul(float(0.89 + 0.07 * k)).add(float(3.1 * k)));
+      const w = cloudGateAt(rainTexCompute, cand);
+      const better = w.greaterThan(bestW.add(float(1e-3)));
+      best.assign(better.select(cand, best));
+      bestW.assign(better.select(w, bestW));
+    }
+    return best;
   };
 
   // Species constants, hoisted so the kernels read plain numbers. A refused
@@ -756,6 +881,18 @@ export function createPrecipEngine({
   const GRAV_MAX = S ? S.fall.gravityMul[1] : 1;
   const SIZE_MIN = S ? S.body.sizePx[0] : 0;
   const SIZE_MAX = S ? S.body.sizePx[1] : 0;
+  /**
+   * Deck mode's fall: the species' TERMINAL VELOCITY in m/s (`fall.terminalMps`; a row without one reads its V2
+   * px/s at the default 65.6 px/m, which is already near-physical for every slow species). Rain's `dropLaw`
+   * takes the drop's diameter (0.5-4.5 mm, from the same `mass` hash that sets its width) through Atlas, Srivastava
+   * & Sekhon's fit to Gunn & Kinzer (1949): v = 9.65 - 10.3·e^(-0.6·D[mm]) — 2.0 m/s drizzle to 8.9 m/s fat drops.
+   */
+  const TERM_MIN = S ? (S.fall.terminalMps?.[0] ?? S.fall.speedPxS[0] / WIND_DEFAULT_PIXELS_PER_METRE) : 0;
+  const TERM_MAX = S ? (S.fall.terminalMps?.[1] ?? S.fall.speedPxS[1] / WIND_DEFAULT_PIXELS_PER_METRE) : 0;
+  const DROP_LAW = Boolean(S?.fall.dropLaw);
+  /** Deck mode: the share of the wind a body is born moving with (hail leaves an updraft core; the rest form in
+   * the wind they fall through). */
+  const BIRTH_CARRY = Number.isFinite(S?.fall.birthCarry01) ? S.fall.birthCarry01 : 1;
   const SPAWN_H = S ? S.fall.spawnHeightPx : 1;
   /** Spawn height and camera height BOTH ride uViewScale, so the parallax
    * magnification h/D is identical at every zoom — this changes pace, not
@@ -820,11 +957,29 @@ export function createPrecipEngine({
     // A small INDEPENDENT jitter on top, so two drops of the same size still
     // separate over their lives — the variety `gravityMul` was always for,
     // without re-introducing the slow-fat body it used to permit.
-    const speed = mix(float(SPEED_MIN), float(SPEED_MAX), mass).mul(
-      mix(float(GRAV_MIN), float(GRAV_MAX), hash11(entropy.mul(float(4.7)).add(float(53))))
-    );
+    const jitter = mix(float(GRAV_MIN), float(GRAV_MAX), hash11(entropy.mul(float(4.7)).add(float(53))));
+    const oldSpeed = mix(float(SPEED_MIN), float(SPEED_MAX), mass).mul(jitter);
+    // Deck mode: the terminal velocity, world px/s at this scene's px/m. The jitter narrows to a quarter of its
+    // old spread — real drops of one size fall at one speed; the spread is the size distribution itself.
+    const termMps = DROP_LAW
+      ? float(9.65).sub(float(10.3).mul(TSL.exp(mix(float(0.5), float(4.5), mass).mul(float(-0.6)))))
+      : mix(float(TERM_MIN), float(TERM_MAX), mass);
+    const physSpeed = termMps.mul(float(1).add(jitter.sub(float(1)).mul(float(0.25)))).mul(uPixelsPerMetre);
+    const speed = mix(oldSpeed, physSpeed, uDeckOn);
     return { brightness, sizePx, speed };
   };
+
+  /**
+   * How high a body is born over `p`: the species' own height (old mode), or the cloud deck's base there, a few
+   * percent inside the cloud so a drop does not appear exactly on the base's line (deck mode).
+   * @param {*} p - world xy. @param {*} e - entropy.
+   */
+  const birthHeight = (p, e) =>
+    mix(
+      spawnH(),
+      deckHeightAt(p).mul(float(1).sub(hash11(e.mul(float(3.3)).add(float(1.9))).mul(float(0.08)))),
+      uDeckOn
+    );
 
   // ── SEED KERNEL ──────────────────────────────────────────────────────────
   const seedKernel = Fn(() => {
@@ -832,20 +987,18 @@ export function createPrecipEngine({
     const fi = float(i);
     seed.element(i).assign(fi);
     velocity.element(i).assign(vec2(0, 0));
-    position.element(i).assign(spawnAt(fi.mul(float(1.37)).add(float(5.9)), fi.mul(float(0.61)).add(float(11.3))));
+    const p0 = spawnUnderCloud(fi.mul(float(1.37)).add(float(5.9)), fi.mul(float(0.61)).add(float(11.3)));
+    position.element(i).assign(p0);
     const c = bodyConstants(fi);
     // ⚠️ HEIGHTS ARE STAGGERED ACROSS THE WHOLE COLUMN, not all set to the
     // ceiling. Seeding every body at `SPAWN_H` would drop one solid sheet of
     // rain that lands together and leaves the sky empty until the next sheet —
     // a pulsing curtain rather than steady weather. Fire staggers AGE for the
     // same reason; here height is the lifecycle, so height is what staggers.
-    const h0 = hash11(fi.mul(float(7.3)).add(float(2.2))).mul(spawnH());
+    const top0 = birthHeight(p0, fi);
+    const h0 = hash11(fi.mul(float(7.3)).add(float(2.2))).mul(top0);
     custom.element(i).assign(vec4(c.brightness, c.sizePx, c.speed, h0));
-    lifeBuf.element(i).assign(
-      spawnH()
-        .div(c.speed.max(float(1)))
-        .mul(float(1000))
-    );
+    lifeBuf.element(i).assign(top0.div(c.speed.max(float(1))).mul(float(1000)));
     age.element(i).assign(float(0));
     if (hasPhases) {
       /**
@@ -892,7 +1045,9 @@ export function createPrecipEngine({
     const s = seed.element(i);
     const c = custom.element(i).toVar();
 
-    const speed = c.z.mul(uSpeedMul).mul(uFallSpeedScale).mul(uViewScale);
+    // Deck mode's fall is world-real (m/s x px/m in `c.z`): the deck already rises with the eye, so the old
+    // per-view pacing would scale the speed twice.
+    const speed = c.z.mul(uSpeedMul).mul(uFallSpeedScale).mul(mix(uViewScale, float(1), uDeckOn));
 
     // ── THE FALL: height integrates DOWN. This is the lifecycle. ──
     // The body clock and its per-body phase, hoisted ABOVE the vertical churn
@@ -914,9 +1069,11 @@ export function createPrecipEngine({
     // doing it this way cannot push a body back above its spawn height or
     // stall it into a hover. Clamped well short of 1 so the fall never
     // reverses — a drop that rose would read as a bug, not as weather.
+    // Deck mode: a terminal-velocity drop barely changes speed through the column (+-9%, not +-50%).
     const vertChurn = sin(tSec.mul(float(2.3)).add(phase.mul(float(1.31))))
       .mul(float(0.45))
       .mul(uChaosScale)
+      .mul(mix(float(1), float(0.2), uDeckOn))
       .clamp(float(-0.8), float(0.8));
     // `.toVar()` because the phase machine below REPLACES it for a species with
     // life stages (a bouncing stone's height follows an arc, not the fall).
@@ -984,11 +1141,18 @@ export function createPrecipEngine({
     //      crossed the GROUND. Sideways drift is the air moving over the map,
     //      so it is world-real now; fall speed, size and jitter keep their
     //      zoom-invariant pace (see `uViewScale`).
+    // Deck mode: carried at the wind's own speed at the push dial's shipped default (see
+    // `WIND_PUSH_SHIPPED_PXS`); the species' old `windCarry01` was a stand-in for a fall that was 3-8x too fast.
     let windVec = windFlowVectorNode(TSL, uWindDirDeg)
       .mul(uWindSpeed01)
       .mul(windFieldPxPerSecPerUnit(uPixelsPerMetre))
-      .mul(uWindAirSpeed.div(float(2250)))
-      .mul(float(WIND_CARRY));
+      .mul(
+        mix(
+          uWindAirSpeed.div(float(2250)).mul(float(WIND_CARRY)),
+          uWindAirSpeed.div(float(WIND_PUSH_SHIPPED_PXS)),
+          uDeckOn
+        )
+      );
     windVec = windVec.mul(
       computeGustEnvelope(TSL, {
         centerXY: pos,
@@ -1013,14 +1177,17 @@ export function createPrecipEngine({
     // privileged lateral axis and the jitter has to be isotropic. Y uses its
     // own phase offsets so the two axes stay decorrelated — equal amplitude,
     // not a circle.
-    const chaos = vec2(
-      sin(tSec.mul(float(3.5)).add(phase))
+    // Deck mode runs the same two sines at eddy rates (`EDDY_RATE`).
+    const tChaos = tSec.mul(mix(float(1), float(EDDY_RATE), uDeckOn));
+    const chaosShape = vec2(
+      sin(tChaos.mul(float(3.5)).add(phase))
         .mul(float(0.6))
-        .add(sin(tSec.mul(float(10)).add(phase.mul(float(1.7)))).mul(float(0.4))),
-      sin(tSec.mul(float(3.1)).add(phase.mul(float(2.3))))
+        .add(sin(tChaos.mul(float(10)).add(phase.mul(float(1.7)))).mul(float(0.4))),
+      sin(tChaos.mul(float(3.1)).add(phase.mul(float(2.3))))
         .mul(float(0.6))
-        .add(sin(tSec.mul(float(8.7)).add(phase.mul(float(0.9)))).mul(float(0.4)))
-    )
+        .add(sin(tChaos.mul(float(8.7)).add(phase.mul(float(0.9)))).mul(float(0.4)))
+    );
+    const oldChaos = chaosShape
       // ⚠️ SCALED BY THE BODY'S OWN FALL SPEED, not an absolute px/s.
       //
       // V2's chaos amplitude (28-100 px) was authored for RAIN, which falls at
@@ -1045,11 +1212,30 @@ export function createPrecipEngine({
       // straight (author: "at 0 wind they wobble from side to side"). Build-time
       // branch; only streaks pay it.
       .mul(isStreak ? mix(float(0.04), float(1), windStrength01Node(TSL, uWindSpeed01)) : float(1));
+    // ⭐ Deck mode: turbulence is a share of the WIND, not of the fall. Real gusts and eddies push a drop by a
+    // fraction of the air's own speed (turbulent intensity 0.1-0.25 near the ground); a fall-speed share made
+    // fast species wander most and vanished in calm air only because of the windStrength mix above.
+    const deckChaos = chaosShape
+      .mul(windVec.length())
+      .mul(float(TURBULENCE_SHARE_OF_WIND * CHAOS_01))
+      .mul(uChaosScale.div(float(CHAOS_SCALE_DEFAULT)));
+    const chaos = mix(oldChaos, deckChaos, uDeckOn);
 
     // 3. Flutter — snow only. The paper-fall sway (V2 `:1556-1663`), and the
     //    whole character of a flake: without it snow falls like slow rain,
     //    which reads as ash. Collapses in a blizzard via `uFlutterMul`.
-    let drift = windVec.add(chaos);
+    const airTarget = windVec.add(chaos);
+    let drift = airTarget;
+    // ⭐ INERTIA (deck mode, bodies without flutter): a drop reaches the air's speed with its own response time
+    // tau = v_t / g — 0.2 s drizzle, 0.9 s fat drops, ~3 s hail — so a heavy body lags a gust and punches through
+    // the eddies a fine one rides. `velocity` holds last frame's drift; a body is reborn already moving with the
+    // air (it formed in it), see the respawn below. Snow and the flutterers keep the direct drift: tau ~0.1 s,
+    // and their sway is in the same buffer.
+    if (!hasFlutter) {
+      const tauSec = c.z.div(uPixelsPerMetre.max(float(1))).div(float(GRAVITY_MPS2)).max(float(0.02));
+      const keep = TSL.exp(uDtSec.negate().div(tauSec)).mul(uDeckOn);
+      drift = mix(drift, velocity.element(i), keep);
+    }
     if (hasFlutter) {
       const fHz = mix(float(FLUTTER.hzMin), float(FLUTTER.hzMax), hash11(s.mul(float(5.9))));
       const fAmp = mix(float(FLUTTER.ampPxMin), float(FLUTTER.ampPxMax), hash11(s.mul(float(6.7)).add(float(3))));
@@ -1096,8 +1282,8 @@ export function createPrecipEngine({
     // uniform under any wind, at any species lifetime, for one comparison —
     // and it composes with the birth fade, so a recycled body eases in rather
     // than popping at the upwind edge.
-    const halfSpan = uRectSize.mul(float(0.5 + SPAWN_MARGIN_FRAC));
-    const rectCentre = uRectMin.add(uRectSize.mul(float(0.5)));
+    const halfSpan = uRectSize.mul(float(0.5 + SPAWN_MARGIN_FRAC)).add(uSpawnExt.abs().mul(float(0.5)));
+    const rectCentre = uRectMin.add(uRectSize.mul(float(0.5))).add(uSpawnExt.mul(float(0.5)));
     const fromCentre = nextPos.sub(rectCentre).abs();
     const escaped = fromCentre.x.greaterThan(halfSpan.x).or(fromCentre.y.greaterThan(halfSpan.y));
     /**
@@ -1219,25 +1405,24 @@ export function createPrecipEngine({
       .add(nextPos.x.mul(float(0.011)))
       .add(nextPos.y.mul(float(0.013)));
     const fresh = bodyConstants(entropy);
-    const respawnPos = spawnAt(entropy, entropy.mul(float(1.9)).add(float(4.4)));
+    const respawnPos = spawnUnderCloud(entropy, entropy.mul(float(1.9)).add(float(4.4)));
+    const respawnH = birthHeight(respawnPos, entropy);
 
     position.element(i).assign(landed.select(respawnPos, nextPos));
-    velocity.element(i).assign(drift);
+    // Reborn already moving with the air it formed in (the target, not the relaxed drift — see INERTIA).
+    velocity
+      .element(i)
+      .assign(landed.select(mix(drift, airTarget.mul(float(BIRTH_CARRY)), uDeckOn), drift));
     custom
       .element(i)
-      .assign(landed.select(vec4(fresh.brightness, fresh.sizePx, fresh.speed, spawnH()), vec4(c.x, c.y, c.z, nextH)));
+      .assign(landed.select(vec4(fresh.brightness, fresh.sizePx, fresh.speed, respawnH), vec4(c.x, c.y, c.z, nextH)));
     const agedMs = age.element(i).add(uDtSec.mul(float(1000)));
     age.element(i).assign(landed.select(float(0), agedMs));
     // A respawned stone starts falling again — the phase must reset with it, or
     // it would be reborn mid-bounce at the top of the sky.
     if (hasPhases) phaseBuf.element(i).assign(landed.select(float(PHASE_FALL), phaseBuf.element(i)));
     lifeBuf.element(i).assign(
-      landed.select(
-        spawnH()
-          .div(fresh.speed.max(float(1)))
-          .mul(float(1000)),
-        lifeBuf.element(i)
-      )
+      landed.select(respawnH.div(fresh.speed.max(float(1))).mul(float(1000)), lifeBuf.element(i))
     );
   })().compute(capacity);
 
@@ -1269,7 +1454,8 @@ export function createPrecipEngine({
   const vBody = Fn(() => {
     const i = instanceIndex;
     const c = custom.element(i);
-    const fall01 = float(1).sub(c.w.div(spawnH())).clamp(float(0), float(1));
+    const top = mix(spawnH(), deckHeightAt(position.element(i)), uDeckOn).max(float(1));
+    const fall01 = float(1).sub(c.w.div(top)).clamp(float(0), float(1));
     const alive = float(i).lessThan(uActiveCount).select(float(1), float(0));
 
     // ⭐ THE BIRTH FADE — the author's own diagnosis, and it was right:
@@ -1344,7 +1530,20 @@ export function createPrecipEngine({
       advection: uAdvection,
     });
 
-    const visible = alive.mul(birthEase).mul(sceneClip).mul(squall);
+    /**
+     * ⭐ THE CLOUD IT FELL FROM (deck mode). A body chose its birthplace under a cloud, but the cloud drifts and
+     * reshapes while it falls; read the rain field where the body was born — back up its own drift, less the
+     * deck's, for the time it has been falling — and fade it if its cloud has gone. Soft by construction (the
+     * field is low-frequency and bilinear). Exactly 1 with the link at 0.
+     */
+    const fellSec = top
+      .sub(c.w)
+      .max(float(0))
+      .div(c.z.mul(uSpeedMul).mul(uFallSpeedScale).max(float(1)));
+    const bornAt = position.element(i).sub(velocity.element(i).sub(uCloudVel).mul(fellSec).mul(uDeckOn));
+    const cloudGate = mix(float(1), cloudGateAt(rainTexDraw, bornAt), uDeckOn);
+
+    const visible = alive.mul(birthEase).mul(sceneClip).mul(squall).mul(cloudGate);
 
     // ⭐ THE SKY-REACH GATE, sampled at the body's DRAWN (parallaxed) position.
     // Computed HERE because `position.element(i)` is a storage read and storage
@@ -1552,7 +1751,7 @@ export function createPrecipEngine({
      */
     const rawWindOffset = vel.mul(uCamHeight).div(fallSpeed).mul(uFallSlant01);
     const offsetLen = rawWindOffset.length().max(float(1e-4));
-    const cappedLen = offsetLen.min(uCamHeight.mul(float(WIND_OFFSET_MAX_CAM_HEIGHTS)));
+    const cappedLen = offsetLen.min(uCamHeight.mul(uOffsetCap));
     const windOffset = rawWindOffset.mul(cappedLen.div(offsetLen));
     const convergence = uCamCentre.add(windOffset);
     // Pure radial about the shifted point. `uParallaxStreak01` blends between
@@ -1584,7 +1783,14 @@ export function createPrecipEngine({
     // directly above), and a body genuinely travelling across the map draws a
     // streak along the way it is actually going. One quantity, one direction,
     // no disagreement possible.
-    const length = width.add(speedLen.mul(float(STREAK_PER_PXS)).mul(uStreakScale).mul(uLengthMul).mul(uSizeScale));
+    // Deck mode: the streak is the eye's own motion blur — apparent speed x `DECK_STREAK_EXPOSURE_SEC` (the
+    // Streak length dial relative to its default 3) — not tied to the drop's width dial.
+    const exposure = mix(
+      float(STREAK_PER_PXS).mul(uStreakScale).mul(uSizeScale),
+      float(DECK_STREAK_EXPOSURE_SEC / 3).mul(uStreakScale),
+      uDeckOn
+    );
+    const length = width.add(speedLen.mul(exposure).mul(uLengthMul));
     // Perpendicular, for the width axis.
     const perp = vec2(dir.y.negate(), dir.x);
     return { parallaxed, width, dir, length, perp };
@@ -1950,12 +2156,86 @@ export function createPrecipEngine({
 
   let seeded = false;
   let lastFrame = null;
+  /** The frame's own live count, and the birth rect's area over the plain spawn rect's (see `upwindReach`). */
+  let liveBase = 0;
+  let spawnAreaRatio = 1;
+  const applyLive = () => {
+    const live = Math.max(0, Math.min(capacity, Math.round(liveBase * spawnAreaRatio)));
+    uActiveCount.value = live;
+    mesh.visible = live > 0;
+  };
+  /**
+   * The species' mean terminal speed (m/s) over its own size distribution — the same `mass = u^0.7` draw and drop
+   * law `bodyConstants` uses, integrated once here — for the CPU's fall-time estimate.
+   */
+  const MEAN_TERM_MPS = (() => {
+    let sum = 0;
+    const n = 64;
+    for (let k = 0; k < n; k++) {
+      const m = ((k + 0.5) / n) ** 0.7;
+      sum += DROP_LAW ? 9.65 - 10.3 * Math.exp(-0.6 * (0.5 + 4 * m)) : TERM_MIN + (TERM_MAX - TERM_MIN) * m;
+    }
+    return Math.max(0.05, sum / n);
+  })();
+  /**
+   * ⭐ THE UPWIND REACH (deck mode) — widen the birth rect upwind by how far a drop drifts while it falls
+   * (`U · T`, capped at two views), and raise the live count by the same area so the view keeps its density.
+   * Old mode: exactly 0 and 1. Per frame: wind and the deck both move.
+   */
+  const landingShift = { x: 0, y: 0 };
+  const upwindReach = () => {
+    if (!(uDeck2.value.w > 0.5)) {
+      landingShift.x = 0;
+      landingShift.y = 0;
+      D.deckC.value.z = 0;
+      D.deckC.value.w = 0;
+      if (spawnAreaRatio !== 1) {
+        spawnAreaRatio = 1;
+        applyLive();
+      }
+      return;
+    }
+    const ppm = uPixelsPerMetre.value;
+    const fallPxS = MEAN_TERM_MPS * ppm * uFallSpeedScale.value * Math.max(0.05, uSpeedMul.value);
+    const fallSec = (uDeck.value.x + 0.7 * uDeck.value.y) / Math.max(1, fallPxS);
+    const windPxS =
+      uWindSpeed01.value *
+      WIND_DIAL_MAX_METRES_PER_SECOND *
+      ppm *
+      (uWindAirSpeed.value / WIND_PUSH_SHIPPED_PXS) *
+      // the gust envelope's mean lift over the lull
+      1.15;
+    const w = uRectSize.value.x;
+    const h = uRectSize.value.y;
+    const reach = Math.min(windPxS * fallSec, 2 * Math.max(w, h));
+    const flow = windFlowVector(uWindDirDeg.value);
+    // Where the mean drop lands relative to the cloud it fell from: the air outruns the deck by (U - cloud) · T.
+    landingShift.x = (flow.x * windPxS - D.deckC.value.x) * fallSec;
+    landingShift.y = (flow.y * windPxS - D.deckC.value.y) * fallSec;
+    D.deckC.value.z = -flow.x * reach;
+    D.deckC.value.w = -flow.y * reach;
+    const pw = w * (1 + 2 * SPAWN_MARGIN_FRAC);
+    const ph = h * (1 + 2 * SPAWN_MARGIN_FRAC);
+    spawnAreaRatio = ((pw + Math.abs(flow.x * reach)) * (ph + Math.abs(flow.y * reach))) / (pw * ph);
+    applyLive();
+  };
 
   return {
     scene,
     capacity,
     speciesId,
     species: S,
+    /** The arena's storage nodes, for the shader lab's motion readout only (`rain-cloud-lab.js#stats`). */
+    labBuffers: buffers,
+
+    /**
+     * Where this frame's mean drop lands relative to the cloud it fell from (world px; 0 without a deck) — the
+     * splashes read the rain field this far upwind (`precip-splash-runtime.js#setCloudDeck`), so they land
+     * where this rain lands, not under the cloud. Updated by `step`.
+     */
+    landingShiftPx() {
+      return { x: landingShift.x, y: landingShift.y };
+    },
     /** True if the species resolved; false means this engine draws nothing. */
     ok: resolved.ok,
 
@@ -1999,6 +2279,7 @@ export function createPrecipEngine({
       }
       uDtSec.value = Math.max(0, Math.min(0.1, dtSec || 0));
       uTimeMs.value = timeMs || 0;
+      upwindReach();
       if (!seeded) this.init(renderer);
       // Nothing live means nothing to simulate — a JS `if`, never a uniform
       // set to zero (Effects.md Law 4). This is LAW 5's teeth: a clear day
@@ -2095,7 +2376,50 @@ export function createPrecipEngine({
     setEye(eye) {
       if (!eye || !(eye.height > 0) || !Number.isFinite(eye.x) || !Number.isFinite(eye.y)) return;
       uCamCentre.value.set(eye.x, eye.y);
-      uCamHeight.value = Math.max(1, (eye.height * camHeightBase) / RAIN_EYE_REFERENCE_CAMERA);
+      // With a cloud deck the fall IS seen by the clouds' own camera (the eye, exactly): a drop born at the deck's
+      // height must be drawn where the deck is drawn. The perspective dial only shapes the deck-less fall.
+      uCamHeight.value =
+        uDeck2.value.w > 0.5
+          ? Math.max(1, eye.height)
+          : Math.max(1, (eye.height * camHeightBase) / RAIN_EYE_REFERENCE_CAMERA);
+    },
+
+    /**
+     * ⭐ THE CLOUD DECK — where the rain comes from (`precipitation/cloud-rain.js`). Call each frame AFTER
+     * `setWorldRect` and `setEye`. Arms deck mode: bodies are born at the deck's height over their birthplace,
+     * chosen under the clouds by the rain field, and fall and drift physically (see the block above
+     * `WIND_OFFSET_MAX_CAM_HEIGHTS_DECK`). `null` returns to the old fixed-height fall, exactly.
+     *
+     * @param {null|{deck:{baseHeight:number, domeHeight:number, domeCentre:number[], domeRadius:number, lens?:number},
+     *   eye?:{x:number,y:number,height:number}, texture?:*, rect?:{minX:number,minY:number,maxX:number,maxY:number},
+     *   linkWeight?:number, cloudVelPxS?:{x:number,y:number}}} c
+     */
+    setCloudDeck(c) {
+      const d = c?.deck;
+      if (!d || !Number.isFinite(d.baseHeight)) {
+        uDeck2.value.z = 0;
+        uDeck2.value.w = 0;
+        return { armed: false };
+      }
+      uDeck.value.set(
+        Math.max(0, d.baseHeight),
+        Math.max(0, d.domeHeight || 0),
+        d.domeCentre?.[0] ?? 0,
+        d.domeCentre?.[1] ?? 0
+      );
+      const hasField = Boolean(c.texture && c.rect && rainTexCompute);
+      const link = hasField && Number.isFinite(c.linkWeight) ? Math.max(0, Math.min(1, c.linkWeight)) : 0;
+      uDeck2.value.set(Math.max(1, d.domeRadius || 1), Math.max(0, d.lens || 0), link, 1);
+      if (rainTexCompute) {
+        const tex = hasField ? c.texture : openSkyPixel;
+        rainTexCompute.value = tex;
+        rainTexDraw.value = tex;
+        if (hasField) uRainRect.value.set(c.rect.minX, c.rect.minY, c.rect.maxX, c.rect.maxY);
+      }
+      D.deckC.value.x = c.cloudVelPxS?.x ?? 0;
+      D.deckC.value.y = c.cloudVelPxS?.y ?? 0;
+      if (c.eye) this.setEye(c.eye);
+      return { armed: true, link };
     },
 
     setWorldRect(rect) {
@@ -2124,9 +2448,8 @@ export function createPrecipEngine({
     setFrame(frame) {
       if (!frame) return;
       lastFrame = frame;
-      const live = Math.max(0, Math.min(capacity, Math.round(frame.liveCount ?? 0)));
-      uActiveCount.value = live;
-      mesh.visible = live > 0;
+      liveBase = Math.max(0, frame.liveCount ?? 0);
+      applyLive();
       if (Number.isFinite(frame.speedMul)) uSpeedMul.value = frame.speedMul;
       if (Number.isFinite(frame.lengthMul)) uLengthMul.value = frame.lengthMul;
       if (Number.isFinite(frame.alphaMul)) uAlphaMul.value = frame.alphaMul;

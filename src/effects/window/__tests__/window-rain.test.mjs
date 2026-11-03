@@ -224,11 +224,23 @@ export function run(t) {
       linger.impact === 0 && linger.sheet === 0 && linger.slider < frameFor(0.5).slider
     );
 
-    const twice = resolveRainFrame({ rain01: 0.5, wet01: 0.5, look: { ...look, splatDensity: 2 } });
+    const twice = resolveRainFrame({ rain01: 0.25, wet01: 0.4, look: { ...look, splatDensity: 2 } });
+    const half = resolveRainFrame({ rain01: 0.25, wet01: 0.4, look: { ...look, splatDensity: 1 } });
     t.ok(
-      'rain: splat density scales how many drops there are',
-      twice.cover > frameFor(0.5, {}).cover || twice.cover === 1
+      'rain: splat density scales how many drops there are (' + half.cover.toFixed(3) + ' -> ' + twice.cover.toFixed(3) + ')',
+      Math.abs(twice.cover / half.cover - 2) < 1e-9
     );
+    // splashes on the glass at once = cover x live share: that product must follow the rain, not saturate or dip
+    const splashes = (r) => {
+      const f = frameFor(r);
+      return f.cover * f.live;
+    };
+    const ratios = [0.1, 0.25, 0.5, 0.75, 1].map((r) => splashes(r) / splashes(1) / r);
+    t.ok(
+      'rain: the number of splashes is proportional to the rain (' + ratios.map((v) => v.toFixed(3)).join(', ') + ')',
+      ratios.every((v) => Math.abs(v - 1) < 0.02)
+    );
+    t.ok('rain: a storm fills every cell the dial allows', frameFor(1).cover > 0.99);
     const off = resolveRainFrame({ rain01: 1, wet01: 1, look: { ...look, sliders: 0, sheeting: 0, splatDensity: 0 } });
     t.ok(
       'rain: zeroing the dials zeroes the water',
@@ -783,7 +795,7 @@ export function run(t) {
       'rain: all four drop lattices are within 1.6x of each other in size (near-uniform)',
       Math.max(...T.octScale) / Math.min(...T.octScale) < 1.6 && Math.exp(T.radiusLog) < 1.7
     );
-    const storm = resolveRainFrame({ rain01: 1, wet01: 1, look: moderateLook });
+    const storm = resolveRainFrame({ rain01: 1, wet01: 1, look: { ...moderateLook, splatDensity: 2 } });
     const old = 1.5;
     t.ok(
       'rain: a storm runs at least 10x the old gravity (' + storm.slideSpeedMul.toFixed(1) + ' vs ' + old + ')',

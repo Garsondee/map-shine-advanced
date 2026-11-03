@@ -292,9 +292,19 @@ export function resolveRainFrame({ rain01, wet01, look, windSpeed01 = 0, gust01 
   const gravityMix = directionMix(clamp01(windSpeed01)).gravity;
   const rain = clamp01(rain01);
   const wet = clamp01(wet01);
-  const dens = Math.max(0, look.splatDensity);
+  // The Drop count dial relative to its default, so the default makes a full storm fill every cell and anything
+  // below scales the whole curve. (Dens used to multiply a curve that already hit 1 at rain 0.44: half the rain
+  // dial added no splashes at all.)
+  const dens = Math.max(0, look.splatDensity) / WINDOW_RAIN_DEFAULTS.splatDensity;
+  const live = lerp(0.9, 0.6, rain);
   const windPush = clamp01(windSpeed01);
-  const cover = clamp01(1.0 * Math.pow(rain, 0.85) * dens + 0.26 * wet * dens) * (1 - RAIN_TUNE.beadWindCut * windPush);
+  // Splashes on the glass at any moment = cover x live share of each cycle, so cover is divided by what `live` takes
+  // away: the number of splashes is then LINEAR in the rain (rain 0.5 = half the splashes of rain 1), not a curve
+  // that saturates early or dips as the drops' lives shorten. Only water the glass holds beyond what the current
+  // rain keeps there (the lingering after-rain beads) is added on top.
+  const lingering = Math.max(0, wet - clamp01(rain * 1.6));
+  const cover =
+    clamp01(rain * dens * (0.6 / live) + 0.26 * lingering * dens) * (1 - RAIN_TUNE.beadWindCut * windPush);
   // coverage of the 4x finer run grid: the old coverage x boost/grid, so the running count is `boost` x the old one
   const runBoost = lerp(RAIN_TUNE.runBoostCalm, RAIN_TUNE.runBoostGale, windPush);
   const slider =
@@ -302,7 +312,7 @@ export function resolveRainFrame({ rain01, wet01, look, windSpeed01 = 0, gust01 
   const sheet = clamp01(smoothstep(0.55, 1, rain) * look.sheeting);
   return {
     cover,
-    live: lerp(0.9, 0.6, rain),
+    live,
     // the fraction of each slip cycle a run drop sits still: a drizzle drop mostly sticks, a storm drop runs
     stick: lerp(0.55, 0.12, rain),
     impact: smoothstep(0.02, 0.15, rain),

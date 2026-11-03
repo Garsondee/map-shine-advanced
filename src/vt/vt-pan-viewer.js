@@ -631,6 +631,7 @@ import {
 } from '../effects/index.js';
 import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC, perfNowMs } from '../core/frame-clock.js';
 import { createPipelineGovernor } from './pipeline-governor.js';
+import { createRendererKeeper } from './kept-renderer.js';
 import { planWeatherWarmUp, formatWeatherWarmDetail } from './weather-warm-plan.js';
 import { markCompileDeferrable } from '../core/compile-policy.js';
 import {
@@ -938,6 +939,13 @@ let _active = null;
 // construction finishes). Read by the load report's GPU queue probe
 // (diag/gpu-queue-probe.js), which must see the device while the load runs.
 let _latestGpuDevice = null;
+// ONE GPU DEVICE FOR THE SESSION (vt/kept-renderer.js, epic mmp-8gf.2): a clean teardown parks the renderer with
+// its live pipelines pinned instead of disposing it, and the next start adopts it. Revert: msa.keepDevice = '0'.
+const rendererKeeper = createRendererKeeper({ log });
+/** Kept-device counters (parks, adopts, fresh devices, pinned pipelines) for the diagnostics. */
+export function getRendererKeeperStats() {
+  return rendererKeeper.stats();
+}
 
 /**
  * THE BISECT (2026-07-16). Three guesses into a black screen, stop guessing.
@@ -963,6 +971,16 @@ function disposeActive() {
   // requests are not queued behind them (loading audit L-10). Jobs already inside the worker
   // finish — they warm the persistent cache the next visit reads.
   _active.markTornDown?.();
+  // KEEP THE DEVICE (vt/kept-renderer.js): pin every live pipeline BEFORE the materials below are disposed —
+  // three drops a pipeline the moment nothing uses it — so the next scene finds the ones it shares in three's
+  // own cache. False for a lost device (three marks it before the slide calls us), WebGL2 or the revert
+  // flag: then the renderer is disposed at the end exactly as before.
+  let keepRenderer = false;
+  try {
+    keepRenderer = rendererKeeper.prepareToPark(_active.renderer);
+  } catch (err) {
+    log.warn('could not pin pipelines for the next scene — disposing the renderer as before:', err);
+  }
   // Foundry draws its grid and outline again the moment MSA stops presenting.
   try {
     _active.releaseFoundryGrid?.();
@@ -1249,10 +1267,32 @@ function disposeActive() {
   // wrong place after a scene switch" than anything in the placement math
   // (which reads straight from the live document, unaffected by this). LAST,
   // after every resource the backend owns has already been told to let go.
-  try {
-    _active.renderer.dispose();
-  } catch (err) {
-    log.error('renderer dispose failed — GPU context may be leaked:', err);
+  //
+  // KEPT (2026-11-03, mmp-8gf.2): a healthy renderer is PARKED instead — still exactly one live device, never
+  // an abandoned one (the keeper disposes a parked renderer before it would ever park a second). What this
+  // viewer installed ON the renderer comes off first, so the next viewer's copies are the only ones.
+  if (keepRenderer) {
+    try {
+      _active.uninstallRendererHooks?.();
+      // The viewer's device-lost slide replaced three's handler; put three's default back exactly as its
+      // constructor sets it (`this.onDeviceLost = this._onDeviceLost`), so the next viewer wraps THAT, not us.
+      _active.renderer.onDeviceLost = _active.renderer._onDeviceLost;
+      rendererKeeper.park(_active.renderer);
+    } catch (err) {
+      log.error('parking the renderer failed — disposing it instead:', err);
+      try {
+        _active.renderer.dispose();
+      } catch (disposeErr) {
+        log.error('…and disposing it failed too — GPU context may be leaked:', disposeErr);
+      }
+    }
+  } else {
+    rendererKeeper.releaseParked();
+    try {
+      _active.renderer.dispose();
+    } catch (err) {
+      log.error('renderer dispose failed — GPU context may be leaked:', err);
+    }
   }
   try {
     _active.canvas.remove();
@@ -1914,6 +1954,8 @@ async function startVtPanViewerUnserialized({
   // place puts a black rectangle over a perfectly healthy Foundry canvas — which
   // is what used to block the safety slide (diag/render-fallback.js).
   let canvas = null;
+  /** This start's renderer (new or kept), hoisted so a failed start disposes it rather than stranding a device. */
+  let startRenderer = null;
   try {
     /**
      * THE DANGLING-INDIRECTION FIX (author-reported 2026-07-17, under a
@@ -2062,18 +2104,29 @@ async function startVtPanViewerUnserialized({
     // is seconds, and until now it happened with the previous phase's label
     // still on screen and no counter moving. An unlabeled wait reads as a
     // freeze; this is the same fix MASKS got in 2026-07-17.
-    onLoadProgress?.({ phase: 'device', done: 0, total: 1, detail: 'asking the GPU for its limits' });
-    const requiredLimits = await resolveRendererRequiredLimits();
-    // `trackTimestamp: true` REQUESTS the per-render-pass GPU timer. It is a
-    // CONSTRUCTOR-ONLY flag (three.webgpu.js:64637) that three then ANDs with the
-    // adapter feature check during init() (:75258) — which is why the previous
-    // reading of "supported:false" proved nothing: the flag was never passed, so
-    // it reported false on hardware that supports timestamp queries perfectly
-    // well. Requesting it here does NOT turn measurement on; see the two lines
-    // after init().
-    const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, requiredLimits, trackTimestamp: true });
-    onLoadProgress?.({ phase: 'device', done: 0, total: 1, detail: 'creating the graphics device' });
-    await renderer.init(); // REQUIRED before any use — the backend is chosen here
+    // THE KEPT DEVICE FIRST (vt/kept-renderer.js): the last scene's renderer, pointed at this new canvas, with
+    // the pipelines it pinned still compiled. Only when there is none (first load, a loss, the revert flag) is
+    // a device created — the seconds-long wait this block's labels exist for.
+    let renderer = rendererKeeper.adopt(canvas, THREE);
+    if (renderer) {
+      onLoadProgress?.({ phase: 'device', done: 0, total: 1, detail: 'reusing the graphics device' });
+    } else {
+      onLoadProgress?.({ phase: 'device', done: 0, total: 1, detail: 'asking the GPU for its limits' });
+      const requiredLimits = await resolveRendererRequiredLimits();
+      // `trackTimestamp: true` REQUESTS the per-render-pass GPU timer. It is a
+      // CONSTRUCTOR-ONLY flag (three.webgpu.js:64637) that three then ANDs with the
+      // adapter feature check during init() (:75258) — which is why the previous
+      // reading of "supported:false" proved nothing: the flag was never passed, so
+      // it reported false on hardware that supports timestamp queries perfectly
+      // well. Requesting it here does NOT turn measurement on; see the two lines
+      // after init().
+      renderer = new THREE.WebGPURenderer({ canvas, antialias: false, requiredLimits, trackTimestamp: true });
+      startRenderer = renderer;
+      onLoadProgress?.({ phase: 'device', done: 0, total: 1, detail: 'creating the graphics device' });
+      await renderer.init(); // REQUIRED before any use — the backend is chosen here
+      rendererKeeper.noteFresh();
+    }
+    startRenderer = renderer;
     _latestGpuDevice = renderer.backend?.isWebGPUBackend ? (renderer.backend.device ?? null) : null;
     onLoadProgress?.({
       phase: 'device',
@@ -2087,7 +2140,8 @@ async function startVtPanViewerUnserialized({
     // `initTimestampQuery` returns on its first line (:76493) and the query pool
     // is never allocated — one boolean per pass in normal play, which is what
     // makes the instrument free when it is not measuring.
-    if (renderer.backend) {
+    // A kept renderer already carries the answer (its flag is parked false, so re-reading would lose it).
+    if (renderer.backend && renderer.backend.__msaTimestampCapable === undefined) {
       renderer.backend.__msaTimestampCapable = renderer.backend.trackTimestamp === true;
       renderer.backend.trackTimestamp = false;
     }
@@ -4669,7 +4723,11 @@ async function startVtPanViewerUnserialized({
       })
     );
     const fogSoftBlurHQuad = new THREE.QuadMesh(
-      buildVisionSoftBlurMaterial({ THREE, inputTexture: visionMask.softTargets.resolve.texture, uStep: fogLook.uStepH })
+      buildVisionSoftBlurMaterial({
+        THREE,
+        inputTexture: visionMask.softTargets.resolve.texture,
+        uStep: fogLook.uStepH,
+      })
     );
     const fogSoftBlurVQuad = new THREE.QuadMesh(
       buildVisionSoftBlurMaterial({
@@ -11289,7 +11347,10 @@ async function startVtPanViewerUnserialized({
       const pxPerWorld = Math.min(fw / spanX, fh / spanY);
       // THE FOG OF WAR CARD (effects/vision/fog-of-war.js): every knob is a uniform, nothing recompiles.
       const look = resolveFogOfWarLook(getFogOfWarRenderState?.() ?? null, gridPx);
-      const featherPx = Math.min(FOG_FEATHER_MAX_PX, Math.max(FOG_FEATHER_MIN_PX, look.featherGrid * gridPx * pxPerWorld));
+      const featherPx = Math.min(
+        FOG_FEATHER_MAX_PX,
+        Math.max(FOG_FEATHER_MIN_PX, look.featherGrid * gridPx * pxPerWorld)
+      );
       fogLook.uStepH.value.set(fogSoftStepUv(featherPx, fw), 0);
       fogLook.uStepV.value.set(0, fogSoftStepUv(featherPx, fh));
       fogLook.uInk.value = look.ink;
@@ -17550,8 +17611,24 @@ async function startVtPanViewerUnserialized({
       rotationLiftEnabled,
       pivot = null,
     }) {
-      const { vec2, vec4, float, int, Loop, positionLocal, sin, cos, length, pow, max, min, mix, smoothstep, clamp, texture } =
-        THREE.TSL;
+      const {
+        vec2,
+        vec4,
+        float,
+        int,
+        Loop,
+        positionLocal,
+        sin,
+        cos,
+        length,
+        pow,
+        max,
+        min,
+        mix,
+        smoothstep,
+        clamp,
+        texture,
+      } = THREE.TSL;
       // TWO BODIES, ONE HAND-OVER (2026-11-02, author: "The current way of distorting trees/bushes is
       // causing shadows to self intersect and double in value"). Near the seam between two plants the
       // sway is worked out for EACH of them, as if this vertex belonged to it, and the two finished moves
@@ -28495,6 +28572,16 @@ async function startVtPanViewerUnserialized({
       THREE,
       renderer,
       canvas,
+      /**
+       * Take off what this viewer put ON the renderer, before it is parked for the next scene
+       * (vt/kept-renderer.js): the pipeline governor (it refuses a second install, so the next viewer's
+       * would never count) and any armed rebuild probe.
+       */
+      uninstallRendererHooks() {
+        pipelineGovernor.uninstall();
+        shaderRebuildProbe?.uninstall?.();
+        pipelineRebuildProbe?.uninstall?.();
+      },
       /** Give Foundry back its own grid and outline (disposeActive, first thing). */
       releaseFoundryGrid() {
         setFoundryGridOwnership?.({ grid: false, outline: false });
@@ -31538,6 +31625,16 @@ async function startVtPanViewerUnserialized({
       detail: diag0.fatalError,
       canvas,
     });
+    // A start that died never became `_active`, so no teardown will reach its renderer: dispose it here (a kept
+    // device would otherwise be stranded, and the next start must begin from a fresh one anyway).
+    if (startRenderer && _active?.renderer !== startRenderer) {
+      try {
+        startRenderer.setAnimationLoop(null);
+        startRenderer.dispose();
+      } catch (disposeErr) {
+        log.warn('disposing the failed start’s renderer failed — GPU context may be leaked:', disposeErr);
+      }
+    }
     return diag0;
   }
 }

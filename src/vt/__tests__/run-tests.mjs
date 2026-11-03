@@ -8,6 +8,7 @@
  *     --bundle --format=esm --platform=node --outfile=<tmp>.mjs && node <tmp>.mjs
  */
 import { run as runVtCore } from './vt-core.test.mjs';
+import { run as runKeptRenderer } from './kept-renderer.test.mjs';
 import { run as runDecodePrimitives } from './decode-primitives.test.mjs';
 import { run as runViewState } from './view-state.test.mjs';
 import { run as runWorkerUrl } from './worker-url.test.mjs';
@@ -77,6 +78,7 @@ const t = {
 
 const suites = [
   ['vt-core', runVtCore],
+  ['kept-renderer', runKeptRenderer],
   ['decode-primitives', runDecodePrimitives],
   ['view-state', runViewState],
   ['worker-url', runWorkerUrl],

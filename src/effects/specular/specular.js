@@ -70,7 +70,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // RAISED 3.79 → 9.96 (ROUND 23, 2026-09-09) — new live-tuned defaults;
     // see SPECULAR_DEFAULT_STRENGTH's own header (specular-render.js).
     // LOWERED 9.96 → 4.92 (ROUND 24, 2026-10-17)
-    default: 20, // 2026-11-04 author's export (was 5.5)
+    default: 5, // 2026-11-04 author's export #2 (was 20)
     category: 'Look',
     label: 'Shine strength',
     help: 'Master strength of everything this effect draws. Turn it to 0 to see what the map looks like with no shine at all — turn it up past 5-10 to brute-force the shine through anything else that might be dimming it, as a diagnostic before reaching for the more targeted controls under Response.',
@@ -334,7 +334,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // defaults; see SPECULAR_INCIDENT_STEEPNESS's own header
     // (specular-pattern.js).
     // LOWERED 16.55 → 10.5 (ROUND 24, 2026-10-17).
-    default: 0.5, // 2026-11-04 author's export (was 2)
+    default: 1.2, // 2026-11-04 author's export #2 (was 0.5)
     category: 'Response',
     label: 'Light response',
     // NEW (2026-08-03, ROUND 17) — exposes `SPECULAR_INCIDENT_STEEPNESS`

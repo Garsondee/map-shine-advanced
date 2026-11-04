@@ -46,7 +46,7 @@ export const WINDOW_PARAMS = Object.freeze({
     // own max back toward neutral; the author's own dialled-in scene,
     // recorded exactly. Was RAISED 1 → 3 (2026-09-09) before this round.
     // 2026-09-25 — author's live-tuned "new defaults" dump (was 1).
-    default: 1.31, // 2026-11-04 author's export (was 3)
+    default: 0.53, // 2026-11-04 author's export #2 (was 1.31)
     category: 'Look',
     label: 'Window light',
     help: 'How much of the outdoor light the painted cookie lets in — higher saturates the painted falloff toward full sunlight sooner. Turn it to 0 to see the map with no window light at all.',
@@ -75,7 +75,7 @@ export const WINDOW_PARAMS = Object.freeze({
     // header (window-render.js). Was LOWERED 1 → 0.69 (2026-09-08, recovered
     // from a stash that missed both this file's own commit and the 0.6.4
     // release; applied 2026-09-18) before this round.
-    default: 1, // 2026-11-04 author's export (was 1.61)
+    default: 2, // 2026-11-04 author's export #2 (was 1)
     category: 'Look',
     label: 'Patch contrast',
     help: 'Gamma on the painted falloff. Above 1 sharpens the cookie toward a hard-edged patch; below 1 softens it toward a broad glow. 1 = exactly what you painted.',

@@ -72,7 +72,8 @@ export function run(t) {
   // sky models, at the three hours she screenshotted.
   const D = WINDOW_PARAMS;
   const fill = windowFill01(D.strength.default * 1.3);
-  ok('a white window at the default strength lets in nearly all the outdoor light', fill > 0.9);
+  // Her 2026-11-04 default (0.53) is deliberately a little shy of fully open (~0.75), made up by outdoorMatch 1.2 + contrast 2.
+  ok('a white window at the default strength lets in most of the outdoor light', fill > 0.7);
   ok('a mid-grey one still reads as less', windowFill01(0.5 * 1.5) < 0.85);
   const tints = { dawnDusk: hexToRgb01(D.dawnDuskTint.default), night: hexToRgb01(D.nightTint.default) };
   const room = (sun, bg, sky) => {
@@ -101,8 +102,8 @@ export function run(t) {
     const peak = (c) => Math.max(...c);
     ok(`⭐ golden hour: no brighter than the garden beside it (×${r.toFixed(2)})`, r > 0.9 && r < 2.1);
     ok('…and no channel blown far past the garden', peak(inside) < peak(outdoor) * 2.1);
-    // (1.6× since the golden grade was scaled 20% down, 2026-10-28 — it was 2× at full strength.)
-    ok(`…and golden (R/B ×${(inside[0] / inside[2]).toFixed(2)})`, inside[0] > inside[2] * 1.6);
+    // (1.5× at her 2026-11-04 defaults (1.59 measured; strength 0.53 lets in a little less); 1.6× since the golden grade was scaled 20% down, 2026-10-28 — it was 2× at full strength.)
+    ok(`…and golden (R/B ×${(inside[0] / inside[2]).toFixed(2)})`, inside[0] > inside[2] * 1.5);
   }
   {
     const sun = computeSun(0);

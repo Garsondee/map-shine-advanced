@@ -159,6 +159,7 @@ export {
   decideArtSuppression,
   MSA_OWNED_GROUPS,
 } from './canvas-compositing.js';
+export { installSmoothPan, glideStep, panKeyDirection, unthrottleDrag } from './smooth-pan.js';
 
 // THE BLANK-CANVAS WATCHDOG — detects a canvasTearDown that nothing follows
 // (Scene#unview(), the active scene being deleted), which canvasInit/

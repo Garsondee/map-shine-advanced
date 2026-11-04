@@ -399,7 +399,7 @@ export function run(t) {
     // 2026-10-26: +transitionStyle, +transitionPace, +transitionOverride (the one-transition system).
     // 2026-10-27: +safeMode (the crash ladder's switch, epic mmp-fpu).
     // 2026-11-01: +roofRevealRadius (the wider RADIAL roof reveal, world).
-    ok('one effect → 16 global + 2 per-effect descriptors', descriptors.length === 18);
+    ok('one effect → 17 global + 2 per-effect descriptors', descriptors.length === 19);
     const reveal = byKey(GLOBAL_SETTING_KEYS.roofRevealRadius);
     ok(
       'the roof reveal radius is a world enum defaulting to 3 squares, wider than Foundry',
@@ -522,7 +522,7 @@ export function run(t) {
           d.key === GLOBAL_SETTING_KEYS.transitionOverride
       )
     );
-    ok('no manifests → just the 16 global descriptors', describeEffectSettings([]).length === 16);
+    ok('no manifests → just the 17 global descriptors', describeEffectSettings([]).length === 17);
     const safeModeSetting = describeEffectSettings([]).find((d) => d.key === GLOBAL_SETTING_KEYS.safeMode);
     ok(
       'safe mode is a client enum defaulting to automatic, requiring a reload (the rung is read before any shader is built)',

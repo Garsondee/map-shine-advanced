@@ -95,6 +95,8 @@ import { createGpuQueueProbe } from './diag/gpu-queue-probe.js';
 // the exact same contract `profileHarness` already satisfies.
 import { runStructuralAB, runEditCascadeStress } from './diag/perf-structural-ab.js';
 import { pickStressTestTile, pingStressTestTile, unpingStressTestTile } from './foundry/index.js';
+import { installSmoothPan } from './foundry/index.js';
+import { framePacer } from './core/frame-pacer.js';
 // The benchmark route drives the EXISTING camera-path player rather than growing
 // a second motion system — a fixed route is what makes two runs comparable.
 import {
@@ -19217,6 +19219,38 @@ function install() {
     });
   }
 
+  // SMOOTH PAN (2026-11-04) — Foundry's own camera input made frame-even: its
+  // right-drag throttle dropped a third of a pan's frames and held arrow keys
+  // restart a 100 ms ease 30 times a second. Measured and explained in
+  // foundry/smooth-pan.js; tools/pan-smoothness/measure.mjs re-measures it.
+  // Registered at module load: it hooks canvasReady and ready.
+  {
+    const smoothPan = installSmoothPan({ onReady: () => MapShine.__applyFramePacing?.() });
+    MapShine.setSmoothPan = (on) => smoothPan.setEnabled(on);
+    MapShine.smoothPanStatus = () => smoothPan.status();
+  }
+
+  // FRAME PACING (2026-11-04, core/frame-pacer.js) — the player's setting, read at
+  // ready (smooth-pan's ready hook calls it: Foundry hooks live in foundry/) and on
+  // every settings change (below); `MapShine.setFramePacing('auto' |
+  // 'off' | 1..4)` overrides it for this page until the setting next changes.
+  {
+    const applyFramePacing = () => {
+      try {
+        const v = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.framePacing) ?? 'off';
+        framePacer.setMode(v === 'half' ? 2 : v === 'third' ? 3 : v);
+      } catch {
+        /* settings not registered yet (shader lab, early probe): stay off */
+      }
+    };
+    MapShine.__applyFramePacing = applyFramePacing;
+    MapShine.setFramePacing = (mode) => framePacer.setMode(mode);
+    MapShine.framePacingStatus = () => framePacer.status();
+    // Same-timestamp calls return the frame's cached decision: a probe can ask
+    // whether a frame was drawn without changing anything.
+    MapShine.framePacingDecided = (t) => framePacer.decide(t);
+  }
+
   if (typeof Hooks !== 'undefined') {
     // canvasInit fires strictly BEFORE Foundry loads scene textures (verified
     // in source, client/canvas/board.mjs) — must register proxies here, not
@@ -20455,6 +20489,7 @@ function install() {
             // own `renderScaleSetting` constructor param, so a change that
             // lands before any scene has loaded is never lost, just moot.
             setVtPanViewerRenderScaleSetting(readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.renderScale));
+            MapShine.__applyFramePacing?.();
             // TIER-COUPLED BUDGET (2026-08-27) — the profile setting may be
             // what just changed (this callback fires on ANY settings change,
             // not just its own); re-resolves the profile itself internally,

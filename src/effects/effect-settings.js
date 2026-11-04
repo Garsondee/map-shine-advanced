@@ -78,6 +78,7 @@ export const GLOBAL_SETTING_KEYS = Object.freeze({
    * while `MAX_PIXEL_RATIO` still protects them from Foundry's own opaque
    * value regardless of which mode they pick. */
   renderScale: 'renderScale',
+  framePacing: 'framePacing',
   /** STUDIO EFFECTS MEMORY (client) — `{open, recent}` JSON: the effect open
    * in the Studio's Effects library and the last few opened (`ui/rooms/studio/
    * effects-department.js`). The key keeps its 2026-09-14 name from when it
@@ -265,6 +266,26 @@ export function describeEffectSettings(manifests = []) {
       config: true,
       name: 'Map Shine — Render resolution',
       hint: 'Auto lets Map Shine automatically balance sharpness against your frame rate — it can never be pushed higher than a safe ceiling, regardless of your own display or Foundry resolution setting. A fixed value locks the render resolution and turns automatic adjustment off.',
+    },
+    {
+      key: GLOBAL_SETTING_KEYS.framePacing,
+      scope: 'client',
+      kind: 'enum',
+      choices: {
+        off: 'Off — draw every frame I can',
+        auto: 'Even — steady frame rate, chosen for me (smoother motion on fast displays)',
+        // Word keys, not 2/3: integer-like keys sort first in a JS object, which put
+        // these above Off in Foundry's dropdown. boot.js maps them to divisors.
+        half: 'Even — every 2nd refresh (72 fps at 144 Hz, 60 fps at 120 Hz)',
+        third: 'Even — every 3rd refresh (48 fps at 144 Hz, 40 fps at 120 Hz)',
+      },
+      default: 'off',
+      config: true,
+      name: 'Map Shine — Frame pacing',
+      hint:
+        'Even draws the map on every 2nd (or 3rd) refresh of your display when it cannot keep up with every one, ' +
+        'so each frame stays on screen for the same time and pans look smooth instead of stuttering. ' +
+        'Fewer frames per second, all the same length. Best on 120 Hz and faster displays; also good for recording.',
     },
     {
       key: GLOBAL_SETTING_KEYS.studioPinnedEffects,

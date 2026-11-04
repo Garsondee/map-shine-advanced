@@ -233,6 +233,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { framePacer } from '../core/frame-pacer.js';
 
 const log = createLogger('interface-seam');
 
@@ -953,6 +954,51 @@ export function uncapFoundryTicker() {
 }
 
 /**
+ * §4b — FOUNDRY'S CANVAS DRAWS ON MSA'S FRAMES (2026-11-04, frame pacing).
+ *
+ * With frame pacing on (core/frame-pacer.js) MSA draws the map on every Nth
+ * refresh only. Foundry's PIXI canvas — tokens, door icons, walls, selection —
+ * sits on top of it and, left alone, would keep drawing on EVERY refresh: on the
+ * frames in between, the chrome would move while the map under it did not, the
+ * same "door icons wriggle" mismatch §4 above exists to prevent.
+ *
+ * So Foundry's draw asks the same pacer, with the same rAF timestamp, just before
+ * Application#render (a LOW-priority ticker listener) runs. Only the draw of the
+ * STAGE to the screen is skipped — `renderer.render` into a render texture
+ * (snapshots, masks, thumbnails) always goes through — and Foundry's own ticker
+ * work (animations, the camera) still runs every frame, so a drawn frame always
+ * shows the latest state. With pacing off the pacer says yes to every frame and
+ * nothing changes. `canvas.app` lives for the whole session: once is enough.
+ *
+ * @returns {boolean} true if the gate was installed
+ */
+export function paceFoundryRender() {
+  try {
+    const app = typeof canvas !== 'undefined' ? canvas?.app : null;
+    if (!app?.ticker || !app.renderer || app.__msaPaced) return false;
+    const LOW = globalThis.PIXI?.UPDATE_PRIORITY?.LOW ?? -25;
+    let skip = false;
+    app.ticker.add(() => { skip = !framePacer.decide(app.ticker.lastTime); }, null, LOW + 1);
+    app.ticker.add(() => { skip = false; }, null, LOW - 1);
+    const renderer = app.renderer;
+    const render = renderer.render;
+    renderer.render = function pacedRender(object, options) {
+      // To the SCREEN only: an options bag with no target, or nothing. A render
+      // texture (v7 options.renderTexture, or the legacy positional 2nd argument)
+      // always draws.
+      const toScreen = options == null || (options.renderTexture == null && options.baseTexture == null);
+      if (skip && object === app.stage && toScreen) return;
+      return render.call(this, object, options);
+    };
+    app.__msaPaced = true;
+    return true;
+  } catch (err) {
+    log.error("pacing Foundry's canvas draw failed — with frame pacing on, its chrome may move between map frames:", err);
+    return false;
+  }
+}
+
+/**
  * Register the two hooks that make the seam work. MUST be called at module load
  * (Foundry's Canvas#initialize runs between the "setup" and "ready" hooks, and
  * `canvasConfig` fires inside it — see header §1: there is no second chance).
@@ -1013,6 +1059,7 @@ export function registerCanvasCompositing() {
   // (see uncapFoundryTicker's header for why once is enough).
   Hooks.once('canvasReady', () => {
     uncapFoundryTicker();
+    paceFoundryRender();
   });
 
   return { registered: true, reason: null };

@@ -690,6 +690,7 @@ import {
   advanceCaptureClock,
   endCaptureClock,
 } from '../core/frame-clock.js';
+import { framePacer } from '../core/frame-pacer.js';
 import { createPipelineGovernor } from './pipeline-governor.js';
 import { createRendererKeeper, hdrOutputRequested } from './kept-renderer.js';
 import { planWeatherWarmUp, formatWeatherWarmDetail } from './weather-warm-plan.js';
@@ -24267,6 +24268,15 @@ async function startVtPanViewerUnserialized({
       if (gpuProbe.isActive() && gpuProbe.isMeasuring()) return;
       const now = nowMs ?? perfNowMs();
 
+      // FRAME PACING (2026-11-04, core/frame-pacer.js) — draw on every Nth display
+      // refresh instead of an uneven mix of 1, 2 and 3 (measured at 144 Hz: a pan
+      // that is even in world space landed on screen in uneven steps). Foundry's own
+      // canvas asks the same pacer with the same rAF timestamp (canvas-compositing.js
+      // paceFoundryRender), so tokens/doors/walls are drawn on exactly these frames
+      // too. A skipped tick leaves lastFrameStartMs alone, like the throttles here.
+      // Never in capture: capture draws every frame it is asked for.
+      if (!captureActive && nowMs != null && !framePacer.decide(nowMs)) return;
+
       // VIDEO-CAPTURE FRAME CAP (2026-08-10) — the author records promotional
       // videos externally at 30fps; rendering faster than that while the
       // camera-path tool is playing only burns GPU work the capture will
@@ -24340,7 +24350,9 @@ async function startVtPanViewerUnserialized({
         // `cost` is ever read) — this guard keeps the EMA itself honest too,
         // not just the governor's momentary decision.
         if (!renderScaleHeld) {
-          renderScaleCostSignal.update(gapMs);
+          // Paced, the gap is long ON PURPOSE: feed the frame's real cost (whole
+          // refreshes it kept the main thread), or the governor reads pacing as slowness.
+          renderScaleCostSignal.update(framePacer.isPacing() ? (framePacer.lastCostMs() ?? gapMs) : gapMs);
           const renderScaleStep = renderScaleGovernor.update(renderScaleCostSignal.costMs());
           if (renderScaleStep.changed) requestInternalRescale();
         } else {

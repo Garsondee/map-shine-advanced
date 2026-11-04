@@ -9,6 +9,7 @@
  */
 import { run as runActiveSceneSource } from './active-scene-source.test.mjs';
 import { run as runCameraPath } from './camera-path.test.mjs';
+import { run as runSmoothPan } from './smooth-pan.test.mjs';
 import { run as runCanvasCompositing } from './canvas-compositing.test.mjs';
 import { run as runCanvasLifecycle } from './canvas-lifecycle.test.mjs';
 import { run as runSceneSwitchGate } from './scene-switch-gate.test.mjs';
@@ -98,6 +99,7 @@ const t = {
 const suites = [
   ['active-scene-source', runActiveSceneSource],
   ['camera-path', runCameraPath],
+  ['smooth-pan', runSmoothPan],
   ['canvas-compositing', runCanvasCompositing],
   ['canvas-lifecycle', runCanvasLifecycle],
   ['scene-switch-gate', runSceneSwitchGate],

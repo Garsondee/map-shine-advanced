@@ -1,6 +1,7 @@
 /** src/core/ verification — the shared contracts (params, frame clock, seams). */
 import { run as runParams } from './params-schema.test.mjs';
 import { run as runFrameClock } from './frame-clock.test.mjs';
+import { run as runFramePacer } from './frame-pacer.test.mjs';
 import { run as runGregorianMath } from './gregorian-math.test.mjs';
 import { run as runCuesSchema } from './cues-schema.test.mjs';
 import { run as runLooksSchema } from './looks-schema.test.mjs';
@@ -29,6 +30,7 @@ const t = {
 const suites = [
   ['params-schema', runParams],
   ['frame-clock', runFrameClock],
+  ['frame-pacer', runFramePacer],
   ['gregorian-math', runGregorianMath],
   ['cues-schema', runCuesSchema],
   ['looks-schema', runLooksSchema],

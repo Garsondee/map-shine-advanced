@@ -683,6 +683,9 @@ export function specularTierPlan(tier) {
  * @param {*} args.islandPackTexture - `specular-islands.js`'s pack. RG = this
  *   texel's island parallax vector.
  * @param {*} args.illumTexture - `buf:scene.illum`.
+ * @param {*} [args.colorationTexture] - `buf:scene.coloration`, the additive
+ *   half of a lamp's light. Counted as incident light (see "LAMPS ARE LIGHT
+ *   TOO" below); null leaves the incident term illum-only, as before.
  * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment (a
  *   `THREE.DepthTexture`); null compiles the floor gate OUT entirely (a
  *   JS-time branch, never a uniform × 0) — see "THE FLOOR GATE" below for
@@ -725,6 +728,7 @@ export function buildSpecularSurfaceMaterial({
   maskTexture,
   islandPackTexture,
   illumTexture,
+  colorationTexture = null,
   depthTexture = null,
   depthFlagsTexture = null,
   positionNode = null,
@@ -1512,7 +1516,43 @@ export function buildSpecularSurfaceMaterial({
   // author-adjustable stylised floor now, not a structural guard: real light —
   // point lights, window light, the sky's own day/night mix — already reaches
   // `illum` before this pass runs, with no floor required to see it.
-  const incidentRaw = max(illumAboveFloor, vec3(uLightFloor, uLightFloor, uLightFloor)).toVar('specIncidentRaw');
+  // ═══════════════════════════════════════════════════════════════════════
+  // ⚠️ LAMPS ARE LIGHT TOO — `buf:scene.coloration` IS ADDED (2026-11-03).
+  // ═══════════════════════════════════════════════════════════════════════
+  // The composite finishes a pixel as `EOTF(OETF(albedo) × illum + coloration)`
+  // (environmental-light.js): coloration is real, visible light added on top,
+  // and every critter material already counts it. Specular read `illum` alone,
+  // and a low-luminosity lamp (Foundry `luminosity < 0.5` → exposure < 0, so
+  // its illumination is scaled DOWN) in a darkened interior lands at or under
+  // the ambient floor — the MAX blend drops it from `illum` entirely while its
+  // coloration still paints a bright pool on screen. Measured live on Big Bank
+  // (MSA): at a hall lamp's centre illum 0.237 (the bare floor) vs coloration
+  // 2.39; debug channel 10 showed the window panes and not one lamp, so the
+  // gold diamonds beside every lamp got no shine at all. Added in the SAME
+  // gamma space the composite adds it in, weight 1 (a constant, not a uniform:
+  // this material sits at the uniform budget cap).
+  //
+  // LUMINOSITY AND COLOUR, SEPARATELY (author's question, 2026-11-04: "do we
+  // accurately deal with the separate ways specular surfaces would respond to
+  // both Foundry light luminosity and light colour?"). Foundry splits a light
+  // in two: `luminosity` drives the ILLUMINATION layer (how much it brightens —
+  // colourless in our buffer), `color` × `alpha` the COLORATION layer (a tinted
+  // additive glow). A reflection is an image of the light, so it should take
+  // the light's STRENGTH from both layers and its HUE from the light's colour.
+  // The illumination share is therefore tinted by the coloration's hue
+  // (normalised to its brightest channel, so the tint only ever REMOVES energy
+  // from the other channels, never adds brightness), faded in by how much
+  // coloration is present — a white or colourless light leaves it untouched.
+  const incidentIllum = max(illumAboveFloor, vec3(uLightFloor, uLightFloor, uLightFloor));
+  let incidentSum = incidentIllum;
+  if (colorationTexture) {
+    const lampGlow = max(texture(colorationTexture).sample(screenUv).rgb, vec3(0, 0, 0)).toVar('specLampGlow');
+    const glowPeak = max(max(lampGlow.r, lampGlow.g), max(lampGlow.b, float(1e-4)));
+    const lightHue = lampGlow.div(glowPeak);
+    const hueWeight = smoothstep(float(0.005), float(0.06), glowPeak);
+    incidentSum = incidentIllum.mul(mix(vec3(1, 1, 1), lightHue, hueWeight)).add(lampGlow);
+  }
+  const incidentRaw = incidentSum.toVar('specIncidentRaw');
   // ═══════════════════════════════════════════════════════════════════════
   // ⚠️ THE ENGINE'S OWN TRANSFER CURVE — NOT A TUNED EXPONENT.
   // ═══════════════════════════════════════════════════════════════════════
@@ -1875,8 +1915,19 @@ export function buildSpecularSurfaceMaterial({
   const mirrorByColour = float(1)
     .add(chromeW.mul(float(CHROME_MIRROR_GAIN)))
     .sub(ironW.mul(float(0.5)));
+  // × kneeT (2026-11-03, Big Bank): the mirror's dark troughs are the CONTRAST
+  // half of reading as metal, and contrast needs light. Unscaled, a dim room got
+  // the full darkening while the knee had already taken nearly all the shine, so
+  // "specular on" made the gold DULLER than "off" (hall close-up mean luma 79 → 73).
+  // `kneeT` is the same light-presence weight the shine and the flicker use: no
+  // light, no glint AND no trough; under a lamp or the sun, both, as before.
   const mirrorDarken = metalBodyEnabled
-    ? uMirrorDepth.mul(mirrorByColour).mul(float(1).sub(reflectWeight)).mul(coverage).mul(strengthNode.sqrt())
+    ? uMirrorDepth
+        .mul(mirrorByColour)
+        .mul(float(1).sub(reflectWeight))
+        .mul(coverage)
+        .mul(strengthNode.sqrt())
+        .mul(kneeT)
     : float(0);
   const reliefDarken = uReliefStrength.mul(reliefShade).mul(float(0.45)).mul(coverage);
   const keepFloor = float(1)

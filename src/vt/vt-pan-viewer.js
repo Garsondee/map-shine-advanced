@@ -17074,6 +17074,8 @@ async function startVtPanViewerUnserialized({
       loadMaskImage: (opts) => loadMaskImageTexture({ ...opts, THREE }),
       createMaskTexture: createMaskDataTexture,
       illumTexture: sceneIllum.texture,
+      // Lamp light reaches the metal too (specular-render.js, "LAMPS ARE LIGHT TOO").
+      colorationTexture: sceneColoration.texture,
       depthTexture: sceneDepth.depthTexture ?? null,
       // PARALLAX (2026-11-04): the per-pixel layer scale, so the mask is read where the art on screen is.
       depthFlagsTexture: sceneDepth.texture ?? null,
@@ -17169,6 +17171,7 @@ async function startVtPanViewerUnserialized({
       createMaskTexture: createMaskDataTexture,
       createPackTexture: createSpecularPackTexture,
       illumTexture: sceneIllum.texture,
+      colorationTexture: sceneColoration.texture,
       depthTexture: sceneDepth.depthTexture ?? null,
       depthFlagsTexture: sceneDepth.texture ?? null,
       // PER ITEM, not per floor — `depthAuthority.rankOf` takes any item id,

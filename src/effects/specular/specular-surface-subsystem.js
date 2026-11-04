@@ -74,6 +74,8 @@ const SPECULAR_BOUNDS_PAD_PX = 8;
  * @param {(data: Float32Array, w: number, h: number) => *} args.createPackTexture -
  *   the island pack's own uploader. ⚠️ MUST use NearestFilter — see `bakeIslandPack`.
  * @param {*} args.illumTexture - `buf:scene.illum`.
+ * @param {*} [args.colorationTexture] - `buf:scene.coloration`: lamp light counts as incident light
+ *   (specular-render.js, "LAMPS ARE LIGHT TOO").
  * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment; null
  *   compiles the floor gate out. STAGE 3 (2026-08-05) — replaces `attrTexture`.
  * @param {(floorIndex: number) => number} [args.resolveExpectedDepth] - given
@@ -101,6 +103,7 @@ export function createSpecularSurfaceSubsystem({
   createMaskTexture,
   createPackTexture,
   illumTexture,
+  colorationTexture = null,
   depthTexture = null,
   depthFlagsTexture = null,
   resolveExpectedDepth,
@@ -253,6 +256,7 @@ export function createSpecularSurfaceSubsystem({
       islandPackTexture,
       shapeTexture,
       illumTexture,
+      colorationTexture,
       depthTexture,
       depthFlagsTexture,
       uViewRect,

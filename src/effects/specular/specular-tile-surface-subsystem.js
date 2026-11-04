@@ -90,6 +90,7 @@ function cornersMoved(a, b) {
  *   the island pack's own uploader — MUST use NearestFilter, same requirement
  *   `specular-surface-subsystem.js#bakeIslandPack` documents.
  * @param {*} args.illumTexture - `buf:scene.illum`.
+ * @param {*} [args.colorationTexture] - `buf:scene.coloration` (lamp light counts as incident light).
  * @param {*} [args.depthTexture]
  * @param {(itemId: string) => number} [args.resolveExpectedDepth] - THIS
  *   item's own rank, per ITEM rather than per floor.
@@ -114,6 +115,7 @@ export function createSpecularTileSurfaceSubsystem({
   createMaskTexture,
   createPackTexture,
   illumTexture,
+  colorationTexture = null,
   depthTexture = null,
   depthFlagsTexture = null,
   resolveExpectedDepth,
@@ -168,6 +170,7 @@ export function createSpecularTileSurfaceSubsystem({
       islandPackTexture: entry.islandPackTexture,
       shapeTexture: entry.shapeTexture,
       illumTexture,
+      colorationTexture,
       depthTexture,
       depthFlagsTexture,
       uViewRect,

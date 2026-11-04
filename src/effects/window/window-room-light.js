@@ -34,9 +34,19 @@
  * brightest at one end and gradually blur and become dimmer till it hits 0% brightness at the extreme end of the
  * smear"*). Each tap carries a weight that falls linearly along the smear — 1 at the painted end, 0 at the far end
  * ({@link roomTapRamp}) — and the sum is divided by the weights' nominal total, so a wide patch keeps its brightness
- * where it is painted and a narrow one spreads the same light. A tap also reads its cookie a little off the line, on a
- * disc that widens with its distance along the smear ({@link roomTapBlur}), a world-locked per-pixel rotation of a
- * golden-angle spiral: the far end of the streak is a soft haze, not a hard copy of the glass.
+ * where it is painted and a narrow one spreads the same light. A tap also reads its cookie blurred, more so the further
+ * along the smear it sits ({@link roomTapFootprint}): the far end of the streak is a soft haze, not a hard copy of the
+ * glass.
+ *
+ * EVERY TAP READS A FILTERED FOOTPRINT, NEVER A POINT (author, 2026-11-04: *"when it stretches and smears, we get quite
+ * a noisy grainy effect, is there no smoother way"*). Eight point reads along a 150 px throw sit ~19 px apart; the
+ * gaps used to be hidden by shifting each pixel's taps by its own noise value and spinning its blur disc by another,
+ * which traded stripes for grain — and nothing in the window pass averages grain away. Now each tap reads the mask
+ * through its mip chain with explicit gradients: a footprint as long as the tap spacing along the throw (so the eight
+ * footprints tile the line with no gaps: no stripes) and as wide as its blur across it (so a glazing bar that runs
+ * along the sun's line stays crisp near the window). The GPU's anisotropic filter does the averaging; every pixel
+ * reads the same smooth field as its neighbours, so there is no grain. The mask is uploaded with mips for this
+ * (`loadMaskImageTexture({ mipmaps: true })`); every other read of it is pinned to level 0, unchanged.
  *
  * THE SMEAR IS LIGHT-WEIGHTED, NOT MAX: five max-blended copies of a patch read as five stripes (found on the bench,
  * 2026-10-28). The taps are folded as a mean (energy kept: a longer patch is a dimmer one) blended toward a
@@ -137,61 +147,82 @@ export function resolveRoomSunFrame(sun, look) {
 }
 
 /** Where along the throw tap `k` reads: from `1 − smear` of the way back to the full drift. */
-export function roomTapT(k, smear, jitter = 0) {
-  return 1 - smear * (1 - (k + 0.5 + jitter) / WINDOW_ROOM_TAPS);
+export function roomTapT(k, smear) {
+  return 1 - smear * (1 - (k + 0.5) / WINDOW_ROOM_TAPS);
 }
-
-/** Tap `k`'s place along the smear, 0 at the painted end to 1 at the far end (jittered like {@link roomTapT}). */
-const tapAlong = (k, jitter = 0) => clamp01((k + 0.5 + jitter) / WINDOW_ROOM_TAPS);
 
 /**
  * Tap `k`'s weight: 1 at the painted end of the smear, falling linearly to `1 − smear` at the far end — so with the
  * full smear the light reaches 0 exactly where the streak ends, and with no smear every tap counts the same.
  */
-export function roomTapRamp(k, smear, jitter = 0) {
-  return 1 - smear * tapAlong(k, jitter);
+export function roomTapRamp(k, smear) {
+  return 1 - smear * ((k + 0.5) / WINDOW_ROOM_TAPS);
 }
 
-/** The ramp's nominal total over the taps (unjittered, so a constant): what the weighted sum is divided by. */
+/** The ramp's total over the taps: what the weighted sum is divided by. */
 export function roomRampNorm(smear) {
   return WINDOW_ROOM_TAPS * (1 - smear / 2);
 }
 
-/** The angle the blur spiral is rotated by at a pixel, radians: world-locked noise, not the tap jitter's. */
-export function roomBlurAngle(x, y) {
-  const f = (v) => v - Math.floor(v);
-  return 2 * Math.PI * f(52.9829189 * f(0.00583715 * Math.floor(x) + 0.06711056 * Math.floor(y)));
+/** The gap between neighbouring taps along the throw, world px. */
+export function roomTapSpacingPx(throwLenPx, smear) {
+  return (Math.max(throwLenPx, 0) * clamp01(smear)) / WINDOW_ROOM_TAPS;
 }
 
-/** Golden angle, radians: successive taps land at well-spread bearings. */
-export const WINDOW_ROOM_GOLDEN_ANGLE = 2.39996323;
+/**
+ * The blur's footprint across the throw per px of `smearBlurPx · smear · (k + ½)/taps` (the old disc's radius). A
+ * filtered read spreads about half its footprint either way (σ ≈ ½ · footprint); 1.4 matches the spread of the old
+ * per-pixel disc (a ring of that radius, σ ≈ 0.71 r), so the far-end haze keeps its measured width (the lab,
+ * 2026-11-04: a footprint of 2 r washed a glazing bar along the throw from 0.21 contrast to 0.08).
+ */
+export const WINDOW_ROOM_BLUR_FOOTPRINT = 1.4;
 
 /**
- * Where tap `k` reads its cookie, relative to the tap's own point, world px: a disc whose radius grows from nothing at
- * the painted end of the smear to `blurPx · smear` at the far end, the bearing spiralling by the golden angle and
- * rotated by `angle` (see {@link roomBlurAngle}).
+ * The patch of cookie tap `k` averages — the read's footprint, world px: `across` the throw it is the blur, growing
+ * from nothing at the painted end of the smear to {@link WINDOW_ROOM_BLUR_FOOTPRINT}` · blurPx · smear` at the far
+ * end; `along` the throw it is never shorter than the tap spacing, so the eight footprints tile the smear's line end
+ * to end (see the header: no stripes, no noise).
+ * @returns {{along:number, across:number}}
  */
-export function roomTapBlur(k, smear, blurPx, angle) {
-  const r = blurPx * smear * ((k + 0.5) / WINDOW_ROOM_TAPS);
-  const a = angle + k * WINDOW_ROOM_GOLDEN_ANGLE;
-  return [Math.cos(a) * r, Math.sin(a) * r];
+export function roomTapFootprint(k, smear, blurPx, throwLenPx) {
+  const across = WINDOW_ROOM_BLUR_FOOTPRINT * Math.max(blurPx, 0) * clamp01(smear) * ((k + 0.5) / WINDOW_ROOM_TAPS);
+  return { along: Math.max(roomTapSpacingPx(throwLenPx, smear), across), across };
+}
+
+/** Sub-samples per footprint side in the CPU twin. */
+const TWIN_STEPS = 7;
+
+/**
+ * The cookie averaged over a footprint centred on (x, y), its `along` side on the unit vector (ux, uy) — the CPU
+ * twin of the shader's anisotropic mip read: tent weights reaching one footprint either way, as a filtered read's do
+ * (and tents a spacing wide tile a line exactly, as the footprints along the throw must). The twin is the spec of
+ * WHERE the light is averaged; the GPU's exact filter shape is its own.
+ */
+function footprintCookie(sampleCookie, x, y, ux, uy, along, across) {
+  if (along < 0.5 && across < 0.5) return sampleCookie(x, y);
+  const out = [0, 0, 0];
+  let wsum = 0;
+  const half = (TWIN_STEPS - 1) / 2;
+  for (let i = 0; i < TWIN_STEPS; i++) {
+    const fa = (i - half) / (half + 1);
+    for (let j = 0; j < TWIN_STEPS; j++) {
+      const fc = (j - half) / (half + 1);
+      const w = (1 - Math.abs(fa)) * (1 - Math.abs(fc));
+      const a = fa * along;
+      const c = fc * across;
+      const v = sampleCookie(x + ux * a - uy * c, y + uy * a + ux * c);
+      out[0] += v[0] * w;
+      out[1] += v[1] * w;
+      out[2] += v[2] * w;
+      wsum += w;
+    }
+  }
+  return [out[0] / wsum, out[1] / wsum, out[2] / wsum];
 }
 
 /** Where gap clearance sample `j` (0..{@link WINDOW_ROOM_GAP_SAMPLES}−1) sits: evenly up to the first tap, unjittered. */
 export function roomGapT(j, smear) {
   return (1 - smear) * ((j + 0.5) / WINDOW_ROOM_GAP_SAMPLES);
-}
-
-/**
- * THE TAP JITTER, −0.5..0.5 of a tap spacing — interleaved gradient noise (Jimenez 2014) on WORLD px, so it is fixed
- * to the map and never crawls under a pan. Eight evenly spaced copies of a patch still read as faint stripes along a
- * long smear (the bench, 2026-10-28); shifting every pixel's taps by its own fraction of a spacing covers the whole
- * smear between neighbours, so the stripes become a dither finer than the eye resolves.
- * @param {number} x @param {number} y
- */
-export function roomTapJitter(x, y) {
-  const f = (v) => v - Math.floor(v);
-  return f(52.9829189 * f(0.06711056 * Math.floor(x) + 0.00583715 * Math.floor(y))) - 0.5;
 }
 
 /**
@@ -219,8 +250,9 @@ export function evalRoomLightPixel({ x, y, sampleCookie, room, frame, look, cell
   const ty = frame.throwY;
   const fade = Math.max(look.wallFadePx, 1);
   const aoW = look.wallFadeStrength * smoothstep(0, fade, Math.hypot(tx, ty));
-  const jitter = roomTapJitter(x, y);
-  const blurAngle = roomBlurAngle(x, y);
+  const tLen = Math.hypot(tx, ty);
+  const ux = tLen > 1e-6 ? tx / tLen : 1;
+  const uy = tLen > 1e-6 ? ty / tLen : 0;
   // THE WAY MUST BE CLEAR: the light at a tap reaches P only if nothing on the path between blocks it. The clearance is
   // a running minimum outward from P — over the gap before the first tap, then at each tap's UNJITTERED position — so
   // once the path touches a wall everything beyond it is shaded.
@@ -232,7 +264,7 @@ export function evalRoomLightPixel({ x, y, sampleCookie, room, frame, look, cell
   let asum = 0;
   let gate = 0;
   for (let k = 0; k < WINDOW_ROOM_TAPS; k++) {
-    const t = roomTapT(k, look.smear, jitter);
+    const t = roomTapT(k, look.smear);
     const qx = x - tx * t;
     const qy = y - ty * t;
     const Q = room(qx, qy);
@@ -242,10 +274,10 @@ export function evalRoomLightPixel({ x, y, sampleCookie, room, frame, look, cell
     // its window wall, and counting that wall shut every beam off at its source (bench, 2026-10-28: the patch stopped
     // moving at all). What lies past it — out through the glass — is shaded.
     vis = Math.min(vis, clearAt(roomTapT(k, look.smear)));
-    const [bx, by] = roomTapBlur(k, look.smear, look.smearBlurPx, blurAngle);
-    const c = sampleCookie(qx + bx, qy + by);
+    const fp = roomTapFootprint(k, look.smear, look.smearBlurPx, tLen);
+    const c = footprintCookie(sampleCookie, qx, qy, ux, uy, fp.along, fp.across);
     const f = windowSunFacing(Q.vec, frame);
-    const ramp = roomTapRamp(k, look.smear, jitter);
+    const ramp = roomTapRamp(k, look.smear);
     const d = c.map((v) => v * w * f * ramp);
     const a = Math.max(d[0], d[1], d[2]);
     for (let i = 0; i < 3; i++) {
@@ -315,7 +347,6 @@ export function createWindowRoomLight({ THREE, roomTexture, fieldTexture }) {
     step,
     mix,
     smoothstep: ss,
-    clamp,
     length,
     fract,
     dot,
@@ -385,29 +416,28 @@ export function createWindowRoomLight({ THREE, roomTexture, fieldTexture }) {
       const fade = max(uFadePx, float(1));
       const aoW = uFadeStrength.mul(ss(float(0), fade, length(uThrow))).toVar('winRoomAoW');
       const destFade = float(1).add(ss(float(0), fade, distP).sub(1).mul(aoW));
-      // `roomTapJitter`, transcribed: world-locked interleaved gradient noise.
-      const cellP = floor(P);
-      const jitter = fract(fract(cellP.x.mul(0.06711056).add(cellP.y.mul(0.00583715))).mul(52.9829189))
-        .sub(0.5)
-        .toVar('winRoomJitter');
-      // `roomBlurAngle`, transcribed.
-      const blurAngle = fract(fract(cellP.x.mul(0.00583715).add(cellP.y.mul(0.06711056))).mul(52.9829189))
-        .mul(2 * Math.PI)
-        .toVar('winRoomBlurAngle');
-      /** World px tap `k` shifts its cookie read by (`roomTapBlur`): ADD to the sample point. */
       // `k` is a JS number OR a shader int (the loop in `combine`): every helper below takes either, through
       // `float(k)`, so one tap's arithmetic is written once whichever way it is emitted.
-      const blurAt = (k) => {
-        const a = blurAngle.add(float(k).mul(WINDOW_ROOM_GOLDEN_ANGLE));
-        return vec2(TSL.cos(a), TSL.sin(a)).mul(uBlur.mul(float(k).add(0.5).div(WINDOW_ROOM_TAPS)));
+      // The throw's unit direction and the tap spacing (`roomTapSpacingPx`), per frame but per pixel constant.
+      const throwLen = length(uThrow).toVar('winRoomThrowLen');
+      const dir = uThrow.div(max(throwLen, float(1e-6))).toVar('winRoomDir');
+      const spacing = throwLen.mul(uSmear).div(WINDOW_ROOM_TAPS).toVar('winRoomSpacing');
+      /**
+       * `roomTapFootprint` as two world-px vectors — the read's gradients: `dx` along the throw (at least the tap
+       * spacing), `dy` across it (the blur). The caller scales them to mask UV.
+       */
+      const footprintAt = (k) => {
+        const across = uBlur.mul(float(WINDOW_ROOM_BLUR_FOOTPRINT)).mul(float(k).add(0.5).div(WINDOW_ROOM_TAPS));
+        const along = max(spacing, across);
+        return { dx: dir.mul(along), dy: vec2(dir.y.negate(), dir.x).mul(across) };
       };
       /** `roomTapRamp`: 1 at the painted end of the smear, 1 − smear at the far end. */
-      const rampAt = (k) => float(1).sub(uSmear.mul(clamp(jitter.add(float(k).add(0.5)).div(WINDOW_ROOM_TAPS), 0, 1)));
-      /** World px tap `k` reads back from P (the sample point is P − this), jittered. */
+      const rampAt = (k) => float(1).sub(uSmear.mul(float(k).add(0.5).div(WINDOW_ROOM_TAPS)));
+      /** World px tap `k` reads back from P (the sample point is P − this). */
       const offsetAt = (k) =>
-        uThrow.mul(float(1).sub(uSmear.mul(float(1).sub(jitter.add(float(k).add(0.5)).div(WINDOW_ROOM_TAPS)))));
-      // THE WAY MUST BE CLEAR — the running-minimum clearance, UNJITTERED (`evalRoomLightPixel`): over the gap before
-      // the first tap here, then at each tap's own unjittered position in `combine`.
+        uThrow.mul(float(1).sub(uSmear.mul(float(1).sub(float(k).add(0.5).div(WINDOW_ROOM_TAPS)))));
+      // THE WAY MUST BE CLEAR — the running-minimum clearance (`evalRoomLightPixel`): over the gap before the first
+      // tap here, then at each tap's own position in `combine`.
       const clearAt = (t) => ss(float(0), uOccSoft, fetchField(P.sub(uThrow.mul(t))).distPx);
       let vis = float(1);
       for (let j = 0; j < WINDOW_ROOM_GAP_SAMPLES; j++) {
@@ -435,7 +465,7 @@ export function createWindowRoomLight({ THREE, roomTexture, fieldTexture }) {
         fade,
         visGap,
         offsetAt,
-        blurAt,
+        footprintAt,
         rampAt,
         clearAtTap,
         destFade,

@@ -235,7 +235,7 @@ export const MASK_CONTENT_EMPTY_BYTE = 1;
  * ([[feedback_y_flip_recurring_risk]]), and two copies of a texture setup is
  * precisely how it recurs. Now it cannot: there is one copy.
  */
-function buildMaskTexture(THREE, data, width, height, rgbMode) {
+function buildMaskTexture(THREE, data, width, height, rgbMode, mipmaps = false) {
   const texture = rgbMode
     ? new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.UnsignedByteType)
     : new THREE.DataTexture(data, width, height, THREE.RedFormat, THREE.UnsignedByteType);
@@ -244,6 +244,13 @@ function buildMaskTexture(THREE, data, width, height, rgbMode) {
   // shoreline.
   texture.minFilter = THREE.LinearFilter;
   texture.magFilter = THREE.LinearFilter;
+  // MIPS ONLY ON REQUEST (`_Window`'s sun smear reads filtered footprints through them, 2026-11-04): +1/3 of the
+  // texture's memory and a one-off GPU downsample at upload. Anisotropy lets one read average a long thin patch.
+  if (mipmaps) {
+    texture.generateMipmaps = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.anisotropy = 16;
+  }
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
   // flipY:false — v=0 is the image's TOP row, the world-quad convention every
@@ -419,6 +426,8 @@ export function getMaskWorkerPoolStats() {
  * @param {'r'|'rgb'} [args.channels] - `'r'` (default) uploads the RED channel
  *   as `RedFormat`, one byte per texel. `'rgb'` uploads all four as
  *   `RGBAFormat`.
+ * @param {boolean} [args.mipmaps] - upload a mip chain (and anisotropic filtering) for a
+ *   consumer that reads filtered footprints of the mask. Off by default: +1/3 memory.
  * @returns {Promise<{texture: *, width: number, height: number, nativeWidth: number,
  *   nativeHeight: number, bytes: number,
  *   contentBounds: {minU: number, minV: number, maxU: number, maxV: number}|null}|null>}
@@ -427,7 +436,7 @@ export function getMaskWorkerPoolStats() {
  *   the file is entirely empty. Consumers crop their geometry to it — Effects.md
  *   Law 6, cost scales with COVERED pixels.
  */
-export async function loadMaskImageTexture({ url, THREE, scale = MASK_IMAGE_SCALE, channels = 'r' }) {
+export async function loadMaskImageTexture({ url, THREE, scale = MASK_IMAGE_SCALE, channels = 'r', mipmaps = false }) {
   if (!url) return null;
   let bitmap = null;
   try {
@@ -505,7 +514,7 @@ export async function loadMaskImageTexture({ url, THREE, scale = MASK_IMAGE_SCAL
     const rgbModeEarly = channels === 'rgb';
     const workerResult = await decodeMaskInWorker(buf, width, height, rgbModeEarly);
     if (workerResult) {
-      const texture = buildMaskTexture(THREE, workerResult.data, width, height, rgbModeEarly);
+      const texture = buildMaskTexture(THREE, workerResult.data, width, height, rgbModeEarly, mipmaps);
       return {
         texture,
         width,
@@ -541,7 +550,7 @@ export async function loadMaskImageTexture({ url, THREE, scale = MASK_IMAGE_SCAL
       emptyByte: MASK_CONTENT_EMPTY_BYTE,
     });
 
-    const texture = buildMaskTexture(THREE, data, width, height, rgbMode);
+    const texture = buildMaskTexture(THREE, data, width, height, rgbMode, mipmaps);
 
     // `data` is returned, not just uploaded. It is the SAME array the texture
     // wraps, so this costs nothing and copies nothing — and a CPU consumer that

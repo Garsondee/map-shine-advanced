@@ -14,10 +14,11 @@ import {
   evalRoomLightPixel,
   createWindowRoomLight,
   roomTapT,
-  roomTapJitter,
   roomTapRamp,
   roomRampNorm,
-  roomTapBlur,
+  roomTapFootprint,
+  roomTapSpacingPx,
+  WINDOW_ROOM_BLUR_FOOTPRINT,
   windowSunFacing,
   WINDOW_ROOM_TAPS,
   WINDOW_ROOM_GAP_SAMPLES,
@@ -121,24 +122,12 @@ export function run(t) {
     'the drift dial scales the throw, 0 = off',
     resolveRoomSunFrame({ elevationDeg: 12, azimuthDeg: 90 }, { ...look, drift: 0 }).throwLenPx === 0
   );
+  // The taps sit half a spacing in from each end of the smear, so their footprints (a spacing long) tile it exactly.
   ok(
-    'jittered taps stay inside the smear, from (1 − smear) to the full drift',
-    roomTapT(0, 0.6, -0.5) === 0.4 && Math.abs(roomTapT(WINDOW_ROOM_TAPS - 1, 0.6, 0.5) - 1) < 1e-9
+    'the taps stay inside the smear, from (1 − smear) to the full drift',
+    Math.abs(roomTapT(0, 0.6) - (0.4 + 0.6 * (0.5 / WINDOW_ROOM_TAPS))) < 1e-12 &&
+      Math.abs(roomTapT(WINDOW_ROOM_TAPS - 1, 0.6) - (1 - 0.6 * (0.5 / WINDOW_ROOM_TAPS))) < 1e-12
   );
-  let jMin = 1;
-  let jMax = -1;
-  for (let x = 0; x < 64; x++) {
-    for (let y = 0; y < 64; y++) {
-      const j = roomTapJitter(x, y);
-      jMin = Math.min(jMin, j);
-      jMax = Math.max(jMax, j);
-    }
-  }
-  ok(
-    `the jitter covers −0.5..0.5 (${jMin.toFixed(2)}..${jMax.toFixed(2)})`,
-    jMin >= -0.5 && jMax < 0.5 && jMax - jMin > 0.9
-  );
-  ok('the jitter is fixed to world px', roomTapJitter(10.2, 7.9) === roomTapJitter(10.7, 7.1));
   ok(
     'a window faces a sun straight out of it, not one behind it',
     windowSunFacing({ x: -1, y: 0 }, { toSunX: -1, toSunY: 0 }) === 1 &&
@@ -222,8 +211,10 @@ export function run(t) {
     }
   }
   ok(
+    // (Not exactly 0 since 2026-11-04: a tap's footprint can reach painted light whose path is shut to within a
+    // smoothstep tail — ~1e-35, nothing a GPU can show.)
     `no light crosses the wall into the next room (max ${leak}; inside the wall band ${inWall.toFixed(4)})`,
-    leak === 0 && inWall < 0.002
+    leak < 1e-9 && inWall < 0.002
   );
   // A north-eastern sun throws the east window's beam south-west, into the wall between the two east rooms.
   const neSun = resolveRoomSunFrame({ elevationDeg: 10, azimuthDeg: 60, dayFactor01: 1 }, look);
@@ -243,7 +234,6 @@ export function run(t) {
   ok(
     `the beam thins out toward the wall instead of stopping (${drifting.map((v) => v.toFixed(2)).join(', ')})`,
     // (The twin reads distance per cell; the shader filters it, so on screen this is a smooth ramp.)
-    // (The jitter moves each pixel's taps by up to half a spacing, so neighbouring values wobble by a few percent.)
     drifting[0] > 0.3 && drifting[0] > drifting[2] && drifting[3] < 0.35 && drifting[0] - drifting[3] > 0.3
   );
 
@@ -259,8 +249,7 @@ export function run(t) {
   );
   ok(`the beam does not reach around a wall stub (${behind.rgb[0].toFixed(2)})`, behind.rgb[0] < 0.1);
   ok(`…and carries on past its end (${past.rgb[0].toFixed(2)})`, past.rgb[0] > 0.3);
-  // Measured as the eye sees it — a few px averaged across the beam — so the taps' fine dither does not count as an
-  // edge; the shadow itself must ramp over tens of px, not step.
+  // Measured a few px averaged across the beam, as the eye sees it; the shadow must ramp over tens of px, not step.
   const at = (y) => {
     let s = 0;
     for (let dx = -6; dx <= 6; dx += 2) s += px(850 + dx, y, wide, westFrame, stubRoom).rgb[0];
@@ -282,7 +271,6 @@ export function run(t) {
     'tap weights fall from the painted end to nothing at the far end of a full smear',
     roomTapRamp(0, 1) > 0.9 &&
       roomTapRamp(WINDOW_ROOM_TAPS - 1, 1) < 0.07 &&
-      roomTapRamp(WINDOW_ROOM_TAPS - 1, 1, 0.5) === 0 &&
       Array.from({ length: WINDOW_ROOM_TAPS - 1 }, (_, k) => roomTapRamp(k, 1) > roomTapRamp(k + 1, 1)).every(Boolean)
   );
   ok(
@@ -326,14 +314,49 @@ export function run(t) {
       (x) => Math.abs(px(x, 700, box(410, 900, 600, 800), fadeFrame, room, fadeLook).rgb[0] - 1) < 0.25
     )
   );
+  const fpNear = roomTapFootprint(0, 1, 24, 150);
+  const fpFar = roomTapFootprint(WINDOW_ROOM_TAPS - 1, 1, 24, 150);
   ok(
-    'the blur grows from nothing at the painted end to the dial at the far end, and 0 = none',
-    Math.hypot(...roomTapBlur(0, 1, 24, 0)) < Math.hypot(...roomTapBlur(WINDOW_ROOM_TAPS - 1, 1, 24, 0)) &&
-      Math.abs(
-        Math.hypot(...roomTapBlur(WINDOW_ROOM_TAPS - 1, 1, 24, 1)) - 24 * ((WINDOW_ROOM_TAPS - 0.5) / WINDOW_ROOM_TAPS)
-      ) < 1e-9 &&
-      Math.hypot(...roomTapBlur(5, 1, 0, 0.3)) === 0 &&
-      Math.hypot(...roomTapBlur(5, 0, 24, 0.3)) === 0
+    'the blur across the throw grows from nothing at the painted end to the dial at the far end, and 0 = none',
+    fpNear.across < fpFar.across &&
+      Math.abs(fpFar.across - WINDOW_ROOM_BLUR_FOOTPRINT * 24 * ((WINDOW_ROOM_TAPS - 0.5) / WINDOW_ROOM_TAPS)) < 1e-9 &&
+      roomTapFootprint(5, 1, 0, 150).across === 0 &&
+      roomTapFootprint(5, 0, 24, 150).across === 0
+  );
+  ok(
+    'every footprint is at least a tap spacing long along the throw (they tile the smear: no gaps, no stripes)',
+    Array.from({ length: WINDOW_ROOM_TAPS }, (_, k) => roomTapFootprint(k, 0.7, 10, 220)).every(
+      (fp) => fp.along >= roomTapSpacingPx(220, 0.7) - 1e-12 && fp.along >= fp.across
+    ) && Math.abs(roomTapSpacingPx(160, 1) - 160 / WINDOW_ROOM_TAPS) < 1e-12
+  );
+  ok('no smear, no footprint: the beam is a sharp copy', roomTapFootprint(3, 0, 24, 150).along === 0);
+
+  // SMOOTH, NOT GRAINY (author, 2026-11-04): along a long smear of one pane, neighbouring pixels read almost the same
+  // light, and across it — where the pane is uniform — exactly the same. Measured on the old jittered twin: steps of
+  // 20% of the peak along and 23% across. What is left along (~6%) is this twin's own 7-step sampling of a hard-edged
+  // box; the GPU's filtered read has none (the shader lab: grain 1.46 -> 0.056).
+  const paneLook = { ...look, smear: 1, smearKeep: 0.18, smearBlurPx: 24, sideBoost: 0 };
+  const paneFrame = { ...westFrame, throwX: 150, throwY: 0, throwLenPx: 150, lowSun01: 0 };
+  const pane = box(410, 560, 600, 800);
+  let worst = 0;
+  let prev = null;
+  let peak = 0;
+  for (let x = 560; x <= 700; x++) {
+    const v = px(x, 700, pane, paneFrame, room, paneLook).rgb[0];
+    if (prev !== null) worst = Math.max(worst, Math.abs(v - prev));
+    peak = Math.max(peak, v);
+    prev = v;
+  }
+  let worstAcross = 0;
+  prev = null;
+  for (let y = 650; y <= 750; y++) {
+    const v = px(620, y, pane, paneFrame, room, paneLook).rgb[0];
+    if (prev !== null) worstAcross = Math.max(worstAcross, Math.abs(v - prev));
+    prev = v;
+  }
+  ok(
+    `a long smear is smooth px to px (largest step ${((worst / peak) * 100).toFixed(2)}% of its peak along, ${((worstAcross / peak) * 100).toFixed(2)}% across)`,
+    peak > 0.2 && worst / peak < 0.08 && worstAcross / peak < 0.005
   );
 
   // SHADED ROOM: the north-east room's east window faces away from a western sun — dimmed, not moved.

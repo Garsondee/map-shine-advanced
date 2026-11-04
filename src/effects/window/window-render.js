@@ -610,9 +610,21 @@ export function buildWindowSurfaceMaterial({
    * first would leave two thirds of the light sampling the 1×1 placeholder
    * forever, and the cookie would render in a plausible partial colour.
    */
-  const sampleCookieAt = (uvNode, label) => {
-    const texNode = texture(liveMaskTexture, uvNode);
-    maskTexNodes.push(texNode);
+  /**
+   * ⚠️ MIP LEVEL 0 UNLESS `grad` IS GIVEN. The real mask is uploaded WITH mips
+   * (`loadMaskImageTexture({ mipmaps: true })`) for the sun's smear only —
+   * its taps pass `grad` (`window-room-light.js`, "EVERY TAP READS A FILTERED
+   * FOOTPRINT"). Every other read stays pinned to the full-resolution level,
+   * exactly what it read before the mask had mips. `.level()`/`.grad()` make
+   * clones that read the BASE node's `.value`, so pushing the base keeps
+   * `setMaskTexture` reaching them.
+   * @param {*} uvNode @param {string} label
+   * @param {{dx:*, dy:*}|null} [grad] - the read's footprint in mask UV.
+   */
+  const sampleCookieAt = (uvNode, label, grad = null) => {
+    const baseNode = texture(liveMaskTexture, uvNode);
+    maskTexNodes.push(baseNode);
+    const texNode = grad ? baseNode.grad(grad.dx, grad.dy) : baseNode.level(float(0));
     const s = texNode.toVar(`${label}Sample`);
     const value = max(max(s.r, s.g), s.b).toVar(`${label}Value`);
     const alpha = clamp(s.a, 0, 1);
@@ -853,9 +865,12 @@ export function buildWindowSurfaceMaterial({
       // not once per tap (see that function's header).
       const beamAt = (k) => {
         const uvK = maskUv.sub(room.offsetAt(k).mul(uUvPerWorldPx)).toVar('winRoomUv');
-        // The smear blurs as it goes: the cookie is read a little off the line (the room gate and the file test stay on it).
-        const uvBlur = uvK.add(room.blurAt(k).mul(uUvPerWorldPx));
-        const tap = sampleCookieAt(warpUv ? uvBlur.add(warpUv) : uvBlur, 'winRoomTap');
+        // A filtered footprint, not a point: as long as the tap spacing along the throw, as wide as the blur across.
+        const fp = room.footprintAt(k);
+        const tap = sampleCookieAt(warpUv ? uvK.add(warpUv) : uvK, 'winRoomTap', {
+          dx: fp.dx.mul(uUvPerWorldPx),
+          dy: fp.dy.mul(uUvPerWorldPx),
+        });
         return tap.cookie.mul(tap.presence).mul(inFile(uvK));
       };
       const folded = roomLight.combine(room, beamAt, cookie, mapXY);

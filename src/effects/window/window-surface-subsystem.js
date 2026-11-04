@@ -613,7 +613,8 @@ export function createWindowSurfaceSubsystem({
     maskReloadMisses += 1;
     loading = true;
     const requestedFloor = floorIndex;
-    loadMaskImage({ url, scale: WINDOW_MASK_IMAGE_SCALE, channels: 'rgb' })
+    // `mipmaps`: the sun's smear reads filtered footprints of the mask (`window-room-light.js`).
+    loadMaskImage({ url, scale: WINDOW_MASK_IMAGE_SCALE, channels: 'rgb', mipmaps: true })
       .then((loaded) => {
         loading = false;
         if (!loaded) return; // already logged loudly by the loader

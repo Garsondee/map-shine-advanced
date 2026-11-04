@@ -1095,3 +1095,5 @@ export { buildInteriorCutGrid, interiorCutZoomFactor } from './clouds/interior-c
 export { buildStorybookRainFieldNode, cloudRainLinkWeight, virtualRainDeck } from './precipitation/cloud-rain.js';
 // Added 2026-11-03 [structure-change]: boot.js used to import these from the file directly.
 export { unionVisibleFireGrid } from './fire/fire-floor-union.js';
+// Moving tiles' shadows (vt/motion-tile-shadow.js) follow the window beam's own throw.
+export { resolveRoomLook, resolveRoomSunFrame } from './window/window-room-light.js';

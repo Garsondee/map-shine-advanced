@@ -42,6 +42,7 @@ import {
   getTileMotionRuntimeStatus,
   setTileMotionConfig,
   pushTileMotionToTileScroll,
+  setTileMotionShadowForAll,
   getTileMotionTransportState,
   startTileMotion,
   stopTileMotion,
@@ -567,11 +568,10 @@ export function installTileMotionPanel() {
   // transform/texture mode, so it sits after both, not nested inside
   // either mode's own section.
   //
-  // Its former sibling here, `shadowProjectionEnabled`, was removed
-  // entirely (mythica-machina-press#575) — a real, normalized, wired-up
-  // checkbox with zero consumers anywhere in the render path. Re-add it
-  // (field + checkbox) alongside real shadow-casting for moving tiles if
-  // that gets built, rather than resurrecting a control that does nothing.
+  // CASTS A SHADOW (2026-11-04) — `shadowProjectionEnabled` is back, now with
+  // a real consumer: vt/motion-tile-shadow.js draws the window light's shadow
+  // under every flagged tile (removed in #575 while nothing read it). The height
+  // field overrides the automatic height (elevation, then sort order).
   function buildRenderingSection(config) {
     const wrap = document.createElement('div');
     wrap.appendChild(sectionHeading('Rendering'));
@@ -582,6 +582,40 @@ export function installTileMotionPanel() {
         { value: config.renderAboveTokens, onChange: (v) => patchSelectedTile({ renderAboveTokens: v }) }
       )
     );
+    wrap.appendChild(
+      buildParamControl(
+        'tileMotionCastsShadow',
+        { type: 'bool', label: 'casts a shadow' },
+        {
+          value: config.shadowProjectionEnabled,
+          onChange: (v) => patchSelectedTile({ shadowProjectionEnabled: v }),
+        }
+      )
+    );
+    if (config.shadowProjectionEnabled) {
+      wrap.appendChild(
+        fieldRow(
+          'shadow height (px)',
+          numberInput(config.shadowHeightPx, 5, (v) => patchSelectedTile({ shadowHeightPx: v }), { min: 0 }),
+          'How high this tile hangs above the floor: higher throws its shadow further and softer. 0 = automatic, from its elevation and its place in the sort order.'
+        )
+      );
+    }
+    const allOn = ghostButton(
+      'All moving tiles cast shadows',
+      'Switch "casts a shadow" on for every tile on this scene that moves',
+      async () => {
+        const result = await setTileMotionShadowForAll(true);
+        setStatus(result.ok ? `Shadows on for ${result.count} tile(s).` : `Failed: ${result.reason}`);
+        render();
+      }
+    );
+    const allOff = ghostButton('None', 'Switch "casts a shadow" off for every moving tile on this scene', async () => {
+      const result = await setTileMotionShadowForAll(false);
+      setStatus(result.ok ? `Shadows off for ${result.count} tile(s).` : `Failed: ${result.reason}`);
+      render();
+    });
+    wrap.appendChild(row(allOn, allOff));
     return wrap;
   }
 

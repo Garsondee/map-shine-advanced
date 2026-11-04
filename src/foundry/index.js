@@ -544,6 +544,7 @@ export {
   getTileMotionSummary,
   setTileMotionConfig,
   pushTileMotionToTileScroll,
+  setTileMotionShadowForAll,
   startTileMotion,
   stopTileMotion,
   pauseTileMotion,

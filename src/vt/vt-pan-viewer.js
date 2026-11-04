@@ -71,6 +71,18 @@ import {
   setTokenGroundingGroundDensity,
   setTokenGroundingWorldPerPixel,
 } from './token-grounding.js';
+// MOVING TILES' SHADOWS (2026-11-04) — the window light's shadow, cast by tiles flagged in their motion settings.
+import {
+  isMotionTileShadowOn,
+  motionTileShadowUniforms,
+  resolveCasterHeights,
+  resolveWindowThrow,
+  resolveCasterShadow,
+  buildMotionTileShadowMaterial,
+  buildCasterSkylightMaterial,
+  buildCasterSilhouetteMaterial,
+  recordMotionTileShadowFrame,
+} from './motion-tile-shadow.js';
 // POST-UPSCALE SHARPEN (2026-08-27) — the render-scale governor's own repair
 // for its free bilinear upscale's softness. Injected into grade-present.js
 // (never imported there directly — a real circular zone dependency; see
@@ -2782,6 +2794,27 @@ async function startVtPanViewerUnserialized({
     // light.js's composite essay for why a linear-space add washed the scene
     // to a single hue and gamma-space fixes it).
     const sceneColoration = allocator.create('scene.coloration', describeSceneColor());
+    // buf:scene.casterShadow (2026-11-04, vt/motion-tile-shadow.js) — how much of each pixel shadow-casting
+    // moving tiles cover (R, MAX across casters). A blurred coverage needs no more than 8 bits.
+    const describeCasterShadow = () => ({ ...describeSceneColor(), type: THREE.UnsignedByteType });
+    const sceneCasterShadow = allocator.create('scene.casterShadow', describeCasterShadow());
+    // buf:scene.casterRank (2026-11-04) — the top shadow-casting tile's stack index at each pixel, from its REAL
+    // silhouette (the cascade gate; vt/motion-tile-shadow.js's CASCADE note says why not buf:scene.depth).
+    const sceneCasterRank = allocator.create('scene.casterRank', describeCasterShadow());
+    // buf:scene.roomLight (2026-11-04) — the room's own light (ambient + sun shadow + darkness Regions) copied
+    // out of scene.illum before the point lights draw: what a window pulls the room FROM (window-render.js
+    // `roomLightTexture`). Ambient light is gamma-space and below 1, so 8 bits carry it.
+    const sceneRoomLight = allocator.create('scene.roomLight', describeCasterShadow());
+    const roomLightCopyQuad = new THREE.QuadMesh(
+      (() => {
+        const m = new THREE.NodeMaterial();
+        m.depthTest = false;
+        m.depthWrite = false;
+        m.blending = THREE.NoBlending;
+        m.colorNode = THREE.TSL.vec4(THREE.TSL.texture(sceneIllum.texture, THREE.TSL.screenUV).rgb, 1);
+        return m;
+      })()
+    );
     // TAA HISTORY (2026-08-30, Stage 5) — a ping-pong pair, same descriptor
     // shape as scene.lit (HalfFloat/NoColorSpace, internal tier), but
     // conceptually a `res:taaHistory` resource per the graph's own grammar
@@ -10287,6 +10320,156 @@ async function startVtPanViewerUnserialized({
       return seen.size;
     }
 
+    // ── MOVING TILES' SHADOWS (vt/motion-tile-shadow.js, 2026-11-04) ───────
+    // One coverage mesh per shadow-casting tile (its motion flag `shadowProjectionEnabled`), sharing the tile's
+    // own geometry and live motion uniforms; drawn into buf:scene.casterShadow, read by the window light and by
+    // the skylight multiply below. Same lifetime rules as the token contact shadows above.
+    const casterShadowScene = new THREE.Scene();
+    const casterSilhouetteScene = new THREE.Scene();
+    const casterShadows = new Map();
+    const casterSkylightQuad = new THREE.QuadMesh(buildCasterSkylightMaterial(THREE, sceneCasterShadow.texture));
+    let casterShadowDrewLastFrame = false;
+    function disposeCasterShadowEntry(entry) {
+      casterShadowScene.remove(entry.mesh);
+      casterSilhouetteScene.remove(entry.silhouetteMesh);
+      try {
+        entry.silhouetteMaterial.dispose();
+        entry.material.dispose();
+      } catch (err) {
+        log.warn('moving-tile shadow: material dispose failed (VRAM may leak):', err);
+      }
+    }
+    function syncCasterShadows() {
+      const seen = new Set();
+      const report = { casters: 0, throwX: 0, throwY: 0, heights: [], skipped: {} };
+      const skip = (why) => (report.skipped[why] = (report.skipped[why] ?? 0) + 1);
+      if (isMotionTileShadowOn()) {
+        const casters = [];
+        for (const item of lastItems) {
+          if (item.kind !== 'tile' || item.dragPreview) continue;
+          const state = itemStates.get(item.id);
+          const tileDoc = state?.item?._placement?.tileDoc ?? item._placement?.tileDoc ?? null;
+          if (!tileDoc?.id) continue;
+          const cfg = getTileMotionConfig(tileDoc.id);
+          if (!cfg?.shadowProjectionEnabled) continue;
+          const tiles = state?.wholeImage?.tiles;
+          // A split (multi-piece) tile has per-piece uvs one grown quad cannot cover; a placeholder has no art.
+          if (!tiles || !state.placement) {
+            skip('not built');
+            continue;
+          }
+          if (tiles.length !== 1) {
+            skip('split into pieces');
+            continue;
+          }
+          const t = tiles[0];
+          if (t.isPlaceholder || !t.mesh?.visible || !t.tex || !t.geometry) {
+            skip(t.isPlaceholder ? 'placeholder' : !t.mesh?.visible ? 'hidden' : 'no art');
+            continue;
+          }
+          const rank = depthAuthority.rankOf({ id: item.id });
+          if (rank === null || rank === undefined) {
+            skip('no depth rank');
+            continue;
+          }
+          casters.push({ item, state, t, tileDoc, cfg, rank });
+        }
+        if (casters.length > 0) {
+          const grid = casters[0].tileDoc?.parent?.grid ?? null;
+          const gridPx = readGridSizePixels().gridSizePixels;
+          const pxPerElevationUnit = Number(grid?.distance) > 0 ? gridPx / Number(grid.distance) : 0;
+          const heights = resolveCasterHeights(
+            casters.map((c) => ({
+              id: c.item.id,
+              elevation: c.tileDoc.elevation,
+              sort: c.tileDoc.sort,
+              heightPx: c.cfg.shadowHeightPx,
+            })),
+            { pxPerElevationUnit }
+          );
+          const windowThrow = resolveWindowThrow(
+            lastEnvSnapshot?.env?.sun ?? null,
+            getWindowRenderState()?.params ?? {}
+          );
+          report.throwX = windowThrow.throwX;
+          report.throwY = windowThrow.throwY;
+          // Stack index by depth rank (1 = lowest caster; 8 bits hold 255 of them), and the top caster's depth.
+          casters.sort((a, b) => a.rank - b.rank);
+          const topDepth = computeTieSafeExpectedDepth(casters[casters.length - 1].rank, depthAuthority.maxRank);
+          casters.forEach((c, i) => (c.stackIndex = Math.min(255, i + 1)));
+          for (const c of casters) {
+            let entry = casterShadows.get(c.item.id);
+            if (
+              entry &&
+              (entry.tex !== c.t.tex || entry.geometry !== c.t.geometry || entry.tileMotion !== c.t.tileMotion)
+            ) {
+              disposeCasterShadowEntry(entry);
+              entry = null;
+            }
+            if (!entry) {
+              const built = buildMotionTileShadowMaterial(THREE, {
+                tex: c.t.tex,
+                uvScale: c.t.uvScale,
+                texWidth: c.t.tex.image?.width ?? 1,
+                depthTexture: sceneDepth.depthTexture ?? null,
+                rankTexture: sceneCasterRank.texture,
+                tileMotion: c.t.tileMotion ?? null,
+              });
+              const mesh = new THREE.Mesh(c.t.geometry, built.material);
+              mesh.frustumCulled = false;
+              casterShadowScene.add(mesh);
+              const sil = buildCasterSilhouetteMaterial(THREE, {
+                tex: c.t.tex,
+                uvScale: c.t.uvScale,
+                tileMotion: c.t.tileMotion ?? null,
+              });
+              const silhouetteMesh = new THREE.Mesh(c.t.geometry, sil.material);
+              silhouetteMesh.frustumCulled = false;
+              casterSilhouetteScene.add(silhouetteMesh);
+              entry = {
+                ...built,
+                mesh,
+                silhouetteMesh,
+                silhouetteMaterial: sil.material,
+                uSilhouetteIndex: sil.uIndex,
+                tex: c.t.tex,
+                geometry: c.t.geometry,
+                tileMotion: c.t.tileMotion,
+              };
+              casterShadows.set(c.item.id, entry);
+            }
+            const q = computeQuadCorners(c.state.placement);
+            const ax = q[1].x - q[0].x;
+            const ay = q[1].y - q[0].y;
+            const w = Math.hypot(ax, ay) || 1;
+            const h = Math.hypot(q[3].x - q[0].x, q[3].y - q[0].y) || 1;
+            entry.uCenter.value.set((q[0].x + q[1].x + q[2].x + q[3].x) / 4, (q[0].y + q[1].y + q[2].y + q[3].y) / 4);
+            entry.uSize.value.set(w, h);
+            entry.uRestRot.value.set(ax / w, ay / w);
+            const heightPx = heights.get(c.item.id) ?? 0;
+            const shadow = resolveCasterShadow(heightPx, windowThrow);
+            entry.uOffset.value.set(shadow.offsetX, shadow.offsetY);
+            entry.uBlurPx.value = shadow.blurPx;
+            entry.uTopDepth.value = topDepth;
+            entry.uIndex.value = c.stackIndex / 255;
+            entry.uSilhouetteIndex.value = c.stackIndex / 255;
+            entry.uAlpha.value = c.t.appearance?.uAlpha?.value ?? 1;
+            entry.mesh.visible = true;
+            seen.add(c.item.id);
+            report.heights.push({ id: c.tileDoc.id, sort: c.tileDoc.sort, heightPx, blurPx: shadow.blurPx });
+          }
+        }
+      }
+      for (const [id, entry] of casterShadows) {
+        if (seen.has(id)) continue;
+        disposeCasterShadowEntry(entry);
+        casterShadows.delete(id);
+      }
+      report.casters = seen.size;
+      recordMotionTileShadowFrame(report);
+      return seen.size;
+    }
+
     function runLightAccumulatePass() {
       // THE FLOOR LIST, RESOLVED EXACTLY ONCE FOR THE WHOLE PASS (2026-08-12
       // cache-completeness pass). Four independent readers below —
@@ -10834,6 +11017,10 @@ async function startVtPanViewerUnserialized({
       profiler?.begin(Z.lightDrawRegions);
       if (regionField.plan) renderer.render(regionOverlayScene, camera);
       profiler?.end(Z.lightDrawRegions);
+      // THE ROOM'S OWN LIGHT, before any lamp — what the window pulls from (buf:scene.roomLight's own note).
+      renderer.setRenderTarget(sceneRoomLight);
+      roomLightCopyQuad.render(renderer);
+      renderer.setRenderTarget(sceneIllum);
       // MAX-blends every active point light on top of the (possibly region-
       // adjusted) ambient fill — same target, same camera as geometry.world/
       // occlusion (world-space).
@@ -10899,6 +11086,31 @@ async function startVtPanViewerUnserialized({
       // `runSurfaceResponsePass` states for specular: gating the load on
       // `hasContent()` would mean the mesh could never become visible in the
       // first place.
+      // MOVING TILES' SHADOWS (vt/motion-tile-shadow.js) — coverage first, into its own target (cleared to 0),
+      // then the skylight multiply on illum, AFTER the lamps (see motion-tile-shadow.js on why the soft share is
+      // laid over them) and BEFORE the window adds its beam (the window reads the coverage
+      // itself and loses its own light there). An empty frame after a drawn one clears the target once, so the
+      // window never reads a stale shadow.
+      {
+        const casterCount = syncCasterShadows();
+        if (casterCount > 0 || casterShadowDrewLastFrame) {
+          const prevAuto = renderer.autoClearColor;
+          const prevClearColor = renderer.getClearColor(new THREE.Color());
+          const prevClearAlpha = renderer.getClearAlpha();
+          renderer.setClearColor(0x000000, 0);
+          renderer.setRenderTarget(sceneCasterRank);
+          renderer.autoClearColor = true;
+          renderer.render(casterSilhouetteScene, camera);
+          renderer.setRenderTarget(sceneCasterShadow);
+          renderer.render(casterShadowScene, camera);
+          renderer.setClearColor(prevClearColor, prevClearAlpha);
+          renderer.setRenderTarget(sceneIllum);
+          renderer.autoClearColor = false;
+          if (casterCount > 0) casterSkylightQuad.render(renderer);
+          renderer.autoClearColor = prevAuto;
+        }
+        casterShadowDrewLastFrame = casterCount > 0;
+      }
       profiler?.begin(Z.lightDrawWindow);
       // EVERY FLOOR, NOT JUST THE VIEWED ONE (2026-08-09) — mirrors the
       // sun-shadow loop at Z.lightSunBake above: same `floorsResultForFrame`,
@@ -17333,6 +17545,9 @@ async function startVtPanViewerUnserialized({
         createMaskTexture: createMaskDataTexture,
         depthTexture: sceneDepth.depthTexture ?? null,
         depthFlagsTexture: sceneDepth.texture ?? null,
+        casterShadowTexture: sceneCasterShadow.texture,
+        casterShadowDarknessNode: motionTileShadowUniforms(THREE).darkness,
+        roomLightTexture: sceneRoomLight.texture,
         // Composed exactly like specular's own `resolveExpectedDepth` above:
         // resolved by ITEM ID rather than by elevation, since window has real
         // drawn geometry of its own (the floor's background), unlike a light.
@@ -17432,6 +17647,9 @@ async function startVtPanViewerUnserialized({
       createMaskTexture: createMaskDataTexture,
       depthTexture: sceneDepth.depthTexture ?? null,
       depthFlagsTexture: sceneDepth.texture ?? null,
+      casterShadowTexture: sceneCasterShadow.texture,
+      casterShadowDarknessNode: motionTileShadowUniforms(THREE).darkness,
+      roomLightTexture: sceneRoomLight.texture,
       // PER ITEM, not per floor — see `specularTileSurface`'s own identical
       // composition just above for the full reasoning.
       resolveExpectedDepth: (itemId) => {
@@ -28073,6 +28291,9 @@ async function startVtPanViewerUnserialized({
       allocator.resize(sceneIllum, internalW, internalH, describeSceneColor());
       allocator.resize(sceneLit, internalW, internalH, describeSceneColor());
       allocator.resize(sceneColoration, internalW, internalH, describeSceneColor());
+      allocator.resize(sceneCasterShadow, internalW, internalH, describeCasterShadow());
+      allocator.resize(sceneCasterRank, internalW, internalH, describeCasterShadow());
+      allocator.resize(sceneRoomLight, internalW, internalH, describeCasterShadow());
       // TAA history — only if it exists (lazy allocation, see
       // ensureTaaHistoryBuffers's own doc). A rung change or CSS resize means
       // wrong-resolution content either way, so this is also a THIRD,

@@ -428,6 +428,11 @@ import {
   getTokenGrounding,
   resetTokenGrounding,
   TOKEN_GROUNDING_PARAMS,
+  setMotionTileShadows,
+  getMotionTileShadows,
+  resetMotionTileShadows,
+  getMotionTileShadowInfo,
+  MOTION_TILE_SHADOW_PARAMS,
   setVtPanViewerAlbedoClarityForce,
   getVtPanViewerAlbedoClarityForce,
   setVtPanViewerMaskNodeOffForce,
@@ -1055,6 +1060,12 @@ MapShine.resetAlbedoClarity = resetAlbedoClarity;
 MapShine.setTokenGrounding = setTokenGrounding;
 MapShine.getTokenGrounding = getTokenGrounding;
 MapShine.resetTokenGrounding = resetTokenGrounding;
+// MOVING TILES' SHADOWS (2026-11-04, vt/motion-tile-shadow.js): tiles flagged 'casts a shadow' in Tile Motion
+// throw the window light's shadow onto what is below them. Live, no reload.
+MapShine.setMotionTileShadows = setMotionTileShadows;
+MapShine.getMotionTileShadows = getMotionTileShadows;
+MapShine.resetMotionTileShadows = resetMotionTileShadows;
+MapShine.getMotionTileShadowInfo = getMotionTileShadowInfo;
 // UI-CAST WINDOW SHADOWS (2026-07-20): open character sheets / journals / context
 // menus cast a soft, offset shadow onto the map. As of Stage A it is MSA's first
 // REGISTERED effect — declared as data (effects/ui-window-shadow.js), driven
@@ -13514,6 +13525,56 @@ function install() {
     zone: 'workshop',
     effect: 'tokenGrounding',
     order: 92,
+  });
+
+  /** MOVING TILE SHADOWS card (vt/motion-tile-shadow.js). Same explicit dispatch as the Tokens card. */
+  function buildMotionTileShadowPanel({ attachments } = {}) {
+    const getValue = (id) => {
+      const st = getMotionTileShadows();
+      switch (id) {
+        case 'darkness':
+          return st.darkness;
+        case 'skylight':
+          return st.skylight;
+        case 'baseHeightPx':
+          return st.baseHeightPx;
+        case 'layerStepPx':
+          return st.layerStepPx;
+        case 'heightScale':
+          return st.heightScale;
+        case 'blurBasePx':
+          return st.blurBasePx;
+        case 'blurPerPx':
+          return st.blurPerPx;
+        default:
+          return undefined;
+      }
+    };
+    const onChange = (id, value) => {
+      if (id in MOTION_TILE_SHADOW_PARAMS) setMotionTileShadows({ [id]: value });
+    };
+    return buildEffectCard({
+      id: 'motionTileShadows',
+      diagnostics: attachments,
+      icon: '🪐',
+      title: 'Moving tile shadows',
+      subtitle:
+        "Tiles set to 'casts a shadow' in Tile Motion block the window light: their shadows fall on what is " +
+        'below them, move with the window beam, and soften the higher a tile hangs. Live; no reload.',
+      status: () => collapsedStatusLine({ enabled: getMotionTileShadows().enabled }),
+      schema: MOTION_TILE_SHADOW_PARAMS,
+      fohKeys: ['darkness', 'skylight', 'heightScale'],
+      getValue,
+      onChange,
+      enabled: getMotionTileShadows().enabled,
+      onToggleEnabled: (next) => setMotionTileShadows({ enabled: next }),
+    });
+  }
+
+  MapShine.debug.registerPanel('motion-tile-shadow-panel', 'Moving tile shadows', buildMotionTileShadowPanel, {
+    zone: 'workshop',
+    effect: 'motionTileShadows',
+    order: 93,
   });
 
   // THE WIND FIELD DEBUG OVERLAY (2026-07-21, docs/planning/Wind.md Tier 0 —

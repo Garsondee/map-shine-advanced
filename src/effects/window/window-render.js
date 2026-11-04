@@ -362,6 +362,18 @@ export function buildWindowSurfaceMaterial({
   // cloud and rain-wave darkness, multiplied in AFTER the shoulder so a 0.1
   // really is a tenth. `null` ⇒ the term is not built at all.
   weatherGainNode = null,
+  // MOVING TILES' SHADOWS (2026-11-04, `vt/motion-tile-shadow.js`) — `buf:scene.casterShadow` (R = how much of
+  // this pixel shadow-casting tiles cover) and the shared darkness uniform. This window's pull toward the light
+  // outside is multiplied by `1 − coverage · darkness`: in the shadow the room keeps its indoor level and only
+  // the beam is missing. Both null ⇒ not built at all.
+  casterShadowTexture = null,
+  casterShadowDarknessNode = null,
+  // THE ROOM'S REAL LIGHT (2026-11-04) — `buf:scene.roomLight`, a copy of `buf:scene.illum` taken after the
+  // ambient fill, sun shadow and darkness Regions and BEFORE any point light. The window pulls the room from
+  // THIS toward the light outside. Before it, the pull started from the constant ambient (`uIndoorLight`), so
+  // inside an "Adjust Darkness Level" region (the Wizard's Lair: 0.26 against a 0.93 constant) a window added
+  // nothing at all — or darkened the room. Null ⇒ the constant, as before.
+  roomLightTexture = null,
   rain = null,
   roomLight = null,
   strength = WINDOW_DEFAULT_STRENGTH,
@@ -1107,9 +1119,18 @@ export function buildWindowSurfaceMaterial({
   // Signed on purpose: `buf:scene.illum` is half-float, so a window whose
   // outside is darker than the room (a storm wave, a cloud, a dim dusk) darkens
   // the room toward it, the way the garden beside it darkens.
-  const cookieLight = applyWindowColor(TSL, shoulderedLight.mul(target), windowColorDials)
-    .sub(shoulderedLight.mul(uIndoorLight))
-    .toVar('winFinal');
+  const indoorHere = roomLightTexture ? texture(roomLightTexture, TSL.screenUV).rgb : uIndoorLight;
+  const cookieLightUnshaded = applyWindowColor(TSL, shoulderedLight.mul(target), windowColorDials).sub(
+    shoulderedLight.mul(indoorHere)
+  );
+  // The beam that a moving tile above blocks never arrives (see `casterShadowTexture`'s own note).
+  const cookieLight = (
+    casterShadowTexture && casterShadowDarknessNode
+      ? cookieLightUnshaded.mul(
+          float(1).sub(texture(casterShadowTexture, TSL.screenUV).r.mul(casterShadowDarknessNode)).clamp(0, 1)
+        )
+      : cookieLightUnshaded
+  ).toVar('winFinal');
 
   /** @param {*} material */
   function configureShared(material) {

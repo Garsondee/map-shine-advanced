@@ -159,6 +159,34 @@ export async function writeTileMotionConfig(tileId, patch) {
 }
 
 /**
+ * Switch "casts a shadow" on or off for EVERY tile on the active scene that has motion enabled, in one
+ * update (2026-11-04, the Wizard's Lair: most of its orrery tiles were never flagged, and the flag had no
+ * control at all). Only the shadow key is written; every other field of each tile's config is left alone.
+ * @param {boolean} on
+ * @returns {Promise<{ok:boolean, reason:string|null, count:number}>}
+ */
+export async function setTileMotionShadowForAll(on) {
+  const scene = activeScene();
+  if (!scene) return { ok: false, reason: 'no active scene', count: 0 };
+  if (!canEditScene()) return { ok: false, reason: 'insufficient permission (GM only)', count: 0 };
+  const updates = [];
+  for (const tileDoc of tileDocsOf(scene)) {
+    if (!tileDoc?.id) continue;
+    const cfg = normalizeTileMotionConfig(readTileMotionConfigRaw(tileDoc), tileDoc.id);
+    if (!cfg.enabled) continue;
+    updates.push({ _id: tileDoc.id, [`flags.${NAMESPACE}.${TILE_FLAG_KEY}.shadowProjectionEnabled`]: on === true });
+  }
+  if (!updates.length) return { ok: true, reason: null, count: 0 };
+  try {
+    await scene.updateEmbeddedDocuments('Tile', updates);
+    reloadAllFromScene();
+    return { ok: true, reason: null, count: updates.length };
+  } catch (err) {
+    return { ok: false, reason: `update failed (GM only?): ${err?.message ?? err}`, count: 0 };
+  }
+}
+
+/**
  * Writes this tile's MSA motion config back out as the equivalent
  * tile-scroll flags, so a player without MSA still sees it move correctly —
  * see `convertTileMotionToTileScrollFlags` (tile-motion.js) for the
@@ -371,17 +399,27 @@ function onTileDocChanged(evt) {
 // an empty map — there is no separate "stable start" snapshot/restore dance.
 // ===========================================================================
 
+/**
+ * ⚠️ FREEZE ONLY WHILE A TILE IS IN HAND (2026-11-04). This used to freeze EVERY moving tile the moment the Tiles
+ * layer was active — and opening the Tile Motion panel activates that layer (`activateTileMotionNativeTool`), so
+ * a GM tuning a speed or a pivot never saw the orrery move until they closed the panel and left the layer
+ * (found on the Wizard's Lair). The freeze exists so Foundry's own selection frame, handles and drag preview
+ * (drawn at the document's REST pose) line up with the art: that only matters while a tile is selected or being
+ * dragged. So: Tiles layer active AND (a tile controlled OR a drag preview showing).
+ */
 function isTilesEditContextActiveRaw() {
   try {
     if (typeof canvas === 'undefined') return false;
-    if (canvas?.tiles?.active) return true;
-    const activeLayer = String(canvas?.activeLayer?.options?.name || canvas?.activeLayer?.name || '').toLowerCase();
-    if (activeLayer === 'tiles' || activeLayer === 'tileslayer') return true;
-    const uiControls = typeof ui !== 'undefined' ? ui?.controls : null;
-    const controlName = String(uiControls?.control?.name || uiControls?.activeControl || '').toLowerCase();
-    if (controlName === 'tiles') return true;
-    const controlLayer = String(uiControls?.control?.layer || '').toLowerCase();
-    if (controlLayer === 'tiles') return true;
+    const layer = canvas?.tiles ?? null;
+    let onTilesLayer = !!layer?.active;
+    if (!onTilesLayer) {
+      const activeLayer = String(canvas?.activeLayer?.options?.name || canvas?.activeLayer?.name || '').toLowerCase();
+      onTilesLayer = activeLayer === 'tiles' || activeLayer === 'tileslayer';
+    }
+    if (!onTilesLayer) return false;
+    const controlled = Array.isArray(layer?.controlled) ? layer.controlled.length : 0;
+    const dragging = (layer?.preview?.children?.length ?? 0) > 0;
+    return controlled > 0 || dragging;
   } catch (_) {
     // fall through to false
   }

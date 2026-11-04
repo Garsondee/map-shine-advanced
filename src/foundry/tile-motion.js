@@ -89,6 +89,7 @@ function point(raw, fx = 0, fy = 0) {
  *   pointB:{x:number,y:number}, amplitudeX:number, amplitudeY:number, amplitudeRot:number}} TileMotionParams */
 /** @typedef {{scrollU:number, scrollV:number, rotateSpeed:number, pivotU:number, pivotV:number}} TileTextureMotion */
 /** @typedef {{version:number, enabled:boolean, renderAboveTokens:boolean,
+ *   shadowProjectionEnabled:boolean, shadowHeightPx:number,
  *   mode:'transform'|'texture', parentId:string|null, pivot:TileMotionPivot, motion:TileMotionParams,
  *   textureMotion:TileTextureMotion}} TileMotionConfig */
 
@@ -113,6 +114,11 @@ export function normalizeTileMotionConfig(raw, tileId = '') {
     version: CURRENT_TILE_CONFIG_VERSION,
     enabled: !!cfg.enabled,
     renderAboveTokens: !!cfg.renderAboveTokens,
+    // CASTS A SHADOW (2026-11-04, vt/motion-tile-shadow.js) — the window light's shadow, cascading onto what is
+    // drawn below. V2's own key, kept by name: the Wizard's Lair orrery tiles were authored with it set, and a
+    // rename would silently switch every one of them off. `shadowHeightPx` 0 = height from elevation + sort.
+    shadowProjectionEnabled: !!cfg.shadowProjectionEnabled,
+    shadowHeightPx: clampNum(cfg.shadowHeightPx, 0, 2000, 0),
     mode,
     parentId,
     pivot: { x: num(pivot.x, 0), y: num(pivot.y, 0), snapToGrid: !!pivot.snapToGrid },

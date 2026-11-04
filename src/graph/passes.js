@@ -269,7 +269,8 @@ export const PASSES = [
     // runs inside this pass's own render sequence (right after the illum
     // guard is restored) — declaring it on vision.gate instead would be a
     // reads-before-creates lie the graph validator correctly refuses.
-    creates: ['buf:scene.illum', 'buf:scene.coloration', 'buf:scene.visionMask'],
+    // buf:scene.casterShadow (2026-11-04): moving tiles' shadow coverage, drawn and read inside this pass.
+    creates: ['buf:scene.illum', 'buf:scene.coloration', 'buf:scene.visionMask', 'buf:scene.casterShadow', 'buf:scene.casterRank', 'buf:scene.roomLight'],
     // `reads` stays narrowed to res:env even now that point lights are live
     // (2026-07-18): light DATA comes from a direct foundry/scene-lights.js
     // adapter read (canvas.effects.lightSources), the same shortcut

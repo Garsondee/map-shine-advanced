@@ -209,6 +209,13 @@ export {
   resetTokenGrounding,
   TOKEN_GROUNDING_PARAMS,
 } from './token-grounding.js';
+export {
+  setMotionTileShadows,
+  getMotionTileShadows,
+  resetMotionTileShadows,
+  getMotionTileShadowInfo,
+  MOTION_TILE_SHADOW_PARAMS,
+} from './motion-tile-shadow.js';
 export { runVtLiveDecodeTest } from './vt-live-decode-report.js';
 // readPageBitmapPixels: the mask authority's injected page-pixel reader —
 // per-page CPU extraction is decode machinery, so it lives with the decoder.

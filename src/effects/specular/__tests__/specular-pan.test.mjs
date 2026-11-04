@@ -208,4 +208,24 @@ export function run(t) {
     ok(`${file}: pushes the eased pan motion`, text.includes('easePanMotion(panMotion'));
     ok(`${file}: passes the sun's elevation`, text.includes('setSunDir(dir[0], dir[1], dir[2])'));
   }
+
+  // ── 6. NO BULLSEYES (2026-11-04, Big Bank underground) ───────────────────
+  // Round 2 scaled each layer's parallax by `1 + 1.2·|slope|`. On a small round
+  // island (an inlay diamond blurs into a dome) |slope| depends on radius only,
+  // so every pixel at one radius read one pattern point: concentric rings on
+  // every inlay, more of them the further the camera sat from the map origin
+  // (the parallax is the absolute view centre). Lab proof: rings vanish with
+  // bend OR parallax off, and with this term removed. The pattern lookup may
+  // move by the slope VECTOR (bendOffset), never by a scalar of it.
+  const render = readFileSync(fileURLToPath(new URL('../specular-render.js', import.meta.url)), 'utf8');
+  const layerLine = render.split('\n').find((l) => /const p = worldUv\.sub\(parallaxBase/.test(l)) || '';
+  ok('the shimmer layer lookup is found', layerLine.length > 0);
+  ok(
+    'the layer parallax is not scaled per pixel (a scalar of the slope draws rings)',
+    /parallaxBase\.mul\(L\.uParallaxDepth\)\)/.test(layerLine)
+  );
+  ok(
+    'no |slope| feeds the pattern position anywhere (length(shapeSlopeW) is never a pattern-space term)',
+    !/length\(shapeSlopeW\)/.test(render)
+  );
 }

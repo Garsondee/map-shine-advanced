@@ -133,7 +133,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     // longer the schema's own max; see SPECULAR_DEFAULT_SHIMMER_GAIN's own
     // header (specular-render.js).
     // RAISED 5.55 → 12.65 (ROUND 24, 2026-10-17)
-    default: 17, // RAISED 12.65 → 17 (METAL BODY, 2026-11-02, mmp-9nb) — focused glints are narrower, so each may be hotter
+    default: 40, // 2026-11-04 author's export (was 17)
     category: 'Look',
     label: 'Shimmer contrast',
     help: 'How far the moving patterns may brighten the metal above its resting shine. Low gives an even satin surface; high gives hard bright glints against darker metal, which is what reads as polished and slightly blown out. At 0 the metal still shines, it just stops moving.',
@@ -149,7 +149,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.6,
+    default: 0.09, // 2026-11-04 author's export (was 0.6)
     category: 'Look',
     label: 'Mirror depth',
     help: "Polished metal hardly returns any plain light of its own — what it is not reflecting looks dark, and that contrast is what makes gold and chrome read as metal rather than as glowing paint. This darkens the metal between its reflections (keeping the metal's own colour, deepened, in the dark parts). 0 is the old look: the shine only ever adds light. Around 0.6 reads as polished; 1 is a dark, mirror-like finish where only the glints are bright.",
@@ -159,7 +159,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     min: 0,
     max: 6,
     step: 0.05,
-    default: 2,
+    default: 0.7, // 2026-11-04 author's export (was 2)
     category: 'Detail',
     label: 'Edge relief',
     help: 'Reads your painted specular mask as height — bright paint stands proud, dark ink lines are grooves — and lights it from where the light really is: the nearest lamp indoors, the sun outdoors. The edges facing the light catch a bright bevel and the far edges fall into shade, so engraving, rims and coin edges look raised. 0 turns it off.',

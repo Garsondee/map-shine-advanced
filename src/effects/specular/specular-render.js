@@ -306,7 +306,7 @@ export const SPECULAR_DEFAULT_PULSE = 0.28;
  * exactly.
  */
 // RAISED 5.55 → 12.65 (ROUND 24, 2026-10-17)
-export const SPECULAR_DEFAULT_SHIMMER_GAIN = 17; // RAISED 12.65 → 17 (METAL BODY, 2026-11-02, mmp-9nb)
+export const SPECULAR_DEFAULT_SHIMMER_GAIN = 40; // 2026-11-04 author's export (was 17); RAISED 12.65 → 17 (METAL BODY, 2026-11-02, mmp-9nb)
 /**
  * THE LIGHT FLOOR. **0, corrected DOWN from 0.18 (2026-07-27) on direct live
  * feedback: metal was reading as SELF-ILLUMINATING in genuinely dark rooms —
@@ -410,9 +410,9 @@ export const SPECULAR_DEFAULT_SUN_BIAS = 1;
  * Absolute peaks deliberately differ: water's glint is the sun's mirror IMAGE
  * (GGX, ~40× HDR in a few pixels), metal's is a broad sheen (~3-4× HDR).
  */
-export const SPECULAR_DEFAULT_RELIEF_STRENGTH = 2;
+export const SPECULAR_DEFAULT_RELIEF_STRENGTH = 0.7; // 2026-11-04 author's export (was 2)
 export const SPECULAR_DEFAULT_RELIEF_WIDTH_PX = 3;
-export const SPECULAR_DEFAULT_MIRROR_DEPTH = 0.6;
+export const SPECULAR_DEFAULT_MIRROR_DEPTH = 0.09; // 2026-11-04 author's export (was 0.6)
 export const SPECULAR_DEFAULT_GLINT_FOCUS = 2;
 export const SPECULAR_DEFAULT_HOT_CORE = 0.4;
 export const SPECULAR_DEFAULT_COLOUR_RESPONSE = 1;
@@ -453,8 +453,6 @@ const CAMERA_GLINT_SHININESS = 160;
 const CAMERA_GLINT_GAIN = 2.5;
 /** World px of reflection offset per unit slope at bend 1. */
 const BEND_PX = 220;
-/** Extra parallax on a fully tilted flank at bend 1. */
-const BEND_PARALLAX = 1.2;
 const SPARKLE_MIN_SCREEN_PX = 3;
 const SPARKLE_JITTER = 0.2;
 const SPARKLE_RADIUS = 0.2;
@@ -1190,7 +1188,7 @@ export function buildSpecularSurfaceMaterial({
   /** One full shimmer layer: its own parallax depth, seamless blob field, soft
    * window, sun bias. @param {object} L @returns {*} */
   function shimmerLayer(L) {
-    const p = worldUv.sub(parallaxBase.mul(L.uParallaxDepth).mul(bendParallax)).add(drift).add(bendOffset);
+    const p = worldUv.sub(parallaxBase.mul(L.uParallaxDepth)).add(drift).add(bendOffset);
     const { e, spreadMul } = blobExponent(p, L);
     return softWindow(e, L, spreadMul).mul(sunGrainBias(L)).mul(L.uLayerStrength);
   }
@@ -1368,16 +1366,26 @@ export function buildSpecularSurfaceMaterial({
       : vec2(0, 0)
   ).toVar('specShapeSlope');
   // REFLECTION BEND: a curved mirror shows the world displaced by its own
-  // slope, and the displacement grows as the eye moves — so each layer is
-  // offset by the slope and its parallax is quickened on the steep flanks.
-  // Reflections then curve around coins and domes and swirl as you pan.
+  // slope — so each layer is offset by the slope VECTOR, and reflections curve
+  // around coins and domes. As you pan, the pattern slides uniformly behind
+  // that warped mapping, so it still flows faster/slower across a dome's
+  // flanks; no extra per-flank parallax is needed for the swirl.
+  //
+  // ⚠️ NEVER SCALE THE PARALLAX BY |slope| (removed 2026-11-04, Big Bank
+  // underground "circular patterns"). Round 2 multiplied the layer parallax by
+  // `1 + 1.2·|slope|`. |slope| is a scalar: on any small round island (an
+  // inlay diamond, a coin, a stud — the shape blur makes them all domes) it
+  // depends on RADIUS ONLY, so every pixel at one radius sampled the same
+  // pattern point → concentric rings, a bullseye on every inlay. Worse, the
+  // parallax it scaled is the ABSOLUTE view centre, so the ring count grew
+  // with the camera's distance from the map origin (2-3 pattern units across
+  // a 30 px dome in the Bank corridor). Any pattern lookup driven by a
+  // radially symmetric scalar (|slope|, height, convexity) draws rings; drive
+  // lookups with the slope's DIRECTION only.
   const bendOffset = shapeSlopeW
     .mul(uPanLook.y.mul(float(BEND_PX)))
     .div(patternScale)
     .toVar('specBendOffset');
-  const bendParallax = float(1)
-    .add(length(shapeSlopeW).mul(uPanLook.y).mul(float(BEND_PARALLAX)))
-    .toVar('specBendPar');
 
   const shimmer = plan.shimmerEnabled
     ? Fn(() => {

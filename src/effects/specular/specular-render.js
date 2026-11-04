@@ -894,6 +894,11 @@ export function buildSpecularSurfaceMaterial({
    * think about because JS-time-compiling the gate out entirely was doing
    * that job instead. See "THE FLOOR GATE" below. */
   const uExpectedDepth = uniform(float(0));
+  /** THE FAR EDGE (2026-11-04, lower floors' own shine) — a stored depth at or beyond this belongs to a
+   * floor BELOW this quad's own (`scene-depth.js#computeTieSafeBelowDepth`). Pushed only while a lower
+   * floor draws its own `_Specular`, so this floor's shine stops where that one starts and the two never
+   * stack. Defaults to 2, past the far plane (1): nothing is cut, exactly the gate as it was. */
+  const uBelowEdge = uniform(float(2));
   /** THE ISLAND PACK'S OWN BAKE STATUS, for debug channel 6 — added 2026-07-27
    * so "channel 6 is black" can never again mean three different things at
    * once. 0 = still the 1×1 placeholder (never baked — the mask never loaded,
@@ -1694,8 +1699,10 @@ export function buildSpecularSurfaceMaterial({
   if (depthTexture) {
     const depthHere = texture(depthTexture, screenUv).toVar('specDepthHere');
     const notOccluded = step(uExpectedDepth, depthHere).toVar('specNotOccluded');
-    visibility01 = notOccluded;
-    debugFloorGate = vec3(notOccluded, depthHere, uExpectedDepth);
+    // ...and not a lower floor that shines for itself (`uBelowEdge`). Arithmetic, like the line above.
+    visibility01 = notOccluded.mul(float(1).sub(step(uBelowEdge, depthHere)));
+    // R is the gate as APPLIED (both edges), so channel 8 shows where a floor steps aside for a lower one.
+    debugFloorGate = vec3(visibility01, depthHere, uExpectedDepth);
   }
 
   const coverage = presence.mul(visibility01).toVar('specCoverage');
@@ -2250,6 +2257,11 @@ export function buildSpecularSurfaceMaterial({
      * see `uExpectedDepth`'s own declaration above. @param {number} depth */
     setExpectedDepth(depth) {
       uExpectedDepth.value = Number.isFinite(depth) ? depth : 0;
+    },
+    /** The far edge — see `uBelowEdge`. `null` (or anything not finite) restores "cut nothing".
+     * @param {number|null} depth */
+    setBelowEdgeDepth(depth) {
+      uBelowEdge.value = Number.isFinite(depth) ? depth : 2;
     },
     /** The sun's azimuth, as ONE unit vector — the only route its direction has
      * into this effect — plus, optionally, the key 3-vector's vertical part

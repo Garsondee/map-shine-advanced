@@ -326,6 +326,21 @@ export function computeTieSafeExpectedDepth(rank, maxRank) {
 }
 
 /**
+ * The OTHER edge of a rank's own band (2026-11-04): a stored depth at or beyond this belongs to
+ * something ranked strictly BELOW `rank` — a lower floor seen through a hole. The same half-gap
+ * as {@link computeTieSafeExpectedDepth}, on the far side, so `[tieSafeExpected, tieSafeBelow)` is
+ * exactly the band where `rank` itself is the top layer, with float noise absorbed at both ties.
+ * A floor-wide surface uses it to stop shining on a lower floor that draws its own.
+ * @param {number} rank
+ * @param {number} maxRank
+ * @returns {number}
+ */
+export function computeTieSafeBelowDepth(rank, maxRank) {
+  const perRankGap = 1 / ((Math.max(1, maxRank) + 1) * (DEPTH_PASS_FAR - DEPTH_PASS_NEAR));
+  return computeExpectedStoredDepth(rank, maxRank) + perRankGap * 0.5;
+}
+
+/**
  * A stored-depth value that reads as "above every real drawable, always" —
  * an explicit opt-out of the rank comparison entirely, for a caller that
  * wants to skip the occlusion question rather than answer it with a very

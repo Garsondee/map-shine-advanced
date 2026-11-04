@@ -43,6 +43,7 @@ export {
   getVtPanViewerAdapterInfo,
   getVtPanViewerGpuDevice,
   setVtPanViewerIllumDiagnostic,
+  setVtPanViewerSpecularLowerDiagnostic,
   // TIER-COUPLED BUDGET (2026-08-27) — re-resolve the governor's frame
   // budget from the CURRENT performance-profile tier; see its own doc.
   setVtPanViewerRenderScaleProfile,

@@ -176,6 +176,7 @@ import {
   rankToDepthZ,
   computeExpectedStoredDepth,
   computeTieSafeExpectedDepth,
+  computeTieSafeBelowDepth,
   RENDER_ABOVE_EVERYTHING_DEPTH,
   computeSceneDepthFlags,
   computeVegetationDepthFlags,
@@ -10643,6 +10644,8 @@ async function startVtPanViewerUnserialized({
         rawDarkness[1] * realismScale,
         rawDarkness[2] * realismScale
       );
+      for (const s of specularLowerByFloor.values())
+        s.setDarknessFloor(rawDarkness[0] * realismScale, rawDarkness[1] * realismScale, rawDarkness[2] * realismScale);
       // mythica-machina-press#538/#539 — the per-TILE population's own
       // entries need the SAME floor pushed onto them; there is no shared
       // uniform between the two populations to piggy-back on.
@@ -11476,8 +11479,45 @@ async function startVtPanViewerUnserialized({
       // could never become visible in the first place — a deadlock that would
       // read on screen as "the effect does nothing", with every test green.
       profiler?.begin(Z.surfSpecularSync);
-      specularSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
-      placeFloorSurfaceForParallax(specularSurface.surfaceMeshes?.(), view?.floorIndex ?? 0);
+      const specViewed = view?.floorIndex ?? 0;
+      const specViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+      specularSurface.sync(specViewed, specViewRect);
+      placeFloorSurfaceForParallax(specularSurface.surfaceMeshes?.(), specViewed);
+      // THE FLOORS BELOW — every composited floor ranked under the viewed floor's own background, with a
+      // `_Specular` of its own. A floor above the viewed one has no background item this pass (Foundry's
+      // roof cutaway), so its rank is null and it is skipped, exactly as the window loop skips it.
+      const specViewedRank = specularBackgroundRank(specViewed);
+      const specLower = [];
+      if (specViewedRank !== null && specularLowerDiag.draw) {
+        const floorsRes = getActiveSceneFloors(globalThis.canvas?.scene ?? null);
+        const floors = floorsRes?.ok ? floorsRes.floors : [];
+        for (const floor of floors) {
+          if (floor.index === specViewed) continue;
+          const rank = specularBackgroundRank(floor.index);
+          if (rank === null || rank >= specViewedRank) continue;
+          if (!getSpecularMaskUrl(floor.index)) continue;
+          const lower = getSpecularLowerSurface(floor.index);
+          lower.sync(floor.index, specViewRect);
+          placeFloorSurfaceForParallax(lower.surfaceMeshes(), floor.index);
+          if (lower.hasContent()) specLower.push({ surface: lower, rank, index: floor.index });
+        }
+        // A scene switch can renumber floors: free the instances no floor uses any more (they borrow the
+        // main store, so this frees only their own mesh and materials).
+        for (const [index, s] of specularLowerByFloor) {
+          if (!floors.some((f) => f.index === index)) {
+            s.dispose();
+            specularLowerByFloor.delete(index);
+          }
+        }
+      }
+      // THE FAR EDGES — each drawn floor stops where a lower floor shines for itself.
+      const belowEdgeOf = (rank) =>
+        specularLowerDiag.cut && specLower.some((l) => l.rank < rank)
+          ? computeTieSafeBelowDepth(rank, depthAuthority.maxRank)
+          : null;
+      specularSurface.setBelowEdgeDepth(specViewedRank === null ? null : belowEdgeOf(specViewedRank));
+      for (const l of specLower) l.surface.setBelowEdgeDepth(belowEdgeOf(l.rank));
+      lastSpecularLowerDrawn = specLower.map((l) => l.index);
       profiler?.end(Z.surfSpecularSync);
       // mythica-machina-press#538/#539 — the per-TILE population, synced
       // right alongside the floor one; see `specularTileSurface`'s own
@@ -11491,7 +11531,7 @@ async function startVtPanViewerUnserialized({
       // tiles (no floor-level `_Specular` at all) must still reach the
       // render calls below; gating this early-return on the floor alone
       // would silently drop every tile-attached shine on exactly that scene.
-      if (!floorHasContent && !tilesHaveContent) return;
+      if (!floorHasContent && !tilesHaveContent && specLower.length === 0) return;
       const previousAutoClear = renderer.autoClearColor;
       renderer.setRenderTarget(sceneLit);
       renderer.autoClearColor = false;
@@ -11503,6 +11543,9 @@ async function startVtPanViewerUnserialized({
       // inside Z.lightDrawWindow. One bracket around BOTH draws now, the
       // same "share one zone by design" shape window's own comment states.
       profiler?.begin(Z.surfSpecular);
+      // Lower floors first: the shine is additive so order does not change it, but a debug channel draws
+      // opaque, and this way the viewed floor's instrument is the one on top.
+      for (const l of specLower) renderer.render(l.surface.scene, camera);
       if (floorHasContent) renderer.render(specularSurface.scene, camera);
       if (tilesHaveContent) renderer.render(specularTileSurface.scene, camera);
       profiler?.end(Z.surfSpecular);
@@ -17024,7 +17067,7 @@ async function startVtPanViewerUnserialized({
     // seam). A missing attachment compiles the floor gate OUT rather than
     // crashing, and `getStatus().floorGate` reports which happened, because
     // "metal draws over upper-floor roofs" is silent on screen.
-    const specularSurface = createSpecularSurfaceSubsystem({
+    const specularSurfaceArgs = {
       THREE,
       getSpecularMaskUrl,
       getSpecularMaskRect,
@@ -17073,7 +17116,38 @@ async function startVtPanViewerUnserialized({
       // (surface.specularIslandBake) — see this subsystem's own doc for why
       // that can't be bracketed from outside the way water's bake is.
       profiler,
-    });
+    };
+    const specularSurface = createSpecularSurfaceSubsystem(specularSurfaceArgs);
+
+    // ── SHINE ON THE FLOORS BELOW (2026-11-04, the author: "draw lower floors' own _Specular from above") ──
+    // `specularSurface` presents the VIEWED floor's mask only. A floor seen from above — down a stairwell,
+    // through a hole, under an open roof — gets its own instance here, one per floor, that BORROWS the main
+    // instance's slot store: one load, one upload and one island bake per floor however many present it,
+    // and floor prepare's prefetch warms both. Each is floor-gated by its own background rank (so it only
+    // shines where its floor is the top layer), moved with its floor's art by Parallax, and the floor above
+    // stops shining where it starts (`setBelowEdgeDepth`) so a hole painted in both masks never doubles up.
+    // A floor whose mask is not authored is not drawn, and the floor above keeps its own paint there.
+    /** @type {Map<number, ReturnType<typeof createSpecularSurfaceSubsystem>>} */
+    const specularLowerByFloor = new Map();
+    /** The floor indices whose own shine drew last frame — what `getSpecularInfo` reports. */
+    let lastSpecularLowerDrawn = [];
+    /** DIAGNOSTIC ONLY — `MapShine.setSpecularLowerDiagnostic({draw, cut})`: turn the lower floors' own
+     * shine off, or keep it but stop the floor above stepping aside, to measure each against the shipped
+     * build (both true). */
+    const specularLowerDiag = { draw: true, cut: true };
+    function getSpecularLowerSurface(floorIndex) {
+      let s = specularLowerByFloor.get(floorIndex);
+      if (!s) {
+        s = createSpecularSurfaceSubsystem({ ...specularSurfaceArgs, sharedSlots: specularSurface.slotStore() });
+        specularLowerByFloor.set(floorIndex, s);
+      }
+      return s;
+    }
+    /** A floor's background rank, or null when nothing of it is composited this frame. @param {number} floorIndex */
+    function specularBackgroundRank(floorIndex) {
+      const id = getSpecularBackgroundItemId(floorIndex);
+      return id ? depthAuthority.rankOf({ id }) : null;
+    }
 
     // ── SHINE, PER-TILE POPULATION (mythica-machina-press#538/#539) ────────
     // ADDED beside `specularSurface` above, never instead of it — see
@@ -30044,6 +30118,12 @@ async function startVtPanViewerUnserialized({
       setIllumDiagnostic(diag) {
         return envLight.setIllumDiagnostic(diag);
       },
+      /** DIAGNOSTIC ONLY — see `specularLowerDiag`. @param {{draw?: boolean, cut?: boolean}} [patch] */
+      setSpecularLowerDiagnostic(patch = {}) {
+        if (typeof patch?.draw === 'boolean') specularLowerDiag.draw = patch.draw;
+        if (typeof patch?.cut === 'boolean') specularLowerDiag.cut = patch.cut;
+        return { ...specularLowerDiag };
+      },
       /** The GPU adapter doing the work — perf reports' run-conditions stamp. */
       readAdapterInfo() {
         return readRendererAdapterInfo(renderer);
@@ -30411,6 +30491,9 @@ async function startVtPanViewerUnserialized({
        * per-Stop/Restart leak of exactly the size the mask-image module's own
        * header budgets for. */
       disposeSpecular() {
+        // Borrowers first: they hold the main instance's slots, which its own dispose frees.
+        for (const s of specularLowerByFloor.values()) s.dispose();
+        specularLowerByFloor.clear();
         specularSurface.dispose();
         // mythica-machina-press#538/#539 — the per-TILE population, torn
         // down alongside the floor one: same leak risk (an uploaded
@@ -30423,7 +30506,7 @@ async function startVtPanViewerUnserialized({
        * exists for it at all, which is inert BY DESIGN. `outdoorsGate`/
        * `floorGate` report which branches actually COMPILED — both are silent
        * on screen if they did not, which is precisely why they are reported. */
-      getSpecularInfo: () => specularSurface.getStatus(),
+      getSpecularInfo: () => ({ ...specularSurface.getStatus(), lowerFloorsDrawn: lastSpecularLowerDrawn.slice() }),
       /** mythica-machina-press#538/#539 — the per-TILE population's own
        * state, ONE ENTRY PER ATTACHED TILE, mirroring `getSpecularInfo`'s own
        * reporting posture for the floor-level surface. */
@@ -32886,6 +32969,13 @@ export function getVtPanViewerRenderScaleState() {
 export function setVtPanViewerIllumDiagnostic(diag) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setIllumDiagnostic(diag);
+}
+
+/** DIAGNOSTIC ONLY — the lower floors' own shine: `({draw:false})` turns it off, `({cut:false})` keeps it
+ * but lets the floor above shine over it too; `({draw:true, cut:true})` is the shipped build. */
+export function setVtPanViewerSpecularLowerDiagnostic(patch) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setSpecularLowerDiagnostic(patch);
 }
 
 /** The newest renderer's GPUDevice — available mid-load, unlike `_active` (see `_latestGpuDevice`). */

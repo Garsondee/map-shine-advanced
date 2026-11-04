@@ -125,6 +125,11 @@ export function createSpecularSurfaceSubsystem({
   // string on each call — exactly frame-profiler.js's documented "cold call
   // sites" use case — costs nothing worth avoiding.
   profiler = null,
+  // LOWER FLOORS' OWN SHINE (2026-11-04). Another instance's slot store (`slotStore()`), so a second
+  // instance drawing a floor seen from above reads the SAME loaded mask, pack and shape as the first —
+  // one decode and one upload per floor, however many instances present it. The instance that made the
+  // store owns it and is the only one that frees its slots on dispose.
+  sharedSlots = null,
 }) {
   // ⚠️ `seams/viewer-wired` exists because water shipped exactly this shape
   // DECLARED, defaulted, consumed and never passed — every control dead, every
@@ -187,11 +192,13 @@ export function createSpecularSurfaceSubsystem({
   // The variables below (`loadedUrl`, `loadedFloor`, `maskTexture`, …) remain,
   // but now mean "what the ACTIVE slot has bound to the surface right now".
   /** @type {Map<number, object>} floor index -> the loaded slot. */
-  const slots = new Map();
+  const slots = sharedSlots?.slots ?? new Map();
   /** @type {Map<number, string>} floor index -> the url whose load is in flight. */
-  const loadingFloors = new Map();
+  const loadingFloors = sharedSlots?.loadingFloors ?? new Map();
   /** @type {Map<number, string>} floor index -> a url whose load failed (logged by the loader); not retried every frame. */
-  const failedLoads = new Map();
+  const failedLoads = sharedSlots?.failedLoads ?? new Map();
+  /** Whether this instance made the slot store (and so frees it on dispose). */
+  const ownsSlots = !sharedSlots;
   /** @type {object|null} the slot currently bound to the mesh, or null when hidden for lack of one. */
   let activeSlot = null;
   /** The floor the last `sync` was asked to present (-1 before the first). */
@@ -915,6 +922,11 @@ export function createSpecularSurfaceSubsystem({
     hasContent: () => mesh.visible,
     /** The floor quad, so Parallax can move it with its floor's art (vertices stay in world px). */
     surfaceMeshes: () => [mesh],
+    /** This instance's slot store, for a second instance to share (`sharedSlots`). */
+    slotStore: () => ({ slots, loadingFloors, failedLoads }),
+    /** The far edge of this floor's shine: a depth (`scene-depth.js#computeTieSafeBelowDepth`) past which
+     * a lower floor draws its own, or `null` to cut nothing. Pushed every frame by the viewer. */
+    setBelowEdgeDepth: (depth) => surface.setBelowEdgeDepth(depth),
     /**
      * What the presentation monitor reads (`diag/presentation-monitor.js`, loading audit §6.7):
      * the floor whose shine is ACTUALLY on the mesh right now — the active slot's own floor, not the
@@ -1083,10 +1095,13 @@ export function createSpecularSurfaceSubsystem({
       // The debug material too — built eagerly whether or not a channel was
       // ever picked, so "nobody used it" is not a reason to leave it.
       surface.debugMaterial?.dispose?.();
-      for (const slot of slots.values()) disposeSlot(slot);
-      slots.clear();
-      loadingFloors.clear();
-      failedLoads.clear();
+      // A borrower never frees the store: the owner's slots are still bound to the owner's mesh.
+      if (ownsSlots) {
+        for (const slot of slots.values()) disposeSlot(slot);
+        slots.clear();
+        loadingFloors.clear();
+        failedLoads.clear();
+      }
       activeSlot = null;
       placeholderMaskTexture?.dispose?.();
       placeholderPackTexture?.dispose?.();

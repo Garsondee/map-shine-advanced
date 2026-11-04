@@ -12,6 +12,7 @@ import {
   rankToDepthZ,
   computeExpectedStoredDepth,
   computeTieSafeExpectedDepth,
+  computeTieSafeBelowDepth,
   RENDER_ABOVE_EVERYTHING_DEPTH,
   DEPTH_PASS_CAMERA_Z,
   DEPTH_PASS_NEAR,
@@ -140,6 +141,24 @@ export function run(t) {
       'computeExpectedStoredDepth: every real rank´s expected depth stays inside the camera´s own (0,1) NDC range',
       low > 0 && low < 1 && high > 0 && high < 1
     );
+  }
+
+  // computeTieSafeBelowDepth (2026-11-04) — a floor's own band is [tieSafeExpected, tieSafeBelow): its own
+  // stored depth is inside it, every lower rank's is at or past the far edge, every higher rank's in front.
+  {
+    let bandHolds = true;
+    for (const maxRank of [1, 2, 5, 50, 5000]) {
+      for (let rank = 0; rank <= maxRank; rank++) {
+        const own = computeExpectedStoredDepth(rank, maxRank);
+        const lo = computeTieSafeExpectedDepth(rank, maxRank);
+        const hi = computeTieSafeBelowDepth(rank, maxRank);
+        if (!(own >= lo && own < hi)) bandHolds = false;
+        if (rank > 0 && !(computeExpectedStoredDepth(rank - 1, maxRank) >= hi)) bandHolds = false;
+        if (rank < maxRank && !(computeExpectedStoredDepth(rank + 1, maxRank) < lo)) bandHolds = false;
+      }
+    }
+    ok('⭐ below-edge: a rank owns exactly its own band — lower ranks past it, higher ranks in front', bandHolds);
+    ok('below-edge: a real depth, short of the far-plane clear (1)', computeTieSafeBelowDepth(0, 1) < 1);
   }
 
   // RENDER_ABOVE_EVERYTHING_DEPTH (mythica-machina-press#515) — an explicit

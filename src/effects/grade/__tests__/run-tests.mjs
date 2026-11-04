@@ -8,6 +8,7 @@
  */
 import { run as runGradeOps } from './grade-ops.test.mjs';
 import { run as runLutCube } from './lut-cube.test.mjs';
+import { run as runPresentLensRegistration } from './present-lens-registration.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -39,6 +40,7 @@ const t = {
 const suites = [
   ['grade-ops', runGradeOps],
   ['lut-cube', runLutCube],
+  ['present-lens-registration', runPresentLensRegistration],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

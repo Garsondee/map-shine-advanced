@@ -455,14 +455,19 @@ export function buildGradePresentMaterial({
       // ARTISTIC grade + the whole-frame TAIL (tone map + LUT).
       // The artistic grade + zone exposure + vignette + stylize, as a function of the lamp-glow
       // sample so the fog hold below can build the REMEMBERED ground's copy without it.
+      // DYNAMIC RANGE reads its light at `maskUv`, NOT `sampleUv` (2026-11-04). Both buffers describe the
+      // unwarped frame, and the lamp glow carries the art's own ink lines: read at the plain uv, the camera
+      // took the glow's ink for a dip in the light, and each line came back as a bright twin beside the real
+      // one, up to ~17 px off at the frame's edge (the author: "highlights/lines in gold and yellow ... They
+      // don't align with the map"). Guarded by __tests__/present-lens-registration.test.mjs.
       const artShot = (lampGlow) => {
         const exposedEnv = drIllumTexNode
           ? buildDynamicRangeNode(
               TSL,
               afterEnv,
-              drIllumTexNode.sample(sampleUv).rgb,
+              drIllumTexNode.sample(maskUv).rgb,
               dynamicRangeUniforms,
-              lampGlowTexNode ? lampGlowTexNode.sample(sampleUv).rgb : null
+              lampGlowTexNode ? lampGlowTexNode.sample(maskUv).rgb : null
             )
           : afterEnv;
         const gradedLook = buildGradeNode(TSL, exposedEnv, uArt, {

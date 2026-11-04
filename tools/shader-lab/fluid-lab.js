@@ -638,6 +638,95 @@ class FluidLab {
     return { frames: n };
   }
 
+  /**
+   * THE METER (round 3, 2026-11-04 — "too bright in all places at once ... more gaps"). Splits the goo's own
+   * light from the scene so contrast is a number, not an impression:
+   *   coverage  tube pixels in view (the _Fluid mask > 0.5, drawn with the same world quad);
+   *   filled    share of those holding liquid (the absorb pass alone, on white, darkens by > 4%);
+   *   bright    share whose EMIT alone, × the lab exposure, exceeds `brightAt` (linear luma);
+   *   mean/p95  the emit luma over the tube, × exposure.
+   * Samples `samples` frames `every` seconds apart after `warm` seconds and reports each plus the averages.
+   */
+  async meter({ view, lighting, params, warm = 6, samples = 8, every = 1.5, brightAt = 0.35, reset = true } = {}) {
+    if (params) this.set(params);
+    if (view) this.setView(view);
+    if (lighting) this.setLighting(lighting);
+    const r = this.renderer;
+    if (!this.meterRT) {
+      this.meterRT = new THREE.RenderTarget(W, H, {
+        type: THREE.UnsignedByteType,
+        format: THREE.RGBAFormat,
+        depthBuffer: false,
+      });
+      this.meterRT.texture.colorSpace = THREE.NoColorSpace;
+      const tex = await new THREE.TextureLoader().loadAsync(ART + 'fluid.png');
+      tex.flipY = false;
+      tex.needsUpdate = true;
+      const m = new THREE.NodeMaterial();
+      m.fragmentNode = T.vec4(T.vec3(T.step(T.float(0.5), T.texture(tex, T.uv()).r)), 1);
+      m.side = THREE.DoubleSide;
+      m.depthTest = false;
+      this.coverScene = new THREE.Scene();
+      this.coverScene.add(new THREE.Mesh(worldQuadGeometry(TILE.x, TILE.y, TILE.w, TILE.h), m));
+    }
+    const read = async (scene, clear) => {
+      r.setRenderTarget(this.meterRT);
+      r.setClearColor(clear, 1);
+      r.clear();
+      r.render(scene, this.camera);
+      r.setRenderTarget(null);
+      return r.readRenderTargetPixelsAsync(this.meterRT, 0, 0, W, H);
+    };
+    const meshes = this.sub.emitScene.children;
+    const isAbsorb = (o) => o.material?.blendDst === THREE.SrcColorFactor;
+    const cover = await read(this.coverScene, 0x000000);
+    if (reset) this.reset();
+    this.advance(warm);
+    const exp = this.lab.exposure;
+    const rows = [];
+    for (let s = 0; s < samples; s++) {
+      if (s) this.advance(every);
+      this.render(false);
+      meshes.forEach((o) => (o.visible = !isAbsorb(o)));
+      const em = await read(this.sub.emitScene, 0x000000);
+      meshes.forEach((o) => (o.visible = isAbsorb(o)));
+      const ab = await read(this.sub.emitScene, 0xffffff);
+      meshes.forEach((o) => (o.visible = true));
+      let n = 0;
+      let filled = 0;
+      let bright = 0;
+      let sum = 0;
+      const lums = [];
+      for (let i = 0; i < W * H; i++) {
+        if (cover[i * 4] < 128) continue;
+        n++;
+        const L = ((0.2126 * em[i * 4] + 0.7152 * em[i * 4 + 1] + 0.0722 * em[i * 4 + 2]) / 255) * exp;
+        sum += L;
+        if (L > brightAt) bright++;
+        if ((ab[i * 4] + ab[i * 4 + 1] + ab[i * 4 + 2]) / 765 < 0.96) filled++;
+        if ((i & 7) === 0) lums.push(L);
+      }
+      lums.sort((a, b) => a - b);
+      const pct = (x) => Math.round((x / Math.max(1, n)) * 1000) / 10;
+      rows.push({
+        t: Math.round(this.tMs / 100) / 10,
+        filled: pct(filled),
+        bright: pct(bright),
+        mean: Math.round((sum / Math.max(1, n)) * 1000) / 1000,
+        p95: Math.round((lums[Math.floor(lums.length * 0.95)] ?? 0) * 1000) / 1000,
+      });
+    }
+    const avg = (k) => Math.round((rows.reduce((a, b) => a + b[k], 0) / rows.length) * 100) / 100;
+    const span = (k) => [Math.min(...rows.map((x) => x[k])), Math.max(...rows.map((x) => x[k]))];
+    return {
+      coverage: rows.length ? undefined : 0,
+      avg: { filled: avg('filled'), bright: avg('bright'), mean: avg('mean'), p95: avg('p95') },
+      brightRange: span('bright'),
+      filledRange: span('filled'),
+      rows,
+    };
+  }
+
   /** Run an async job in the background (a tool call dies at 45 s); poll `fluidLab.last`. */
   job(fn) {
     this.last = 'pending';

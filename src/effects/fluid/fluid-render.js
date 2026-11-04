@@ -173,6 +173,7 @@ export function buildFluidSurfaceMaterials({
     smoothstep,
     clamp,
     max,
+    min,
     sqrt,
     sin,
     mix,
@@ -195,7 +196,8 @@ export function buildFluidSurfaceMaterials({
 
   const uTint = uniform(vec3(tint[0], tint[1], tint[2]));
   const uAccent = uniform(vec3(accent[0], accent[1], accent[2]));
-  const pal = palette?.colors ?? [tint, accent, tint, accent];
+  // Eight slots (`FLUID_PALETTE_SLOTS`): the authored pair plus six wild reagents; `uPalCount` says how many play.
+  const pal = Array.from({ length: 8 }, (_, i) => palette?.colors?.[i] ?? (i % 2 ? accent : tint));
   const uPal = pal.map((c) => uniform(vec3(c[0], c[1], c[2])));
   const uPalCount = uniform(float(palette?.count ?? 2));
   const uVariety = uniform(float(variety));
@@ -226,8 +228,20 @@ export function buildFluidSurfaceMaterials({
     const i0 = floor(gg);
     const i1 = mod(i0.add(1), uPalCount);
     const f = smoothstep(float(0), float(1), fract(gg));
-    const pick = (i) =>
-      select(i.lessThan(0.5), uPal[0], select(i.lessThan(1.5), uPal[1], select(i.lessThan(2.5), uPal[2], uPal[3])));
+    // A balanced select tree (3 deep, not a 7-deep chain) over the eight slots.
+    const pick = (i) => {
+      const lo = select(
+        i.lessThan(1.5),
+        select(i.lessThan(0.5), uPal[0], uPal[1]),
+        select(i.lessThan(2.5), uPal[2], uPal[3])
+      );
+      const hi = select(
+        i.lessThan(5.5),
+        select(i.lessThan(4.5), uPal[4], uPal[5]),
+        select(i.lessThan(6.5), uPal[6], uPal[7])
+      );
+      return select(i.lessThan(3.5), lo, hi);
+    };
     return mix(pick(i0), pick(i1), f);
   }
 
@@ -298,7 +312,13 @@ export function buildFluidSurfaceMaterials({
     const pipeLiquid = smoothstep(float(0.06), float(0.55), phi);
     const liquid = mix(pipeLiquid, float(0.62).add(pipeLiquid.mul(0.38)), wide);
     const along = s.mul(lengthPx).sub(travel);
-    const base = paletteAt(g);
+    // COLOUR DRIFT (round 3 — "a better and more unpredictable colour range"): the body is never quite one
+    // reagent. A slow, long noise riding the flow nudges the palette position up to ±0.4 of a step, so a slug
+    // mottles toward its neighbouring reagents in patches several pipe-widths long — more with Variety, none at 0.
+    const drift = mx_noise_float(vec3(along.div(R.mul(34)), g.mul(0.21).add(3.3), tSec.mul(0.07)))
+      .mul(0.8)
+      .mul(uVariety);
+    const base = paletteAt(g.add(drift));
     return {
       inside,
       gate,
@@ -367,25 +387,37 @@ export function buildFluidSurfaceMaterials({
     //     clock and now and then swells into a bright knot and fades (a ~1.5 s swell, never a strobe) — more often
     //     with Reactions and while the tube is agitated, so the apparatus is never doing the same thing twice;
     //   - whatever the reactions carry: energy waves, slug fronts, reacting seams.
+    //
+    // ROUND 3 (2026-11-04 — "too bright in all places at once ... less bright sections"): the round-2 layers each
+    // covered a fair share and together lit ~28% of the tube on average (peaks 52%, the lab meter). Patches are now
+    // rare (~8%), flares half as frequent, and the always-on layers (filaments, swirl, bubbles, motes) only burn
+    // where `lit` is — the dim body is where most of the goo now rests.
     const patch = smoothstep(
-      float(0.32),
-      float(0.62),
+      float(0.46),
+      float(0.7),
       mx_noise_float(vec3(along.div(R.mul(26)), F.g.mul(0.37), tSec.mul(0.09)))
     );
     const fc = along.div(R.mul(18));
     const fCell = floor(fc);
     const fClock = tSec.div(3.1).add(cellHash(vec2(fCell, 3.7)).mul(5));
     const fRoll = cellHash(vec2(fCell, floor(fClock)));
-    const fRate = float(0.06).add(uChaos.mul(0.14)).add(F.agitation.mul(0.12));
+    const fRate = float(0.025).add(uChaos.mul(0.07)).add(F.agitation.mul(0.1));
     const fOn = smoothstep(float(1).sub(fRate), float(1).sub(fRate).add(0.02), fRoll);
     const fEnv = pow(sin(fract(fClock).mul(Math.PI)), float(2));
     const fd = fract(fc).sub(0.5);
     const flare = fOn.mul(fEnv).mul(exp(fd.mul(fd).div(0.05).negate()));
+    // Patches and flares are noise over `along`, which is nearly CONSTANT across a flask (the skeleton crosses it
+    // in a short stretch) — so in a flask they switched the whole disk on at once (round 3: a flask burned edge to
+    // edge in cyan). They count a quarter there; a flask's own light is its 2-D swirl crest below.
+    const flowLit = patch
+      .mul(0.75)
+      .add(flare.mul(1.4))
+      .mul(float(1).sub(F.wide.mul(0.75)));
     const lit = clamp(
-      patch
-        .mul(0.75)
-        .add(flare.mul(1.4))
-        .add(max(energy.sub(0.15), float(0)).mul(0.6))
+      flowLit
+        // Only a real wave lights it (a pulse, a front, a catalyst's kick reach 1+); the tube-wide simmer of a
+        // fizz or a boil (~0.4) stays below the line — that simmer lit whole pipes at once in round 2.
+        .add(max(energy.sub(0.5), float(0)).mul(0.8))
         .add(F.front)
         .add(F.react),
       0,
@@ -401,7 +433,7 @@ export function buildFluidSurfaceMaterials({
         .mul(liquid)
         .mul(th)
         .mul(1.25)
-        .mul(float(0.25).add(lit.mul(0.75)))
+        .mul(float(0.07).add(lit.mul(0.93)))
     );
     // A thin hot thread down the centreline, where the light path through the goo is longest.
     out.addAssign(
@@ -435,12 +467,15 @@ export function buildFluidSurfaceMaterials({
         const veins = pow(clamp(float(1).sub(abs(sw2).mul(3.5)), 0, 1), float(3));
         const nextC = paletteAt(F.g.add(1));
         const swirlCol = mix(base, nextC, clamp(sw.mul(0.7).add(0.15), 0, 0.85).mul(uVariety));
-        const swirled = mix(deep, swirlCol.mul(1.1), clamp(sw.mul(0.45).add(0.35), 0, 1)).add(hot.mul(veins).mul(0.8));
-        // A flask burns in swirling regions of its own, as well as wherever the pipe's `lit` reaches it.
-        const flaskLit = max(lit, smoothstep(float(0.3), float(0.65), sw.add(sw2.mul(0.5))));
+        // A flask burns in swirling regions of its own (round 3: only the crest of the swirl, not a third of it), as
+        // well as wherever the pipe's `lit` reaches it; its veins burn only there.
+        const flaskLit = max(lit, smoothstep(float(0.55), float(0.85), sw.add(sw2.mul(0.5))));
+        const swirled = mix(deep, swirlCol.mul(1.1), clamp(sw.mul(0.45).add(0.35), 0, 1)).add(
+          hot.mul(veins).mul(float(0.12).add(flaskLit.mul(0.68)))
+        );
         const flaskBody = swirled
           .mul(liquid)
-          .mul(float(0.38).add(th.mul(0.45)))
+          .mul(float(0.24).add(th.mul(0.4)))
           .mul(float(1).add(energy.mul(0.9)))
           .mul(mix(float(FLUID_DIM_BODY * 1.4), float(1), flaskLit));
         out.assign(mix(out, flaskBody, wide.mul(uStructure)));
@@ -456,7 +491,7 @@ export function buildFluidSurfaceMaterials({
               .mul(wide)
               .mul(liquid)
               .mul(uBubbles)
-              .mul(float(0.35).add(F.agitation.mul(1.8)))
+              .mul(float(0.12).add(F.agitation.mul(1.6)))
           );
         }
       });
@@ -478,7 +513,13 @@ export function buildFluidSurfaceMaterials({
       );
       const hollow = float(1).sub(smoothstep(float(0), br.mul(0.75), wd));
       const amt = uBubbles.mul(liquid).mul(presence).mul(th.mul(0.6).add(0.4));
-      out.addAssign(hot.mul(ring).mul(amt).mul(1.5));
+      // Rims catch the light only where the goo burns (round 3); in the dim body they are faint glints.
+      out.addAssign(
+        hot
+          .mul(ring)
+          .mul(amt)
+          .mul(float(0.3).add(lit.mul(1.2)))
+      );
       out.assign(out.mul(float(1).sub(hollow.mul(amt).mul(0.5))));
 
       // MOTES — magic sparkles carried a little slower than the goo, each twinkling on its own clock (0.4-1.5 Hz).
@@ -493,7 +534,8 @@ export function buildFluidSurfaceMaterials({
       const spot = float(1).sub(smoothstep(float(0.04), float(0.17), d));
       const phase = fract(h2.mul(7.31).add(tSec.mul(float(0.4).add(h1.mul(1.1)))));
       const twinkle = pow(clamp(float(1).sub(abs(phase.mul(2).sub(1))), 0, 1), float(5));
-      const density = float(0.22).add(froth.mul(0.5)).add(F.agitation.mul(0.45));
+      // Capped: a fizz once drove this to ~1, a sparkle in EVERY cell of the tube (34% of it over the line).
+      const density = min(float(0.06).add(froth.mul(0.22)).add(F.agitation.mul(0.12)), float(0.38));
       const present = smoothstep(float(1).sub(density), float(1).sub(density).add(0.04), h1);
       out.addAssign(
         mix(hot, vec3(1, 1, 1), 0.6).mul(spot.mul(twinkle).mul(present).mul(liquid).mul(uSparkle).mul(4.5))
@@ -522,8 +564,17 @@ export function buildFluidSurfaceMaterials({
     Discard(F.inside.lessThan(0.003));
     const hue = log(max(F.base, vec3(2e-3, 2e-3, 2e-3))).negate();
     const meanHue = max(dot(hue, vec3(1 / 3, 1 / 3, 1 / 3)), float(1e-4));
-    const sigma = hue.div(meanHue).mul(float(FLUID_ABSORPTION_STRENGTH));
-    const depth = F.th.mul(F.liquid).mul(F.inside).mul(F.gate).mul(uOpacity).mul(uFadeMul);
+    // Plus a little NEUTRAL murk (round 3): normalised by its own mean, a light reagent (a sky blue) let green and
+    // blue through untouched, and a flask of it over the pale painted glass read milky white, not as potion.
+    const sigma = hue.div(meanHue).mul(float(FLUID_ABSORPTION_STRENGTH)).add(0.35);
+    // A flask is many pipe-widths deep: its light path, and so its absorption, is longer.
+    const depth = F.th
+      .mul(F.liquid)
+      .mul(float(1).add(F.wide.mul(0.9)))
+      .mul(F.inside)
+      .mul(F.gate)
+      .mul(uOpacity)
+      .mul(uFadeMul);
     return vec4(exp(sigma.negate().mul(depth)), 1);
   });
 

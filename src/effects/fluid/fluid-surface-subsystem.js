@@ -846,7 +846,8 @@ export function createFluidSurfaceSubsystem({
     const chaos = Number.isFinite(params.chaos) ? params.chaos : 0.5;
     const plan = fluidTierPlan(resolveTier());
     const lightStrength = plan.lightEnabled && Number.isFinite(params.light) ? Math.max(0, params.light) : 0;
-    const palette = lightStrength > 0 ? fluidPalette(params.tint, params.accent, params.variety) : null;
+    // Always built: the reaction schedule needs the live palette size (how far a colour change may jump).
+    const palette = fluidPalette(params.tint, params.accent, params.variety);
     const energyKeep = Math.exp(-Math.max(0, dtSec) / FLUID_ENERGY_DECAY_S);
     const frothKeep = Math.exp(-Math.max(0, dtSec) / FLUID_FROTH_DECAY_S);
 
@@ -883,6 +884,7 @@ export function createFluidSurfaceSubsystem({
         dtSec,
         chaos,
         flowSpeed,
+        paletteCount: palette.count,
       });
       entry.lastReactions = reacted;
       // PRIME (2026-11-04): a freshly cleared sim starts FULL. Empty tubes took 7–10 s to fill after every scene
@@ -892,9 +894,15 @@ export function createFluidSurfaceSubsystem({
       // can be skipped while it builds — a single priming tick was lost on every first load in the lab.
       if (entry.simPrime > 0 && !entry.simNeedsClear && dtSec > 0) {
         const pd = entry.simPumpTexture.image.data;
+        const td = entry.simTubeTexture.image.data;
         for (let row = 0; row < entry.net.tubes.length; row++) {
           pd[row * 4] = 1e9;
           pd[row * 4 + 1] = 1;
+          // Prime with CALM goo: whatever the root carries this instant is copied down the whole tube, so a
+          // reaction that happened to be running at load lit every pipe end to end (round 3 meter: 47% bright).
+          const o = row * FLUID_TUBE_TEXELS * 4;
+          td[o + 1] = Math.min(td[o + 1], 0.12);
+          td[o + 2] = Math.min(td[o + 2], 0.1);
         }
         entry.simPrime--;
       }

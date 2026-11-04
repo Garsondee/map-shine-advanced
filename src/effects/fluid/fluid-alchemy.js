@@ -37,20 +37,40 @@ import { advectTubeStep, FLUID_SIM_MIN_CROSS_SECTION_PX } from './fluid-sim.js';
 import { FLUID_PUMP_BASE_Q } from './fluid-pump.js';
 
 /** The kinds of reaction, in the order the debug buttons list them. */
-export const FLUID_REACTION_KINDS = Object.freeze(['transmute', 'surge', 'stall', 'pulse', 'fizz', 'boil']);
+export const FLUID_REACTION_KINDS = Object.freeze(['transmute', 'catalyst', 'surge', 'stall', 'pulse', 'fizz', 'boil']);
 
 /** How likely each kind is when a slot holds an event (relative weights). */
-const REACTION_WEIGHTS = Object.freeze({ transmute: 3, surge: 2, stall: 1.1, pulse: 1.6, fizz: 1.5, boil: 1.3 });
+const REACTION_WEIGHTS = Object.freeze({
+  transmute: 3,
+  catalyst: 1.6,
+  surge: 1.6,
+  stall: 1.1,
+  pulse: 1.3,
+  fizz: 1.3,
+  boil: 1.2,
+});
 
 /** How long each kind lasts, seconds: [min, spread]. */
 const REACTION_DURATION = Object.freeze({
   transmute: [1.6, 0.8],
+  catalyst: [2.4, 1.0],
   surge: [1.4, 2.0],
   stall: [1.8, 2.4],
   pulse: [2.6, 0.0],
   fizz: [2.0, 2.0],
   boil: [3.0, 3.0],
 });
+
+/**
+ * A CATALYST (round 3, 2026-11-04 — the author: "A better and more unpredictable colour range and response to
+ * catalysts would be ideal"). A dose dropped in at the root sets off a CASCADE: {@link FLUID_CATALYST_STAGES}
+ * colour changes in quick succession, each a jump of its own hashed size, each with its own flash of energy, so a
+ * banded train of fronts runs down the pipe and the tube stays agitated for a while after. These are the spacing
+ * of the stages (s) and how long the agitation lingers past the event's end (s).
+ */
+export const FLUID_CATALYST_STAGES = 3;
+const CATALYST_STAGE_GAP_S = 0.55;
+const CATALYST_AFTERSHOCK_S = 3.5;
 
 /** The reagent position wraps here (a multiple of 1..6 so every palette size stays continuous across the wrap
  * except for the single wrap front itself). Kept small because the state target is half-float: integers are exact
@@ -126,10 +146,20 @@ function hueShift(rgb, dh) {
   return hsvToRgb([(((h + dh) % 1) + 1) % 1, Math.max(s, 0.55), Math.max(v, 0.75)]);
 }
 
+/** How many reagent slots the shader carries (its fixed uniform set). */
+export const FLUID_PALETTE_SLOTS = 8;
+
+/** The palette sizes `variety` can pick — every one divides {@link FLUID_REAGENT_WRAP} (120), so the reagent
+ * position stays continuous across its wrap at any size. 7 does not divide 120, which is why it is skipped. */
+const PALETTE_COUNTS = Object.freeze([1, 2, 3, 4, 5, 6, 8]);
+
 /**
- * The reagents a tube cycles through: the authored colour, the authored accent, and two more found by turning
- * each round the colour wheel. `variety` decides how many are in play (0 → one reagent, the tint alone; 1 → all
- * four). Always returns FOUR entries (the shader's fixed uniform set) plus the live `count`.
+ * The reagents a tube cycles through. Slot 0 is the authored colour and slot 1 the authored accent; the rest are
+ * WILD reagents (round 3, 2026-11-04 — "a better and more unpredictable colour range"): each a hashed turn round
+ * the wheel from the tint, at its own saturation and its own depth, some deep and inky, some electric — so the
+ * apparatus wanders well beyond its two authored colours. Seeded by the authored colours, so a given tint/accent
+ * always brews the same set (no private RNG). `variety` decides how many are in play: 0 → the tint alone,
+ * ~0.75 → six, 1 → all eight. Always returns {@link FLUID_PALETTE_SLOTS} entries plus the live `count`.
  *
  * @param {number[]} tint - linear-ish RGB 0..1.
  * @param {number[]} accent
@@ -140,8 +170,21 @@ export function fluidPalette(tint, accent, variety) {
   const a = Array.isArray(tint) ? tint : [0.15, 0.95, 0.7];
   const b = Array.isArray(accent) ? accent : hueShift(a, 0.5);
   const v = Number.isFinite(variety) ? clamp01(variety) : 0.5;
-  const count = v < 0.12 ? 1 : v < 0.45 ? 2 : v < 0.8 ? 3 : 4;
-  const colors = [a, b, hueShift(a, 0.36), hueShift(b, -0.3)];
+  const count = PALETTE_COUNTS[Math.min(PALETTE_COUNTS.length - 1, Math.floor(v * 7.2 + 0.15))];
+  const seed = Math.round(a[0] * 251 + a[1] * 509 + a[2] * 757 + b[0] * 1013 + b[1] * 1531 + b[2] * 2039);
+  const [h0] = rgbToHsv(a);
+  const colors = [a, b];
+  for (let i = 2; i < FLUID_PALETTE_SLOTS; i++) {
+    // Golden-ratio turns spread the hues; the hash nudges each so no two palettes are the same wheel.
+    const h = h0 + i * 0.618034 + (hash01(seed + i * 13) - 0.5) * 0.22;
+    // Saturated, never pastel: under the night exposure (×2.8) and the white-hot core a pale reagent clips to white
+    // (the lab's first wild set had a sky blue at value 0.98 that turned a whole flask ice-white).
+    const s = 0.82 + 0.18 * hash01(seed + i * 17);
+    // Depth: a third come out deep (0.4-0.55), the rest rich (0.68-0.86) — dark reagents make the bright ones read.
+    const deep = hash01(seed + i * 19) < 0.34;
+    const val = deep ? 0.4 + 0.15 * hash01(seed + i * 23) : 0.68 + 0.18 * hash01(seed + i * 29);
+    colors.push(hsvToRgb([((h % 1) + 1) % 1, s, val]));
+  }
   return { colors, count };
 }
 
@@ -163,10 +206,28 @@ function slotSeconds(chaos, personality) {
 }
 
 /**
- * The event (if any) in slot `k`. Pure in `(k, personality, chaos)`.
- * @returns {null|{kind: string, start: number, end: number, k: number, roll: number}}
+ * How far one colour change jumps along the palette — hashed, so the next colour is never simply "the next one"
+ * (round 3: the old +1 every time cycled A→B→C→D→A, which an eye learns in a minute). Never a multiple of the
+ * palette size, so every jump changes the colour; a jump of 2-3 sweeps its front through the colours between,
+ * a brief rainbow as it travels.
+ * @param {number} seed @param {number} count - palette size in play.
  */
-export function fluidSlotEvent(k, personality, chaos) {
+export function fluidReagentJump(seed, count) {
+  const n = Math.max(1, Math.round(count) || 1);
+  if (n <= 2) return 1;
+  return 1 + Math.floor(hash01(seed) * Math.min(3, n - 1) * 0.9999);
+}
+
+/** The total reagent steps an event moves its tube by (0 for kinds that do not change colour). */
+function eventSteps(ev) {
+  return ev?.jumps ? ev.jumps.reduce((s, j) => s + j, 0) : 0;
+}
+
+/**
+ * The event (if any) in slot `k`. Pure in `(k, personality, chaos, paletteCount)`.
+ * @returns {null|{kind: string, start: number, end: number, k: number, roll: number, jumps?: number[]}}
+ */
+export function fluidSlotEvent(k, personality, chaos, paletteCount = 4) {
   const c = clamp01(chaos);
   if (!(c > 0)) return null;
   const len = slotSeconds(c, personality);
@@ -188,7 +249,14 @@ export function fluidSlotEvent(k, personality, chaos) {
   const [dMin, dSpread] = REACTION_DURATION[kind];
   const dur = Math.min(len * 0.85, dMin + hash01(seed + 3) * dSpread);
   const start = slotStart + hash01(seed + 4) * Math.max(0, len - dur) * 0.6;
-  return { kind, start, end: start + dur, k, roll: hash01(seed + 5) };
+  const ev = { kind, start, end: start + dur, k, roll: hash01(seed + 5) };
+  if (kind === 'transmute') ev.jumps = [fluidReagentJump(seed + 6, paletteCount)];
+  else if (kind === 'catalyst') {
+    ev.jumps = Array.from({ length: FLUID_CATALYST_STAGES }, (_, i) =>
+      fluidReagentJump(seed + 7 + i * 3, paletteCount)
+    );
+  }
+  return ev;
 }
 
 /**
@@ -207,11 +275,21 @@ export function createFluidReactionState(tubeCount) {
   }));
 }
 
-/** Count transmutes in slots [from, to] for one tube. */
-function countTransmutes(from, to, personality, chaos) {
+/** Sum the reagent steps of every colour-changing event in slots [from, to] for one tube. */
+function countTransmutes(from, to, personality, chaos, paletteCount) {
   let n = 0;
-  for (let j = from; j <= to; j++) if (fluidSlotEvent(j, personality, chaos)?.kind === 'transmute') n++;
+  for (let j = from; j <= to; j++) n += eventSteps(fluidSlotEvent(j, personality, chaos, paletteCount));
   return n;
+}
+
+/** How far a catalyst's cascade has carried the reagent at `tSec` (0 → all its stages' jumps). */
+function catalystProgress(ev, tSec) {
+  let s = 0;
+  ev.jumps.forEach((j, i) => {
+    const t0 = ev.start + i * CATALYST_STAGE_GAP_S;
+    s += j * smoothstep(t0, t0 + 0.45, tSec);
+  });
+  return s;
 }
 
 /**
@@ -220,21 +298,24 @@ function countTransmutes(from, to, personality, chaos) {
  * @param {number} tSec
  * @param {object} st - one entry of {@link createFluidReactionState}.
  * @param {number} chaos - 0..1.
+ * @param {number} [paletteCount] - reagents in play (decides how far a colour change may jump).
  * @returns {{qMul: number, reagent: number, energy: number, froth: number, agitation: number, kind: string|null, env: number}}
  */
-export function fluidReactionAt(tSec, st, chaos) {
+export function fluidReactionAt(tSec, st, chaos, paletteCount = 4) {
   const c = clamp01(Number.isFinite(chaos) ? chaos : 0.5);
+  const pc = Math.max(1, Math.round(paletteCount) || 1);
   const p = st.personality;
   const len = slotSeconds(c, p);
   const k = Math.floor((tSec + p.phase01 * len) / len);
-  // Transmutes in all slots BEFORE k (incremental; a chaos change or a backwards clock recounts).
+  // Steps in all slots BEFORE k (incremental; a chaos/palette change or a backwards clock recounts).
   const ORIGIN = 0;
-  if (st.lastK === null || st.chaos !== c || k < st.lastK) {
-    st.transmutes = k - 1 >= ORIGIN ? countTransmutes(ORIGIN, k - 1, p, c) : 0;
+  if (st.lastK === null || st.chaos !== c || st.paletteCount !== pc || k < st.lastK) {
+    st.transmutes = k - 1 >= ORIGIN ? countTransmutes(ORIGIN, k - 1, p, c, pc) : 0;
     st.lastK = k;
     st.chaos = c;
+    st.paletteCount = pc;
   } else if (k > st.lastK) {
-    st.transmutes += countTransmutes(st.lastK, k - 1, p, c);
+    st.transmutes += countTransmutes(st.lastK, k - 1, p, c, pc);
     st.lastK = k;
   }
 
@@ -252,14 +333,16 @@ export function fluidReactionAt(tSec, st, chaos) {
   let solid = 0;
 
   // The current slot's event, plus the tail of the previous slot's (a stall's burp can spill over).
-  const events = [fluidSlotEvent(k, p, c), fluidSlotEvent(k - 1, p, c)];
+  const events = [fluidSlotEvent(k, p, c, pc), fluidSlotEvent(k - 1, p, c, pc)];
   // A forced event (the debug buttons / a future Foundry hook) rides on top, same shapes.
-  if (st.forced && tSec < st.forced.end + 1.5 && tSec >= st.forced.start - 0.01) events.push(st.forced);
+  if (st.forced && tSec < st.forced.end + eventTail(st.forced) && tSec >= st.forced.start - 0.01) {
+    events.push(st.forced);
+  }
   for (const ev of events) {
     if (!ev) continue;
     const { start, end } = ev;
-    if (tSec < start - 0.01 || tSec > end + 1.5) {
-      if (ev.kind === 'transmute' && ev !== st.forced && tSec > end && ev.k === k) reagentStep = 1;
+    if (tSec < start - 0.01 || tSec > end + eventTail(ev)) {
+      if (ev.jumps && ev !== st.forced && tSec > end && ev.k === k) reagentStep = eventSteps(ev);
       continue;
     }
     const e = smoothstep(start, start + 0.35, tSec) * (1 - smoothstep(end - 0.5, end, tSec));
@@ -272,18 +355,36 @@ export function fluidReactionAt(tSec, st, chaos) {
       case 'transmute':
         // The new reagent enters over ~0.8 s: that ramp is the colour FRONT the sim carries down the pipe.
         // (a forced transmute's own step is `forcedStep` below — never counted twice)
-        if (ev.k === k && ev !== st.forced) reagentStep = Math.max(reagentStep, smoothstep(start, start + 0.8, tSec));
+        if (ev.k === k && ev !== st.forced) {
+          reagentStep = Math.max(reagentStep, eventSteps(ev) * smoothstep(start, start + 0.8, tSec));
+        }
         energy += 1.1 * front;
         froth += 0.9 * front;
         agitation += 0.5 * front;
         qMul *= 1 + 0.6 * front;
         break;
+      case 'catalyst': {
+        // The dose hits: a CASCADE of colour fronts, each with its own flash, and a tube that stays agitated
+        // (more flares, more boiling, more froth) for a few seconds after — the apparatus answering.
+        if (ev.k === k && ev !== st.forced) reagentStep = Math.max(reagentStep, catalystProgress(ev, tSec));
+        let kick = 0;
+        for (let i = 0; i < ev.jumps.length; i++) kick += gauss(tSec - start - 0.25 - i * CATALYST_STAGE_GAP_S, 0.2);
+        const after = smoothstep(start, start + 0.6, tSec) * (1 - smoothstep(end, end + CATALYST_AFTERSHOCK_S, tSec));
+        energy += 1.5 * kick;
+        froth += 0.7 * kick + 0.5 * after;
+        agitation += 0.6 * kick + 0.9 * after;
+        qMul *= 1 + 0.9 * kick;
+        mood += 0.25 * kick;
+        break;
+      }
       case 'surge':
+        // A RUSH, not a floodlight (round 3): speed and a solid stream carry it; its energy stays near the line,
+        // so it does not light the whole pipe at once (at 0.9 a surge lit 34% of the tube for seconds).
         qMul *= 1 + 2.4 * e;
-        energy += 0.9 * e;
+        energy += 0.45 * e;
         froth += 0.6 * e;
         agitation += 0.35 * e;
-        mood += 0.3 * e;
+        mood += 0.12 * e;
         solid = Math.max(solid, e);
         break;
       case 'stall': {
@@ -327,14 +428,16 @@ export function fluidReactionAt(tSec, st, chaos) {
     }
   }
 
-  const forcedStep =
-    st.forced?.kind === 'transmute' && tSec >= st.forced.start
-      ? smoothstep(st.forced.start, st.forced.start + 0.8, tSec)
-      : 0;
+  const fv = st.forced;
+  let forcedStep = 0;
+  if (fv?.jumps && tSec >= fv.start) {
+    forcedStep =
+      fv.kind === 'catalyst' ? catalystProgress(fv, tSec) : eventSteps(fv) * smoothstep(fv.start, fv.start + 0.8, tSec);
+  }
   const steps = st.transmutes + reagentStep + (st.forcedSteps ?? 0) + forcedStep;
   const reagent = ((steps % FLUID_REAGENT_WRAP) + FLUID_REAGENT_WRAP) % FLUID_REAGENT_WRAP;
-  if (st.forced && tSec > st.forced.end + 1.5) {
-    if (st.forced.kind === 'transmute') st.forcedSteps = (st.forcedSteps ?? 0) + 1;
+  if (fv && tSec > fv.end + eventTail(fv)) {
+    st.forcedSteps = (st.forcedSteps ?? 0) + eventSteps(fv);
     st.forced = null;
   }
   return {
@@ -354,16 +457,61 @@ export function fluidReactionAt(tSec, st, chaos) {
 export function forceFluidReaction(st, kind, tSec) {
   if (!FLUID_REACTION_KINDS.includes(kind)) return false;
   const [dMin, dSpread] = REACTION_DURATION[kind];
-  st.forced = { kind, start: tSec, end: tSec + dMin + dSpread * 0.5, k: -1, roll: 0.5 };
+  const ev = { kind, start: tSec, end: tSec + dMin + dSpread * 0.5, k: -1, roll: 0.5 };
+  // A forced jump is hashed from the moment it was forced, so pressing the button twice does not repeat itself.
+  const seed = Math.floor(tSec * 61) + 17;
+  const pc = st.paletteCount ?? 4;
+  if (kind === 'transmute') ev.jumps = [fluidReagentJump(seed, pc)];
+  else if (kind === 'catalyst') {
+    ev.jumps = Array.from({ length: FLUID_CATALYST_STAGES }, (_, i) => fluidReagentJump(seed + 7 + i * 3, pc));
+  }
+  st.forced = ev;
   return true;
+}
+
+/** How long an event keeps acting after its end (a stall's burp; a catalyst's aftershock). */
+function eventTail(ev) {
+  return ev.kind === 'catalyst' ? CATALYST_AFTERSHOCK_S : 1.5;
+}
+
+// ── DROUGHTS ──────────────────────────────────────────────────────────────────
+
+/** The share of a tube's supply windows that run DRY, and how long a window is (s: min, spread). */
+export const FLUID_DROUGHT_CHANCE = 0.3;
+const DROUGHT_WINDOW_S = [3.5, 4.5];
+
+/**
+ * DROUGHTS (round 3, 2026-11-04 — the author: "too bright in all places at once ... more effective with more gaps
+ * in the fluid pipe"). Each tube's supply is cut into windows of a few seconds of its own length; about
+ * {@link FLUID_DROUGHT_CHANCE} of them run DRY — nothing enters the root at all, so a long run of empty glass
+ * travels down the pipe behind the last slug. On top of the pump's own slug/gap duty cycle, that gives gaps of
+ * every length, from a hand-span to most of a pipe. Deterministic in `(tSec, tubeIndex)`; edges ease over ~0.4 s
+ * and two dry windows in a row join into one drought (no blip of liquid at their seam).
+ *
+ * @param {number} tSec @param {number} tubeIndex
+ * @returns {number} 0 (supply on) .. 1 (dry).
+ */
+export function fluidDroughtAt(tSec, tubeIndex) {
+  const t = Math.max(0, tubeIndex | 0);
+  const win = DROUGHT_WINDOW_S[0] + DROUGHT_WINDOW_S[1] * hash01(t * 31 + 1);
+  const u = tSec / win + hash01(t * 31 + 2) * 7;
+  const w = Math.floor(u);
+  const f = u - w;
+  const dry = (j) => hash01(t * 31 + j * 7 + 3) < FLUID_DROUGHT_CHANCE;
+  if (!dry(w)) return 0;
+  const ease = 0.4 / win;
+  const rise = dry(w - 1) ? 1 : smoothstep(0, ease, f);
+  const fall = dry(w + 1) ? 1 : 1 - smoothstep(1 - ease, 1, f);
+  return rise * fall;
 }
 
 // ── THE PER-TICK UPLOAD ───────────────────────────────────────────────────────
 
 /** Texels per tube row of the tube texture: [0] = what enters the root, [1] = what the shader reads. */
 export const FLUID_TUBE_TEXELS = 2;
-/** What a gap between slugs still carries (φ). */
-export const FLUID_TRICKLE = 0.18;
+/** What a gap between slugs still carries (φ). Round 3: nothing — a gap is empty glass (it was 0.18, which kept
+ * every gap ~30% full and the whole pipe lit; the meter read 83-87% of the tube filled at every sample). */
+export const FLUID_TRICKLE = 0;
 /** `x` wraps here (world px). Large, so the pattern jump it causes is rare (~half an hour of fast flow). */
 export const FLUID_TRAVEL_WRAP_PX = 1e6;
 
@@ -373,9 +521,9 @@ export const FLUID_TRAVEL_WRAP_PX = 1e6;
  *   tube texel 0 = (reagent, energy, froth, 1)   — injected at the root by the sim
  *   tube texel 1 = (x, lengthPx, agitation, mood) — read by the surface shader
  *
- * and floors the pump's φ injection at {@link FLUID_TRICKLE} (a gap between slugs keeps a thin trickle, so the
- * pipes read as a rushing stream with surges in it rather than as a marquee of lit segments), raised to a solid
- * stream while a surge or a burp pours.
+ * and shapes the pump's φ injection: cut to nothing while the tube is in a drought ({@link fluidDroughtAt}),
+ * floored at {@link FLUID_TRICKLE}, and raised to a solid stream while a surge or a burp pours (a surge breaks a
+ * drought — the reaction is the point).
  *
  * @param {object} args
  * @param {Float32Array} args.tubeData - `tubeCount * 2 * 4`.
@@ -384,16 +532,31 @@ export const FLUID_TRAVEL_WRAP_PX = 1e6;
  * @param {Array<object>} args.reactions - {@link createFluidReactionState}.
  * @param {number} args.tSec @param {number} args.dtSec
  * @param {number} args.chaos @param {number} args.flowSpeed
+ * @param {number} [args.paletteCount] - reagents in play.
+ * @param {boolean} [args.droughts] - false keeps every supply window on (tests; a pre-round-3 look).
  * @returns {Array<object>} this tick's reaction per tube (for lights + status).
  */
-export function writeFluidTubeTick({ tubeData, pumpData, tubes, reactions, tSec, dtSec, chaos, flowSpeed }) {
+export function writeFluidTubeTick({
+  tubeData,
+  pumpData,
+  tubes,
+  reactions,
+  tSec,
+  dtSec,
+  chaos,
+  flowSpeed,
+  paletteCount = 4,
+  droughts = true,
+}) {
   const out = [];
   for (let row = 0; row < tubes.length; row++) {
     const st = reactions[row];
-    const r = fluidReactionAt(tSec, st, chaos);
+    const r = fluidReactionAt(tSec, st, chaos, paletteCount);
     const q = pumpData[row * 4] * flowSpeed * r.qMul;
     pumpData[row * 4] = q;
-    const pumped = pumpData[row * 4 + 1];
+    const drought = droughts ? fluidDroughtAt(tSec, row) : 0;
+    r.drought = drought;
+    const pumped = pumpData[row * 4 + 1] * (1 - drought);
     pumpData[row * 4 + 1] = Math.max(pumped, FLUID_TRICKLE + (1 - FLUID_TRICKLE) * r.solid);
     // Mean speed along this tube (world px/s) = Q / mean cross-section — the same `v = Q/A` the sim uses.
     const prof = tubes[row].crossSectionProfile;

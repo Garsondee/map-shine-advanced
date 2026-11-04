@@ -15,6 +15,9 @@ import {
   resolveCasterHeights,
   resolveWindowThrow,
   resolveCasterShadow,
+  shadowOnReceiver,
+  buildCasterHeightTable,
+  CASTER_HEIGHT_TABLE_SIZE,
 } from '../motion-tile-shadow.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
@@ -164,6 +167,53 @@ export function run(t) {
     ok(
       'blur = base + height x per-px',
       near(high.blurPx, MOTION_TILE_SHADOW_DEFAULTS.blurBasePx + 200 * MOTION_TILE_SHADOW_DEFAULTS.blurPerPx)
+    );
+  }
+
+  // HEIGHT ABOVE WHAT IT FALLS ON (the Clockwork Dungeon's side-by-side rings; a planet on its own arm).
+  {
+    const thr = { throwX: 120, throwY: -90, throwHeightPx: 120 };
+    const D = MOTION_TILE_SHADOW_DEFAULTS;
+    const floor = shadowOnReceiver(150, 0, thr, D);
+    const plain = resolveCasterShadow(150, thr, D);
+    ok(
+      'on the floor the shadow is the plain caster shadow',
+      near(floor.offsetX, plain.offsetX) && near(floor.offsetY, plain.offsetY) && near(floor.blurPx, plain.blurPx)
+    );
+    const onArm = shadowOnReceiver(150, 120, thr, D);
+    ok(
+      'over a raised piece it lands only the gap away (30 px of height)',
+      near(onArm.offsetX, 30) && near(onArm.offsetY, -22.5)
+    );
+    ok('…and is sharper there', onArm.blurPx < floor.blurPx && near(onArm.blurPx, D.blurBasePx + 30 * D.blurPerPx));
+    const level = shadowOnReceiver(120, 120, thr, D);
+    ok('two pieces at one height: no throw between them', level.offsetX === 0 && level.offsetY === 0);
+    const above = shadowOnReceiver(60, 200, thr, D);
+    ok('a receiver above the caster never gets a negative throw', above.offsetX === 0 && above.offsetY === 0);
+  }
+
+  // THE RECEIVER HEIGHT TABLE.
+  {
+    const table = buildCasterHeightTable([
+      { stackIndex: 1, heightPx: 45 },
+      { stackIndex: 2, heightPx: 120 },
+      { stackIndex: 255, heightPx: 300 },
+      { stackIndex: 0, heightPx: 999 },
+      { stackIndex: 256, heightPx: 999 },
+      { stackIndex: 3, heightPx: NaN },
+      { stackIndex: 4, heightPx: -5 },
+    ]);
+    ok(
+      'the table has one entry per 8-bit stack index',
+      table.length === CASTER_HEIGHT_TABLE_SIZE && table.length === 256
+    );
+    ok('entry 0 is the floor and cannot be written', table[0] === 0);
+    ok('casters land at their own index', table[1] === 45 && table[2] === 120 && table[255] === 300);
+    ok('a non-finite height is skipped', table[3] === 0);
+    ok('a negative height clamps to the floor', table[4] === 0);
+    ok(
+      'an empty or missing list is all floor',
+      buildCasterHeightTable(undefined).every((v) => v === 0)
     );
   }
 }

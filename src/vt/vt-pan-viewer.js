@@ -82,6 +82,9 @@ import {
   buildCasterSkylightMaterial,
   buildCasterSilhouetteMaterial,
   recordMotionTileShadowFrame,
+  buildCasterHeightTable,
+  CASTER_HEIGHT_TABLE_SIZE,
+  getMotionTileShadows,
 } from './motion-tile-shadow.js';
 // POST-UPSCALE SHARPEN (2026-08-27) — the render-scale governor's own repair
 // for its free bilinear upscale's softness. Injected into grade-present.js
@@ -10359,6 +10362,21 @@ async function startVtPanViewerUnserialized({
     const casterCoreScene = new THREE.Scene();
     const casterShadows = new Map();
     const casterSkylightQuad = new THREE.QuadMesh(buildCasterSkylightMaterial(THREE, sceneCasterShadow.texture));
+    // Receiver heights by stack index (motion-tile-shadow.js 'HEIGHT ABOVE WHAT IT FALLS ON'): half float,
+    // NEAREST — each texel is one whole caster, and a filtered read would invent a height between two of them.
+    const casterHeightTableData = new Uint16Array(CASTER_HEIGHT_TABLE_SIZE);
+    const casterHeightTable = new THREE.DataTexture(
+      casterHeightTableData,
+      CASTER_HEIGHT_TABLE_SIZE,
+      1,
+      THREE.RedFormat,
+      THREE.HalfFloatType
+    );
+    casterHeightTable.minFilter = THREE.NearestFilter;
+    casterHeightTable.magFilter = THREE.NearestFilter;
+    casterHeightTable.flipY = false;
+    casterHeightTable.needsUpdate = true;
+    let casterHeightTableKey = '';
     let casterShadowDrewLastFrame = false;
     function disposeCasterShadowEntry(entry) {
       casterShadowScene.remove(entry.mesh);
@@ -10439,6 +10457,22 @@ async function startVtPanViewerUnserialized({
           casters.sort((a, b) => a.rank - b.rank);
           const topDepth = computeTieSafeExpectedDepth(casters[casters.length - 1].rank, depthAuthority.maxRank);
           casters.forEach((c, i) => (c.stackIndex = Math.min(255, i + 1)));
+          // Each receiver's height by its stack index, rewritten only when a height or the order changed.
+          const tableRows = casters.map((c) => ({
+            stackIndex: c.stackIndex,
+            heightPx: heights.get(c.tileDoc.id) ?? 0,
+          }));
+          const tableKey = tableRows.map((r) => `${r.stackIndex}:${r.heightPx.toFixed(2)}`).join('|');
+          if (tableKey !== casterHeightTableKey) {
+            casterHeightTableKey = tableKey;
+            const table = buildCasterHeightTable(tableRows);
+            for (let i = 0; i < table.length; i++) casterHeightTableData[i] = THREE.DataUtils.toHalfFloat(table[i]);
+            casterHeightTable.needsUpdate = true;
+          }
+          const shadowSettings = getMotionTileShadows();
+          const throwRef = windowThrow.throwHeightPx > 0 ? windowThrow.throwHeightPx : 0;
+          const throwPerPxX = throwRef > 0 ? windowThrow.throwX / throwRef : 0;
+          const throwPerPxY = throwRef > 0 ? windowThrow.throwY / throwRef : 0;
           for (const c of casters) {
             let entry = casterShadows.get(c.item.id);
             if (
@@ -10456,6 +10490,7 @@ async function startVtPanViewerUnserialized({
                 depthTexture: sceneDepth.depthTexture ?? null,
                 rankTexture: sceneCasterRank.texture,
                 tileMotion: c.t.tileMotion ?? null,
+                heightTableTexture: casterHeightTable,
               });
               // The shadow draws on its OWN full quad, never the tile's mesh: a tile's mesh can be coverage-
               // tessellated (vt/coverage-mesh.js) with its transparent cells LEFT OUT, and a shadow drawn on it
@@ -10510,10 +10545,15 @@ async function startVtPanViewerUnserialized({
             entry.uCenter.value.set((q[0].x + q[1].x + q[2].x + q[3].x) / 4, (q[0].y + q[1].y + q[2].y + q[3].y) / 4);
             entry.uSize.value.set(w, h);
             entry.uRestRot.value.set(ax / w, ay / w);
+            entry.uRestAxisY.value.set((q[3].x - q[0].x) / h, (q[3].y - q[0].y) / h);
             const heightPx = heights.get(c.tileDoc.id) ?? 0;
             const shadow = resolveCasterShadow(heightPx, windowThrow);
             entry.uOffset.value.set(shadow.offsetX, shadow.offsetY);
             entry.uBlurPx.value = shadow.blurPx;
+            entry.uHeight.value = heightPx;
+            entry.uThrowPerPx.value.set(throwPerPxX, throwPerPxY);
+            entry.uBlurBase.value = shadowSettings.blurBasePx;
+            entry.uBlurPer.value = shadowSettings.blurPerPx;
             entry.uTopDepth.value = topDepth;
             entry.uIndex.value = c.stackIndex / 255;
             entry.uSilhouetteIndex.value = c.stackIndex / 255;

@@ -37,6 +37,18 @@
  *
  * HOW SOFT — a penumbra grows with the distance to what it falls on: `blurPx = blurBasePx + h · blurPerPx`.
  *
+ * HEIGHT ABOVE WHAT IT FALLS ON (2026-11-04, the Clockwork Dungeon) — `h` above is the caster's height above
+ * whatever is UNDER that pixel, not above the floor. A shadow on the floor travels the whole `throw · h_c / ref`;
+ * the same shadow crossing a lower piece at height `h_r` lands only `throw · (h_c − h_r) / ref` from its caster, with
+ * the penumbra of that smaller gap. Measured with absolute heights, the dungeon's concentric walkway rings (one
+ * floor of platforms, side by side over the pit) threw hard 100 px+ slabs of shadow across each other's walkways,
+ * and a planet's shadow on its own arm sat a whole planet-height away from it. Per pixel, the shader reads the
+ * receiver from `buf:scene.casterRank` (R = the top caster there), looks its height up in a 256-entry table indexed
+ * by stack index (`buildCasterHeightTable`; index 0 = the floor, height 0), and samples its own art that much
+ * closer: `shadowOnReceiver` is the same sum for Node. Two pieces at ONE height cannot shade each other at all:
+ * the gap is 0, the shadow sits exactly under its caster and the caster's own opaque art hides it — so a ring
+ * shades the pit below but never the ring beside it, whatever their sort order.
+ *
  * CASCADE — a caster's shadow falls only on what is drawn BELOW it: a planet shades the arms and the floor under
  * it, never itself and never the piece above it; each lower piece in turn shades what is under IT. The test is
  * the casters' REAL silhouettes, not `buf:scene.depth`: a tile's depth proxy is built from coarse coverage cells,
@@ -330,6 +342,43 @@ export function resolveCasterShadow(heightPx, windowThrow, settings = _s) {
   };
 }
 
+/**
+ * Where one caster's shadow lands ON A RECEIVER at height `receiverHeightPx` (0 = the floor), and how soft it is
+ * there: the caster's height above THAT surface, never below 0. The shadow material does this same sum per pixel
+ * (module header, 'HEIGHT ABOVE WHAT IT FALLS ON').
+ * @param {number} casterHeightPx
+ * @param {number} receiverHeightPx
+ * @param {{throwX:number, throwY:number, throwHeightPx:number}} windowThrow
+ * @param {Partial<typeof MOTION_TILE_SHADOW_DEFAULTS>} [settings]
+ * @returns {{offsetX:number, offsetY:number, blurPx:number}}
+ */
+export function shadowOnReceiver(casterHeightPx, receiverHeightPx, windowThrow, settings = _s) {
+  const hc = Math.max(0, Number(casterHeightPx) || 0);
+  const hr = Math.max(0, Number(receiverHeightPx) || 0);
+  return resolveCasterShadow(Math.max(0, hc - hr), windowThrow, settings);
+}
+
+/** Entries in the receiver height table: stack indices 0..255 (0 = the floor, no caster). */
+export const CASTER_HEIGHT_TABLE_SIZE = 256;
+
+/**
+ * The receiver height table the shadow material reads: entry `i` = the height (world px) of the caster drawn with
+ * stack index `i` into `buf:scene.casterRank`; entry 0 is the floor (0). Indices outside 1..255 and non-finite
+ * heights are ignored.
+ * @param {Array<{stackIndex:number, heightPx:number}>} casters
+ * @returns {Float32Array} CASTER_HEIGHT_TABLE_SIZE heights.
+ */
+export function buildCasterHeightTable(casters) {
+  const table = new Float32Array(CASTER_HEIGHT_TABLE_SIZE);
+  for (const c of casters ?? []) {
+    const i = Math.round(Number(c?.stackIndex));
+    const h = Number(c?.heightPx);
+    if (!(i >= 1 && i < CASTER_HEIGHT_TABLE_SIZE) || !Number.isFinite(h)) continue;
+    table[i] = Math.max(0, h);
+  }
+  return table;
+}
+
 // ===========================================================================
 // THE MATERIALS
 // ===========================================================================
@@ -362,19 +411,31 @@ const SHADOW_TAPS = (() => {
  * @param {*} args.rankTexture - `buf:scene.casterRank` (R top caster's index / 255, G its alpha, B highest fully
  *   opaque index / 255).
  * @param {object|null} args.tileMotion - the tile's motion uniform bag, or null.
- * @returns {{material:any, uCenter:any, uSize:any, uRestRot:any, uOffset:any, uBlurPx:any, uTopDepth:any, uIndex:any, uAlpha:any}}
+ * @param {*} [args.heightTableTexture] - the receiver height table (`buildCasterHeightTable`, 256×1, R = world px).
+ *   Absent: every receiver counts as the floor (the old absolute-height shadow).
+ * @returns {{material:any, uCenter:any, uSize:any, uRestRot:any, uRestAxisY:any, uOffset:any, uBlurPx:any,
+ *   uHeight:any, uThrowPerPx:any, uBlurBase:any, uBlurPer:any, uTopDepth:any, uIndex:any, uAlpha:any}}
  */
 export function buildMotionTileShadowMaterial(
   THREE,
-  { tex, uvScale, texWidth, depthTexture, rankTexture, tileMotion }
+  { tex, uvScale, texWidth, depthTexture, rankTexture, tileMotion, heightTableTexture = null }
 ) {
   const TSL = THREE.TSL;
   const { Fn, uniform, vec2, vec3, vec4, float, uv, texture, positionLocal, screenUV } = TSL;
   const uCenter = uniform(vec2(0, 0));
   const uSize = uniform(vec2(1, 1));
+  /** The art's u axis in world (unit), and its v axis — given separately so a mirrored tile stays exact. */
   const uRestRot = uniform(vec2(1, 0));
+  const uRestAxisY = uniform(vec2(0, 1));
+  /** The FLOOR shadow's offset (height above the floor) — where the quad is drawn. */
   const uOffset = uniform(vec2(0, 0));
+  /** The FLOOR shadow's blur — sizes the quad; each pixel's own blur is smaller over a raised receiver. */
   const uBlurPx = uniform(float(4));
+  /** This caster's height, world px, and the shadow offset per px of height (throw / throwHeightPx). */
+  const uHeight = uniform(float(0));
+  const uThrowPerPx = uniform(vec2(0, 0));
+  const uBlurBase = uniform(float(MOTION_TILE_SHADOW_DEFAULTS.blurBasePx));
+  const uBlurPer = uniform(float(MOTION_TILE_SHADOW_DEFAULTS.blurPerPx));
   /** Tie-safe expected depth of the TOP caster: anything stored nearer than this is above the whole stack. */
   const uTopDepth = uniform(float(0));
   /** This caster's place in the stack, 1..255, over 255. */
@@ -397,8 +458,9 @@ export function buildMotionTileShadowMaterial(
   material.blendSrcAlpha = THREE.OneFactor;
   material.blendDstAlpha = THREE.OneFactor;
 
-  // Grow factor per LOCAL axis: twice the blur on every side.
-  const pad = vec2(1, 1).add(uBlurPx.mul(4).div(uSize));
+  // Grow factor per LOCAL axis: twice the blur on every side, plus the floor offset once more — over a raised
+  // receiver the shadow lands nearer its caster than the floor shadow the quad is centred on, by up to that offset.
+  const pad = vec2(1, 1).add(uBlurPx.mul(4).add(uOffset.length().mul(2)).div(uSize));
 
   material.positionNode = Fn(() => {
     // Rest world vertex -> the tile's own local frame (its static rotation), grown, back to world.
@@ -425,12 +487,39 @@ export function buildMotionTileShadowMaterial(
   })();
 
   material.colorNode = Fn(() => {
-    // The art uv this fragment would have on the un-grown quad.
-    const artUv = uv().sub(0.5).mul(pad).add(0.5).toVar();
-    const reach = uBlurPx.div(uSize).toVar(); // blur radius in art uv, per axis
+    const rankHere = rankTexture ? texture(rankTexture, screenUV) : vec4(0, 0, 0, 0);
+
+    // THE RECEIVER (module header, 'HEIGHT ABOVE WHAT IT FALLS ON'): the top caster here, its height from the
+    // table; the floor where none is, and blended toward the floor over an anti-aliased rim (G = its alpha).
+    let receiverH = float(0);
+    if (heightTableTexture && rankTexture) {
+      const tableU = rankHere.r.mul(255).add(0.5).div(CASTER_HEIGHT_TABLE_SIZE);
+      receiverH = texture(heightTableTexture, vec2(tableU, 0.5))
+        .r.mul(TSL.smoothstep(0.1, 0.6, rankHere.g))
+        .toVar();
+    }
+    const gap = TSL.max(float(0), uHeight.sub(receiverH)).toVar();
+
+    // The quad is drawn at the FLOOR offset; over a receiver at height h_r the shadow lands throw·h_r/ref
+    // nearer, so the art is read that much further along the throw. World delta -> the art's own uv: undo the
+    // tile's live motion rotation, then project on its rest axes.
+    const d = uThrowPerPx.mul(TSL.min(receiverH, uHeight));
+    let dRest = d;
+    if (tileMotion) {
+      const mc = tileMotion.uMotionRot.x;
+      const ms = tileMotion.uMotionRot.y;
+      dRest = vec2(d.x.mul(mc).add(d.y.mul(ms)), d.y.mul(mc).sub(d.x.mul(ms)));
+    }
+    const dUv = vec2(dRest.dot(uRestRot), dRest.dot(uRestAxisY)).div(uSize);
+
+    // The art uv this fragment would have on the un-grown quad, for this receiver.
+    const artUv = uv().sub(0.5).mul(pad).add(0.5).add(dUv).toVar();
+    // Blur for THIS gap (never wider than the quad was grown for).
+    const blurHere = TSL.min(uBlurPx, TSL.max(float(0.5), uBlurBase.add(gap.mul(uBlurPer))));
+    const reach = vec2(blurHere, blurHere).div(uSize).toVar(); // blur radius in art uv, per axis
     const reachMax = TSL.max(reach.x, reach.y);
     const lod = TSL.log2(TSL.max(float(1), uTexWidth.mul(uUvScale.x).mul(reachMax).div(3)));
-    const artSample = (p) => {
+    const artSample = (p, level = lod) => {
       let s = p.clamp(0, 1).mul(uUvScale);
       if (tileMotion) {
         // A texture-mode tile spins its art inside a still quad: the shadow spins with it.
@@ -441,49 +530,78 @@ export function buildMotionTileShadowMaterial(
           .add(tileMotion.uTexScrollUV)
           .add(vec2(rel.x.mul(rc).add(rel.y.mul(rs)), rel.y.mul(rc).sub(rel.x.mul(rs))));
       }
-      return texture(tex, s).level(lod).a;
+      return texture(tex, s).level(level).a;
     };
-    // Past the art's border the alpha falls away smoothly over the blur width, as a blurred zero-padded image
-    // would (a hard inside-[0,1] cut made straight-edged halos on token shadows, 2026-11-02).
-    const cover = (p) => {
-      const outside = TSL.max(TSL.max(p.negate(), p.sub(1)), vec2(0))
-        .div(TSL.max(reach, vec2(1e-4)))
-        .length();
-      return artSample(p).mul(float(1).sub(TSL.smoothstep(0, 0.6, outside)));
-    };
-    const acc = float(0).toVar();
-    let wsum = 0;
-    for (const [ox, oy, w] of SHADOW_TAPS) {
-      acc.addAssign(cover(artUv.add(vec2(ox, oy).mul(reach))).mul(w));
-      wsum += w;
-    }
-    const s = TSL.smoothstep(0, 0.9, acc.div(wsum));
 
     // CASCADE (soft — see the module header): no caster at or above this one fully covers the pixel, and a
     // partly covering top piece lets through exactly its uncovered fraction…
-    const rankHere = rankTexture ? texture(rankTexture, screenUV) : vec4(0, 0, 0, 0);
     const myEdge = uIndex.sub(0.5 / 255);
     const noCoreAbove = TSL.step(rankHere.b, myEdge);
     const topBelow = TSL.step(rankHere.r, myEdge);
     const belowCasters = noCoreAbove.mul(topBelow.add(float(1).sub(topBelow).mul(float(1).sub(rankHere.g))));
     // …and nothing above the whole stack covers the pixel.
     const notUnderRoof = depthTexture ? TSL.step(uTopDepth, texture(depthTexture, screenUV).x) : float(1);
-    const below = belowCasters.mul(notUnderRoof);
+    const below = belowCasters.mul(notUnderRoof).toVar();
 
-    // Zero at the grown quad's own border, fading over its last half-blur only (per axis, in grown-quad uv).
-    // The quad is grown 2 blurs past the art and the taps reach ~1.5 blurs, so nothing real lives out there;
-    // the first cut faded over 0.5/pad of the WHOLE quad and dimmed big shadows far inside their border.
-    const q = uv();
-    const band = reach.mul(0.5).div(pad);
-    const edgeFade = TSL.smoothstep(0, band.x, TSL.min(q.x, float(1).sub(q.x))).mul(
-      TSL.smoothstep(0, band.y, TSL.min(q.y, float(1).sub(q.y)))
-    );
+    // EARLY OUT (2026-11-04, the Clockwork Dungeon: seven 7500 px rings and a 10500 px floor overlay ran the
+    // 17 blur taps over nearly every pixel, +1.2-2 ms a frame at 1600x900). Two cheap tests first, the taps only
+    // where both pass — the shadow target is MAX-blended, so writing 0 is exactly "no shadow here":
+    //   - the cascade gate above: hidden under this caster or one above it, nothing shows whatever the taps say;
+    //   - ONE coarse-mip read at a level whose texel is >= 4 blur radii wide, so its footprint (±2 radii) holds
+    //     every tap's (±0.9 radius, each read at a mip ~1/3 radius wide): a box-filtered average of 0 there
+    //     means every tap reads 0. Every tile texture carries a full mip chain (vt-pan-viewer.js: hand-built for
+    //     the baked BC1/BC7 path, GPU-generated for raw images), so a high level is always real.
+    // The taps are BUILT inside the If on purpose: constructed outside, TSL hoists them out of the branch and
+    // nothing is skipped (light-visibility.js's own note on the UI shadow).
+    const coarseLevel = TSL.ceil(TSL.log2(TSL.max(float(1), uTexWidth.mul(uUvScale.x).mul(reachMax).mul(4))));
+    const coarse = artSample(artUv, coarseLevel);
+    const c = float(0).toVar();
+    TSL.If(below.greaterThan(1e-4).and(coarse.greaterThan(1 / 1024)), () => {
+      // Past the art's border the alpha falls away smoothly over the blur width, as a blurred zero-padded image
+      // would (a hard inside-[0,1] cut made straight-edged halos on token shadows, 2026-11-02).
+      const cover = (p) => {
+        const outside = TSL.max(TSL.max(p.negate(), p.sub(1)), vec2(0))
+          .div(TSL.max(reach, vec2(1e-4)))
+          .length();
+        return artSample(p).mul(float(1).sub(TSL.smoothstep(0, 0.6, outside)));
+      };
+      const acc = float(0).toVar();
+      let wsum = 0;
+      for (const [ox, oy, w] of SHADOW_TAPS) {
+        acc.addAssign(cover(artUv.add(vec2(ox, oy).mul(reach))).mul(w));
+        wsum += w;
+      }
+      const s = TSL.smoothstep(0, 0.9, acc.div(wsum));
 
-    const c = s.mul(below).mul(edgeFade).mul(uAlpha);
+      // Zero at the grown quad's own border, fading over its last half-blur only (per axis, in grown-quad uv).
+      // The quad is grown 2 blurs past the art and the taps reach ~1.5 blurs, so nothing real lives out there;
+      // the first cut faded over 0.5/pad of the WHOLE quad and dimmed big shadows far inside their border.
+      const q = uv();
+      const band = reach.mul(0.5).div(pad);
+      const edgeFade = TSL.smoothstep(0, band.x, TSL.min(q.x, float(1).sub(q.x))).mul(
+        TSL.smoothstep(0, band.y, TSL.min(q.y, float(1).sub(q.y)))
+      );
+      c.assign(s.mul(below).mul(edgeFade).mul(uAlpha));
+    });
     return vec4(c, c, c, c);
   })();
 
-  return { material, uCenter, uSize, uRestRot, uOffset, uBlurPx, uTopDepth, uIndex, uAlpha };
+  return {
+    material,
+    uCenter,
+    uSize,
+    uRestRot,
+    uRestAxisY,
+    uOffset,
+    uBlurPx,
+    uHeight,
+    uThrowPerPx,
+    uBlurBase,
+    uBlurPer,
+    uTopDepth,
+    uIndex,
+    uAlpha,
+  };
 }
 
 /**

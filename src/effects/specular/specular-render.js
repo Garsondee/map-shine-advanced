@@ -75,6 +75,7 @@ import {
   softWindowParams,
 } from './specular-pattern.js';
 import { ISLAND_PARALLAX_RANGE } from './specular-islands.js';
+import { SPECULAR_LAMP_MAX, lampLobeExponent } from './specular-lamps.js';
 import { SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from './specular.js';
 import { buildDebugChannelColor, pickEquals } from '../debug-channel-select.js';
 import { sharedFn } from '../../core/tsl-fn.js';
@@ -469,6 +470,17 @@ const MIRROR_MAX_DARKEN = 0.85;
 const SPECULAR_DAYLIGHT_WHITE = 0.85;
 /** Mirrors the grade's `lightGlowDay` default: what is left of a lamp's glow outdoors in full sun. */
 const SPECULAR_LAMP_GLOW_DAY = 0.25;
+/** LAMP REFLECTIONS (2026-11-04) — the card's "Lamp reflections" default: 1 puts
+ * a lamp's reflection, at its brightest, level with a full shimmer peak at the
+ * author's own shimmer contrast (40 × SHIMMER_REF_PEAK). */
+export const SPECULAR_DEFAULT_LAMP_HIGHLIGHT = 1;
+/** The card's "Lamp reflection size": half-power reach in lamp heights. */
+export const SPECULAR_DEFAULT_LAMP_SIZE = 0.5;
+/** A lamp reflection at `lampHighlight` 1, in the glint's own units (see above). */
+const LAMP_GLINT_REF = 14;
+/** How much the moving shimmer still textures a lamp's reflection: painted metal
+ * is not a mirror, and a perfectly even disc under every lamp reads as a decal. */
+const LAMP_SHIMMER_TEXTURE = 0.35;
 
 /**
  * Per-layer defaults, transcribed from V2's tuned values.
@@ -725,6 +737,13 @@ export function specularTierPlan(tier) {
  *   #buildTileMotionMaskUvNode`'s output here; every floor caller and every
  *   `transform`-mode/static tile omits it, leaving the lookup exactly
  *   `uv()` as before.
+ * @param {*} [args.lampTexture] - the lamp table (`specular-lamps.js`): where
+ *   the real lamps near the view are, so each one throws a reflection lobe onto
+ *   the metal (see "LAMP REFLECTIONS" below). Null compiles the lamp term OUT
+ *   (JS-time) and leaves the indoor camera highlight on its old guessed key.
+ * @param {number} [args.lampHighlight] - how bright a lamp's reflection is.
+ * @param {number} [args.lampSize] - how far from a lamp's foot its reflection
+ *   reaches, in lamp heights (`lampLobeExponent`).
  * @returns {object} the material plus its setters.
  */
 export function buildSpecularSurfaceMaterial({
@@ -774,6 +793,9 @@ export function buildSpecularSurfaceMaterial({
   sparkle = SPECULAR_DEFAULT_SPARKLE,
   sparkleSizePx = SPECULAR_DEFAULT_SPARKLE_SIZE_PX,
   panFlare = SPECULAR_DEFAULT_PAN_FLARE,
+  lampTexture = null,
+  lampHighlight = SPECULAR_DEFAULT_LAMP_HIGHLIGHT,
+  lampSize = SPECULAR_DEFAULT_LAMP_SIZE,
   tier = SPECULAR_DEFAULT_TIER,
 }) {
   const TSL = THREE.TSL;
@@ -818,6 +840,10 @@ export function buildSpecularSurfaceMaterial({
     mx_worley_noise_float,
     mx_noise_float,
     mx_hsvtorgb,
+    // LAMP REFLECTIONS: a fixed-count loop over the lamp table, read texel-exact.
+    Loop,
+    int,
+    ivec2,
   } = TSL;
   // `mrt` is deliberately NOT destructured — this pass draws into `scene.lit`,
   // a single-attachment target, and `MRTNode` matches its keys against the
@@ -855,10 +881,17 @@ export function buildSpecularSurfaceMaterial({
   const uIncidentKnee = uniform(float(incidentKnee));
   const uKneeSoftness = uniform(float(kneeSoftness));
   const uIncidentGain = uniform(float(incidentGain));
-  const uFlickerAmount = uniform(float(flickerAmount));
-  const uFlickerSpeed = uniform(float(flickerSpeed));
-  const uFlickerScalePx = uniform(float(flickerScalePx));
-  const uFlickerRoughness = uniform(float(flickerRoughness));
+  // The flicker's four knobs, PACKED (2026-11-04) to make room for the lamp
+  // reflections' own vec4 under the uniform-budget cap: x amount, y speed,
+  // z patch size px, w roughness. The aliases keep every reader below unchanged.
+  const uFlicker = uniform(vec4(flickerAmount, flickerSpeed, flickerScalePx, flickerRoughness));
+  const uFlickerAmount = uFlicker.x;
+  const uFlickerSpeed = uFlicker.y;
+  const uFlickerScalePx = uFlicker.z;
+  const uFlickerRoughness = uFlicker.w;
+  // LAMP REFLECTIONS (2026-11-04): x brightness (`lampHighlight`), y the lobe
+  // exponent resolved on the CPU from `lampSize` (`lampLobeExponent`).
+  const uLampLook = uniform(vec4(lampHighlight, lampLobeExponent(lampSize), 0, 0));
   // THE METAL BODY's knobs, PACKED (effects/uniform-budget caps this file at
   // 40 uniform() calls): x relief strength, y relief width px, z mirror depth,
   // w glint focus. Its sibling below carries hot core + the sky response.
@@ -1549,22 +1582,27 @@ export function buildSpecularSurfaceMaterial({
   // coloration is present — a white or colourless light leaves it untouched.
   const incidentIllum = max(illumAboveFloor, vec3(uLightFloor, uLightFloor, uLightFloor));
   let incidentSum = incidentIllum;
-  if (colorationTexture) {
-    // A lamp is nearly invisible next to the sun: the composite turns the
-    // coloration down outdoors in daylight (`grade-ops.js#buildLightLookNodes`,
-    // `lightGlowDay` 0.25 × daylight weight × outdoors). The reflection follows
-    // the SAME rule, or a brazier out front would out-shine the noon sun on the
-    // gold beside it (measured: debug channel 10 orange, sunlit cobbles grey).
-    // Daylight weight = the local ambient's luminance over the composite's own
-    // DAYLIGHT_WHITE, outdoors only.
-    const ambLin = sRGBTransferEOTF(max(illumSample, vec3(0, 0, 0)));
-    const dayWeight = clamp(
-      dot(ambLin, vec3(LUMA_709[0], LUMA_709[1], LUMA_709[2])).div(float(SPECULAR_DAYLIGHT_WHITE)),
+  // A lamp is nearly invisible next to the sun: the composite turns the
+  // coloration down outdoors in daylight (`grade-ops.js#buildLightLookNodes`,
+  // `lightGlowDay` 0.25 × daylight weight × outdoors). The reflection follows
+  // the SAME rule, or a brazier out front would out-shine the noon sun on the
+  // gold beside it (measured: debug channel 10 orange, sunlit cobbles grey).
+  // Daylight weight = the local ambient's luminance over the composite's own
+  // DAYLIGHT_WHITE, outdoors only. Shared with LAMP REFLECTIONS below.
+  const lampDayFade = mix(
+    float(1),
+    float(SPECULAR_LAMP_GLOW_DAY),
+    clamp(
+      dot(sRGBTransferEOTF(max(illumSample, vec3(0, 0, 0))), vec3(LUMA_709[0], LUMA_709[1], LUMA_709[2])).div(
+        float(SPECULAR_DAYLIGHT_WHITE)
+      ),
       0,
       1
-    ).mul(outdoors);
+    ).mul(outdoors)
+  ).toVar('specLampDayFade');
+  if (colorationTexture) {
     const lampGlow = max(texture(colorationTexture).sample(screenUv).rgb, vec3(0, 0, 0))
-      .mul(mix(float(1), float(SPECULAR_LAMP_GLOW_DAY), dayWeight))
+      .mul(lampDayFade)
       .toVar('specLampGlow');
     const glowPeak = max(max(lampGlow.r, lampGlow.g), max(lampGlow.b, float(1e-4)));
     const lightHue = lampGlow.div(glowPeak);
@@ -1834,16 +1872,96 @@ export function buildSpecularSurfaceMaterial({
   // The same eye water's sun glint uses (`water-light.js`: above the view
   // centre at one view-width × SPECULAR_EYE_HEIGHT), so a pan moves the gold's
   // highlights and the sea's glints by the same geometry.
+  const eyePos = vec3(uViewCentre.x, uViewCentre.y, viewSpanX.mul(float(SPECULAR_EYE_HEIGHT)));
+  const viewDirW = normalize(eyePos.sub(vec3(positionWorld.x, positionWorld.y, float(0)))).toVar('specViewDir');
   const halfVec = (() => {
     if (!shapeEnabled) return vec3(0, 0, 1);
-    const eye = vec3(uViewCentre.x, uViewCentre.y, viewSpanX.mul(float(SPECULAR_EYE_HEIGHT)));
-    const viewDir = normalize(eye.sub(vec3(positionWorld.x, positionWorld.y, float(0))));
     // The key, lifted off the ground: the sun at its real elevation outdoors,
     // a lamp at LAMP_ELEVATION_Z indoors (the light buffer has no height).
+    // Where a REAL lamp reaches, LAMP REFLECTIONS below takes over from this
+    // guessed key (`camSpec` fades out by the lamps' presence).
     const keyZ = mix(float(LAMP_ELEVATION_Z), max(uSunDir.z, float(0.05)), outdoors);
     const keyXY = keyDir.mul(sqrt(max(float(1).sub(keyZ.mul(keyZ)), float(0))));
-    return normalize(normalize(vec3(keyXY.x, keyXY.y, keyZ)).add(viewDir));
+    return normalize(normalize(vec3(keyXY.x, keyXY.y, keyZ)).add(viewDirW));
   })().toVar('specHalfVec');
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // ⚠️ LAMP REFLECTIONS (2026-11-04) — EVERY REAL LAMP NEAR THE VIEW.
+  // ═══════════════════════════════════════════════════════════════════════
+  // The author: *"A light can be directly above a bit of metal and doesn't seem
+  // to brighten it directly downwards."* Nothing in this shader knew where a
+  // lamp IS: the shimmer was scaled by how much light lands, and the camera
+  // highlight above guessed a key from the light buffer's slope at a fixed
+  // ~58° — under a lamp the slope is zero, the guess fell back to top-left, and
+  // flat metal straight below the lamp (the exact mirror angle) got
+  // pow(0.9617, 160) ≈ 0.2% of a highlight. `specular-lamps.js` has the account.
+  //
+  // Now the light pool hands over a table of the lamps near the view, and each
+  // throws a Blinn-Phong lobe from its real place (a sconce's height above its
+  // foot) toward the real eye, onto the shape normal — so flat metal brightens
+  // straight down under a lamp, and a coin or dome catches it on the side that
+  // faces the lamp. The table says only WHERE: how bright stays the light
+  // buffer's (`shineResponse` multiplies this below), so walls, darkness
+  // regions, flicker and the lamp's own colour all still apply, and a lamp
+  // behind a wall leaves its side dark.
+  //
+  //   align    = Σ wᵢ·lobeᵢ / Σ wᵢ   (wᵢ = Foundry reach falloff × lamp weight)
+  //   presence = min(Σ falloffᵢ, 1)   (how much lamp reach covers this pixel)
+  //
+  // A fixed-count TSL `Loop` inside its own `Fn`, gated on presence like the
+  // shimmer: this renderer's proven-safe loop shape (`window-room-light.js`),
+  // NOT a `uniformArray` (see `aperture-gobo-render.js`'s landmine note). The
+  // table is a texture, read texel-exact with `load`, so it costs no uniform.
+  // Its CPU twin is `specular-lamps.js#lampReflectionAt`.
+  const lampsEnabled = Boolean(lampTexture) && plan.shimmerEnabled;
+  const lampTexNode = lampsEnabled ? texture(lampTexture) : null;
+  const surfaceNormal = normalize(vec3(shapeSlopeW.add(heightGrad.mul(float(0.35))).negate(), float(1))).toVar(
+    'specSurfaceNormal'
+  );
+  const lampReflect = lampsEnabled
+    ? Fn(() => {
+        const out = vec2(0, 0).toVar('specLampOut');
+        If(presence.greaterThan(float(0)), () => {
+          const wSum = float(0).toVar('specLampWSum');
+          const aSum = float(0).toVar('specLampASum');
+          const fSum = float(0).toVar('specLampFSum');
+          Loop({ start: int(0), end: int(SPECULAR_LAMP_MAX), type: 'int', condition: '<' }, ({ i }) => {
+            // Texel A = (x, y, reach, bright). One read answers "does this lamp
+            // reach me"; only the one to three lamps that do pay for the lobe
+            // (bench, 24 lamps, all-metal 1080p: the full evaluation cost
+            // +2.1 ms). An empty slot has reach 0, so it is always skipped.
+            const lampA = lampTexNode.load(ivec2(i.mul(int(2)), int(0))).toVar('specLampA');
+            const lampXY = vec2(lampA.x.sub(positionWorld.x), lampA.y.sub(positionWorld.y)).toVar('specLampXY');
+            const lampDist = length(lampXY).toVar('specLampDist');
+            If(lampDist.lessThan(lampA.z), () => {
+              // Texel B = (height, weight). Height floored at 1 px so the vector
+              // to the lamp can never be zero (normalising it would be NaN).
+              const lampB = lampTexNode.load(ivec2(i.mul(int(2)).add(int(1)), int(0))).toVar('specLampB');
+              const reach = lampA.z;
+              const e0 = min(max(lampA.w, float(0)), reach.sub(float(1)));
+              const e1 = max(reach, e0.add(float(1)));
+              const fall = float(1)
+                .sub(smoothstep(e0, e1, lampDist))
+                .toVar('specLampFall');
+              const toLamp = vec3(lampXY.x, lampXY.y, max(lampB.x, float(1)));
+              const h = normalize(normalize(toLamp).add(viewDirW));
+              const lobe = pow(max(dot(surfaceNormal, h), float(0)), uLampLook.y);
+              const w = fall.mul(lampB.y);
+              wSum.addAssign(w);
+              aSum.addAssign(w.mul(lobe));
+              fSum.addAssign(fall);
+            });
+          });
+          out.assign(vec2(aSum.div(max(wSum, float(1e-4))), min(fSum, float(1))));
+        });
+        return out;
+      })().toVar('specLampReflect')
+    : vec2(0, 0).toVar('specLampReflect');
+  // × presence: at the very rim of a lamp's reach its reflection is only as
+  // present as the lamp is, whatever else lights the pixel. Outdoors in
+  // daylight a lamp's reflection fades exactly as its glow does.
+  const lampAlign = lampReflect.x.mul(lampReflect.y).mul(lampDayFade).toVar('specLampAlign');
+  const lampPresence = lampReflect.y.toVar('specLampPresence');
 
   // PAN FLARE: the subsystem eases the camera's speed into uPanState.z; while
   // the view moves, every camera-keyed highlight brightens a little.
@@ -1855,11 +1973,13 @@ export function buildSpecularSurfaceMaterial({
   // as the eye passes. Flat metal faces straight up and stays dark here — this
   // lives only where the mask has FORM, which is what makes it read as a
   // reflection rather than a pattern.
+  // × (1 − lamp presence) indoors: where a real lamp reaches, its own lobe
+  // (LAMP REFLECTIONS) is the highlight, and this guessed key would put a
+  // second, wrongly-placed one beside it. The sun outdoors keeps it whole.
   const camSpec = (
     shapeEnabled
-      ? pow(
-          max(dot(normalize(vec3(shapeSlopeW.add(heightGrad.mul(float(0.35))).negate(), float(1))), halfVec), float(0)),
-          float(CAMERA_GLINT_SHININESS)
+      ? pow(max(dot(surfaceNormal, halfVec), float(0)), float(CAMERA_GLINT_SHININESS)).mul(
+          float(1).sub(lampPresence.mul(float(1).sub(outdoors)))
         )
       : float(0)
   ).toVar('specCamSpec');
@@ -1910,8 +2030,12 @@ export function buildSpecularSurfaceMaterial({
   // reflections; the glints ride on top additively.
   // The camera highlight and the sparkle are reflections too: never darken under them.
   const reflectWeight = max(
-    smoothstep(float(0.02), float(SHIMMER_REF_PEAK), shimmer),
-    smoothstep(float(0.02), float(0.4), camSpec.mul(uPanLook.x))
+    max(
+      smoothstep(float(0.02), float(SHIMMER_REF_PEAK), shimmer),
+      smoothstep(float(0.02), float(0.4), camSpec.mul(uPanLook.x))
+    ),
+    // A lamp's reflection is the brightest reflection there is (LAMP REFLECTIONS).
+    smoothstep(float(0.02), float(0.3), lampAlign.mul(uLampLook.x))
   );
   // ── METAL BY COLOUR — one mask, several metals ─────────────────────────
   // Author (2026-11-02): *"reproduce different metallic responses based on
@@ -2026,11 +2150,33 @@ export function buildSpecularSurfaceMaterial({
   // pewter in the lab (round 2).
   const paleTint = mix(vec3(tintLuma, tintLuma, tintLuma), tint, float(0.5));
   const glintTint = mix(tint, paleTint, smoothstep(float(0.5), float(1.2), shimmerRel).mul(uHotCore));
+  // LAMP REFLECTIONS (see the loop above): the lamp's image on the metal. Its
+  // finish follows the paint like the glint's does — chrome's spot is tighter,
+  // iron's broader — by raising the lobe to a power (exact for the dominant
+  // lamp: pow(pow(x, n), k) = pow(x, n·k)). Lightly textured by the shimmer, so
+  // it reads as reflection on painted metal rather than a disc stamped on it.
+  // Same light response, strength and coverage as the glint, and the same
+  // ceiling (summed before it), so a lamp's peak and a shimmer peak blow out
+  // together rather than stacking.
+  const lampFinish = mix(float(1).add(chromeW.mul(float(CHROME_FOCUS_GAIN))), float(0.6), ironW);
+  const lampLobe = pow(lampReflect.x, lampFinish).mul(lampReflect.y).mul(lampDayFade).toVar('specLampLobe');
+  const lampTexture01 = float(1 - LAMP_SHIMMER_TEXTURE).add(
+    clamp(shimmerRel, float(0), float(1.5)).mul(float(LAMP_SHIMMER_TEXTURE))
+  );
+  const lampGlintRaw = mix(tint, paleTint, smoothstep(float(0.5), float(1), lampLobe).mul(uHotCore))
+    .mul(lampLobe.mul(uLampLook.x).mul(float(LAMP_GLINT_REF)))
+    .mul(lampTexture01)
+    .mul(float(1).add(chromeW.mul(float(CHROME_GLINT_GAIN))))
+    .mul(shineResponse)
+    .mul(uStrength)
+    .mul(coverage)
+    .toVar('specLampGlintRaw');
   const glintRaw = glintTint
     .mul(focused.mul(uShimmerGain))
     .mul(shineResponse)
     .mul(uStrength)
     .mul(coverage)
+    .add(lampGlintRaw)
     .toVar('specGlintRaw');
   const glint = ceilingCompress(glintRaw, uGlintCeiling).toVar('specGlint');
 
@@ -2246,6 +2392,10 @@ export function buildSpecularSurfaceMaterial({
     // `maskDirect` mistake this shares no risk of capturing a build-time
     // placeholder; a fresh node here reads the SAME real texture, always.
     depthDirect: vec3(depthRawHere, depthRawHere, depthRawHere),
+    // LAMP REFLECTIONS: R = the lamp lobe (finish applied, before brightness),
+    // G = lamp reach (presence), B = 0. Red/yellow under each lamp, green to
+    // the rim of its reach; black = no lamp in the table reaches this metal.
+    lamps: vec3(lampLobe, lampPresence, float(0)),
   };
   // ⚠️ ARITHMETIC, NOT `select()` — and this is not a style choice. The
   // `select()` fold this replaces put every channel's maths inside its own
@@ -2418,17 +2568,27 @@ export function buildSpecularSurfaceMaterial({
       uIncidentGain.value = Math.max(0, v);
     },
     setFlickerAmount(v) {
-      uFlickerAmount.value = Math.max(0, v);
+      uFlicker.value.x = Math.max(0, v);
     },
     setFlickerSpeed(v) {
-      uFlickerSpeed.value = Math.max(0, v);
+      uFlicker.value.y = Math.max(0, v);
     },
     setFlickerScalePx(v) {
-      uFlickerScalePx.value = Math.max(1, v);
+      uFlicker.value.z = Math.max(1, v);
     },
     setFlickerRoughness(v) {
-      uFlickerRoughness.value = Math.min(1, Math.max(0, v));
+      uFlicker.value.w = Math.min(1, Math.max(0, v));
     },
+    /** LAMP REFLECTIONS — brightness (0 turns the lamp lobes off). */
+    setLampHighlight(v) {
+      uLampLook.value.x = Math.max(0, v);
+    },
+    /** LAMP REFLECTIONS — reach in lamp heights, resolved to a lobe exponent here. */
+    setLampSize(v) {
+      uLampLook.value.y = lampLobeExponent(v);
+    },
+    /** Whether this build reads the lamp table (a null `lampTexture` compiles it out). */
+    lampsEnabled: Boolean(lampTexture),
     /** `outdoorGlintResponse(sky)`'s result, pushed when the sky changes.
      * @param {{gain: number, broaden: number}} r */
     setSkyGlint(r) {

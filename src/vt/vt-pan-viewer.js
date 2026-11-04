@@ -547,6 +547,9 @@ import {
   createFluidSurfaceSubsystem,
   createSpecularSurfaceSubsystem,
   createSpecularTileSurfaceSubsystem,
+  createSpecularLampTable,
+  packSpecularLamps,
+  SPECULAR_LAMP_TABLE_WIDTH,
   createWindowSurfaceSubsystem,
   // WINDOW WEATHER (2026-10-27) — sun breaks + rain-wave darkness.
   buildWindowWeatherGainNode,
@@ -11481,6 +11484,8 @@ async function startVtPanViewerUnserialized({
       profiler?.begin(Z.surfSpecularSync);
       const specViewed = view?.floorIndex ?? 0;
       const specViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+      // The lamps the shine reflects, for THIS view (before either shine syncs or draws).
+      syncSpecularLamps(specViewRect);
       specularSurface.sync(specViewed, specViewRect);
       placeFloorSurfaceForParallax(specularSurface.surfaceMeshes?.(), specViewed);
       // THE FLOORS BELOW — every composited floor ranked under the viewed floor's own background, with a
@@ -17056,6 +17061,41 @@ async function startVtPanViewerUnserialized({
       return pieces[0]?.tileMotion ?? null;
     }
 
+    // ── LAMP REFLECTIONS (2026-11-04, effects/specular/specular-lamps.js) ──
+    // The table of real lamps near the view, so each one throws a reflection
+    // onto the metal below it. ONE texture shared by the floor and tile shine,
+    // rewritten in place by `syncSpecularLamps` (before the shine draws) only
+    // when a lamp in it moved, appeared or left. RGBA32F, read texel-exact.
+    const specularLampTable = createSpecularLampTable();
+    const specularLampScratch = [];
+    const specularLampTexture = (() => {
+      const tex = new THREE.DataTexture(
+        specularLampTable.data,
+        SPECULAR_LAMP_TABLE_WIDTH,
+        1,
+        THREE.RGBAFormat,
+        THREE.FloatType
+      );
+      tex.minFilter = THREE.NearestFilter;
+      tex.magFilter = THREE.NearestFilter;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.colorSpace = THREE.NoColorSpace;
+      tex.generateMipmaps = false;
+      tex.flipY = false;
+      tex.needsUpdate = true;
+      return tex;
+    })();
+    /** @param {{minX:number,minY:number,maxX:number,maxY:number}|null} worldView */
+    function syncSpecularLamps(worldView) {
+      const changed = packSpecularLamps(pointLights.getShownFloorSources(), worldView, {
+        gridSizePx: lastGridSizePixels ?? readGridSizePixels().gridSizePixels,
+        table: specularLampTable,
+        scratch: specularLampScratch,
+      });
+      if (changed) specularLampTexture.needsUpdate = true;
+    }
+
     // ── SHINE, tiers 0-2 (effects/specular/specular-surface-subsystem.js) ──
     // Constructed beside water's surface for the same trap-#4 reason, but it
     // does NOT take `scene`: it owns its own, because it reads buf:scene.illum
@@ -17076,6 +17116,8 @@ async function startVtPanViewerUnserialized({
       illumTexture: sceneIllum.texture,
       // Lamp light reaches the metal too (specular-render.js, "LAMPS ARE LIGHT TOO").
       colorationTexture: sceneColoration.texture,
+      // Where the real lamps are (specular-lamps.js, "LAMP REFLECTIONS").
+      lampTexture: specularLampTexture,
       depthTexture: sceneDepth.depthTexture ?? null,
       // PARALLAX (2026-11-04): the per-pixel layer scale, so the mask is read where the art on screen is.
       depthFlagsTexture: sceneDepth.texture ?? null,
@@ -17140,7 +17182,12 @@ async function startVtPanViewerUnserialized({
     function getSpecularLowerSurface(floorIndex) {
       let s = specularLowerByFloor.get(floorIndex);
       if (!s) {
-        s = createSpecularSurfaceSubsystem({ ...specularSurfaceArgs, sharedSlots: specularSurface.slotStore() });
+        // No lamp table: it holds only the SHOWN floor's lamps, which do not light a floor below it.
+        s = createSpecularSurfaceSubsystem({
+          ...specularSurfaceArgs,
+          lampTexture: null,
+          sharedSlots: specularSurface.slotStore(),
+        });
         specularLowerByFloor.set(floorIndex, s);
       }
       return s;
@@ -17172,6 +17219,8 @@ async function startVtPanViewerUnserialized({
       createPackTexture: createSpecularPackTexture,
       illumTexture: sceneIllum.texture,
       colorationTexture: sceneColoration.texture,
+      // Where the real lamps are (specular-lamps.js, "LAMP REFLECTIONS").
+      lampTexture: specularLampTexture,
       depthTexture: sceneDepth.depthTexture ?? null,
       depthFlagsTexture: sceneDepth.texture ?? null,
       // PER ITEM, not per floor — `depthAuthority.rankOf` takes any item id,
@@ -30502,6 +30551,8 @@ async function startVtPanViewerUnserialized({
         // down alongside the floor one: same leak risk (an uploaded
         // `_Specular` texture PER masked tile), same Stop/Restart cadence.
         specularTileSurface.dispose();
+        // LAMP REFLECTIONS: the shared lamp table both shine populations read.
+        specularLampTexture.dispose();
       },
       /** SHINE's own state — for the debug report. `visible: false` with a
        * loaded mask means the resolved floor has no painted metal (the honest

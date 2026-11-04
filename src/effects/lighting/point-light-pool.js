@@ -1173,6 +1173,10 @@ export function createPointLightPool({
    * snapshot. Overwriting a slot's fields next frame cannot corrupt anything
    * a previous `reconcile()` call is still holding onto. */
   const seen = new Set();
+  /** LAMP REFLECTIONS (2026-11-04): this frame's light sources on the SHOWN floor, for the shine's lamp
+   * table (`effects/specular/specular-lamps.js`). Refilled every `update()`; the sources are the frame's own
+   * records, read by the viewer before the next update, never kept. */
+  const shownFloorSources = [];
   const illumBatchGroups = new Map();
   const colorBatchGroups = new Map();
   /** `deriveApertureGoboPaneCount`'s own `out` scratch — same "reuse, don't
@@ -2120,6 +2124,7 @@ export function createPointLightPool({
     // members this frame reconciles to an empty view further down, same as
     // `seen`/`lightMeshes`' own per-light equivalent.
     seen.clear();
+    shownFloorSources.length = 0;
     for (const group of illumBatchGroups.values()) group.memberCount = 0;
     for (const group of colorBatchGroups.values()) group.memberCount = 0;
     for (const light of lights) {
@@ -2151,6 +2156,8 @@ export function createPointLightPool({
       // one of them batched, and the 24 entries were never drawn again. Such a light gets no apertures and no
       // window reach until its own floor is the one shown (there are no right walls to test it against yet).
       const offShownFloor = OFF_FLOOR_GUARD && isLightOffShownFloor(light, currentFloorId);
+      // The shine reflects only the shown floor's lamps (its surfaces draw only that floor).
+      if (!isLightOffShownFloor(light, currentFloorId)) shownFloorSources.push(light);
       // APERTURE GOBO ASSIGNMENT — a cheap CPU pass per light
       // (`aperture-gobo.js#findAperturesForLight`), computed BEFORE the
       // rebuild check below because `apertureCount` is itself part of that
@@ -3016,6 +3023,8 @@ export function createPointLightPool({
     getBatchingReadout,
     getWallClipCacheStats,
     getMeshPoolStats,
+    /** LAMP REFLECTIONS: the last `update()`'s light sources on the shown floor (see `shownFloorSources`). */
+    getShownFloorSources: () => shownFloorSources,
     invalidateBatchedWindMaterials,
     dispose,
   });

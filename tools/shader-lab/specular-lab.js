@@ -47,7 +47,13 @@ import {
 } from '../../src/effects/specular/specular-render.js';
 import { buildSpecularIslandPack } from '../../src/effects/specular/specular-islands.js';
 import { buildSpecularShapeMap } from '../../src/effects/specular/specular-shape.js';
-import { SPECULAR_DEBUG_CHANNELS } from '../../src/effects/specular/specular.js';
+import { SPECULAR_DEBUG_CHANNELS, SPECULAR_PARAMS } from '../../src/effects/specular/specular.js';
+import {
+  createSpecularLampTable,
+  packSpecularLamps,
+  lampFalloff,
+  SPECULAR_LAMP_TABLE_WIDTH,
+} from '../../src/effects/specular/specular-lamps.js';
 import { buildWorldSpaceOutdoorsGate } from '../../src/effects/lighting/environmental-light.js';
 import { computeCameraFrustum, QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../src/scene/world-quad.js';
 import { loadMaskImageTexture } from '../../src/vt/mask-image.js';
@@ -107,6 +113,9 @@ const state = {
   islands: null,
   art: null,
   tier: query.get('tier') != null ? Number(query.get('tier')) : undefined,
+  /** LAMP REFLECTIONS: lamps in the view, and the grid the lamp height is measured in. */
+  lamps: [],
+  gridPx: 150,
 };
 
 const { uniform, vec4, texture } = THREE.TSL;
@@ -139,6 +148,20 @@ const illumData = new Uint8Array(W * H * 4);
 const illumTexture = makeTex(illumData, W, H);
 const outdoorsData = new Uint8Array([0, 0, 0, 255]);
 const outdoorsTexture = makeTex(outdoorsData, 1, 1);
+// LAMP REFLECTIONS (2026-11-04): the same lamp table the viewer packs, from
+// `state.lamps` ({x, y, radius, ratio, luminosity01, level}) — repacked for the
+// view on every render, exactly like `syncSpecularLamps` does per frame.
+const lampTable = createSpecularLampTable();
+const lampTexture = (() => {
+  const t = new THREE.DataTexture(lampTable.data, SPECULAR_LAMP_TABLE_WIDTH, 1, THREE.RGBAFormat, THREE.FloatType);
+  t.minFilter = THREE.NearestFilter;
+  t.magFilter = THREE.NearestFilter;
+  t.colorSpace = THREE.NoColorSpace;
+  t.generateMipmaps = false;
+  t.flipY = false;
+  t.needsUpdate = true;
+  return t;
+})();
 
 let surface = null;
 let mesh = null;
@@ -286,7 +309,15 @@ function fillIllum(spec) {
     for (let x = 0; x < W; x++) {
       const wx = v.minX + ((x + 0.5) / W) * (v.maxX - v.minX);
       let lv = spec.level ?? 0.6;
-      if (kind === 'pool') {
+      if (kind === 'lamps') {
+        // `buf:scene.illum` is MAX-blended: the ambient floor, then each lamp's
+        // own Foundry-shaped pool (`level` inside the bright radius, fading to
+        // nothing at the dim one) — the same curve the lamp table assumes.
+        for (const l of state.lamps) {
+          const f = lampFalloff(Math.hypot(wx - l.x, wy - l.y), l.radius, l.radius * (l.ratio ?? 0.5));
+          lv = Math.max(lv, (l.level ?? 0.95) * f);
+        }
+      } else if (kind === 'pool') {
         const d = Math.hypot(wx - spec.cx, wy - spec.cy) / spec.radius;
         const t = clamp01(1 - d);
         const s = t * t * (3 - 2 * t);
@@ -349,6 +380,7 @@ async function renderRaw(channel, clear = 0) {
   uOutdoorsRect.value.set(world.minX, world.minY, world.maxX, world.maxY);
   uTimeMs.value = state.timeMs;
   surface.setViewCentre(view.cx, view.cy);
+  if (packSpecularLamps(state.lamps, v, { gridSizePx: state.gridPx, table: lampTable })) lampTexture.needsUpdate = true;
   const n = channel === 'off' ? 0 : channelNumber(channel);
   surface.setDebugChannel(n);
   mesh.material = n > 0 ? surface.debugMaterial : surface.specularMaterial;
@@ -760,6 +792,8 @@ const ready = (async () => {
     outdoorsTexNode: texture(outdoorsTexture),
     buildOutdoorsGate: buildWorldSpaceOutdoorsGate,
     timeMsNode: uTimeMs,
+    // `?nolamps=1` builds without the lamp table (the pre-2026-11-04 graph) for A/B.
+    lampTexture: query.get('nolamps') ? null : lampTexture,
   };
   if (state.tier !== undefined) buildArgs.tier = state.tier;
   surface = buildSpecularSurfaceMaterial(buildArgs);
@@ -815,6 +849,24 @@ window.specLab = {
   },
   layerCount: SPECULAR_LAYER_COUNT,
   channels: SPECULAR_DEBUG_CHANNELS.map((c) => c.id),
+  /** LAMP REFLECTIONS: the lamps in the scene — `[{x, y, radius, ratio, luminosity01, level}]`. Use
+   * `illum: {kind: 'lamps', level: <ambient>}` in `shot` for a light buffer that matches them. */
+  setLamps(lamps) {
+    state.lamps = Array.isArray(lamps) ? lamps.map((l) => ({ ratio: 0.5, luminosity01: 0.5, level: 0.95, ...l })) : [];
+  },
+  /** Every card param at the MSA default (`SPECULAR_PARAMS`), as the live card applies them. */
+  applyDefaults() {
+    const done = [];
+    for (const [k, d] of Object.entries(SPECULAR_PARAMS)) {
+      const name = k === 'patternScalePx' ? 'patternScale' : k;
+      const fn = surface[`set${cap(name)}`];
+      if (typeof fn === 'function' && Number.isFinite(d.default)) {
+        fn(d.default);
+        done.push(k);
+      }
+    }
+    return done;
+  },
   setSun(dx, dy, outdoors01 = 0) {
     surface.setSunDir(dx, dy);
     const v = Math.round(clamp01(outdoors01) * 255);

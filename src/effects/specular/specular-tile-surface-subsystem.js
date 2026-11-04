@@ -91,6 +91,8 @@ function cornersMoved(a, b) {
  *   `specular-surface-subsystem.js#bakeIslandPack` documents.
  * @param {*} args.illumTexture - `buf:scene.illum`.
  * @param {*} [args.colorationTexture] - `buf:scene.coloration` (lamp light counts as incident light).
+ * @param {*} [args.lampTexture] - the lamp table (`specular-lamps.js`): each nearby lamp throws a
+ *   reflection onto the metal (specular-render.js, "LAMP REFLECTIONS"). Shared, updated in place per frame.
  * @param {*} [args.depthTexture]
  * @param {(itemId: string) => number} [args.resolveExpectedDepth] - THIS
  *   item's own rank, per ITEM rather than per floor.
@@ -116,6 +118,7 @@ export function createSpecularTileSurfaceSubsystem({
   createPackTexture,
   illumTexture,
   colorationTexture = null,
+  lampTexture = null,
   depthTexture = null,
   depthFlagsTexture = null,
   resolveExpectedDepth,
@@ -171,6 +174,7 @@ export function createSpecularTileSurfaceSubsystem({
       shapeTexture: entry.shapeTexture,
       illumTexture,
       colorationTexture,
+      lampTexture,
       depthTexture,
       depthFlagsTexture,
       uViewRect,
@@ -557,6 +561,8 @@ export function createSpecularTileSurfaceSubsystem({
       p.sparkle,
       p.sparkleSizePx,
       p.panFlare,
+      p.lampHighlight,
+      p.lampSize,
       JSON.stringify(layerParams),
     ].join('|');
     if (key !== lastParamsKey) {
@@ -595,6 +601,8 @@ export function createSpecularTileSurfaceSubsystem({
         if (Number.isFinite(p.sparkle)) b.setSparkle(p.sparkle);
         if (Number.isFinite(p.sparkleSizePx)) b.setSparkleSizePx(p.sparkleSizePx);
         if (Number.isFinite(p.panFlare)) b.setPanFlare(p.panFlare);
+        if (Number.isFinite(p.lampHighlight)) b.setLampHighlight(p.lampHighlight);
+        if (Number.isFinite(p.lampSize)) b.setLampSize(p.lampSize);
         if (Number.isFinite(p.pulse)) b.setPulse(p.pulse);
         if (Number.isFinite(p.sunBias)) b.setSunBias(p.sunBias);
         for (let i = 0; i < layerParams.length; i++) {

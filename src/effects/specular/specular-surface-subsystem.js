@@ -76,6 +76,8 @@ const SPECULAR_BOUNDS_PAD_PX = 8;
  * @param {*} args.illumTexture - `buf:scene.illum`.
  * @param {*} [args.colorationTexture] - `buf:scene.coloration`: lamp light counts as incident light
  *   (specular-render.js, "LAMPS ARE LIGHT TOO").
+ * @param {*} [args.lampTexture] - the lamp table (`specular-lamps.js`): each nearby lamp throws a
+ *   reflection onto the metal (specular-render.js, "LAMP REFLECTIONS"). Shared, updated in place per frame.
  * @param {*} [args.depthTexture] - `buf:scene.depth`'s DEPTH attachment; null
  *   compiles the floor gate out. STAGE 3 (2026-08-05) — replaces `attrTexture`.
  * @param {(floorIndex: number) => number} [args.resolveExpectedDepth] - given
@@ -104,6 +106,7 @@ export function createSpecularSurfaceSubsystem({
   createPackTexture,
   illumTexture,
   colorationTexture = null,
+  lampTexture = null,
   depthTexture = null,
   depthFlagsTexture = null,
   resolveExpectedDepth,
@@ -257,6 +260,7 @@ export function createSpecularSurfaceSubsystem({
       shapeTexture,
       illumTexture,
       colorationTexture,
+      lampTexture,
       depthTexture,
       depthFlagsTexture,
       uViewRect,
@@ -845,6 +849,8 @@ export function createSpecularSurfaceSubsystem({
       p.sparkle,
       p.sparkleSizePx,
       p.panFlare,
+      p.lampHighlight,
+      p.lampSize,
       JSON.stringify(layerParams),
     ].join('|');
     if (key === lastParamsKey) return;
@@ -879,6 +885,8 @@ export function createSpecularSurfaceSubsystem({
     if (Number.isFinite(p.sparkle)) surface.setSparkle(p.sparkle);
     if (Number.isFinite(p.sparkleSizePx)) surface.setSparkleSizePx(p.sparkleSizePx);
     if (Number.isFinite(p.panFlare)) surface.setPanFlare(p.panFlare);
+    if (Number.isFinite(p.lampHighlight)) surface.setLampHighlight(p.lampHighlight);
+    if (Number.isFinite(p.lampSize)) surface.setLampSize(p.lampSize);
     if (Number.isFinite(p.pulse)) surface.setPulse(p.pulse);
     if (Number.isFinite(p.sunBias)) surface.setSunBias(p.sunBias);
 

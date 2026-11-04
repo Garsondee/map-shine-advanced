@@ -209,6 +209,29 @@ export const SPECULAR_PARAMS = Object.freeze({
   // pans."* All four read a SHAPE map baked once from the same mask
   // (`specular-shape.js`); the header of `SPECULAR_EYE_HEIGHT` in
   // specular-render.js carries the design.
+  // LAMP REFLECTIONS (2026-11-04) — the author: "A light can be directly above
+  // a bit of metal and doesn't seem to brighten it directly downwards." See
+  // specular-lamps.js and specular-render.js "LAMP REFLECTIONS".
+  lampHighlight: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1, // SPECULAR_DEFAULT_LAMP_HIGHLIGHT
+    category: 'Look',
+    label: 'Lamp reflections',
+    help: 'Every light near the view throws a reflection onto the metal below it: brightest straight under the lamp, where a polished surface faces the light and your eye at once, and on the side of a coin or dome that faces the lamp. Its colour and brightness follow the real light (walls, darkness and flicker included). 0 turns lamp reflections off; 1 makes a lamp’s reflection about as bright as the strongest shimmer.',
+  },
+  lampSize: {
+    type: 'float',
+    min: 0.1,
+    max: 2,
+    step: 0.05,
+    default: 0.5, // SPECULAR_DEFAULT_LAMP_SIZE
+    category: 'Look',
+    label: 'Lamp reflection size',
+    help: 'How far from the lamp its reflection spreads, measured in lamp heights (lamps are treated as hanging about one and a half grid squares up). Small gives a tight, polished hot spot right under the light; large gives a broad satin pool. Silver and chrome paint keep a tighter spot than gold, iron a broader one.',
+  },
   cameraGlint: {
     type: 'float',
     min: 0,
@@ -894,6 +917,17 @@ export const SPECULAR_DEBUG_CHANNELS = Object.freeze([
       'signal: it means the shared-node staleness bug that lied on this exact channel`s predecessor ' +
       '(2026-07-27 to 08-01, `effects/debug-channel-select.js`) is back, and channel 8 is the one to ' +
       'distrust. This channel earned its keep proving precisely that once already.',
+  }),
+  Object.freeze({
+    n: 21,
+    id: 'lamps',
+    label: '21 · Lamp reflections',
+    reads:
+      'Added 2026-11-04. RED = how squarely this metal reflects a nearby lamp toward the camera (the lamp ' +
+      'lobe, before brightness); GREEN = how much of a lamp`s reach covers it. Under each lamp you should ' +
+      'see a red/yellow spot right below it, fading to green toward the edge of the light. Black over ' +
+      'metal that a lamp clearly lights = the lamp table is empty (no lamps handed over, or the lamp is on ' +
+      'another floor). Red where the metal is unlit is expected: brightness comes from channel 10, not here.',
   }),
 ]);
 

@@ -376,6 +376,8 @@ export { createSpecularSurfaceSubsystem } from './specular/specular-surface-subs
 // floor-level subsystem above; see that file's own header for why.
 export { createSpecularTileSurfaceSubsystem } from './specular/specular-tile-surface-subsystem.js';
 export { createSpecularSeams } from './specular/specular-seams.js';
+// LAMP REFLECTIONS (2026-11-04) — the table of nearby lamps the shine reflects.
+export { createSpecularLampTable, packSpecularLamps, SPECULAR_LAMP_TABLE_WIDTH } from './specular/specular-lamps.js';
 export { createSpecularRegistration } from './specular/specular-registration.js';
 // FLUID — goo in thin glass tubes (docs/planning/Fluid.md). Phase 1 only: the
 // declaration and the CPU tube-net extractor. NOTHING RENDERS YET — there is no

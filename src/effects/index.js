@@ -197,6 +197,11 @@ export {
   computeMinimumDarknessFloor,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
+  REGION_EDGE_FADE_PX,
+  REGION_FIELD_BLUR_TAPS,
+  computeShapeWorldAabb,
+  planRegionField,
+  hashRegionFieldInputs,
 } from './lighting/region-geometry.js';
 // THE VISION MASK's rules — slice 2 of "MSA owns vision/fog" (Pillar 11,
 // docs/planning/Vision-Fog-Ownership.md). Pure; the rasteriser that consumes
@@ -262,6 +267,9 @@ export {
   buildRegionLineMaterial,
   buildRegionEmanationRectangleMaterial,
   buildRegionEmanationPolygonMaterial,
+  buildRegionFieldZeroMaterial,
+  buildRegionFieldBlurMaterial,
+  buildRegionFieldOverlayMaterial,
   MAX_REGION_POLYGON_POINTS,
 } from './lighting/region-darkness.js';
 export { buildGradePass } from './grade/grade-pass.js';

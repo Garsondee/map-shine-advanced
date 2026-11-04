@@ -395,6 +395,11 @@ import {
   computeMinimumDarknessFloor,
   regionOverlapsElevationBand,
   DARKNESS_ADJUST_MODES,
+  REGION_EDGE_FADE_PX,
+  REGION_FIELD_BLUR_TAPS,
+  computeShapeWorldAabb,
+  planRegionField,
+  hashRegionFieldInputs,
   // THE VISION MASK (Pillar 11) — the rasteriser, plus the rule's threshold.
   // `decideRevealed` itself is the CPU twin the composite shader mirrors.
   createVisionMaskSubsystem,
@@ -427,6 +432,9 @@ import {
   buildRegionLineMaterial,
   buildRegionEmanationRectangleMaterial,
   buildRegionEmanationPolygonMaterial,
+  buildRegionFieldZeroMaterial,
+  buildRegionFieldBlurMaterial,
+  buildRegionFieldOverlayMaterial,
   buildUiShadowVisibility,
   mapWindowRectToStamp,
   MAX_UI_SHADOW_STAMPS,
@@ -6689,8 +6697,73 @@ async function startVtPanViewerUnserialized({
     const uRegionDaylightColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
     const uRegionDarknessColor = THREE.TSL.uniform(THREE.TSL.vec3(0.14, 0.14, 0.28));
 
+    // THE REGION FIELD (2026-11-04, the soft edge — region-geometry.js's "THE
+    // SOFT EDGE" has the why). regionScene no longer draws into scene.illum: it
+    // is baked HARD into regionFieldA through regionFieldCamera (framed on the
+    // field's own world rect), blurred A -> B -> A, and the result is laid over
+    // the ambient fill by one world-space overlay quad. The bake only re-runs
+    // when hashRegionFieldInputs changes (regions, their draw order, the plan);
+    // the overlay runs every frame there are regions. 8-bit is plenty: the
+    // field is coefficients in 0..1 under a 30 px blur, and it is O(1) in map
+    // size (<= REGION_FIELD_MAX_DIM per side, under the Keyhole law's plain cap).
+    const regionFieldDesc = {
+      resolvedW: 64,
+      resolvedH: 64,
+      screenSized: false,
+      type: THREE.UnsignedByteType,
+      colorSpace: THREE.NoColorSpace,
+      filter: 'linear',
+      depth: false,
+    };
+    const regionFieldA = allocator.create('region.field', { ...regionFieldDesc });
+    const regionFieldB = allocator.create('region.fieldBlurH', { ...regionFieldDesc });
+    const regionFieldCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+    const uRegionFieldRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
+    const uRegionBaseDarkness01 = THREE.TSL.uniform(THREE.TSL.float(0));
+    const uRegionFieldStepH = THREE.TSL.uniform(new THREE.Vector2(1 / 64, 0));
+    const uRegionFieldStepV = THREE.TSL.uniform(new THREE.Vector2(0, 1 / 64));
+    const uRegionFieldSigma = THREE.TSL.uniform(THREE.TSL.float(1));
+    const regionFieldZeroQuad = new THREE.QuadMesh(buildRegionFieldZeroMaterial({ THREE }));
+    const regionFieldBlurHQuad = new THREE.QuadMesh(
+      buildRegionFieldBlurMaterial({
+        THREE,
+        inputTexture: regionFieldA.texture,
+        uStepUv: uRegionFieldStepH,
+        uSigmaTexels: uRegionFieldSigma,
+        taps: REGION_FIELD_BLUR_TAPS,
+      })
+    );
+    const regionFieldBlurVQuad = new THREE.QuadMesh(
+      buildRegionFieldBlurMaterial({
+        THREE,
+        inputTexture: regionFieldB.texture,
+        uStepUv: uRegionFieldStepV,
+        uSigmaTexels: uRegionFieldSigma,
+        taps: REGION_FIELD_BLUR_TAPS,
+      })
+    );
+    const regionOverlayScene = new THREE.Scene();
+    const regionOverlayMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      buildRegionFieldOverlayMaterial({
+        THREE,
+        fieldTexture: regionFieldA.texture,
+        uFieldRect: uRegionFieldRect,
+        uBaseDarkness01: uRegionBaseDarkness01,
+        uDaylightColor: uRegionDaylightColor,
+        uDarknessColor: uRegionDarknessColor,
+      })
+    );
+    regionOverlayMesh.frustumCulled = false;
+    regionOverlayScene.add(regionOverlayMesh);
+    /** This frame's field: `plan` from planRegionField (null = no region
+     * visible, nothing drawn), `hash` of what it was planned from, and the hash
+     * the field texture currently holds (`bakedHash`; null = never baked, or
+     * invalidated). `bakes` counts real re-bakes, for getRegionDarknessInfo. */
+    const regionField = { plan: null, hash: 0, bakedHash: null, bakes: 0, retries: 0, shapeCount: 0, boxes: [] };
+
     /** `${regionId}:${shapeIndex}` -> { mesh, material, kind, uMode,
-     * uModifier, uBaseDarkness01, ...kind-specific uniforms }. Reconciled
+     * uModifier, uCoverage, ...kind-specific uniforms }. Reconciled
      * every frame in updateRegionDarknessMeshes; same hide-not-dispose
      * lifecycle gap lightMeshes documents (a region genuinely deleted is
      * only hidden, full cleanup needs a deleteRegion hook — not built this
@@ -6841,6 +6914,9 @@ async function startVtPanViewerUnserialized({
 
       const seen = new Set();
       let renderOrder = 0;
+      regionField.boxes.length = 0;
+      regionField.shapeCount = 0;
+      uRegionBaseDarkness01.value = darkness01;
 
       /**
        * Reconcile/update ONE shape's mesh. Shared by both passes below — a
@@ -6849,9 +6925,13 @@ async function startVtPanViewerUnserialized({
        * the caller (see the hole pass' own comment for why that override is
        * an exact identity, not an approximation).
        */
-      function renderRegionShape(region, shape, shapeIndex, uMode, uModifier) {
+      function renderRegionShape(region, shape, shapeIndex, uMode, uModifier, coverage) {
         const bounds = computeShapeMeshBounds(shape);
         if (!bounds) return; // unsupported/degenerate shape — never a mesh, matches pointInRegionShapes' own skip.
+        // The field is sized from the shapes that ADD coverage; a hole only
+        // ever removes it inside them, so it never needs room of its own.
+        if (coverage > 0) regionField.boxes.push(computeShapeWorldAabb(shape));
+        regionField.shapeCount += 1; // one expected draw in the bake (see bakeRegionFieldIfStale)
         // A circle reuses the ellipse material (radiusX=radiusY=radius).
         // An emanation reuses whichever material matches its OWN base
         // shape's type — computeShapeMeshBounds already guaranteed the
@@ -6896,7 +6976,7 @@ async function startVtPanViewerUnserialized({
         entry.mesh.renderOrder = renderOrder++;
         entry.uMode.value = uMode;
         entry.uModifier.value = uModifier;
-        entry.uBaseDarkness01.value = darkness01;
+        entry.uCoverage.value = coverage;
         if (kind === 'rectangle') {
           entry.uOrigin.value.set(shape.x ?? 0, shape.y ?? 0);
           entry.uSize.value.set(shape.width ?? 0, shape.height ?? 0);
@@ -6973,7 +7053,7 @@ async function startVtPanViewerUnserialized({
         for (let shapeIndex = 0; shapeIndex < shapes.length; shapeIndex++) {
           const shape = shapes[shapeIndex];
           if (shape?.hole) continue; // holes render in pass 2, below.
-          renderRegionShape(region, shape, shapeIndex, region.mode, region.modifier);
+          renderRegionShape(region, shape, shapeIndex, region.mode, region.modifier, 1);
         }
       }
       // Pass 2: every hole shape, drawn AFTER every non-hole shape across
@@ -6987,24 +7067,93 @@ async function startVtPanViewerUnserialized({
       // module header for the documented trade-off.
       //
       // Reuses the SAME mesh-pooling/kind-dispatch machinery as an ordinary
-      // shape — a hole needs no new shader material at all. Overriding
-      // uMode=BRIGHTEN, uModifier=0 makes computeRegionColor's own formula
-      // collapse to an EXACT identity (`applyDarknessAdjustment`'s own
-      // BRIGHTEN case is `base*(1-0) = base`), so the hole mesh paints the
-      // scene's raw ambient colour back over whatever the non-hole pass
-      // drew underneath it.
+      // shape — a hole needs no new shader material at all. Coverage 0 makes
+      // it write the region field's empty value, (0,0,0), over whatever the
+      // non-hole pass drew underneath it (2026-11-04: it used to repaint the
+      // plain day/night mix via BRIGHTEN/0; "no region here" is the truer
+      // statement, and it keeps a global-light raise inside the hole). The
+      // mode/modifier passed are an identity either way.
       for (const { region } of sortedByBrightestLast) {
         const shapes = Array.isArray(region.shapes) ? region.shapes : [];
         for (let shapeIndex = 0; shapeIndex < shapes.length; shapeIndex++) {
           const shape = shapes[shapeIndex];
           if (!shape?.hole) continue;
-          renderRegionShape(region, shape, shapeIndex, DARKNESS_ADJUST_MODES.BRIGHTEN, 0);
+          renderRegionShape(region, shape, shapeIndex, DARKNESS_ADJUST_MODES.BRIGHTEN, 0, 0);
         }
       }
 
       for (const [key, entry] of regionMeshes) {
         if (!seen.has(key)) entry.mesh.visible = false;
       }
+
+      // THE REGION FIELD's plan for this frame (see its declaration). Clipped
+      // to the canvas: nothing past it is ever drawn, and a region authored
+      // far larger than the map must not size the texture.
+      const dims = globalThis.canvas?.dimensions;
+      const clipRect =
+        Number(dims?.width) > 0 && Number(dims?.height) > 0
+          ? { minX: 0, minY: 0, maxX: Number(dims.width), maxY: Number(dims.height) }
+          : null;
+      const plan =
+        regionField.boxes.length > 0 ? planRegionField(regionField.boxes, clipRect, REGION_EDGE_FADE_PX) : null;
+      regionField.plan = plan;
+      if (!plan) return;
+      regionField.hash = hashRegionFieldInputs(sortedByBrightestLast, plan);
+      const { rect } = plan;
+      uRegionFieldRect.value.set(rect.minX, rect.minY, rect.maxX, rect.maxY);
+      regionOverlayMesh.position.set((rect.minX + rect.maxX) / 2, (rect.minY + rect.maxY) / 2, 0);
+      regionOverlayMesh.scale.set(rect.maxX - rect.minX, rect.maxY - rect.minY, 1);
+    }
+
+    /**
+     * Re-bake THE REGION FIELD when what it was planned from changed (no-op
+     * otherwise): resize, empty it, draw every region shape hard through the
+     * field camera, then blur A -> B -> A. Each step is a full-target draw, so
+     * the caller's `autoClearColor = false` is exactly right here too. Leaves
+     * the render target pointing at the field; the caller binds its own next.
+     */
+    function bakeRegionFieldIfStale() {
+      const plan = regionField.plan;
+      if (!plan || regionField.bakedHash === regionField.hash) return;
+      for (const target of [regionFieldA, regionFieldB]) {
+        if (target.width !== plan.width || target.height !== plan.height) {
+          regionFieldDesc.resolvedW = plan.width;
+          regionFieldDesc.resolvedH = plan.height;
+          allocator.resize(target, plan.width, plan.height, regionFieldDesc);
+        }
+      }
+      const f = computeCameraFrustum(plan.rect);
+      regionFieldCamera.left = f.left;
+      regionFieldCamera.right = f.right;
+      regionFieldCamera.top = f.top;
+      regionFieldCamera.bottom = f.bottom;
+      regionFieldCamera.updateProjectionMatrix();
+      uRegionFieldStepH.value.set(1 / plan.width, 0);
+      uRegionFieldStepV.value.set(0, 1 / plan.height);
+      uRegionFieldSigma.value = plan.sigmaTexels;
+      // ⚠️ A BAKE THAT DID NOT DRAW IS NOT A BAKE — the sun-shadow field's own
+      // lesson (renderSunShadowPass, 2026-10-27), met again here on the first
+      // rig load (2026-11-04): the bake ran during warm-up while these
+      // pipelines were still compiling on a worker, three skipped every draw,
+      // and the hash said "done" — so the bank interior never darkened. The
+      // bake is recorded only when three's own draw counter shows EVERY draw
+      // landed (zero + one per visible shape + two blurs); otherwise it simply
+      // runs again next frame.
+      const drawsBefore = renderer.info?.render?.drawCalls ?? 0;
+      renderer.setRenderTarget(regionFieldA);
+      regionFieldZeroQuad.render(renderer);
+      renderer.render(regionScene, regionFieldCamera);
+      renderer.setRenderTarget(regionFieldB);
+      regionFieldBlurHQuad.render(renderer);
+      renderer.setRenderTarget(regionFieldA);
+      regionFieldBlurVQuad.render(renderer);
+      const drawn = (renderer.info?.render?.drawCalls ?? Infinity) - drawsBefore;
+      if (drawn < regionField.shapeCount + 3) {
+        regionField.retries += 1;
+        return;
+      }
+      regionField.bakedHash = regionField.hash;
+      regionField.bakes += 1;
     }
 
     // (lightMeshes/candleWallClipCache moved into point-light-pool.js
@@ -10657,17 +10806,23 @@ async function startVtPanViewerUnserialized({
       profiler?.begin(Z.lightCloudShadowCache);
       renderCloudShadowCache(envLight.uViewRect.value);
       profiler?.end(Z.lightCloudShadowCache);
+      // THE REGION FIELD (2026-11-04): re-baked only when the regions changed,
+      // before scene.illum is bound, so the fill below is not split around it.
+      // (Counted in getRegionDarknessInfo's `field.bakes`, not a profiler zone:
+      // it runs on an edit, not per frame.)
+      bakeRegionFieldIfStale();
       profiler?.begin(Z.lightDrawIllum);
       renderer.setRenderTarget(sceneIllum);
       selectIllumMaterial();
       illumQuad.render(renderer); // buf:scene.illum = ambient background (sRGB), raised by global illumination if active
       profiler?.end(Z.lightDrawIllum);
-      // Darkness-region meshes OVERWRITE (discard outside their own shape,
-      // no blending) the ambient fill within their own footprint — BEFORE
-      // point lights, so a light sitting inside a darkened/brightened region
-      // MAX-blends against the REGION-ADJUSTED floor, not the base one.
+      // The blurred region field is laid OVER the ambient fill (premultiplied:
+      // fully inside a region this is the old opaque overwrite, at its edge a
+      // 30 px fade) — BEFORE point lights, so a light sitting inside a
+      // darkened/brightened region MAX-blends against the REGION-ADJUSTED
+      // floor, not the base one.
       profiler?.begin(Z.lightDrawRegions);
-      renderer.render(regionScene, camera);
+      if (regionField.plan) renderer.render(regionOverlayScene, camera);
       profiler?.end(Z.lightDrawRegions);
       // MAX-blends every active point light on top of the (possibly region-
       // adjusted) ambient fill — same target, same camera as geometry.world/
@@ -30573,6 +30728,16 @@ async function startVtPanViewerUnserialized({
         regionMeshes.clear();
         try {
           regionQuadGeometry.dispose();
+          // THE REGION FIELD's own GPU objects (2026-11-04).
+          regionOverlayMesh.geometry.dispose();
+          regionOverlayMesh.material.dispose();
+          regionFieldZeroQuad.material.dispose();
+          regionFieldBlurHQuad.material.dispose();
+          regionFieldBlurVQuad.material.dispose();
+          allocator.dispose(regionFieldA);
+          allocator.dispose(regionFieldB);
+          regionField.plan = null;
+          regionField.bakedHash = null;
         } catch (err) {
           log.error('region-darkness shared geometry dispose failed — VRAM may be leaked:', err);
         }
@@ -31876,14 +32041,14 @@ async function startVtPanViewerUnserialized({
           if (!entry.mesh.visible) continue;
           const mode = entry.uMode.value;
           const modifier = entry.uModifier.value;
-          const baseDarkness01 = entry.uBaseDarkness01.value;
-          const adjusted = applyDarknessAdjustment(baseDarkness01, mode, modifier);
+          const baseDarkness01 = uRegionBaseDarkness01.value;
+          const isHole = entry.uCoverage.value === 0;
+          const adjusted = isHole ? baseDarkness01 : applyDarknessAdjustment(baseDarkness01, mode, modifier);
           const resultColor = mixRgb(uDaylight, uDarkness, adjusted);
           const geometry = {};
           for (const [uniformName, uniformNode] of Object.entries(entry)) {
             if (!uniformName.startsWith('u') || uniformName === uniformName.toLowerCase()) continue;
-            if (['uMode', 'uModifier', 'uBaseDarkness01', 'uDaylightColor', 'uDarknessColor'].includes(uniformName))
-              continue;
+            if (['uMode', 'uModifier', 'uCoverage'].includes(uniformName)) continue;
             const v = uniformNode?.value;
             if (v == null) continue;
             geometry[uniformName] = typeof v === 'object' && 'x' in v && 'y' in v ? [v.x, v.y] : v;
@@ -31907,12 +32072,35 @@ async function startVtPanViewerUnserialized({
             resultColor,
             meshCenter: [entry.mesh.position.x, entry.mesh.position.y],
             meshScale: [entry.mesh.scale.x, entry.mesh.scale.y],
+            hole: isHole,
             geometry,
             polygon,
           });
         }
+        const fieldPlan = regionField.plan;
         return {
           available: true,
+          // THE REGION FIELD (2026-11-04, the soft edge). `resultColor` above is
+          // what a region shows WELL INSIDE itself; within ~fadePx/2 of an edge
+          // the blurred field mixes it toward its neighbour. `stale: true` on a
+          // frame after an edit is normal; on every frame it means the bake
+          // never runs. `bakes` climbing while nothing is edited means the
+          // field's inputs are not stable (a hash input changing every frame).
+          field: fieldPlan
+            ? {
+                fadePx: REGION_EDGE_FADE_PX,
+                rect: { ...fieldPlan.rect },
+                size: [fieldPlan.width, fieldPlan.height],
+                texelPx: fieldPlan.texelPx,
+                sigmaTexels: fieldPlan.sigmaTexels,
+                stale: regionField.bakedHash !== regionField.hash,
+                bakes: regionField.bakes,
+                // Bake attempts thrown away because a draw was skipped (a pipeline
+                // still compiling). A few at load is normal; climbing forever is not.
+                retries: regionField.retries,
+                shapesDrawn: regionField.shapeCount,
+              }
+            : { active: false, bakes: regionField.bakes, retries: regionField.retries },
           scope:
             'rectangle/ellipse/circle/polygon/cone/ring/line/emanation shapes, hole (subtraction) support — ' +
             'all built 2026-07-19 (see keyhole-region-shapes-and-holes-build memory). Elevation-band-gated ' +

@@ -770,3 +770,292 @@ export function computeRegionAdjustedDarkness(px, py, darkness01, regions) {
   }
   return result === null ? darkness01 : result;
 }
+
+/* -------------------------------------------- */
+/*  THE SOFT EDGE (2026-11-04)                   */
+/* -------------------------------------------- */
+
+/**
+ * THE SOFT EDGE (2026-11-04, author request: darkness regions drew "pixel
+ * perfect lines across the map"; fade them over about 30 px, and never leave a
+ * bright seam where two region shapes touch).
+ *
+ * Why a FIELD, not a per-shape fade. Fading each shape on its own fails the
+ * second half of the request: two rectangles that share an edge would each be
+ * half-faded at that edge, and the seam between them would read brighter than
+ * either. So the regions are first drawn HARD, exactly as before (same shapes,
+ * same holes, same brightest-wins order), into one small WORLD-space texture,
+ * the "region field". Only then is that finished field blurred. A seam between
+ * two touching shapes no longer exists by the time the blur sees it, so it
+ * cannot open; only the field's outer edge, and the step between two regions
+ * of different darkness, are softened.
+ *
+ * What a field texel holds. Every Foundry mode is AFFINE in the scene's base
+ * darkness (see `regionFieldCoefficients`), so a texel stores `(a, b, c)`:
+ * coverage `c` (1 inside a region, 0 outside or in a hole) and the region's
+ * `a`, `b` premultiplied by it. Blurring is linear, so the blurred texel still
+ * means "this much coverage, at this darkness": the composite rebuilds
+ * `a + b * base` per pixel. The field therefore only changes when the regions
+ * or their draw order change, not every time the darkness slider moves, and is
+ * re-baked only then.
+ */
+
+/** The width, in scene pixels, across which a region's darkness fades in. */
+export const REGION_EDGE_FADE_PX = 30;
+/** World pixels per field texel when the regions are small enough to afford it. */
+export const REGION_FIELD_TEXEL_PX = 4;
+/**
+ * The field's largest side, in texels. 1536 (as the water-body grid) sits under
+ * the Keyhole law's plain 2048 cap, so no world-scale exception is claimed:
+ * regions spanning more than 1536 x 4 = 6144 px just get coarser texels.
+ */
+export const REGION_FIELD_MAX_DIM = 1536;
+/** Field sides round up to this many texels, so a small edit to a region rarely reallocates. */
+export const REGION_FIELD_DIM_STEP = 64;
+/** Gaussian taps EACH SIDE of the centre in each blur pass (13 per pass). */
+export const REGION_FIELD_BLUR_TAPS = 6;
+
+/**
+ * The blur's sigma for a fade band `fadePx` wide. A Gaussian step climbs from
+ * 2.3% to 97.7% across four sigmas, so the band is four sigmas wide and
+ * centred on the authored edge: half the fade lies inside the region, half
+ * outside it.
+ * @param {number} [fadePx]
+ * @returns {number}
+ */
+export function regionFadeSigmaPx(fadePx = REGION_EDGE_FADE_PX) {
+  return Math.max(0, num(fadePx, REGION_EDGE_FADE_PX)) / 4;
+}
+
+/**
+ * The darkness a region computes, written as `a + b * base`. Every mode is
+ * affine in the base darkness (the three formulas in `applyDarknessAdjustment`):
+ *   OVERRIDE: m                      -> a = m, b = 0
+ *   BRIGHTEN: base * (1 - m)         -> a = 0, b = 1 - m
+ *   DARKEN:   1 - (1 - base)(1 - m)  -> a = m, b = 1 - m
+ * An unknown mode changes nothing (a = 0, b = 1), as `applyDarknessAdjustment` does.
+ * @param {number} mode @param {number} modifier
+ * @returns {{a:number, b:number}}
+ */
+export function regionFieldCoefficients(mode, modifier) {
+  const m = Math.min(1, Math.max(0, num(modifier, 0)));
+  switch (mode) {
+    case DARKNESS_ADJUST_MODES.OVERRIDE:
+      return { a: m, b: 0 };
+    case DARKNESS_ADJUST_MODES.BRIGHTEN:
+      return { a: 0, b: 1 - m };
+    case DARKNESS_ADJUST_MODES.DARKEN:
+      return { a: m, b: 1 - m };
+    default:
+      return { a: 0, b: 1 };
+  }
+}
+
+/**
+ * The world corners of a box held in a rotated local frame (origin + R(rotation) * local).
+ * @returns {{minX:number, minY:number, maxX:number, maxY:number}}
+ */
+function rotatedBoxAabb(ox, oy, rotationDeg, left, top, right, bottom) {
+  const c = Math.cos(rotationDeg * DEG2RAD);
+  const s = Math.sin(rotationDeg * DEG2RAD);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [lx, ly] of [
+    [left, top],
+    [right, top],
+    [left, bottom],
+    [right, bottom],
+  ]) {
+    const x = ox + lx * c - ly * s;
+    const y = oy + lx * s + ly * c;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+/**
+ * A TIGHT world-space box around one shape's true footprint — what the region
+ * field is sized from. `computeShapeMeshBounds` stays the mesh-positioning
+ * hint it always was (a rectangle there is its full diagonal in every
+ * direction from its origin corner, nearly three times its own area: fine for
+ * a quad that discards, wasteful for a texture). Rectangles and lines are
+ * bounded by their rotated corners; every other shape by
+ * `computeShapeMeshBounds`, which is already tight for them.
+ * @param {object} shape
+ * @returns {{minX:number, minY:number, maxX:number, maxY:number}|null}
+ */
+export function computeShapeWorldAabb(shape) {
+  if (!shape) return null;
+  if (shape.type === 'rectangle') {
+    const width = num(shape.width, 0);
+    const height = num(shape.height, 0);
+    if (!(width > 0) || !(height > 0)) return null;
+    const left = -num(shape.anchorX, 0) * width;
+    const top = -num(shape.anchorY, 0) * height;
+    return rotatedBoxAabb(
+      num(shape.x, 0),
+      num(shape.y, 0),
+      num(shape.rotation, 0),
+      left,
+      top,
+      left + width,
+      top + height
+    );
+  }
+  if (shape.type === 'line') {
+    const length = num(shape.length, 0);
+    const width = num(shape.width, 0);
+    if (!(length > 0) || !(width > 0)) return null;
+    return rotatedBoxAabb(num(shape.x, 0), num(shape.y, 0), num(shape.rotation, 0), 0, -width / 2, length, width / 2);
+  }
+  if (shape.type === 'emanation' && shape.base?.type === 'rectangle') {
+    const base = computeShapeWorldAabb(shape.base);
+    if (!base) return null;
+    const r = Math.max(0, num(shape.radius, 0));
+    return { minX: base.minX - r, minY: base.minY - r, maxX: base.maxX + r, maxY: base.maxY + r };
+  }
+  const b = computeShapeMeshBounds(shape);
+  if (!b) return null;
+  return { minX: b.cx - b.halfWidth, minY: b.cy - b.halfHeight, maxX: b.cx + b.halfWidth, maxY: b.cy + b.halfHeight };
+}
+
+/**
+ * Size and place the region field for this frame's shapes.
+ *
+ * The union of the shapes' boxes is clipped to `clipRect` (the canvas: nothing
+ * past it is ever seen, and a region drawn huge must not size a huge texture),
+ * then grown by one fade width so the field's own border is always empty and
+ * the overlay never shows a rectangle where the field ends. Texels are square;
+ * sides round up to `REGION_FIELD_DIM_STEP` (the extra lands as margin on the
+ * max side) and stop at `REGION_FIELD_MAX_DIM`, past which texels grow instead.
+ *
+ * @param {Array<{minX:number,minY:number,maxX:number,maxY:number}|null>} boxes
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} clipRect
+ * @param {number} [fadePx]
+ * @returns {{rect:{minX:number,minY:number,maxX:number,maxY:number}, width:number, height:number,
+ *   texelPx:number, sigmaTexels:number}|null} null when nothing visible remains.
+ */
+export function planRegionField(boxes, clipRect, fadePx = REGION_EDGE_FADE_PX) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const b of Array.isArray(boxes) ? boxes : []) {
+    if (!b || !Number.isFinite(b.minX) || !Number.isFinite(b.maxX)) continue;
+    if (!Number.isFinite(b.minY) || !Number.isFinite(b.maxY)) continue;
+    if (b.minX < minX) minX = b.minX;
+    if (b.minY < minY) minY = b.minY;
+    if (b.maxX > maxX) maxX = b.maxX;
+    if (b.maxY > maxY) maxY = b.maxY;
+  }
+  if (clipRect) {
+    minX = Math.max(minX, clipRect.minX);
+    minY = Math.max(minY, clipRect.minY);
+    maxX = Math.min(maxX, clipRect.maxX);
+    maxY = Math.min(maxY, clipRect.maxY);
+  }
+  if (!(maxX > minX) || !(maxY > minY)) return null;
+  const margin = Math.max(0, num(fadePx, REGION_EDGE_FADE_PX)) + 2 * REGION_FIELD_TEXEL_PX;
+  minX -= margin;
+  minY -= margin;
+  maxX += margin;
+  maxY += margin;
+  const spanX = maxX - minX;
+  const spanY = maxY - minY;
+  const texelPx = Math.max(REGION_FIELD_TEXEL_PX, Math.max(spanX, spanY) / REGION_FIELD_MAX_DIM);
+  const roundUp = (n) =>
+    Math.min(REGION_FIELD_MAX_DIM, Math.max(1, Math.ceil(n / REGION_FIELD_DIM_STEP)) * REGION_FIELD_DIM_STEP);
+  const width = roundUp(Math.ceil(spanX / texelPx));
+  const height = roundUp(Math.ceil(spanY / texelPx));
+  return {
+    rect: { minX, minY, maxX: minX + width * texelPx, maxY: minY + height * texelPx },
+    width,
+    height,
+    texelPx,
+    sigmaTexels: regionFadeSigmaPx(fadePx) / texelPx,
+  };
+}
+
+/** Folds one number into a 32-bit FNV-1a style hash (quantised to 1/1000 of a unit). */
+function hashNumber(h, v) {
+  const q = Number.isFinite(v) ? Math.round(v * 1000) : 0x7fffffff;
+  h = Math.imul(h ^ (q & 0xffff), 16777619);
+  return Math.imul(h ^ ((q >>> 16) & 0xffff), 16777619);
+}
+
+/** @returns {number} */
+function hashString(h, s) {
+  const str = String(s ?? '');
+  for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619);
+  return Math.imul(h ^ 0xff, 16777619);
+}
+
+const SHAPE_HASH_FIELDS = [
+  'x',
+  'y',
+  'width',
+  'height',
+  'anchorX',
+  'anchorY',
+  'rotation',
+  'radius',
+  'radiusX',
+  'radiusY',
+  'angle',
+  'innerWidth',
+  'outerWidth',
+  'length',
+];
+
+/** @returns {number} */
+function hashShape(h, shape) {
+  if (!shape) return hashNumber(h, -1);
+  h = hashString(h, shape.type);
+  h = hashNumber(h, shape.hole ? 1 : 0);
+  for (const key of SHAPE_HASH_FIELDS) h = hashNumber(h, shape[key]);
+  const points = Array.isArray(shape.points) ? shape.points : null;
+  h = hashNumber(h, points ? points.length : -1);
+  if (points) for (let i = 0; i < points.length; i++) h = hashNumber(h, points[i]);
+  if (shape.base) h = hashShape(h, shape.base);
+  return h;
+}
+
+/**
+ * Everything the baked region field depends on, folded into one number: the
+ * regions in DRAW order (order decides who wins an overlap, and it can flip as
+ * the base darkness moves), each one's mode and modifier, every shape's
+ * geometry, and the field's own placement. Equal hashes mean the last bake is
+ * still exact; the base darkness itself is deliberately NOT included (the field
+ * stores coefficients, see the section header).
+ * @param {Array<object>} regionsInDrawOrder - regions `{regionId, mode, modifier,
+ *   shapes}`, or sort slots `{region}` wrapping them (the viewer's reused sort scratch).
+ * @param {{rect:object, width:number, height:number}|null} plan
+ * @returns {number}
+ */
+export function hashRegionFieldInputs(regionsInDrawOrder, plan) {
+  let h = 2166136261;
+  for (const item of Array.isArray(regionsInDrawOrder) ? regionsInDrawOrder : []) {
+    const region = item?.region ?? item;
+    if (!region) continue;
+    h = hashString(h, region.regionId);
+    h = hashNumber(h, region.mode);
+    h = hashNumber(h, region.modifier);
+    const shapes = Array.isArray(region.shapes) ? region.shapes : [];
+    h = hashNumber(h, shapes.length);
+    for (const shape of shapes) h = hashShape(h, shape);
+  }
+  if (plan) {
+    h = hashNumber(h, plan.rect.minX);
+    h = hashNumber(h, plan.rect.minY);
+    h = hashNumber(h, plan.rect.maxX);
+    h = hashNumber(h, plan.rect.maxY);
+    h = hashNumber(h, plan.width);
+    h = hashNumber(h, plan.height);
+  }
+  return h >>> 0;
+}

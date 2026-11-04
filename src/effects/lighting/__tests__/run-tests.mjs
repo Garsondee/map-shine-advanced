@@ -17,6 +17,7 @@ import { run as runPointLightPool } from './point-light-pool.test.mjs';
 import { run as runPointLightBatch } from './point-light-batch.test.mjs';
 import { run as runPointLightBatchMesh } from './point-light-batch-mesh.test.mjs';
 import { run as runRegionGeometry } from './region-geometry.test.mjs';
+import { run as runRegionField } from './region-field.test.mjs';
 import { run as runLightVisibility } from './light-visibility.test.mjs';
 import { run as runSunOcclusion } from './sun-occlusion.test.mjs';
 import { run as runSunOcclusionRender } from './sun-occlusion-render.test.mjs';
@@ -82,6 +83,7 @@ const suites = [
   ['point-light-batch', runPointLightBatch],
   ['point-light-batch-mesh', runPointLightBatchMesh],
   ['region-geometry', runRegionGeometry],
+  ['region-field', runRegionField],
   ['light-visibility', runLightVisibility],
   ['sun-occlusion', runSunOcclusion],
   ['sun-occlusion-render', runSunOcclusionRender],

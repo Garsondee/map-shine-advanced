@@ -190,27 +190,153 @@ import { DARKNESS_ADJUST_MODES, REGION_EDGE_TOLERANCE } from './region-geometry.
  */
 
 /**
- * The shared "apply this region's mode/modifier to the base darkness, mix
- * daylight/darkness by the result" tail — identical across all three shape
- * kinds, so built once and called from each. `select`-chained rather than a
- * real switch (TSL has no statement-level switch): only 3 constant modes
- * exist (`DARKNESS_ADJUST_MODES`), so this is a direct, exhaustive mirror of
- * `applyDarknessAdjustment`'s own JS `switch`, not an approximation of it.
+ * ⚠️ THE SOFT EDGE (2026-11-04) CHANGED WHERE THESE MATERIALS DRAW. They no
+ * longer write a colour into `buf:scene.illum`. They write the REGION FIELD
+ * (region-geometry.js's "THE SOFT EDGE" has the why): a small world-space
+ * texture, drawn hard and in the same brightest-last order as before, holding
+ * per texel `(a·c, b·c, c)`, with coverage `c` and the region's darkness
+ * written as `a + b·base`. The viewer then blurs it
+ * (`buildRegionFieldBlurMaterial`) and lays it over the ambient fill
+ * (`buildRegionFieldOverlayMaterial`). Step 3 above still holds, but what is
+ * overwritten is a field texel, not a screen pixel.
+ *
+ * A hole shape draws with `uCoverage = 0`, so it writes `(0,0,0)`: no region
+ * here, and the ambient fill shows through untouched (before this change a
+ * hole repainted the plain day/night mix, which dropped a global-light raise
+ * in the hole; now it keeps it).
+ */
+
+/**
+ * The shared "this region's darkness, as field coefficients" tail —
+ * identical across every shape kind, so built once and called from each.
+ * `select`-chained rather than a real switch (TSL has no statement-level
+ * switch): a direct mirror of region-geometry.js#regionFieldCoefficients,
+ * which a Node test checks against `applyDarknessAdjustment` for all modes.
  *
  * @param {*} TSL @param {*} args
- * @returns {*} the mixed daylight/darkness colour for a fragment INSIDE the shape.
+ * @returns {*} vec4(a·c, b·c, c, 1) for a fragment INSIDE the shape.
  */
-function computeRegionColor(TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor }) {
-  const { float, int, mix, select } = TSL;
-  const override = uModifier;
-  const brighten = uBaseDarkness01.mul(float(1).sub(uModifier));
-  const darken = float(1).sub(float(1).sub(uBaseDarkness01).mul(float(1).sub(uModifier)));
-  const adjusted = select(
-    uMode.equal(int(DARKNESS_ADJUST_MODES.OVERRIDE)),
-    override,
-    select(uMode.equal(int(DARKNESS_ADJUST_MODES.BRIGHTEN)), brighten, darken)
-  );
-  return mix(uDaylightColor, uDarknessColor, adjusted);
+function computeRegionField(TSL, { uMode, uModifier, uCoverage }) {
+  const { float, int, vec4, select, clamp } = TSL;
+  const m = clamp(uModifier, float(0), float(1));
+  const isOverride = uMode.equal(int(DARKNESS_ADJUST_MODES.OVERRIDE));
+  const isBrighten = uMode.equal(int(DARKNESS_ADJUST_MODES.BRIGHTEN));
+  const isDarken = uMode.equal(int(DARKNESS_ADJUST_MODES.DARKEN));
+  const a = select(isOverride.or(isDarken), m, float(0));
+  const b = select(isOverride, float(0), select(isBrighten.or(isDarken), float(1).sub(m), float(1)));
+  return vec4(a.mul(uCoverage), b.mul(uCoverage), uCoverage, float(1));
+}
+
+/**
+ * The region field's empty state, `(0,0,0)`: drawn over the whole field first
+ * on every bake. A draw, not a clear, the same way `pointLightMergedZeroQuad`
+ * does it, so the bake never depends on the renderer's clear colour or on
+ * `autoClearColor` (both belong to the frame around it).
+ * @param {{THREE: *}} args
+ * @returns {*} a NodeMaterial for a fullscreen quad.
+ */
+export function buildRegionFieldZeroMaterial({ THREE }) {
+  const { vec4, float } = THREE.TSL;
+  const material = new THREE.NodeMaterial();
+  material.transparent = false;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.fragmentNode = vec4(float(0), float(0), float(0), float(1));
+  return material;
+}
+
+/**
+ * ONE separable Gaussian pass over the region field: 13 taps (`taps` each
+ * side) one texel apart along `uStepUv`, sigma `uSigmaTexels`. The field's
+ * texels are sized so sigma is about two texels (region-geometry.js#
+ * planRegionField), so one-texel taps are dense enough to leave no contour
+ * lines and need no jitter. Weights are worked out in the shader from the
+ * sigma uniform, so a re-planned field never rebuilds this material; a sigma
+ * near zero collapses the kernel to its centre tap, a pass-through.
+ * @param {{THREE: *, inputTexture: *, uStepUv: *, uSigmaTexels: *, taps: number}} args
+ * @returns {*} a NodeMaterial for a fullscreen quad.
+ */
+export function buildRegionFieldBlurMaterial({ THREE, inputTexture, uStepUv, uSigmaTexels, taps }) {
+  const { texture, uv, float, vec4, exp, max } = THREE.TSL;
+  const src = texture(inputTexture);
+  const twoSigmaSq = max(uSigmaTexels.mul(uSigmaTexels).mul(2), float(1e-4));
+  let sum = src.sample(uv()).rgb;
+  let weightSum = float(1);
+  for (let k = 1; k <= taps; k++) {
+    const w = exp(float(-(k * k)).div(twoSigmaSq));
+    const off = uStepUv.mul(k);
+    sum = sum.add(
+      src
+        .sample(uv().add(off))
+        .rgb.add(src.sample(uv().sub(off)).rgb)
+        .mul(w)
+    );
+    weightSum = weightSum.add(w.mul(2));
+  }
+  const material = new THREE.NodeMaterial();
+  material.transparent = false;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.fragmentNode = vec4(sum.div(weightSum), float(1));
+  return material;
+}
+
+/**
+ * The blurred region field laid over `buf:scene.illum`'s ambient fill. Drawn
+ * as ONE world-space quad covering the field's own rect (so it rasterises
+ * only where regions are, and through the same camera, TAA jitter included,
+ * as everything else in the pass). Per pixel:
+ *
+ *   c        = coverage (0 outside every region, 1 well inside, a ramp at an edge)
+ *   d·c      = a·c + b·c · base          (the region darkness, still premultiplied)
+ *   colour·c = c · daylight + (darkness - daylight) · d·c
+ *   out      = colour·c + illum · (1 - c)   (premultiplied "over", by blend state)
+ *
+ * At `c = 1` this is exactly the old opaque overwrite, `mix(daylight,
+ * darkness, adjusted)`; at `c = 0` the ambient fill is left as it was.
+ *
+ * Field UV follows the convention every world buffer here uses: a texture
+ * drawn by a camera framed with `computeCameraFrustum(rect)` is read at
+ * `uv = (world - rect.min) / rect.size`, the inverse of the
+ * `world = mix(rect.min, rect.max, uv())` the fog field's quads use.
+ *
+ * @param {{THREE: *, fieldTexture: *, uFieldRect: *, uBaseDarkness01: *,
+ *   uDaylightColor: *, uDarknessColor: *}} args - uFieldRect is vec4(minX, minY, maxX, maxY).
+ * @returns {*} a NodeMaterial for a world-space quad.
+ */
+export function buildRegionFieldOverlayMaterial({
+  THREE,
+  fieldTexture,
+  uFieldRect,
+  uBaseDarkness01,
+  uDaylightColor,
+  uDarknessColor,
+}) {
+  const { texture, vec2, vec4, float, clamp, positionWorld, Fn } = THREE.TSL;
+  const fragmentNode = Fn(() => {
+    const fu = positionWorld.x.sub(uFieldRect.x).div(uFieldRect.z.sub(uFieldRect.x));
+    const fv = positionWorld.y.sub(uFieldRect.y).div(uFieldRect.w.sub(uFieldRect.y));
+    const s = texture(fieldTexture).sample(vec2(fu, fv));
+    const c = clamp(s.b, float(0), float(1));
+    const dc = s.r.add(s.g.mul(uBaseDarkness01));
+    const colour = uDaylightColor.mul(c).add(uDarknessColor.sub(uDaylightColor).mul(dc));
+    return vec4(colour, c);
+  })();
+  const material = new THREE.NodeMaterial();
+  material.transparent = true;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.side = THREE.DoubleSide;
+  // Premultiplied "over" on colour; the target's own alpha is kept as it was.
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.AddEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneMinusSrcAlphaFactor;
+  material.blendEquationAlpha = THREE.AddEquation;
+  material.blendSrcAlpha = THREE.ZeroFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = fragmentNode;
+  return material;
 }
 
 /**
@@ -223,13 +349,11 @@ function computeRegionColor(TSL, { uMode, uModifier, uBaseDarkness01, uDaylightC
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.uDaylightColor - shared vec3 uniform (sRGB), env's `ambient.daylight`.
- * @param {*} args.uDarknessColor - shared vec3 uniform (sRGB), env's `ambient.darkness`.
  * @returns {{material: *, uOrigin: *, uSize: *, uAnchor: *, uRotationRad: *,
- *   uMode: *, uModifier: *, uBaseDarkness01: *}}
+ *   uMode: *, uModifier: *, uCoverage: *}}
  */
-export function buildRegionRectangleMaterial({ THREE, uDaylightColor, uDarknessColor }) {
-  const { uniform, float, int, vec2, vec4, cos, sin, positionWorld, Fn } = THREE.TSL;
+export function buildRegionRectangleMaterial({ THREE }) {
+  const { uniform, float, int, vec2, cos, sin, positionWorld, Fn } = THREE.TSL;
 
   const uOrigin = uniform(vec2(0, 0));
   const uSize = uniform(vec2(100, 100));
@@ -237,7 +361,7 @@ export function buildRegionRectangleMaterial({ THREE, uDaylightColor, uDarknessC
   const uRotationRad = uniform(float(0));
   const uMode = uniform(int(0));
   const uModifier = uniform(float(0));
-  const uBaseDarkness01 = uniform(float(0));
+  const uCoverage = uniform(float(1));
 
   // ───────────────────────────────────────────────────────────────────────
   // WHY THE WHOLE BODY IS WRAPPED IN Fn() (2026-07-19, THE REAL "a point far
@@ -287,8 +411,7 @@ export function buildRegionRectangleMaterial({ THREE, uDaylightColor, uDarknessC
       .and(ly.greaterThanEqual(top.sub(tol)))
       .and(ly.lessThanEqual(top.add(uSize.y).add(tol)));
     inside.not().discard();
-    const color = computeRegionColor(THREE.TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor });
-    return vec4(color, float(1));
+    return computeRegionField(THREE.TSL, { uMode, uModifier, uCoverage });
   })();
 
   const material = new THREE.NodeMaterial();
@@ -298,7 +421,7 @@ export function buildRegionRectangleMaterial({ THREE, uDaylightColor, uDarknessC
   material.side = THREE.DoubleSide;
   material.fragmentNode = fragmentNode;
 
-  return { material, uOrigin, uSize, uAnchor, uRotationRad, uMode, uModifier, uBaseDarkness01 };
+  return { material, uOrigin, uSize, uAnchor, uRotationRad, uMode, uModifier, uCoverage };
 }
 
 /**
@@ -308,19 +431,18 @@ export function buildRegionRectangleMaterial({ THREE, uDaylightColor, uDarknessC
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.uDaylightColor @param {*} args.uDarknessColor
  * @returns {{material: *, uOrigin: *, uRadii: *, uRotationRad: *, uMode: *,
- *   uModifier: *, uBaseDarkness01: *}}
+ *   uModifier: *, uCoverage: *}}
  */
-export function buildRegionEllipseMaterial({ THREE, uDaylightColor, uDarknessColor }) {
-  const { uniform, float, int, vec2, vec4, cos, sin, positionWorld, Fn } = THREE.TSL;
+export function buildRegionEllipseMaterial({ THREE }) {
+  const { uniform, float, int, vec2, cos, sin, positionWorld, Fn } = THREE.TSL;
 
   const uOrigin = uniform(vec2(0, 0));
   const uRadii = uniform(vec2(50, 50));
   const uRotationRad = uniform(float(0));
   const uMode = uniform(int(0));
   const uModifier = uniform(float(0));
-  const uBaseDarkness01 = uniform(float(0));
+  const uCoverage = uniform(float(1));
 
   // Wrapped in Fn() — see `buildRegionRectangleMaterial`'s own header for
   // why: `discard()` called outside a build-time stack context is a silent
@@ -336,8 +458,7 @@ export function buildRegionEllipseMaterial({ THREE, uDaylightColor, uDarknessCol
     const ny = ly.div(uRadii.y);
     const inside = nx.mul(nx).add(ny.mul(ny)).lessThanEqual(float(1));
     inside.not().discard();
-    const color = computeRegionColor(THREE.TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor });
-    return vec4(color, float(1));
+    return computeRegionField(THREE.TSL, { uMode, uModifier, uCoverage });
   })();
 
   const material = new THREE.NodeMaterial();
@@ -347,7 +468,7 @@ export function buildRegionEllipseMaterial({ THREE, uDaylightColor, uDarknessCol
   material.side = THREE.DoubleSide;
   material.fragmentNode = fragmentNode;
 
-  return { material, uOrigin, uRadii, uRotationRad, uMode, uModifier, uBaseDarkness01 };
+  return { material, uOrigin, uRadii, uRotationRad, uMode, uModifier, uCoverage };
 }
 
 /** Capacity, in polygon vertices, for a region polygon's fixed-capacity
@@ -453,19 +574,18 @@ function makeUnsignedPolygonEdgeDistanceFn(TSL) {
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.uDaylightColor @param {*} args.uDarknessColor
  * @returns {{material: *, points: object[], uPointCount: *, uMode: *,
- *   uModifier: *, uBaseDarkness01: *}}
+ *   uModifier: *, uCoverage: *}}
  */
-export function buildRegionPolygonMaterial({ THREE, uDaylightColor, uDarknessColor }) {
-  const { uniform, uniformArray, float, int, vec2, vec4, positionWorld, Fn } = THREE.TSL;
+export function buildRegionPolygonMaterial({ THREE }) {
+  const { uniform, uniformArray, float, int, vec2, positionWorld, Fn } = THREE.TSL;
 
   const points = Array.from({ length: MAX_REGION_POLYGON_POINTS }, () => new THREE.Vector2(0, 0));
   const pointsUniform = uniformArray(points, 'vec2');
   const uPointCount = uniform(int(0));
   const uMode = uniform(int(0));
   const uModifier = uniform(float(0));
-  const uBaseDarkness01 = uniform(float(0));
+  const uCoverage = uniform(float(1));
 
   const pointInPolygon = makePointInPolygonFn(THREE.TSL);
   // Wrapped in Fn() — see `buildRegionRectangleMaterial`'s own header for
@@ -478,8 +598,7 @@ export function buildRegionPolygonMaterial({ THREE, uDaylightColor, uDarknessCol
     const p = vec2(positionWorld.x, positionWorld.y);
     const inside = pointInPolygon(p, pointsUniform, uPointCount);
     inside.not().discard();
-    const color = computeRegionColor(THREE.TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor });
-    return vec4(color, float(1));
+    return computeRegionField(THREE.TSL, { uMode, uModifier, uCoverage });
   })();
 
   const material = new THREE.NodeMaterial();
@@ -489,7 +608,7 @@ export function buildRegionPolygonMaterial({ THREE, uDaylightColor, uDarknessCol
   material.side = THREE.DoubleSide;
   material.fragmentNode = fragmentNode;
 
-  return { material, points, uPointCount, uMode, uModifier, uBaseDarkness01 };
+  return { material, points, uPointCount, uMode, uModifier, uCoverage };
 }
 
 /**
@@ -513,12 +632,11 @@ export function buildRegionPolygonMaterial({ THREE, uDaylightColor, uDarknessCol
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.uDaylightColor @param {*} args.uDarknessColor
  * @returns {{material: *, uOrigin: *, uRadius: *, uHalfAngleRad: *,
- *   uRotationRad: *, uFullCircle: *, uMode: *, uModifier: *, uBaseDarkness01: *}}
+ *   uRotationRad: *, uFullCircle: *, uMode: *, uModifier: *, uCoverage: *}}
  */
-export function buildRegionConeMaterial({ THREE, uDaylightColor, uDarknessColor }) {
-  const { uniform, float, int, bool, vec2, vec4, mod, atan, positionWorld, Fn } = THREE.TSL;
+export function buildRegionConeMaterial({ THREE }) {
+  const { uniform, float, int, bool, vec2, mod, atan, positionWorld, Fn } = THREE.TSL;
 
   const uOrigin = uniform(vec2(0, 0));
   const uRadius = uniform(float(50));
@@ -529,7 +647,7 @@ export function buildRegionConeMaterial({ THREE, uDaylightColor, uDarknessColor 
   const uFullCircle = uniform(bool(false));
   const uMode = uniform(int(0));
   const uModifier = uniform(float(0));
-  const uBaseDarkness01 = uniform(float(0));
+  const uCoverage = uniform(float(1));
 
   // Wrapped in Fn() — see `buildRegionRectangleMaterial`'s own header for
   // why: `discard()` called outside a build-time stack context is a silent
@@ -550,8 +668,7 @@ export function buildRegionConeMaterial({ THREE, uDaylightColor, uDarknessColor 
 
     const inside = withinRadius.and(atApex.or(withinAngle));
     inside.not().discard();
-    const color = computeRegionColor(THREE.TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor });
-    return vec4(color, float(1));
+    return computeRegionField(THREE.TSL, { uMode, uModifier, uCoverage });
   })();
 
   const material = new THREE.NodeMaterial();
@@ -561,7 +678,7 @@ export function buildRegionConeMaterial({ THREE, uDaylightColor, uDarknessColor 
   material.side = THREE.DoubleSide;
   material.fragmentNode = fragmentNode;
 
-  return { material, uOrigin, uRadius, uHalfAngleRad, uRotationRad, uFullCircle, uMode, uModifier, uBaseDarkness01 };
+  return { material, uOrigin, uRadius, uHalfAngleRad, uRotationRad, uFullCircle, uMode, uModifier, uCoverage };
 }
 
 /**
@@ -572,19 +689,18 @@ export function buildRegionConeMaterial({ THREE, uDaylightColor, uDarknessColor 
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.uDaylightColor @param {*} args.uDarknessColor
  * @returns {{material: *, uOrigin: *, uInnerRadius: *, uOuterRadius: *,
- *   uMode: *, uModifier: *, uBaseDarkness01: *}}
+ *   uMode: *, uModifier: *, uCoverage: *}}
  */
-export function buildRegionRingMaterial({ THREE, uDaylightColor, uDarknessColor }) {
-  const { uniform, float, int, vec2, vec4, positionWorld, Fn } = THREE.TSL;
+export function buildRegionRingMaterial({ THREE }) {
+  const { uniform, float, int, vec2, positionWorld, Fn } = THREE.TSL;
 
   const uOrigin = uniform(vec2(0, 0));
   const uInnerRadius = uniform(float(0));
   const uOuterRadius = uniform(float(50));
   const uMode = uniform(int(0));
   const uModifier = uniform(float(0));
-  const uBaseDarkness01 = uniform(float(0));
+  const uCoverage = uniform(float(1));
 
   // Wrapped in Fn() — see `buildRegionRectangleMaterial`'s own header for
   // why: `discard()` called outside a build-time stack context is a silent
@@ -595,8 +711,7 @@ export function buildRegionRingMaterial({ THREE, uDaylightColor, uDarknessColor 
     const dist = rel.length();
     const inside = dist.greaterThanEqual(uInnerRadius).and(dist.lessThanEqual(uOuterRadius));
     inside.not().discard();
-    const color = computeRegionColor(THREE.TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor });
-    return vec4(color, float(1));
+    return computeRegionField(THREE.TSL, { uMode, uModifier, uCoverage });
   })();
 
   const material = new THREE.NodeMaterial();
@@ -606,7 +721,7 @@ export function buildRegionRingMaterial({ THREE, uDaylightColor, uDarknessColor 
   material.side = THREE.DoubleSide;
   material.fragmentNode = fragmentNode;
 
-  return { material, uOrigin, uInnerRadius, uOuterRadius, uMode, uModifier, uBaseDarkness01 };
+  return { material, uOrigin, uInnerRadius, uOuterRadius, uMode, uModifier, uCoverage };
 }
 
 /**
@@ -619,12 +734,11 @@ export function buildRegionRingMaterial({ THREE, uDaylightColor, uDarknessColor 
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.uDaylightColor @param {*} args.uDarknessColor
  * @returns {{material: *, uOrigin: *, uLength: *, uWidth: *, uRotationRad: *,
- *   uMode: *, uModifier: *, uBaseDarkness01: *}}
+ *   uMode: *, uModifier: *, uCoverage: *}}
  */
-export function buildRegionLineMaterial({ THREE, uDaylightColor, uDarknessColor }) {
-  const { uniform, float, int, vec2, vec4, cos, sin, positionWorld, Fn } = THREE.TSL;
+export function buildRegionLineMaterial({ THREE }) {
+  const { uniform, float, int, vec2, cos, sin, positionWorld, Fn } = THREE.TSL;
 
   const uOrigin = uniform(vec2(0, 0));
   const uLength = uniform(float(100));
@@ -632,7 +746,7 @@ export function buildRegionLineMaterial({ THREE, uDaylightColor, uDarknessColor 
   const uRotationRad = uniform(float(0));
   const uMode = uniform(int(0));
   const uModifier = uniform(float(0));
-  const uBaseDarkness01 = uniform(float(0));
+  const uCoverage = uniform(float(1));
 
   // Wrapped in Fn() — see `buildRegionRectangleMaterial`'s own header for
   // why: `discard()` called outside a build-time stack context is a silent
@@ -651,8 +765,7 @@ export function buildRegionLineMaterial({ THREE, uDaylightColor, uDarknessColor 
       .and(ly.greaterThanEqual(halfWidth.negate()))
       .and(ly.lessThanEqual(halfWidth));
     inside.not().discard();
-    const color = computeRegionColor(THREE.TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor });
-    return vec4(color, float(1));
+    return computeRegionField(THREE.TSL, { uMode, uModifier, uCoverage });
   })();
 
   const material = new THREE.NodeMaterial();
@@ -662,7 +775,7 @@ export function buildRegionLineMaterial({ THREE, uDaylightColor, uDarknessColor 
   material.side = THREE.DoubleSide;
   material.fragmentNode = fragmentNode;
 
-  return { material, uOrigin, uLength, uWidth, uRotationRad, uMode, uModifier, uBaseDarkness01 };
+  return { material, uOrigin, uLength, uWidth, uRotationRad, uMode, uModifier, uCoverage };
 }
 
 /**
@@ -675,12 +788,11 @@ export function buildRegionLineMaterial({ THREE, uDaylightColor, uDarknessColor 
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.uDaylightColor @param {*} args.uDarknessColor
  * @returns {{material: *, uOrigin: *, uSize: *, uAnchor: *, uRotationRad: *,
- *   uGrowRadius: *, uMode: *, uModifier: *, uBaseDarkness01: *}}
+ *   uGrowRadius: *, uMode: *, uModifier: *, uCoverage: *}}
  */
-export function buildRegionEmanationRectangleMaterial({ THREE, uDaylightColor, uDarknessColor }) {
-  const { uniform, float, int, vec2, vec4, cos, sin, clamp, positionWorld, Fn } = THREE.TSL;
+export function buildRegionEmanationRectangleMaterial({ THREE }) {
+  const { uniform, float, int, vec2, cos, sin, clamp, positionWorld, Fn } = THREE.TSL;
 
   const uOrigin = uniform(vec2(0, 0));
   const uSize = uniform(vec2(100, 100));
@@ -689,7 +801,7 @@ export function buildRegionEmanationRectangleMaterial({ THREE, uDaylightColor, u
   const uGrowRadius = uniform(float(0));
   const uMode = uniform(int(0));
   const uModifier = uniform(float(0));
-  const uBaseDarkness01 = uniform(float(0));
+  const uCoverage = uniform(float(1));
 
   // Wrapped in Fn() — see `buildRegionRectangleMaterial`'s own header for
   // why: `discard()` called outside a build-time stack context is a silent
@@ -722,8 +834,7 @@ export function buildRegionEmanationRectangleMaterial({ THREE, uDaylightColor, u
 
     const inside = insideBase.or(distToBoundary.lessThanEqual(uGrowRadius));
     inside.not().discard();
-    const color = computeRegionColor(THREE.TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor });
-    return vec4(color, float(1));
+    return computeRegionField(THREE.TSL, { uMode, uModifier, uCoverage });
   })();
 
   const material = new THREE.NodeMaterial();
@@ -742,7 +853,7 @@ export function buildRegionEmanationRectangleMaterial({ THREE, uDaylightColor, u
     uGrowRadius,
     uMode,
     uModifier,
-    uBaseDarkness01,
+    uCoverage,
   };
 }
 
@@ -757,12 +868,11 @@ export function buildRegionEmanationRectangleMaterial({ THREE, uDaylightColor, u
  *
  * @param {object} args
  * @param {*} args.THREE
- * @param {*} args.uDaylightColor @param {*} args.uDarknessColor
  * @returns {{material: *, points: object[], uPointCount: *, uGrowRadius: *,
- *   uMode: *, uModifier: *, uBaseDarkness01: *}}
+ *   uMode: *, uModifier: *, uCoverage: *}}
  */
-export function buildRegionEmanationPolygonMaterial({ THREE, uDaylightColor, uDarknessColor }) {
-  const { uniform, uniformArray, float, int, vec2, vec4, positionWorld, Fn } = THREE.TSL;
+export function buildRegionEmanationPolygonMaterial({ THREE }) {
+  const { uniform, uniformArray, float, int, vec2, positionWorld, Fn } = THREE.TSL;
 
   const points = Array.from({ length: MAX_REGION_POLYGON_POINTS }, () => new THREE.Vector2(0, 0));
   const pointsUniform = uniformArray(points, 'vec2');
@@ -770,7 +880,7 @@ export function buildRegionEmanationPolygonMaterial({ THREE, uDaylightColor, uDa
   const uGrowRadius = uniform(float(0));
   const uMode = uniform(int(0));
   const uModifier = uniform(float(0));
-  const uBaseDarkness01 = uniform(float(0));
+  const uCoverage = uniform(float(1));
 
   const pointInPolygon = makePointInPolygonFn(THREE.TSL);
   const distToPolygonBoundary = makeUnsignedPolygonEdgeDistanceFn(THREE.TSL);
@@ -784,8 +894,7 @@ export function buildRegionEmanationPolygonMaterial({ THREE, uDaylightColor, uDa
     const dist = distToPolygonBoundary(p, pointsUniform, uPointCount);
     const inside = insideBase.or(dist.lessThanEqual(uGrowRadius));
     inside.not().discard();
-    const color = computeRegionColor(THREE.TSL, { uMode, uModifier, uBaseDarkness01, uDaylightColor, uDarknessColor });
-    return vec4(color, float(1));
+    return computeRegionField(THREE.TSL, { uMode, uModifier, uCoverage });
   })();
 
   const material = new THREE.NodeMaterial();
@@ -795,5 +904,5 @@ export function buildRegionEmanationPolygonMaterial({ THREE, uDaylightColor, uDa
   material.side = THREE.DoubleSide;
   material.fragmentNode = fragmentNode;
 
-  return { material, points, uPointCount, uGrowRadius, uMode, uModifier, uBaseDarkness01 };
+  return { material, points, uPointCount, uGrowRadius, uMode, uModifier, uCoverage };
 }

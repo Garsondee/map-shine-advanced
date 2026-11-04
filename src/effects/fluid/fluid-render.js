@@ -252,6 +252,40 @@ export function buildFluidSurfaceMaterials({
   }
 
   /**
+   * ORGANIC FROTH (2026-11-04, round 4 — the author: "The circle/bubbles are a nice idea but need to be a lot more
+   * random, uneven and not perfect circles"). A rim at a fixed Worley distance is a perfect circle by definition,
+   * and every one shared one radius and one rim width — they read as stamped rings. Here:
+   *   - the lookup is DOMAIN-WARPED by noise at about the bubble's own scale, so each outline is a different lump;
+   *   - the SIZE varies from place to place (≈0.35×–1.65×), so tiny beads sit next to big gulps of gas;
+   *   - the RIM WIDTH varies round each outline, and arcs DROP OUT (a broken, foaming rim, not a drawn circle);
+   *   - each bubble's BRIGHTNESS varies, so some are only faint ghosts.
+   * `bc` = (x, y in feature cells, z = the time axis the bubbles evolve along); `br` = the base rim radius in
+   * cells. Returns `{ ring, hollow }` (hollow = the bubble's gas core, 1 at its centre).
+   */
+  function organicBubbles(bc, br) {
+    const xy = bc.xy;
+    const z = bc.z;
+    const size = float(0.35).add(clamp(mx_noise_float(vec3(xy.mul(0.9), z.mul(0.3).add(1.7))).add(0.5), 0, 1).mul(1.3));
+    const r = br.mul(size);
+    // A lump or so across a typical bubble (two lobes read as scribbles in the lab, not bubbles).
+    const k = float(1).div(br.mul(3.6));
+    const kp = xy.mul(k);
+    const warp = vec2(
+      mx_noise_float(vec3(kp, z.mul(0.8).add(4.1))),
+      mx_noise_float(vec3(kp.add(vec2(17.3, 5.9)), z.mul(0.8).add(9.2)))
+    ).mul(r.mul(0.42));
+    const wd = mx_worley_noise_float(vec3(xy.add(warp), z), float(1));
+    const tk = float(0.22).add(clamp(mx_noise_float(vec3(kp.mul(1.7), z.add(2.3))).add(0.5), 0, 1).mul(0.6));
+    const ring = smoothstep(r.mul(float(1).sub(tk)), r.mul(float(1).sub(tk.mul(0.35))), wd).mul(
+      float(1).sub(smoothstep(r, r.mul(float(1).add(tk.mul(0.5))), wd))
+    );
+    const unbroken = smoothstep(float(-0.42), float(-0.05), mx_noise_float(vec3(kp.mul(1.1).add(31), z.mul(1.5))));
+    const bright = float(0.3).add(clamp(mx_noise_float(vec3(xy.mul(0.7).add(50), z.mul(0.5))).add(0.5), 0, 1).mul(0.9));
+    const hollow = float(1).sub(smoothstep(float(0), r.mul(0.8), wd));
+    return { ring: ring.mul(unbroken).mul(bright), hollow };
+  }
+
+  /**
    * Every field both passes share — built ONCE, here, outside any Fn: the two materials reference the SAME
    * nodes (they cannot disagree about where the goo is or what colour it is), and the state samples exist at
    * construction so `stateTexNodes` can be re-pointed every tick. (Nodes created inside an Fn body only exist once
@@ -482,9 +516,8 @@ export function buildFluidSurfaceMaterials({
         if (plan.bubblesEnabled) {
           // BOILING: cells that appear, swell and pop as the time axis moves through them — faster when agitated.
           const bc = vec3(p.mul(1.1), tSec.mul(float(0.35).add(F.agitation.mul(1.3))));
-          const wd = mx_worley_noise_float(bc, float(1));
           const br = float(0.03).add(F.agitation.mul(0.05));
-          const ring = smoothstep(br.mul(0.5), br, wd).mul(float(1).sub(smoothstep(br, br.mul(1.45), wd)));
+          const { ring } = organicBubbles(bc, br);
           out.addAssign(
             hot
               .mul(ring)
@@ -501,17 +534,13 @@ export function buildFluidSurfaceMaterials({
       // BUBBLES riding faster than the liquid (gas slips forward): bright rims, hollow cores.
       const bAlong = F.s.mul(F.lengthPx).sub(F.travel.mul(1.32));
       const bc = vec3(bAlong.div(R.mul(2.6)), across.mul(1.0), tSec.mul(0.12));
-      const wd = mx_worley_noise_float(bc, float(1));
       const presence = smoothstep(
         float(0.3).sub(froth.mul(0.7)).sub(F.agitation.mul(0.3)),
         float(0.65),
         mx_noise_float(vec3(bc.xy.mul(0.3), 7.3)).add(0.5)
       );
       const br = float(0.05).add(froth.mul(0.08));
-      const ring = smoothstep(br.mul(0.45), br.mul(0.9), wd).mul(
-        float(1).sub(smoothstep(br.mul(0.9), br.mul(1.3), wd))
-      );
-      const hollow = float(1).sub(smoothstep(float(0), br.mul(0.75), wd));
+      const { ring, hollow } = organicBubbles(bc, br);
       const amt = uBubbles.mul(liquid).mul(presence).mul(th.mul(0.6).add(0.4));
       // Rims catch the light only where the goo burns (round 3); in the dim body they are faint glints.
       out.addAssign(

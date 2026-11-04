@@ -465,6 +465,10 @@ const SPARKLE_GAIN = 14;
 const PAN_FLARE_GAIN = 0.6;
 /** The most of the lit floor under the metal that darkening may take. */
 const MIRROR_MAX_DARKEN = 0.85;
+/** Mirrors `grade-ops.js`'s DAYLIGHT_WHITE (sunlit white in scene.lit at noon). */
+const SPECULAR_DAYLIGHT_WHITE = 0.85;
+/** Mirrors the grade's `lightGlowDay` default: what is left of a lamp's glow outdoors in full sun. */
+const SPECULAR_LAMP_GLOW_DAY = 0.25;
 
 /**
  * Per-layer defaults, transcribed from V2's tuned values.
@@ -1546,7 +1550,22 @@ export function buildSpecularSurfaceMaterial({
   const incidentIllum = max(illumAboveFloor, vec3(uLightFloor, uLightFloor, uLightFloor));
   let incidentSum = incidentIllum;
   if (colorationTexture) {
-    const lampGlow = max(texture(colorationTexture).sample(screenUv).rgb, vec3(0, 0, 0)).toVar('specLampGlow');
+    // A lamp is nearly invisible next to the sun: the composite turns the
+    // coloration down outdoors in daylight (`grade-ops.js#buildLightLookNodes`,
+    // `lightGlowDay` 0.25 × daylight weight × outdoors). The reflection follows
+    // the SAME rule, or a brazier out front would out-shine the noon sun on the
+    // gold beside it (measured: debug channel 10 orange, sunlit cobbles grey).
+    // Daylight weight = the local ambient's luminance over the composite's own
+    // DAYLIGHT_WHITE, outdoors only.
+    const ambLin = sRGBTransferEOTF(max(illumSample, vec3(0, 0, 0)));
+    const dayWeight = clamp(
+      dot(ambLin, vec3(LUMA_709[0], LUMA_709[1], LUMA_709[2])).div(float(SPECULAR_DAYLIGHT_WHITE)),
+      0,
+      1
+    ).mul(outdoors);
+    const lampGlow = max(texture(colorationTexture).sample(screenUv).rgb, vec3(0, 0, 0))
+      .mul(mix(float(1), float(SPECULAR_LAMP_GLOW_DAY), dayWeight))
+      .toVar('specLampGlow');
     const glowPeak = max(max(lampGlow.r, lampGlow.g), max(lampGlow.b, float(1e-4)));
     const lightHue = lampGlow.div(glowPeak);
     const hueWeight = smoothstep(float(0.005), float(0.06), glowPeak);

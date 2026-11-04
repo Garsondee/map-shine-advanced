@@ -13,9 +13,8 @@ import { run as runEffectTierConsumption } from './effect-tier-consumption.test.
 import { run as runDepthOfFieldBlur } from './depth-of-field-blur.test.mjs';
 import { run as runBloomDofRender } from './bloom-dof-render.test.mjs';
 import { run as runBloomThreshold } from './bloom-threshold.test.mjs';
-import { run as runAutoExposure } from './auto-exposure.test.mjs';
-import { run as runAutoExposureCompress } from './auto-exposure-compress.test.mjs';
-import { run as runAutoExposureRender } from './auto-exposure-render.test.mjs';
+import { run as runDynamicRange } from './dynamic-range.test.mjs';
+import { run as runDynamicRangeRender } from './dynamic-range-render.test.mjs';
 import { run as runDebugChannelSelect } from './debug-channel-select.test.mjs';
 import { run as runCandleFlame } from './candle-flame.test.mjs';
 import { run as runCandleFlameGeometry } from './candle-flame-geometry.test.mjs';
@@ -82,9 +81,8 @@ const suites = [
   ['depth-of-field-blur', runDepthOfFieldBlur],
   ['bloom-dof-render', runBloomDofRender],
   ['bloom-threshold', runBloomThreshold],
-  ['auto-exposure', runAutoExposure],
-  ['auto-exposure-compress', runAutoExposureCompress],
-  ['auto-exposure-render', runAutoExposureRender],
+  ['dynamic-range', runDynamicRange],
+  ['dynamic-range-render', runDynamicRangeRender],
   ['debug-channel-select', runDebugChannelSelect],
   ['candle-flame', runCandleFlame],
   ['candle-flame-geometry', runCandleFlameGeometry],

@@ -63,7 +63,7 @@ export const EFFECT_GROUP = Object.freeze({
   smellyFlies: 'living',
   maggots: 'living',
 
-  autoExposure: 'camera',
+  dynamicRange: 'camera',
   bloom: 'camera',
   lens: 'camera',
   depthOfField: 'camera',

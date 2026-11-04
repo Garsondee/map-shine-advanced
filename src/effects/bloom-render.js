@@ -32,6 +32,7 @@
  */
 
 import { buildOutdoorsGate } from './lighting/environmental-light.js';
+import { buildDynamicRangeBrightnessNode } from './dynamic-range-render.js';
 
 /** Rec.709 luminance of a linear-RGB node (for the Karis firefly weight). */
 function lumaOf(TSL, c) {
@@ -54,6 +55,11 @@ function lumaOf(TSL, c) {
  *   rebake reaches bloom too — the frozen-input lesson grade-present.js records).
  * @param {*} [args.uViewRect]      - SHARED camera-rect uniform (per-frame world rect).
  * @param {*} [args.uOutdoorsRect]  - SHARED mask-rect uniform.
+ * @param {*} [args.illumTexture]   - scene.illum, for the Dynamic Range camera (2026-11-04).
+ * @param {*} [args.colorationTexture] - scene.coloration (coloured lamp light counts as LIGHT, not material).
+ * @param {object} [args.dynamicRangeUniforms] - dynamic-range-render.js#createDynamicRangeUniforms, SHARED
+ *   with the present pass: while it is on, the bright pass thresholds the brightness that camera SHOWS
+ *   (so only what reads past "Glow from" on screen glows). Either missing = the plain bright pass.
  * @returns {object} materials + uniform handles (see the return literal).
  */
 export function buildBloomMaterials({
@@ -64,6 +70,9 @@ export function buildBloomMaterials({
   outdoorsTexNode,
   uViewRect,
   uOutdoorsRect,
+  illumTexture = null,
+  colorationTexture = null,
+  dynamicRangeUniforms = null,
 }) {
   const TSL = THREE.TSL;
   const { texture, uv, vec2, vec4, float, uniform, Fn, mix, smoothstep, max } = TSL;
@@ -80,14 +89,25 @@ export function buildBloomMaterials({
   // The world-space gate (null when no `_Outdoors` mask node was supplied — the
   // whole clamp term then compiles OUT, per the dead-code rule). 1 = outdoors.
   const outdoorsGate = buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode });
+  const drIllumNode = illumTexture && dynamicRangeUniforms ? texture(illumTexture) : null;
+  const drColorationNode = drIllumNode && colorationTexture ? texture(colorationTexture) : null;
 
   const brightMaterial = new THREE.NodeMaterial();
   brightMaterial.depthTest = false;
   brightMaterial.depthWrite = false;
   brightMaterial.fragmentNode = Fn(() => {
     const c = litTexNode.sample(uv()).rgb;
-    // Brightness = max channel (does not desaturate coloured highlights).
-    const br = c.r.max(c.g).max(c.b);
+    // Brightness = max channel (does not desaturate coloured highlights) — or, under the Dynamic Range
+    // camera, the brightest channel as that camera shows it (equal to the max channel while it is off).
+    const br = drIllumNode
+      ? buildDynamicRangeBrightnessNode(
+          TSL,
+          c,
+          drIllumNode.sample(uv()).rgb,
+          dynamicRangeUniforms,
+          drColorationNode ? drColorationNode.sample(uv()).rgb : null
+        )
+      : c.r.max(c.g).max(c.b);
 
     // Quadratic soft knee: a gentle roll-in across [threshold-knee, threshold+knee]
     // instead of a hard step (the hard step is the classic "grainy bloom" source).

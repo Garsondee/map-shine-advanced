@@ -437,7 +437,7 @@ import {
   getUiShadow,
   sampleVtPanViewerIllumPixel,
   probeVtPanViewerPixels,
-  getVtPanViewerAutoExposureInfo,
+  getVtPanViewerDynamicRangeInfo,
   runInteractiveVtPanViewerPixelProbe,
   probeVtPanViewerWindAndParticles,
   runInteractiveVtPanViewerWindProbe,
@@ -531,8 +531,8 @@ import {
   VEGETATION_LIVE_PARAM_KEYS,
   BLOOM,
   BLOOM_PARAMS,
-  AUTO_EXPOSURE,
-  AUTO_EXPOSURE_PARAMS,
+  DYNAMIC_RANGE,
+  DYNAMIC_RANGE_PARAMS,
   BLOOM_PRESETS,
   bloomPreset,
   // LENS (mythica-machina-press#57) — MSA's third post-processing effect,
@@ -1190,9 +1190,9 @@ MapShine.sampleIllumPixel = sampleVtPanViewerIllumPixel;
 // discard() bug and the region-aware-ambient seam, now computed for free.
 // See vt-pan-viewer.js#probePixels / diag/pixel-probe.js.
 MapShine.probePixels = probeVtPanViewerPixels;
-// AUTO EXPOSURE (2026-11-04): `MapShine.autoExposure()` — the meter's median / 95th percentile, the
+// DYNAMIC RANGE (2026-11-04): `MapShine.dynamicRange()` — the metered light, the exposure, the
 // target and applied exposure (stops), and the bloom's glow-budget and threshold scales.
-MapShine.autoExposure = getVtPanViewerAutoExposureInfo;
+MapShine.dynamicRange = getVtPanViewerDynamicRangeInfo;
 // THE INTERACTIVE PIXEL PROBE (2026-07-19, author-requested: "I want to
 // click on the screen and set the points"). MapShine.armPixelProbe() also
 // exists for console use; the debug-panel "Pixel Probe" button (registered
@@ -2827,8 +2827,8 @@ function install() {
    * is the real fix; this seed is the belt-and-braces half, the same posture
    * `water-registration.js` takes for the same reason. */
   let bloomReadout = { enabled: true, params: null };
-  // AUTO EXPOSURE (2026-11-04) — seeded ON, the same belt-and-braces posture as bloom just above.
-  let autoExposureReadout = { enabled: true, params: null };
+  // DYNAMIC RANGE (2026-11-04) — seeded ON, the same belt-and-braces posture as bloom just above.
+  let dynamicRangeReadout = { enabled: true, params: null };
   // LENS (mythica-machina-press#57, seed corrected mythica-machina-press#573,
   // flipped back with the 2026-10-16 live-tuning dump) —
   // `enabledFromProfile: 'low'` again since the author's "Turns Lens On by
@@ -3082,10 +3082,10 @@ function install() {
     bloomReadout = buildCascadeReadout(resolved);
   });
 
-  // AUTO EXPOSURE (2026-11-04, effects/auto-exposure.js) — a whole-image camera control, same shape as
+  // DYNAMIC RANGE (2026-11-04, effects/dynamic-range.js) — a whole-image camera control, same shape as
   // bloom's registration: `apply` only refreshes the readout the viewer's runPostBloomPass reads each frame.
-  effectRegistry.register(AUTO_EXPOSURE, (resolved) => {
-    autoExposureReadout = buildCascadeReadout(resolved);
+  effectRegistry.register(DYNAMIC_RANGE, (resolved) => {
+    dynamicRangeReadout = buildCascadeReadout(resolved);
   });
 
   // LENS (mythica-machina-press#57) — MSA's THIRD post-processing effect,
@@ -3400,15 +3400,15 @@ function install() {
     effectRegistry.resolveAndApply('bloom', layers);
   }
 
-  /** Transient, in-memory Auto Exposure tuning (MapShine.setAutoExposure / the card). Mirrors bloomLiveOverride. */
-  const autoExposureLiveOverride = {};
+  /** Transient, in-memory Dynamic Range tuning (MapShine.setDynamicRange / the card). Mirrors bloomLiveOverride. */
+  const dynamicRangeLiveOverride = {};
 
-  /** Re-resolve Auto Exposure's cascade. Mirrors reapplyBloom; MUST be in EFFECT_REAPPLIERS too. */
-  function reapplyAutoExposure() {
-    const layers = deriveEffectLayers('autoExposure', (key) => readSetting(MODULE_ID, key));
-    const { params: sceneParams } = readSceneEffectParams('autoExposure');
-    layers.paramLayers = [sceneParams, autoExposureLiveOverride].filter(Boolean);
-    effectRegistry.resolveAndApply('autoExposure', layers);
+  /** Re-resolve Dynamic Range's cascade. Mirrors reapplyBloom; MUST be in EFFECT_REAPPLIERS too. */
+  function reapplyDynamicRange() {
+    const layers = deriveEffectLayers('dynamicRange', (key) => readSetting(MODULE_ID, key));
+    const { params: sceneParams } = readSceneEffectParams('dynamicRange');
+    layers.paramLayers = [sceneParams, dynamicRangeLiveOverride].filter(Boolean);
+    effectRegistry.resolveAndApply('dynamicRange', layers);
   }
 
   /** Transient, in-memory lens param tuning (MapShine.setLens / the FOH-ROH
@@ -3753,7 +3753,7 @@ function install() {
     ['window light', () => windowLight.reapply()],
     ['aperture gobo', () => apertureGobo.reapply()],
     ['bloom', () => reapplyBloom()],
-    ['auto exposure', () => reapplyAutoExposure()],
+    ['dynamic range', () => reapplyDynamicRange()],
     ['lens', () => reapplyLens()],
     ['prism', () => reapplyPrism()],
     ['iridescence', () => reapplyIridescence()],
@@ -3855,7 +3855,7 @@ function install() {
       precipLiveOverride,
       vegetationLiveOverride,
       bloomLiveOverride,
-      autoExposureLiveOverride,
+      dynamicRangeLiveOverride,
       lensLiveOverride,
       prismLiveOverride,
       iridescenceLiveOverride,
@@ -5521,38 +5521,38 @@ function install() {
     return { ...bloomLiveOverride };
   };
 
-  // MapShine.setAutoExposure — the console tuner AND the card's write path (mirrors MapShine.setLens):
-  //   MapShine.setAutoExposure({ strength: 0.8, glowBudget: 0.15 }) · MapShine.setAutoExposure({ enabled: false })
-  MapShine.setAutoExposure = (partial = {}) => {
+  // MapShine.setDynamicRange — the console tuner AND the card's write path (mirrors MapShine.setLens):
+  //   MapShine.setDynamicRange({ drama: 1.4, punch: 2 }) · MapShine.setDynamicRange({ enabled: false })
+  MapShine.setDynamicRange = (partial = {}) => {
     const p = partial ?? {};
     if (typeof p.enabled === 'boolean') {
-      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('autoExposure', 'player'), p.enabled ? 'on' : 'off'))
-        .then(() => reapplyAutoExposure())
-        .catch((err) => log.error('auto exposure enable write/reapply failed:', err));
+      Promise.resolve(writeSetting(MODULE_ID, effectEnableKey('dynamicRange', 'player'), p.enabled ? 'on' : 'off'))
+        .then(() => reapplyDynamicRange())
+        .catch((err) => log.error('dynamic range enable write/reapply failed:', err));
     }
     let changed = false;
     const scenePatch = {};
-    for (const k of Object.keys(AUTO_EXPOSURE_PARAMS)) {
+    for (const k of Object.keys(DYNAMIC_RANGE_PARAMS)) {
       if (k in p) {
-        autoExposureLiveOverride[k] = p[k];
-        if (AUTO_EXPOSURE_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
+        dynamicRangeLiveOverride[k] = p[k];
+        if (DYNAMIC_RANGE_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];
         changed = true;
       }
     }
     if (changed) {
-      Promise.resolve(writeSceneEffectParams('autoExposure', scenePatch)).then(
+      Promise.resolve(writeSceneEffectParams('dynamicRange', scenePatch)).then(
         (result) => {
-          if (!result.ok) log.warn(`auto exposure scene param write not persisted: ${result.reason}`);
+          if (!result.ok) log.warn(`dynamic range scene param write not persisted: ${result.reason}`);
         },
-        (err) => log.error('auto exposure scene param write failed:', err)
+        (err) => log.error('dynamic range scene param write failed:', err)
       );
       try {
-        reapplyAutoExposure();
+        reapplyDynamicRange();
       } catch (err) {
-        log.error('auto exposure reapply (setAutoExposure) failed:', err);
+        log.error('dynamic range reapply (setDynamicRange) failed:', err);
       }
     }
-    return { ...autoExposureLiveOverride };
+    return { ...dynamicRangeLiveOverride };
   };
 
   // MapShine.setLens — the console tuner AND the FOH/ROH card's write path
@@ -6274,8 +6274,8 @@ function install() {
   // U6 read-tracking wrap (lens is not in READ_TRACKED_EFFECTS; that wrap is
   // opt-in instrumentation, not a correctness requirement).
   const getLensRenderState = () => projectCascadeRenderState(lensReadout);
-  // AUTO EXPOSURE's render-state seam (2026-11-04) — same shape as lens's.
-  const getAutoExposureRenderState = () => projectCascadeRenderState(autoExposureReadout);
+  // DYNAMIC RANGE's render-state seam (2026-11-04) — same shape as lens's.
+  const getDynamicRangeRenderState = () => projectCascadeRenderState(dynamicRangeReadout);
   // PRISM's render-state seam (mythica-machina-press#137) — same shape as
   // lens's own, above: no U6 read-tracking wrap (prism is not in
   // READ_TRACKED_EFFECTS).
@@ -12224,16 +12224,16 @@ function install() {
     presets: { table: LENS_PRESETS, pick: lensPreset },
   });
 
-  // AUTO EXPOSURE (2026-11-04) — the balanced-light camera (effects/auto-exposure.js). FOH carries the
+  // AUTO EXPOSURE (2026-11-04) — the balanced-light camera (effects/dynamic-range.js). FOH carries the
   // three dials a GM reaches for (how hard it works, how dark, the glow budget); the rest is ROH.
-  registerSimpleEffectCard('autoExposure', {
+  registerSimpleEffectCard('dynamicRange', {
     icon: 'aperture',
-    title: 'Auto Exposure',
+    title: 'Dynamic Range',
     accVar: '--c-post',
-    schema: AUTO_EXPOSURE_PARAMS,
-    fohKeys: ['strength', 'darkFloor', 'glowBudget'],
-    getReadout: () => autoExposureReadout,
-    setValue: (patch) => MapShine.setAutoExposure(patch),
+    schema: DYNAMIC_RANGE_PARAMS,
+    fohKeys: ['drama', 'punch', 'colour', 'eyeAdapt'],
+    getReadout: () => dynamicRangeReadout,
+    setValue: (patch) => MapShine.setDynamicRange(patch),
   });
 
   // PRISM (mythica-machina-press#137, docs recovered from V2's own
@@ -17466,8 +17466,8 @@ function install() {
         // harness staying minimal, not a data dependency — wire it there too if
         // bloom ever needs soak-perf coverage.
         getBloomRenderState,
-        // AUTO EXPOSURE (2026-11-04): the meter + exposure limiter (effects/auto-exposure.js).
-        getAutoExposureRenderState,
+        // AUTO EXPOSURE (2026-11-04): the meter + exposure limiter (effects/dynamic-range.js).
+        getDynamicRangeRenderState,
         // LENS (effects/lens-render.js, mythica-machina-press#57): same shape
         // as bloom's own seam just above — a whole-image screen effect
         // needing no scene data of its own (the autofocus/motion-blur inputs

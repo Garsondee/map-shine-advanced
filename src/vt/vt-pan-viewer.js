@@ -580,16 +580,17 @@ import {
   buildGradePresentMaterial,
   buildBloomMaterials,
   bloomEffectiveThreshold,
-  // AUTO EXPOSURE (2026-11-04) — effects/auto-exposure.js has the maths and the why.
-  buildExposureMeterMaterial,
-  AUTO_EXPOSURE_METER_W,
-  AUTO_EXPOSURE_METER_H,
-  autoExposureMeterStats,
-  autoExposureTarget,
-  adaptExposure,
-  bloomThresholdScale,
-  glowBudgetScale,
-  autoExposureRangeCompression,
+  // DYNAMIC RANGE (2026-11-04) — effects/dynamic-range.js has the maths and the why.
+  buildDynamicRangeMeterMaterial,
+  DYNAMIC_RANGE_METER_W,
+  DYNAMIC_RANGE_METER_H,
+  dynamicRangeMeterStats,
+  dynamicRangeExposure,
+  dynamicRangeCurve,
+  dynamicRangeAdapt,
+  createDynamicRangeUniforms,
+  writeDynamicRangeUniforms,
+  readDynamicRangeUniforms,
   // LENS (mythica-machina-press#57) — see effects/lens-render.js's own
   // header for the two materials' shapes and effects/lens-motion.js's own
   // header for why the autofocus/motion/light-burn MATHS is imported
@@ -1563,8 +1564,8 @@ async function startVtPanViewerUnserialized({
   getDoorRenderState,
   getVegetationRenderState,
   getBloomRenderState,
-  // AUTO EXPOSURE (2026-11-04) — same seam shape as bloom's (effects/auto-exposure.js).
-  getAutoExposureRenderState,
+  // DYNAMIC RANGE (2026-11-04) — same seam shape as bloom's (effects/dynamic-range.js).
+  getDynamicRangeRenderState,
   getLensRenderState,
   // FOUNDRY'S GRID + OUTLINE (2026-11-02): boot hands both halves of `foundry/scene-grid.js` — read
   // what Foundry would draw, and hide/show Foundry's own PIXI copies. Omitted ⇒ Foundry keeps drawing them.
@@ -1913,8 +1914,8 @@ async function startVtPanViewerUnserialized({
   // injection discipline as the candle/vegetation seams. Default = the effect
   // off, so an un-wired caller (the torture fixture) runs no bloom pass at all.
   getBloomRenderState ??= () => ({ enabled: false, params: {} });
-  // AUTO EXPOSURE's seam — default off, so an un-wired caller renders no meter and exposes at 0.
-  getAutoExposureRenderState ??= () => ({ enabled: false, params: {} });
+  // DYNAMIC RANGE's seam — default off, so an un-wired caller renders no meter and no transform.
+  getDynamicRangeRenderState ??= () => ({ enabled: false, params: {} });
   // LENS's data seam (effects/lens-render.js, mythica-machina-press#57): same
   // injection discipline as bloom's own seam just above. Default = the
   // effect off, so an un-wired caller (the torture fixture) runs no lens
@@ -5547,9 +5548,15 @@ async function startVtPanViewerUnserialized({
     for (let k = 0; k < BLOOM_MIP_COUNT; k++) {
       bloomMips.push(allocator.create(`bloom.mip${k}`, describeBloomMip(bloomMipW(k), bloomMipH(k))));
     }
+    // DYNAMIC RANGE (2026-11-04) — ONE uniform set shared by bloom's bright pass (what glows) and the
+    // present pass (the picture), so the two can never disagree about what reads past white.
+    const drUniforms = createDynamicRangeUniforms(THREE);
     const bloom = buildBloomMaterials({
       THREE,
       litTexture: sceneLit.texture,
+      illumTexture: sceneIllum.texture,
+      colorationTexture: sceneColoration.texture,
+      dynamicRangeUniforms: drUniforms,
       coreTexture: bloomMips[0].texture,
       atmoTexture: bloomMips[bloomActiveAtmoTop].texture,
       // Share envLight's outdoor-gate nodes (mask texture + rect uniforms), so the
@@ -5566,46 +5573,41 @@ async function startVtPanViewerUnserialized({
     const bloomCompositeQuad = new THREE.QuadMesh(bloom.compositeMaterial);
 
     // ========================================================================
-    // AUTO EXPOSURE (2026-11-04) — effects/auto-exposure.js has the maths and the why. A 96×54 meter
-    // of scene.lit (and of the glow the bloom is about to add) is drawn inside runPostBloomPass and
-    // read back ASYNCHRONOUSLY (mapAsync; nothing waits on it) every AE_METER_EVERY frames, one read
-    // in flight at a time. The answer moves a target exposure; the exposure itself adapts every frame
-    // on the real frame delta and reaches the present pass through gradePresent.setAutoExposure.
+    // DYNAMIC RANGE (2026-11-04) — effects/dynamic-range.js has the maths and the why. A 96×54 meter of
+    // scene.lit and scene.illum is drawn inside runPostBloomPass and read back ASYNCHRONOUSLY (mapAsync;
+    // nothing waits on it) every DR_METER_EVERY frames, one read in flight. The metered light (median
+    // illum) adapts on the real frame delta; exposure, pivot and bloom threshold follow from it every
+    // frame and reach bloom and the present pass as shared live uniforms (dynamic-range-render.js).
     // ========================================================================
-    const AE_METER_EVERY = 4;
-    const aeMeterTarget = allocator.create('autoExposure.meter', {
-      resolvedW: AUTO_EXPOSURE_METER_W,
-      resolvedH: AUTO_EXPOSURE_METER_H,
+    const DR_METER_EVERY = 4;
+    const drMeterTarget = allocator.create('dynamicRange.meter', {
+      resolvedW: DYNAMIC_RANGE_METER_W,
+      resolvedH: DYNAMIC_RANGE_METER_H,
       screenSized: false,
       type: THREE.FloatType,
       colorSpace: THREE.NoColorSpace,
       filter: 'nearest',
       depth: false,
     });
-    const aeMeter = buildExposureMeterMaterial({
-      THREE,
-      litTexture: sceneLit.texture,
-      coreTexture: bloomMips[0].texture,
-      atmoTexture: bloomMips[bloomActiveAtmoTop].texture,
-      bloomUniforms: bloom.uniforms,
-      // The same camera rect + map rect the bloom's outdoor clamp uses: padding is left out of the meter.
-      uViewRect: envLight.uViewRect,
-      uSceneRect: envLight.uOutdoorsRect,
-    });
-    const aeMeterQuad = new THREE.QuadMesh(aeMeter.material);
-    /** The live controller state (see `stepAutoExposure`). Exposed read-only via getAutoExposureInfo. */
-    const ae = {
+    const drMeterQuad = new THREE.QuadMesh(
+      buildDynamicRangeMeterMaterial({
+        THREE,
+        litTexture: sceneLit.texture,
+        illumTexture: sceneIllum.texture,
+        // The same camera rect + map rect the bloom's outdoor clamp uses: padding is left out.
+        uViewRect: envLight.uViewRect,
+        uSceneRect: envLight.uOutdoorsRect,
+      }).material
+    );
+    /** The live controller state (see `stepDynamicRange`); read-only copy via getDynamicRangeInfo. */
+    const dr = {
       on: false,
-      ev: 0, // the exposure applied now (stops)
-      target: 0, // where the meter says it should go
-      bloomScale: 1, // bloom strength multiplier from the glow budget (applied now)
-      bloomScaleTarget: 1,
-      thresholdScale: 1,
-      compKnee: 1, // range compressor knee (exposed luminance) and ratio (1 = off), applied now
-      compRatio: 1,
-      compKneeTarget: 1,
-      compRatioTarget: 1,
-      stats: null, // the last meter answer (see auto-exposure.js#meterStats)
+      logIllum: 0, // the metered light (log2 of median illum), adapted — the one eased state
+      ev: 0,
+      curve: null, // what the present pass runs now (dynamic-range.js#curveFor)
+      glowFrom: null, // "Glow from": the bright pass's threshold while on (display units)
+      bloomThresholdUsed: null, // what the bright pass used last (for the fire's inverse-bloom)
+      stats: null,
       inFlight: false,
       frame: 0,
       reads: 0,
@@ -5613,7 +5615,6 @@ async function startVtPanViewerUnserialized({
       errors: 0,
       lastError: null,
       lastRealDtSec: 0,
-      bloomThreshold: null, // the threshold the bright pass used last (scene units), for the fire's inverse-bloom
     };
 
     // ========================================================================
@@ -9397,6 +9398,9 @@ async function startVtPanViewerUnserialized({
       },
       // The lamps' coloured glow, so a Look's colourise can keep lamplight white.
       lampGlowTexture: sceneColoration.texture,
+      // DYNAMIC RANGE (2026-11-04) — the HDR camera before the Look grade (effects/dynamic-range-render.js).
+      illumTexture: sceneIllum.texture,
+      dynamicRangeUniforms: drUniforms,
       // The lens's own Table guard, so the present's lens-warped mask reads match the lens to the pixel.
       lensUvGuard: tableSubsystem.lensGuard,
       directSrgb: presentDirectSrgb,
@@ -12558,106 +12562,75 @@ async function startVtPanViewerUnserialized({
      * early-return, zero GPU work (Effects.md: gating by uniform is not gating).
      */
     /**
-     * AUTO EXPOSURE — one frame of the controller (effects/auto-exposure.js). The exposure and the
-     * glow-budget scale move toward the meter's last answer on the REAL frame delta (presentation
-     * pacing, like the weather ease — a slowed world must not stretch an eye's adaptation), and
-     * SNAP while the view is settling (scene load, floor change: `renderScaleHeld`), so the curtain
-     * never lifts on a sliding exposure. Off ⇒ everything back to identity, once.
+     * DYNAMIC RANGE — one frame of the controller (effects/dynamic-range.js). The metered light eases
+     * on the REAL frame delta (presentation pacing — a slowed world must not stretch an eye's
+     * adaptation) and SNAPS while the view settles (scene load, floor change: `renderScaleHeld`), so
+     * the curtain never lifts on a sliding picture. Every dial is read every frame, so a drag shows at
+     * once. Off ⇒ the shared uniforms off, once (bloom and present both back to their plain selves).
      */
-    function stepAutoExposure() {
-      const st = getAutoExposureRenderState();
-      const p = st?.params ?? {};
-      const on = !!st?.enabled && Number(p.strength ?? 1) > 0;
-      if (!on) {
-        if (ae.on || ae.ev !== 0 || ae.bloomScale !== 1) {
-          Object.assign(ae, {
-            ev: 0,
-            target: 0,
-            bloomScale: 1,
-            bloomScaleTarget: 1,
-            thresholdScale: 1,
-            compKnee: 1,
-            compRatio: 1,
-            compKneeTarget: 1,
-            compRatioTarget: 1,
-            stats: null,
-          });
-          gradePresent.setAutoExposure(0, 1, 1);
+    function stepDynamicRange() {
+      const st = getDynamicRangeRenderState();
+      if (!st?.enabled) {
+        if (dr.on) {
+          Object.assign(dr, { on: false, stats: null, curve: null, glowFrom: null });
+          writeDynamicRangeUniforms(drUniforms, null);
         }
-        ae.on = false;
         return;
       }
-      ae.on = true;
-      const snap = renderScaleHeld || !ae.stats;
-      if (snap) ae.snaps++;
-      const dt = ae.lastRealDtSec;
-      ae.ev = snap ? ae.target : adaptExposure(ae.ev, ae.target, dt, p.adaptSeconds);
-      const lbNow = Math.log2(Math.max(1e-3, ae.bloomScale));
-      const lbTarget = Math.log2(Math.max(1e-3, ae.bloomScaleTarget));
-      ae.bloomScale = 2 ** (snap ? lbTarget : adaptExposure(lbNow, lbTarget, dt, p.adaptSeconds));
-      // The compressor eases at the same pace (its knee in stops, its ratio directly).
-      const lkNow = Math.log2(Math.max(1e-6, ae.compKnee));
-      const lkTarget = Math.log2(Math.max(1e-6, ae.compKneeTarget));
-      ae.compKnee = 2 ** (snap ? lkTarget : adaptExposure(lkNow, lkTarget, dt, p.adaptSeconds));
-      ae.compRatio = snap ? ae.compRatioTarget : adaptExposure(ae.compRatio, ae.compRatioTarget, dt, p.adaptSeconds);
-      ae.thresholdScale = bloomThresholdScale(ae.ev, p.bloomFollow);
-      gradePresent.setAutoExposure(ae.ev, ae.compKnee, ae.compRatio);
+      dr.on = true;
+      if (!dr.stats) return; // no meter answer yet: the transform waits (identity) for its first reading
+      const p = st.params ?? {};
+      const snap = renderScaleHeld || !dr.curve;
+      if (snap) dr.snaps++;
+      const target = Math.log2(Math.max(1e-6, dr.stats.illumP50));
+      dr.logIllum = snap ? target : dynamicRangeAdapt(dr.logIllum, target, dr.lastRealDtSec, p.adaptSeconds);
+      const illum = 2 ** dr.logIllum;
+      dr.ev = dynamicRangeExposure(illum, { eyeAdapt: p.eyeAdapt, exposure: p.exposure });
+      dr.curve = dynamicRangeCurve({ illumP50: illum }, dr.ev, {
+        drama: p.drama,
+        punch: p.punch,
+        punchFrom: p.punchFrom,
+        shadowDepth: p.shadowDepth,
+        colour: p.colour,
+        lightRange: p.lightRange,
+      });
+      dr.glowFrom = Number.isFinite(Number(p.glowFrom)) ? Number(p.glowFrom) : 1.15;
+      writeDynamicRangeUniforms(drUniforms, dr.curve);
     }
 
     /**
-     * AUTO EXPOSURE — draw the meter (every AE_METER_EVERY frames, one read in flight) and start its
-     * asynchronous readback. Called from runPostBloomPass after the pyramid is built and BEFORE the
-     * composite, so R is the scene's own light and G is exactly the glow about to be added.
-     * @param {boolean} bloomDrawn - false when bloom is off (the glow channel is then zeroed)
+     * DYNAMIC RANGE — draw the meter (every DR_METER_EVERY frames, one read in flight) and start its
+     * asynchronous readback. Called from runPostBloomPass BEFORE the bloom composite, so `lit` is the
+     * scene's own light.
      */
-    function runAutoExposureMeter(bloomDrawn) {
-      if (!ae.on || ae.inFlight) return;
-      if (ae.frame++ % AE_METER_EVERY !== 0) return;
-      aeMeter.uBloomOn.value = bloomDrawn ? 1 : 0;
-      aeMeter.atmoTexNode.value = bloomMips[bloomActiveAtmoTop].texture;
-      renderer.setRenderTarget(aeMeterTarget);
-      aeMeterQuad.render(renderer);
+    function runDynamicRangeMeter() {
+      if (!dr.on || dr.inFlight) return;
+      if (dr.frame++ % DR_METER_EVERY !== 0) return;
+      renderer.setRenderTarget(drMeterTarget);
+      drMeterQuad.render(renderer);
       renderer.setRenderTarget(null);
-      const scaleUsed = ae.bloomScale;
-      ae.inFlight = true;
+      dr.inFlight = true;
       renderer
-        .readRenderTargetPixelsAsync(aeMeterTarget, 0, 0, AUTO_EXPOSURE_METER_W, AUTO_EXPOSURE_METER_H)
+        .readRenderTargetPixelsAsync(drMeterTarget, 0, 0, DYNAMIC_RANGE_METER_W, DYNAMIC_RANGE_METER_H)
         .then((px) => {
-          const stats = autoExposureMeterStats(px, AUTO_EXPOSURE_METER_W, AUTO_EXPOSURE_METER_H);
-          ae.reads++;
-          if (!stats) return;
-          ae.stats = stats;
-          const p = getAutoExposureRenderState()?.params ?? {};
-          ae.target = autoExposureTarget(stats, {
-            strength: p.strength,
-            darkFloor: p.darkFloor,
-            brightCeiling: p.brightCeiling,
-            maxLift: p.maxLift,
-            maxCut: p.maxCut,
-          });
-          ae.bloomScaleTarget = bloomDrawn ? glowBudgetScale(stats, p.glowBudget, scaleUsed) : 1;
-          // The compressor works on the image AFTER the exposure it is heading for.
-          const comp = autoExposureRangeCompression(stats, ae.target, {
-            strength: p.strength,
-            lightRange: p.lightRange,
-          });
-          ae.compKneeTarget = comp.knee;
-          ae.compRatioTarget = comp.ratio;
+          dr.reads++;
+          const stats = dynamicRangeMeterStats(px, DYNAMIC_RANGE_METER_W, DYNAMIC_RANGE_METER_H);
+          if (stats) dr.stats = stats;
         })
         .catch((err) => {
-          ae.errors++;
-          ae.lastError = String(err?.message ?? err);
+          dr.errors++;
+          dr.lastError = String(err?.message ?? err);
         })
         .finally(() => {
-          ae.inFlight = false;
+          dr.inFlight = false;
         });
     }
 
     /**
      * The bloom AS DRAWN, for consumers that predict it (the fire paints the inverse of the glow the
-     * bloom will add back — fire-billow-bloom.js): strength × the glow budget's scale, and the
-     * threshold the bright pass really used (daylight floor and exposure following included). Only
-     * the keys that predictor reads are touched, so U6 read tracking stays honest.
+     * bloom will add back — fire-billow-bloom.js): the threshold the bright pass really used (Dynamic
+     * Range's "glow from", or bloom's own daylight floor). Only the keys that predictor reads are
+     * touched, so U6 read tracking stays honest.
      */
     function getBloomStateAsDrawn() {
       const st = getBloomRenderState();
@@ -12666,31 +12639,32 @@ async function startVtPanViewerUnserialized({
       return {
         ...st,
         params: {
-          strength: bloomNum(p.strength, 1.0) * ae.bloomScale,
+          strength: p.strength,
           coreStrength: p.coreStrength,
           coreTint: p.coreTint,
           atmoStrength: p.atmoStrength,
           atmoTint: p.atmoTint,
           knee: p.knee,
-          threshold: ae.bloomThreshold ?? p.threshold,
+          threshold: dr.bloomThresholdUsed ?? p.threshold,
         },
       };
     }
 
-    /** A copy of the controller state for the console (`MapShine.autoExposure()`). */
-    function getAutoExposureInfo() {
+    /** A copy of the controller state for the console (`MapShine.dynamicRange()`). */
+    function getDynamicRangeInfo() {
       return {
-        ...ae,
-        stats: ae.stats ? { ...ae.stats } : null,
-        appliedStops: gradePresent.getAutoExposure(),
+        ...dr,
+        stats: dr.stats ? { ...dr.stats } : null,
+        curve: dr.curve ? { ...dr.curve } : null,
+        applied: readDynamicRangeUniforms(drUniforms),
       };
     }
 
     function runPostBloomPass() {
-      stepAutoExposure();
+      stepDynamicRange();
       const st = getBloomRenderState();
       if (!st.enabled) {
-        runAutoExposureMeter(false);
+        runDynamicRangeMeter();
         return;
       }
       const p = st.params || {};
@@ -12712,14 +12686,19 @@ async function startVtPanViewerUnserialized({
       profiler?.begin(Z.bloomUniforms);
       const u = bloom.uniforms;
       // The daylight floor (bloom.js#bloomEffectiveThreshold): at noon, sunlit ground no longer glows.
-      // AUTO EXPOSURE (2026-11-04): the threshold means "on screen", so it follows the exposure
-      // (× 2^-EV·follow), and the glow is held to its budget (strength × bloomScale). Both 1 when off.
-      u.threshold.value =
-        bloomEffectiveThreshold(bloomNum(p.threshold, 1.0), bloomNum(p.dayThreshold, 0), lastRaisedBackground) *
-        ae.thresholdScale;
-      ae.bloomThreshold = u.threshold.value;
+      // DYNAMIC RANGE (2026-11-04): while it is on, bloom glows from the scene light its curve carries
+      // past "Glow from" on screen — light too bright for the picture — instead of the card's thresholds.
+      // The bright pass then thresholds the brightness the camera SHOWS (dynamic-range-render.js), so the
+      // threshold is "Glow from" itself, in screen units.
+      const drGlowing = dr.on && dr.curve && dr.glowFrom != null;
+      u.threshold.value = drGlowing
+        ? dr.glowFrom
+        : bloomEffectiveThreshold(bloomNum(p.threshold, 1.0), bloomNum(p.dayThreshold, 0), lastRaisedBackground);
+      // Scene units for the fire's predictor: "Glow from" back through the exposure (the per-pixel curve is
+      // not undone — an approximation the inverse-bloom tolerates).
+      dr.bloomThresholdUsed = drGlowing ? dr.glowFrom / 2 ** dr.curve.ev : u.threshold.value;
       u.knee.value = bloomNum(p.knee, 0.5);
-      u.strength.value = bloomNum(p.strength, 1.0) * ae.bloomScale;
+      u.strength.value = bloomNum(p.strength, 1.0);
       u.coreStrength.value = bloomNum(p.coreStrength, 1.0);
       u.atmoStrength.value = bloomNum(p.atmoStrength, 0.5);
       u.spillEnabled.value = p.outdoorSpillSuppress === false ? 0 : 1;
@@ -12789,8 +12768,8 @@ async function startVtPanViewerUnserialized({
       }
       profiler?.end(Z.bloomUpAtmo);
 
-      // 3b) AUTO EXPOSURE METER — the scene before its glow, and the glow about to be added.
-      runAutoExposureMeter(true);
+      // 3b) DYNAMIC RANGE METER — the scene's own light, before its glow is added.
+      runDynamicRangeMeter();
 
       // 4) COMPOSITE — core (mip0) + atmosphere (mip3) additively into scene.lit.
       //    autoClearColor is still false here — an unguarded clear would wipe the
@@ -13242,8 +13221,8 @@ async function startVtPanViewerUnserialized({
       const dtGameHours = lastWeatherHour === null ? 0 : shortestHourDelta(lastWeatherHour, todHour);
       lastWeatherHour = todHour;
       const weatherState = weather.tick(time.realDtSec, { dtGameHours, hour: todHour });
-      // AUTO EXPOSURE adapts on the same real delta (presentation pacing) — see stepAutoExposure.
-      ae.lastRealDtSec = time.realDtSec;
+      // DYNAMIC RANGE adapts on the same real delta (presentation pacing) — see stepDynamicRange.
+      dr.lastRealDtSec = time.realDtSec;
       const weatherForSnapshot = weather.toSnapshotWeather();
       // ⚠️ `wind` WAS NEVER PASSED AT ALL until 2026-08-15, so `env.wind` was
       // permanently `DEFAULT_WIND` — {0, 0, 0} — no matter what the astrolabe
@@ -32231,8 +32210,8 @@ async function startVtPanViewerUnserialized({
        *   deltaFromPrev:{perBuffer:object, biggestJump:object}|null}>>}
        */
       probePixels: async (points) => runProbeOnPoints(points),
-      /** AUTO EXPOSURE's live controller state (effects/auto-exposure.js) — `MapShine.autoExposure()`. */
-      getAutoExposureInfo,
+      /** DYNAMIC RANGE's live controller state (effects/dynamic-range.js) — `MapShine.dynamicRange()`. */
+      getDynamicRangeInfo,
       /**
        * THE INTERACTIVE FLOW: arm (see `armInteractivePixelProbe`'s own
        * header for the full input-model reasoning), collect up to
@@ -34048,10 +34027,10 @@ export async function sampleVtPanViewerIllumPixel(worldX, worldY) {
  * `await MapShine.probePixels([{x, y}, {x, y}, {x, y}])`.
  * @param {Array<{x:number, y:number}>} points - 1..3 world positions.
  */
-/** AUTO EXPOSURE's live state (meter statistics, target and applied stops, bloom scales) for the console. */
-export function getVtPanViewerAutoExposureInfo() {
+/** DYNAMIC RANGE's live state (meter statistics, exposure, curve, bloom threshold) for the console. */
+export function getVtPanViewerDynamicRangeInfo() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
-  return _active.getAutoExposureInfo?.() ?? { skipped: true, reason: 'not wired' };
+  return _active.getDynamicRangeInfo?.() ?? { skipped: true, reason: 'not wired' };
 }
 
 export async function probeVtPanViewerPixels(points) {

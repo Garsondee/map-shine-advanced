@@ -727,7 +727,7 @@ export function steepenIncidentRgb(rgb, lumaWeights, steepness) {
  * — read {@link SPECULAR_INCIDENT_KNEE}'s ROUND 25 note: the two only make
  * sense as a pair, and the knee is what actually changed.
  */
-export const SPECULAR_INCIDENT_STEEPNESS = 2; // LOWERED 10.5 → 2 (ROUND 25, 2026-11-02)
+export const SPECULAR_INCIDENT_STEEPNESS = 0.5; // 2026-11-04 author's export (was 2); LOWERED 10.5 → 2 (ROUND 25, 2026-11-02)
 
 /**
  * THE KNEE — the incident-light level at which metal reaches its FULL shine.

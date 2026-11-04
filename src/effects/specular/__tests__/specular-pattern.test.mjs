@@ -537,7 +537,10 @@ export function run(t) {
   // dark), never to a hard zero, and leave full light where it was approved.
   // Lights are gamma-space illum, as the lab's ladder and `buf:scene.illum`.
   const lightLuma = (illum) => incidentFromIllumRgb([illum, illum, illum])[0];
-  const relShine = (illum) => shineLightResponse(lightLuma(illum)) / shineLightResponse(lightLuma(1));
+  // Pinned to the ROUND 25 curve (steepness 2) explicitly: the shipped default moved to 0.5 on 2026-11-04
+  // (author export; exponent clamps to 0 = no darkness suppression), but this guards the law, not the default.
+  const R25 = { steepness: 2 };
+  const relShine = (illum) => shineLightResponse(lightLuma(illum), R25) / shineLightResponse(lightLuma(1), R25);
   ok('a dim area (illum 0.25) keeps under 15% of full-light shine per unit light', relShine(0.25) < 0.15);
   ok('near-dark (illum 0.15) keeps under 6%', relShine(0.15) < 0.06);
   ok('…but never a hard zero — darker shine, not no shine', relShine(0.15) > 0);
@@ -551,7 +554,7 @@ export function run(t) {
   ok(
     'full light matches what ROUND 24 shipped (knee 0.01, steepness 10.5, gain 0.23) within 2%',
     Math.abs(
-      shineLightResponse(1) / shineLightResponse(1, { knee: 0.01, steepness: 10.5, softness: 0.66, gain: 0.23 }) - 1
+      shineLightResponse(1, R25) / shineLightResponse(1, { knee: 0.01, steepness: 10.5, softness: 0.66, gain: 0.23 }) - 1
     ) < 0.02
   );
   // The twin is only worth its assertions while the shader still computes the

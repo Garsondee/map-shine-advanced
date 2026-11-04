@@ -87,7 +87,7 @@ export const WINDOW_MASK_IMAGE_SCALE = 0.5;
 // Was LOWERED 3 → 1 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither. Was RAISED 1 → 3 = WINDOW_PARAMS.strength's own max
 // (2026-09-09) before this round.
-export const WINDOW_DEFAULT_STRENGTH = 3; // 2026-11-01 author's export
+export const WINDOW_DEFAULT_STRENGTH = 1.31; // 2026-11-04 author's export (was 3)
 // RAISED 0.69 → 1 (2026-09-21) — new live-tuned default, back to neutral;
 // see `WINDOW_PARAMS.contrast`'s own header (window.js). Was LOWERED 1 →
 // 0.69 (2026-09-08, recovered from a stash that missed both this file's own

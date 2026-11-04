@@ -146,7 +146,7 @@ export const SPECULAR_LAYER_COUNT = 6;
  * the author's own dialled-in scene, recorded exactly.
  */
 // LOWERED 9.96 → 4.92 (ROUND 24, 2026-10-17) — new live-tuned defaults
-export const SPECULAR_DEFAULT_STRENGTH = 5.5; // RAISED 4.92 → 5.5 (METAL BODY, 2026-11-02, mmp-9nb)
+export const SPECULAR_DEFAULT_STRENGTH = 20; // 2026-11-04 author's export (was 5.5); RAISED 4.92 → 5.5 (METAL BODY, 2026-11-02, mmp-9nb)
 /**
  * ⚠️ RAISED FROM 1 TO 1.3 (ROUND 16, 2026-08-03) — now that the shader
  * actually honours values past 1 (see the tint mix's own comment), a MODEST

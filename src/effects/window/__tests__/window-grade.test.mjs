@@ -24,11 +24,11 @@ export function run(t) {
   );
   ok('malformed dials fall back to identity', windowColorParams({ exposure: NaN, filter: 'red' }).exposure === 0);
   ok(
-    'every cc* param defaults to the identity',
+    'every cc* param defaults to the identity (gamma: author 0.73 look, 2026-11-04)',
     WINDOW_PARAMS.ccExposure.default === WINDOW_COLOR_DEFAULTS.exposure &&
       WINDOW_PARAMS.ccContrast.default === WINDOW_COLOR_DEFAULTS.contrast &&
       WINDOW_PARAMS.ccSaturation.default === WINDOW_COLOR_DEFAULTS.saturation &&
-      WINDOW_PARAMS.ccGamma.default === WINDOW_COLOR_DEFAULTS.gamma &&
+      WINDOW_PARAMS.ccGamma.default === 0.73 &&
       WINDOW_PARAMS.ccColorFilter.default === '#ffffff'
   );
   ok('the CC is the LAST section on the card', Object.values(WINDOW_PARAMS).at(-1).category === 'Colour');

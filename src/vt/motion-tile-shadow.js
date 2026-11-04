@@ -27,8 +27,9 @@
  * as the sun moves, the SAME rate, scaled by height. When the window is set not to drift, nothing moves and the
  * shadow lies straight under its caster.
  *
- * HOW HIGH — elevation, then sort. All of an orrery's tiles sit at one elevation; their sort order is the stack.
- * A caster's height is `baseHeightPx + elevation · pxPerElevationUnit + rank · layerStepPx`, `rank` being its
+ * HOW HIGH — a piece riding another (a planet on its arm) sits ON its parent: the parent's height + `childLiftPx`.
+ * Free pieces: elevation, then sort. All of an orrery's tiles sit at one elevation; their sort order is the stack.
+ * A free caster's height is `baseHeightPx + elevation · pxPerElevationUnit + rank · layerStepPx`, `rank` being its
  * place among the DISTINCT sort values of the casters at its own elevation (0 = the lowest). Raw sort numbers
  * (1, 15, 999) are an author's ordering, not distances; the rank keeps a stack of eleven pieces eleven even
  * steps tall whatever numbers they were given. A per-tile height in the tile's motion settings overrides all
@@ -40,9 +41,14 @@
  * it, never itself and never the piece above it; each lower piece in turn shades what is under IT. The test is
  * the casters' REAL silhouettes, not `buf:scene.depth`: a tile's depth proxy is built from coarse coverage cells,
  * so it claims the transparent pixels round its art in steps, and a depth-gated shadow showed blocky unshadowed
- * islands beside every piece (found on the rig, 2026-11-04). So a pre-pass draws each caster's art where it is
- * really opaque into `buf:scene.casterRank` (its place in the stack, MAX-blended: the top caster here wins),
- * and a shadow draws only where that top caster is lower than its own. Depth still keeps every shadow off
+ * islands beside every piece (found on the rig, 2026-11-04). So a pre-pass draws each caster's art into
+ * `buf:scene.casterRank`, and the gate is SOFT — a hard 50%-alpha cut chopped a gear's own shadow into a pixel
+ * stair round the rims of its holes (author, 2026-11-04: "the inside of the cogs is showing a clipped ugly pixel
+ * shadow"). The pre-pass writes, wherever a caster has any alpha, in stack order so the highest wins:
+ * R = the top caster's index, G = ITS alpha; then, MAX-blended, B = the highest index that is fully opaque. A
+ * shadow of caster i draws with weight [B < i] · ([R < i] + [R ≥ i]·(1 − G)): nothing at or above i fully covers the
+ * pixel, and where the top piece only partly covers it (an anti-aliased rim, a hole's edge) the shadow fills
+ * exactly the uncovered fraction. Depth still keeps every shadow off
  * anything drawn above the WHOLE stack (a roof, an overhead tile).
  *
  * This file: the settings (one shared set, like the Tokens card), the pure maths (Node-tested), and the two TSL
@@ -62,6 +68,8 @@ export const MOTION_TILE_SHADOW_DEFAULTS = Object.freeze({
   baseHeightPx: 45,
   /** Extra height per step up the sort order, world px. */
   layerStepPx: 20,
+  /** How far a tile riding another (its Tile Motion parent) sits above that parent, world px. */
+  childLiftPx: 4,
   /** Multiplies every caster's height (and so its throw and blur). */
   heightScale: 1,
   /** Penumbra at zero height, world px. */
@@ -75,6 +83,7 @@ const CLAMPS = Object.freeze({
   skylight: [0, 1],
   baseHeightPx: [0, 400],
   layerStepPx: [0, 120],
+  childLiftPx: [0, 120],
   heightScale: [0, 4],
   blurBasePx: [0, 40],
   blurPerPx: [0, 1],
@@ -121,6 +130,16 @@ export const MOTION_TILE_SHADOW_PARAMS = Object.freeze({
     category: 'Height',
     label: 'Height per layer',
     help: 'How much higher each step up the sort order hangs, in map pixels. The top of a stack throws the longest, softest shadow.',
+  },
+  childLiftPx: {
+    type: 'float',
+    min: 0,
+    max: 120,
+    step: 1,
+    default: MOTION_TILE_SHADOW_DEFAULTS.childLiftPx,
+    category: 'Height',
+    label: 'Riding piece lift',
+    help: "How far a tile that rides another (a planet on its arm: its parent in Tile Motion) sits above it, in map pixels. Small keeps its shadow joined to its parent's.",
   },
   heightScale: {
     type: 'float',
@@ -215,46 +234,67 @@ export function isMotionTileShadowOn() {
 
 /**
  * Every caster's height above the floor, world px.
- * @param {Array<{id:string, elevation?:number, sort?:number, heightPx?:number|null}>} casters
+ *
+ * ATTACHED PIECES SHARE THEIR PARENT'S HEIGHT (2026-11-04, author: "one of the planets shadows is detached from
+ * the bar"). A tile riding another (Tile Motion's `parentId`: a planet on its arm, a moon on its planet) sits ON
+ * it, so it hangs at the parent's height plus a small `childLiftPx` — never at its own sort rank, which put a
+ * planet (sort 150) ~80 px above the arm it is bolted to (sort 35) and threw its shadow clear of the arm's.
+ * Only FREE pieces (no parent) are ranked: by elevation, then by the distinct sort values among the free pieces.
+ *
+ * @param {Array<{id:string, elevation?:number, sort?:number, heightPx?:number|null, parentId?:string|null}>} tiles
+ *   - the casters AND any non-casting ancestors of theirs (a parent's height is needed even when it casts nothing).
  * @param {{pxPerElevationUnit?:number}} [scene] - world px per elevation unit (grid size / grid distance).
  * @param {Partial<typeof MOTION_TILE_SHADOW_DEFAULTS>} [settings]
  * @returns {Map<string, number>}
  */
-export function resolveCasterHeights(casters, scene = {}, settings = _s) {
-  const base = Number.isFinite(settings.baseHeightPx)
-    ? settings.baseHeightPx
-    : MOTION_TILE_SHADOW_DEFAULTS.baseHeightPx;
-  const step = Number.isFinite(settings.layerStepPx) ? settings.layerStepPx : MOTION_TILE_SHADOW_DEFAULTS.layerStepPx;
+export function resolveCasterHeights(tiles, scene = {}, settings = _s) {
+  const D = MOTION_TILE_SHADOW_DEFAULTS;
+  const base = Number.isFinite(settings.baseHeightPx) ? settings.baseHeightPx : D.baseHeightPx;
+  const step = Number.isFinite(settings.layerStepPx) ? settings.layerStepPx : D.layerStepPx;
+  const lift = Number.isFinite(settings.childLiftPx) ? settings.childLiftPx : D.childLiftPx;
   const scale = Number.isFinite(settings.heightScale) ? settings.heightScale : 1;
   const perUnit =
     Number.isFinite(scene.pxPerElevationUnit) && scene.pxPerElevationUnit > 0 ? scene.pxPerElevationUnit : 0;
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const byId = new Map(tiles.map((t) => [t.id, t]));
+  const parentOf = (t) => (t.parentId && t.parentId !== t.id && byId.has(t.parentId) ? byId.get(t.parentId) : null);
 
-  // Distinct sort values per elevation, ascending -> rank.
+  // Distinct sort values per elevation among the FREE pieces, ascending -> rank.
   const sortsByElevation = new Map();
-  for (const c of casters) {
-    const e = num(c.elevation);
+  for (const t of tiles) {
+    if (parentOf(t)) continue;
+    const e = num(t.elevation);
     let set = sortsByElevation.get(e);
     if (!set) sortsByElevation.set(e, (set = new Set()));
-    set.add(num(c.sort));
+    set.add(num(t.sort));
   }
   const rankOf = new Map();
   for (const [e, set] of sortsByElevation) {
     const ordered = [...set].sort((a, b) => a - b);
-    rankOf.set(e, new Map(ordered.map((s, i) => [s, i])));
+    rankOf.set(e, new Map(ordered.map((v, i) => [v, i])));
   }
 
-  const out = new Map();
-  for (const c of casters) {
-    const override = Number(c.heightPx);
-    if (Number.isFinite(override) && override > 0) {
-      out.set(c.id, override * scale);
-      continue;
+  // Unscaled height. `seen` breaks a parent cycle: the tile that closes it is treated as free.
+  const memo = new Map();
+  const heightOf = (t, seen) => {
+    if (memo.has(t.id)) return memo.get(t.id);
+    seen.add(t.id);
+    let h;
+    const override = Number(t.heightPx);
+    const parent = parentOf(t);
+    if (Number.isFinite(override) && override > 0) h = override;
+    else if (parent && !seen.has(parent.id)) h = heightOf(parent, seen) + lift;
+    else {
+      const e = num(t.elevation);
+      const rank = rankOf.get(e)?.get(num(t.sort)) ?? 0;
+      h = base + Math.max(0, e) * perUnit + rank * step;
     }
-    const e = num(c.elevation);
-    const rank = rankOf.get(e).get(num(c.sort));
-    out.set(c.id, Math.max(0, (base + Math.max(0, e) * perUnit + rank * step) * scale));
-  }
+    memo.set(t.id, h);
+    return h;
+  };
+
+  const out = new Map();
+  for (const t of tiles) out.set(t.id, Math.max(0, heightOf(t, new Set()) * scale));
   return out;
 }
 
@@ -319,7 +359,8 @@ const SHADOW_TAPS = (() => {
  * @param {number[]} [args.uvScale] - the tile piece's padding crop.
  * @param {number} args.texWidth - texel width (sizes the blur mip).
  * @param {*} args.depthTexture - `buf:scene.depth`'s depth.
- * @param {*} args.rankTexture - `buf:scene.casterRank` (R = the top caster's stack index / 255 here).
+ * @param {*} args.rankTexture - `buf:scene.casterRank` (R top caster's index / 255, G its alpha, B highest fully
+ *   opaque index / 255).
  * @param {object|null} args.tileMotion - the tile's motion uniform bag, or null.
  * @returns {{material:any, uCenter:any, uSize:any, uRestRot:any, uOffset:any, uBlurPx:any, uTopDepth:any, uIndex:any, uAlpha:any}}
  */
@@ -418,17 +459,25 @@ export function buildMotionTileShadowMaterial(
     }
     const s = TSL.smoothstep(0, 0.9, acc.div(wsum));
 
-    // CASCADE: only where the top caster drawn here is lower in the stack than this one…
-    const topHere = rankTexture ? texture(rankTexture, screenUV).r : float(0);
-    const belowCasters = TSL.step(topHere, uIndex.sub(0.5 / 255));
+    // CASCADE (soft — see the module header): no caster at or above this one fully covers the pixel, and a
+    // partly covering top piece lets through exactly its uncovered fraction…
+    const rankHere = rankTexture ? texture(rankTexture, screenUV) : vec4(0, 0, 0, 0);
+    const myEdge = uIndex.sub(0.5 / 255);
+    const noCoreAbove = TSL.step(rankHere.b, myEdge);
+    const topBelow = TSL.step(rankHere.r, myEdge);
+    const belowCasters = noCoreAbove.mul(topBelow.add(float(1).sub(topBelow).mul(float(1).sub(rankHere.g))));
     // …and nothing above the whole stack covers the pixel.
     const notUnderRoof = depthTexture ? TSL.step(uTopDepth, texture(depthTexture, screenUV).x) : float(1);
     const below = belowCasters.mul(notUnderRoof);
 
-    // Zero before the grown quad's own border, whatever the blur.
+    // Zero at the grown quad's own border, fading over its last half-blur only (per axis, in grown-quad uv).
+    // The quad is grown 2 blurs past the art and the taps reach ~1.5 blurs, so nothing real lives out there;
+    // the first cut faded over 0.5/pad of the WHOLE quad and dimmed big shadows far inside their border.
     const q = uv();
-    const toBorder = TSL.min(TSL.min(q.x, q.y), TSL.min(float(1).sub(q.x), float(1).sub(q.y)));
-    const edgeFade = TSL.smoothstep(0, float(0.5).div(TSL.max(pad.x, pad.y)), toBorder);
+    const band = reach.mul(0.5).div(pad);
+    const edgeFade = TSL.smoothstep(0, band.x, TSL.min(q.x, float(1).sub(q.x))).mul(
+      TSL.smoothstep(0, band.y, TSL.min(q.y, float(1).sub(q.y)))
+    );
 
     const c = s.mul(below).mul(edgeFade).mul(uAlpha);
     return vec4(c, c, c, c);
@@ -438,55 +487,73 @@ export function buildMotionTileShadowMaterial(
 }
 
 /**
- * ONE caster's silhouette for `buf:scene.casterRank`: the tile's own geometry and live motion, its art's alpha
- * (texture-mode spin included), writing its stack index where the art is really opaque. MAX-blended.
+ * ONE caster's silhouette for `buf:scene.casterRank` — two materials on the tile's own geometry and live motion
+ * (texture-mode spin included):
+ *   - `material`: wherever the art has any alpha, writes (index, alpha) to R,G with NO blending — drawn in stack
+ *     order (`mesh.renderOrder` = index), so the highest caster here is the one left;
+ *   - `coreMaterial`: where the art is fully opaque, writes the index to B, MAX-blended (R and G receive 0, which a
+ *     MAX leaves untouched).
  * @param {*} THREE
  * @param {{tex:any, uvScale?:number[], tileMotion:object|null}} args
- * @returns {{material:any, uIndex:any}}
+ * @returns {{material:any, coreMaterial:any, uIndex:any}}
  */
 export function buildCasterSilhouetteMaterial(THREE, { tex, uvScale, tileMotion }) {
   const TSL = THREE.TSL;
   const { Fn, uniform, vec2, vec3, vec4, float, uv, texture, positionLocal } = TSL;
   const uIndex = uniform(float(1 / 255));
   const uUvScale = uniform(vec2(uvScale?.[0] ?? 1, uvScale?.[1] ?? 1));
-  const material = new THREE.NodeMaterial();
-  material.transparent = true;
-  material.depthTest = false;
-  material.depthWrite = false;
-  material.side = THREE.DoubleSide;
-  material.blending = THREE.CustomBlending;
-  material.blendEquation = THREE.MaxEquation;
-  material.blendSrc = THREE.OneFactor;
-  material.blendDst = THREE.OneFactor;
-  material.blendEquationAlpha = THREE.MaxEquation;
-  material.blendSrcAlpha = THREE.OneFactor;
-  material.blendDstAlpha = THREE.OneFactor;
-  if (tileMotion) {
-    material.positionNode = Fn(() => {
-      const r = positionLocal.xy.sub(tileMotion.uMotionPivot);
-      const rotated = vec2(
-        r.x.mul(tileMotion.uMotionRot.x).sub(r.y.mul(tileMotion.uMotionRot.y)),
-        r.x.mul(tileMotion.uMotionRot.y).add(r.y.mul(tileMotion.uMotionRot.x))
-      );
-      const xy = tileMotion.uMotionPivot.add(rotated).add(tileMotion.uMotionTranslate);
-      return vec3(xy.x, xy.y, positionLocal.z);
+  const positionNode = tileMotion
+    ? Fn(() => {
+        const r = positionLocal.xy.sub(tileMotion.uMotionPivot);
+        const rotated = vec2(
+          r.x.mul(tileMotion.uMotionRot.x).sub(r.y.mul(tileMotion.uMotionRot.y)),
+          r.x.mul(tileMotion.uMotionRot.y).add(r.y.mul(tileMotion.uMotionRot.x))
+        );
+        const xy = tileMotion.uMotionPivot.add(rotated).add(tileMotion.uMotionTranslate);
+        return vec3(xy.x, xy.y, positionLocal.z);
+      })()
+    : null;
+  const alphaNode = () =>
+    Fn(() => {
+      let s = uv().mul(uUvScale);
+      if (tileMotion) {
+        const rel = s.sub(tileMotion.uTexPivotUV);
+        const rc = tileMotion.uTexRotUV.x;
+        const rs = tileMotion.uTexRotUV.y;
+        s = tileMotion.uTexPivotUV
+          .add(tileMotion.uTexScrollUV)
+          .add(vec2(rel.x.mul(rc).add(rel.y.mul(rs)), rel.y.mul(rc).sub(rel.x.mul(rs))));
+      }
+      return texture(tex, s).a;
     })();
-  }
-  const alpha = Fn(() => {
-    let s = uv().mul(uUvScale);
-    if (tileMotion) {
-      const rel = s.sub(tileMotion.uTexPivotUV);
-      const rc = tileMotion.uTexRotUV.x;
-      const rs = tileMotion.uTexRotUV.y;
-      s = tileMotion.uTexPivotUV
-        .add(tileMotion.uTexScrollUV)
-        .add(vec2(rel.x.mul(rc).add(rel.y.mul(rs)), rel.y.mul(rc).sub(rel.x.mul(rs))));
-    }
-    return texture(tex, s).a;
-  })();
-  material.maskNode = alpha.greaterThan(0.5);
-  material.colorNode = vec4(uIndex, uIndex, uIndex, float(1));
-  return { material, uIndex };
+  const make = () => {
+    const m = new THREE.NodeMaterial();
+    m.transparent = true;
+    m.depthTest = false;
+    m.depthWrite = false;
+    m.side = THREE.DoubleSide;
+    if (positionNode) m.positionNode = positionNode;
+    return m;
+  };
+
+  const material = make();
+  material.blending = THREE.NoBlending;
+  const a = alphaNode();
+  material.maskNode = a.greaterThan(0.004);
+  material.colorNode = vec4(uIndex, a, float(0), float(1));
+
+  const coreMaterial = make();
+  coreMaterial.blending = THREE.CustomBlending;
+  coreMaterial.blendEquation = THREE.MaxEquation;
+  coreMaterial.blendSrc = THREE.OneFactor;
+  coreMaterial.blendDst = THREE.OneFactor;
+  coreMaterial.blendEquationAlpha = THREE.MaxEquation;
+  coreMaterial.blendSrcAlpha = THREE.OneFactor;
+  coreMaterial.blendDstAlpha = THREE.OneFactor;
+  coreMaterial.maskNode = alphaNode().greaterThan(0.98);
+  coreMaterial.colorNode = vec4(float(0), float(0), uIndex, float(1));
+
+  return { material, coreMaterial, uIndex };
 }
 
 /**

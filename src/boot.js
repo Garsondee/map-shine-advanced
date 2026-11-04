@@ -13540,6 +13540,8 @@ function install() {
           return st.baseHeightPx;
         case 'layerStepPx':
           return st.layerStepPx;
+        case 'childLiftPx':
+          return st.childLiftPx;
         case 'heightScale':
           return st.heightScale;
         case 'blurBasePx':

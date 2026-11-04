@@ -89,6 +89,38 @@ export function run(t) {
     ok('a per-tile height of 0 means automatic', z.get('x') === 30);
   }
 
+  // ATTACHED PIECES: a planet on its arm hangs at the arm's height (+ lift), whatever its own sort says.
+  {
+    const settings = { baseHeightPx: 40, layerStepPx: 20, childLiftPx: 4, heightScale: 1 };
+    const h = resolveCasterHeights(
+      [
+        { id: 'arm', elevation: 0, sort: 35 },
+        { id: 'planet', elevation: 0, sort: 150, parentId: 'arm' },
+        { id: 'moonArm', elevation: 0, sort: 22, parentId: 'planet' },
+        { id: 'moon', elevation: 0, sort: 90, parentId: 'moonArm' },
+        { id: 'gear', elevation: 0, sort: 80 },
+        { id: 'sun', elevation: 0, sort: 999 },
+      ],
+      {},
+      settings
+    );
+    ok('free pieces are ranked among the free pieces only (arm 35 is the lowest)', h.get('arm') === 40);
+    ok('next free sort is one step up', h.get('gear') === 60 && h.get('sun') === 80);
+    ok("the planet sits on its arm, not at its own sort's height", h.get('planet') === 44);
+    ok('a chain keeps lifting by the small step', h.get('moonArm') === 48 && h.get('moon') === 52);
+    const cyc = resolveCasterHeights(
+      [
+        { id: 'a', elevation: 0, sort: 1, parentId: 'b' },
+        { id: 'b', elevation: 0, sort: 2, parentId: 'a' },
+      ],
+      {},
+      settings
+    );
+    ok('a parent cycle resolves to finite heights', Number.isFinite(cyc.get('a')) && Number.isFinite(cyc.get('b')));
+    const orphan = resolveCasterHeights([{ id: 'p', elevation: 0, sort: 5, parentId: 'missing' }], {}, settings);
+    ok('a missing parent makes the piece free', orphan.get('p') === 40);
+  }
+
   // THE THROW IS THE WINDOW'S OWN: same direction, scaled by height over the window's throw height.
   {
     const sun = { elevationDeg: 35, azimuthDeg: 250, dayFactor01: 1 };

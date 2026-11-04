@@ -10326,14 +10326,18 @@ async function startVtPanViewerUnserialized({
     // the skylight multiply below. Same lifetime rules as the token contact shadows above.
     const casterShadowScene = new THREE.Scene();
     const casterSilhouetteScene = new THREE.Scene();
+    const casterCoreScene = new THREE.Scene();
     const casterShadows = new Map();
     const casterSkylightQuad = new THREE.QuadMesh(buildCasterSkylightMaterial(THREE, sceneCasterShadow.texture));
     let casterShadowDrewLastFrame = false;
     function disposeCasterShadowEntry(entry) {
       casterShadowScene.remove(entry.mesh);
+      entry.shadowGeometry?.dispose();
       casterSilhouetteScene.remove(entry.silhouetteMesh);
+      casterCoreScene.remove(entry.coreMesh);
       try {
         entry.silhouetteMaterial.dispose();
+        entry.coreMaterial.dispose();
         entry.material.dispose();
       } catch (err) {
         log.warn('moving-tile shadow: material dispose failed (VRAM may leak):', err);
@@ -10378,15 +10382,23 @@ async function startVtPanViewerUnserialized({
           const grid = casters[0].tileDoc?.parent?.grid ?? null;
           const gridPx = readGridSizePixels().gridSizePixels;
           const pxPerElevationUnit = Number(grid?.distance) > 0 ? gridPx / Number(grid.distance) : 0;
-          const heights = resolveCasterHeights(
-            casters.map((c) => ({
-              id: c.item.id,
-              elevation: c.tileDoc.elevation,
-              sort: c.tileDoc.sort,
-              heightPx: c.cfg.shadowHeightPx,
-            })),
-            { pxPerElevationUnit }
-          );
+          // Heights by TILE id (Tile Motion parents are tile ids), with every ancestor of a caster included —
+          // a planet's height is its arm's, whether or not the arm casts (motion-tile-shadow.js 'HOW HIGH').
+          const heightInputs = new Map();
+          const addHeightInput = (tileDoc, cfg) => {
+            if (!tileDoc?.id || heightInputs.has(tileDoc.id)) return;
+            heightInputs.set(tileDoc.id, {
+              id: tileDoc.id,
+              elevation: tileDoc.elevation,
+              sort: tileDoc.sort,
+              heightPx: cfg?.shadowHeightPx,
+              parentId: cfg?.parentId ?? null,
+            });
+            const parentDoc = cfg?.parentId ? (tileDoc.parent?.tiles?.get?.(cfg.parentId) ?? null) : null;
+            if (parentDoc) addHeightInput(parentDoc, getTileMotionConfig(parentDoc.id));
+          };
+          for (const c of casters) addHeightInput(c.tileDoc, c.cfg);
+          const heights = resolveCasterHeights([...heightInputs.values()], { pxPerElevationUnit });
           const windowThrow = resolveWindowThrow(
             lastEnvSnapshot?.env?.sun ?? null,
             getWindowRenderState()?.params ?? {}
@@ -10415,7 +10427,15 @@ async function startVtPanViewerUnserialized({
                 rankTexture: sceneCasterRank.texture,
                 tileMotion: c.t.tileMotion ?? null,
               });
-              const mesh = new THREE.Mesh(c.t.geometry, built.material);
+              // The shadow draws on its OWN full quad, never the tile's mesh: a tile's mesh can be coverage-
+              // tessellated (vt/coverage-mesh.js) with its transparent cells LEFT OUT, and a shadow drawn on it
+              // had square gaps wherever the art is clear — the stepped "clipped pixel" shadow inside a gear's
+              // holes (author, 2026-11-04). Corners are the tile's rest pose, rewritten when it is moved.
+              const shadowGeometry = new THREE.BufferGeometry();
+              shadowGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(12), 3));
+              shadowGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+              shadowGeometry.setIndex([...QUAD_INDICES]);
+              const mesh = new THREE.Mesh(shadowGeometry, built.material);
               mesh.frustumCulled = false;
               casterShadowScene.add(mesh);
               const sil = buildCasterSilhouetteMaterial(THREE, {
@@ -10426,11 +10446,18 @@ async function startVtPanViewerUnserialized({
               const silhouetteMesh = new THREE.Mesh(c.t.geometry, sil.material);
               silhouetteMesh.frustumCulled = false;
               casterSilhouetteScene.add(silhouetteMesh);
+              const coreMesh = new THREE.Mesh(c.t.geometry, sil.coreMaterial);
+              coreMesh.frustumCulled = false;
+              casterCoreScene.add(coreMesh);
               entry = {
                 ...built,
                 mesh,
                 silhouetteMesh,
                 silhouetteMaterial: sil.material,
+                shadowGeometry,
+                cornersKey: '',
+                coreMesh,
+                coreMaterial: sil.coreMaterial,
                 uSilhouetteIndex: sil.uIndex,
                 tex: c.t.tex,
                 geometry: c.t.geometry,
@@ -10439,6 +10466,13 @@ async function startVtPanViewerUnserialized({
               casterShadows.set(c.item.id, entry);
             }
             const q = computeQuadCorners(c.state.placement);
+            const cornersKey = q.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join('|');
+            if (cornersKey !== entry.cornersKey) {
+              entry.cornersKey = cornersKey;
+              entry.shadowGeometry.attributes.position.array.set(buildQuadPositions(q));
+              entry.shadowGeometry.attributes.position.needsUpdate = true;
+              entry.shadowGeometry.computeBoundingSphere();
+            }
             const ax = q[1].x - q[0].x;
             const ay = q[1].y - q[0].y;
             const w = Math.hypot(ax, ay) || 1;
@@ -10446,13 +10480,15 @@ async function startVtPanViewerUnserialized({
             entry.uCenter.value.set((q[0].x + q[1].x + q[2].x + q[3].x) / 4, (q[0].y + q[1].y + q[2].y + q[3].y) / 4);
             entry.uSize.value.set(w, h);
             entry.uRestRot.value.set(ax / w, ay / w);
-            const heightPx = heights.get(c.item.id) ?? 0;
+            const heightPx = heights.get(c.tileDoc.id) ?? 0;
             const shadow = resolveCasterShadow(heightPx, windowThrow);
             entry.uOffset.value.set(shadow.offsetX, shadow.offsetY);
             entry.uBlurPx.value = shadow.blurPx;
             entry.uTopDepth.value = topDepth;
             entry.uIndex.value = c.stackIndex / 255;
             entry.uSilhouetteIndex.value = c.stackIndex / 255;
+            // Stack order: the ordered overwrite leaves the highest caster's index + alpha at each pixel.
+            entry.silhouetteMesh.renderOrder = c.stackIndex;
             entry.uAlpha.value = c.t.appearance?.uAlpha?.value ?? 1;
             entry.mesh.visible = true;
             seen.add(c.item.id);
@@ -11101,6 +11137,9 @@ async function startVtPanViewerUnserialized({
           renderer.setRenderTarget(sceneCasterRank);
           renderer.autoClearColor = true;
           renderer.render(casterSilhouetteScene, camera);
+          renderer.autoClearColor = false;
+          renderer.render(casterCoreScene, camera);
+          renderer.autoClearColor = true;
           renderer.setRenderTarget(sceneCasterShadow);
           renderer.render(casterShadowScene, camera);
           renderer.setClearColor(prevClearColor, prevClearAlpha);

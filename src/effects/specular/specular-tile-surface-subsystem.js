@@ -115,6 +115,7 @@ export function createSpecularTileSurfaceSubsystem({
   createPackTexture,
   illumTexture,
   depthTexture = null,
+  depthFlagsTexture = null,
   resolveExpectedDepth,
   getItemTileMotion,
   uViewRect,
@@ -168,6 +169,7 @@ export function createSpecularTileSurfaceSubsystem({
       shapeTexture: entry.shapeTexture,
       illumTexture,
       depthTexture,
+      depthFlagsTexture,
       uViewRect,
       uOutdoorsRect,
       outdoorsTexNode,
@@ -650,6 +652,18 @@ export function createSpecularTileSurfaceSubsystem({
       refreshVisibility();
     },
     /** True while some parked entry has not been through a warm-up draw yet. */
+    /**
+     * Each surface mesh with the id of the drawable it is painted on, so Parallax can move it with that
+     * drawable's art (`parallax-subsystem.js#placeLike`). The mesh's vertices stay in world px.
+     * @param {(mesh: *, itemId: string) => void} cb
+     */
+    forEachSurfaceMesh(cb) {
+      for (const [id, e] of entries) {
+        if (e.mesh) cb(e.mesh, id);
+        if (e.absorbMesh) cb(e.absorbMesh, id);
+        if (e.emitMesh) cb(e.emitMesh, id);
+      }
+    },
     hasUnwarmed: () => [...entries.values()].some((e) => (e.mesh || e.absorbMesh) && !e.presented && !e.warmed),
     getStatus() {
       return {

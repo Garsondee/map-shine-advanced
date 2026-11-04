@@ -47,7 +47,7 @@
  */
 
 import { buildSunVisibilityNode, buildWorldSpaceSunVisibilityNode } from './sun-occlusion-render.js';
-import { liftedLookupNode, layerScaleDecodeNode } from '../../scene/index.js';
+import { liftedLookupNode, layerScaleDecodeNode, pixelMapXYNode } from '../../scene/index.js';
 // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — reused, not
 // reinvented: the SAME footprint threshold `fluid-render.js`'s own mesh
 // gates its silhouette on (`smoothstep(EDGE0, EDGE1, maskTexNode.r)`), so a
@@ -555,8 +555,10 @@ export function buildEnvironmentalLightMaterials({
    * gate from byte-identical maths — a second inline copy is how the two would
    * drift and gate different halves of the map.
    */
-  const outdoorsAt = () =>
-    buildOutdoorsGate(THREE.TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode, uExtentRect: uOutdoorsExtent });
+  const outdoorsAt = (mapXY = null) =>
+    mapXY && outdoorsTexNode
+      ? sampleOutdoorsAtWorldXY(THREE.TSL, uOutdoorsRect, outdoorsTexNode, mapXY.x, mapXY.y, uOutdoorsExtent)
+      : buildOutdoorsGate(THREE.TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode, uExtentRect: uOutdoorsExtent });
 
   // ═══════════════════════════════════════════════════════════════════════
   // THE SUN'S OWN SHADOW (docs/planning/Sun-Shadows.md) — building, overhead
@@ -728,7 +730,20 @@ export function buildEnvironmentalLightMaterials({
     // own curve (`sun-occlusion.js#GATE_SHARPEN_*`), so the indoor light stops where the
     // shadows already treat the ground as outdoors. Only this fill's blend: every other
     // `_Outdoors` consumer reads the shared gate unchanged.
-    const outdoorsRaw = outdoorsAt();
+    // PARALLAX (2026-11-04): `_Outdoors` is read where the layer this pixel SHOWS has the point
+    // (`scene-eye.js#pixelMapXYNode`), so a floor Parallax drew smaller — a basement down a stairwell —
+    // gets the sky tint of its own spot, not of the spot it now covers on screen. Exactly the old
+    // lookup on the viewed floor (its scale byte decodes to 1). One sample of the depth colour
+    // attachment, shared with the shadow floor gate below.
+    const plxFlagsHere = depthFlagsTexNode ? depthFlagsTexNode.sample(uv()) : null;
+    const plxPixelXY = plxFlagsHere
+      ? pixelMapXYNode(THREE.TSL, {
+          shownXY: vec2(mix(uViewRect.x, uViewRect.z, uv().x), mix(uViewRect.y, uViewRect.w, uv().y)),
+          eye: uViewRect.xy.add(uViewRect.zw).mul(0.5),
+          flagsG: plxFlagsHere.g,
+        }).toVar('envPixelMapXY')
+      : null;
+    const outdoorsRaw = outdoorsAt(plxPixelXY);
     const outdoors = outdoorsRaw ? smoothstep(float(GATE_SHARPEN_LOW), float(GATE_SHARPEN_HIGH), outdoorsRaw) : null;
     // `mix(1, skyMultiplier, outdoors)` — indoors keeps the untouched Foundry
     // ambient, outdoors gets the sky's hue. At `realism01 = 0` the multiplier
@@ -747,7 +762,7 @@ export function buildEnvironmentalLightMaterials({
     // fullscreen quad reads it at `uv()` rather than `screenUV` because this
     // pass IS the screen (the point-light path, drawing world-space quads,
     // uses `screenUV` for the identical sample — see its own call site).
-    const depthFloorHere = depthFlagsTexNode ? depthFlagsTexNode.sample(uv()) : null;
+    const depthFloorHere = plxFlagsHere;
     const floorSource = depthFloorHere ?? attrTexNode;
     // THE LIFTED LOOKUP (2026-10-28, `scene/scene-eye.js#liftedLookupNode`): the top layer here may be
     // one Parallax raised (a canopy, a roof) — its scale is the depth pass's G byte. The building and

@@ -13,6 +13,7 @@ import {
   encodeLayerScale01,
   decodeLayerScale01,
   liftedLookup,
+  pixelMapXY,
 } from '../scene-eye.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
@@ -80,4 +81,17 @@ export function run(t) {
     'lookup: a sunk floor gets no throw',
     near(liftedLookup(p, lookEye, 2000, 0.95, { x: 0.5, y: 0 }).x, 1000 + 500 / 0.95, 1e-9)
   );
+
+  // pixelMapXY — a mask read over a pixel that shows another layer is read where that layer's point is.
+  ok(
+    'pixel map: the viewed floor (scale 1) is the pixel itself',
+    near(pixelMapXY(p, lookEye, encodeLayerScale01(1)).x, 1500)
+  );
+  const sunk = 0.958;
+  const back = pixelMapXY(p, lookEye, encodeLayerScale01(sunk));
+  ok(
+    '⭐ pixel map: a sunk floor seen through a hole is read at its own map point (within a byte’s step)',
+    Math.abs(back.x - (1000 + 500 / sunk)) < 0.5 && near(back.y, p.y)
+  );
+  ok('pixel map: an unwritten byte reads as scale 1', near(pixelMapXY(p, lookEye, 0).x, 1500));
 }

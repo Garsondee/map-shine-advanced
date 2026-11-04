@@ -74,8 +74,35 @@ export function run(t) {
     floorArt.scale.x === 1 && floorArt.position.x === 0 && floorArt.position.y === 0
   );
 
+  // THE MASKS RIDE WITH THEIR ART: a tile's own `_Specular` quad (a separate mesh, same world corners) takes
+  // its tile's scale this frame; a floor-wide surface takes its floor's.
+  const lowTile = mesh({ id: 'lowTile' });
+  const sLow = p.placeItem(lowTile, 0, 'tile:low');
+  const lowShine = mesh({ id: 'lowShine' });
+  ok('⭐ a surface takes its tile’s scale', near(p.placeLike(lowShine, 'tile:low'), sLow) && sLow < 1);
+  ok(
+    '⭐ and its tile’s exact transform, so mask and art cannot part',
+    near(lowShine.scale.x, lowTile.scale.x) &&
+      near(lowShine.position.x, lowTile.position.x) &&
+      near(lowShine.position.y, lowTile.position.y)
+  );
+  ok('itemScale reports it', near(p.itemScale('tile:low'), sLow));
+  p.placeItem(floorArt, 10, 'tile:viewed');
+  const viewedShine = mesh({ id: 'viewedShine' });
+  p.placeLike(viewedShine, 'tile:viewed');
+  ok('a surface on the viewed floor stays put', viewedShine.scale.x === 1 && viewedShine.position.x === 0);
+  const orphan = mesh({ id: 'orphan' });
+  p.placeLike(orphan, 'tile:never-placed');
+  ok('a surface whose drawable was not placed stays at 1', orphan.scale.x === 1 && orphan.position.x === 0);
+  const floorShine = mesh({ id: 'floorShine' });
+  p.placeFloor(floorShine, 0);
+  ok('a floor-wide surface takes its floor’s scale', near(floorShine.scale.x, p.floorScale(0)) && p.floorScale(0) < 1);
+  p.placeFloor(floorShine, 1);
+  ok('the viewed floor’s surface is unmoved', floorShine.scale.x === 1 && floorShine.position.x === 0);
+
   // The eye follows the view.
   p.update(frame({ viewRect: { minX: 500, minY: 0, maxX: 2500, maxY: 1000 }, nowMs: 16 }));
+  ok('a new frame forgets last frame’s drawables', p.itemScale('tile:low') === 1);
   p.placeItem(roof, 20);
   ok('panning moves the eye, so the layer slides', near(roof.position.x + roof.scale.x * 1500, 1500));
 
@@ -87,6 +114,8 @@ export function run(t) {
   p.update(frame({ enabled: false }));
   p.placeItem(roof, 20);
   ok('turning off restores the mesh', roof.scale.x === 1 && roof.position.x === 0 && roof.position.y === 0);
+  p.placeLike(lowShine, 'tile:low');
+  ok('turning off restores a surface too', lowShine.scale.x === 1 && lowShine.position.x === 0);
   p.placeProxy(twin);
   ok('and its twin', twin.scale.x === 1 && twin.position.x === 0 && twin.position.z === 0.42);
 

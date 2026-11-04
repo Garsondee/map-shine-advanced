@@ -26,6 +26,8 @@ export function createParallaxSubsystem({ fovDeg = 45 } = {}) {
   const glide = createFloorGlide();
   /** colour-mesh geometry → the scale this frame gave it, for its depth twins. */
   const byGeometry = new Map();
+  /** drawable id → the scale this frame gave its art, for the surfaces painted on it (`placeLike`). */
+  const byItemId = new Map();
   /** This frame's blended layers, (renderOrder, edge-shadow share), for the Table's shadow ladder. */
   const shades = [];
   /** meshes this subsystem has moved, so turning off (or a scale back to 1) puts them back. */
@@ -89,6 +91,7 @@ export function createParallaxSubsystem({ fovDeg = 45 } = {}) {
       snap = false,
     }) {
       byGeometry.clear();
+      byItemId.clear();
       shades.length = 0;
       if (snap) glide.settle(floorIndex);
       const dur = params?.glideSec ?? DEFAULTS.glideSec;
@@ -143,11 +146,16 @@ export function createParallaxSubsystem({ fovDeg = 45 } = {}) {
     /** The smallest scale any layer gets this frame (1 when off). */
     lowestScale: () => (on ? Math.min(1, frame.lowestScale) : 1),
     frame: () => frame,
-    /** Move a colour mesh to the scale of `elevation`; remember it for its depth twins. Returns the scale. */
-    placeItem(mesh, elevation) {
+    /**
+     * Move a colour mesh to the scale of `elevation`; remember it for its depth twins and, given the
+     * drawable's id, for the surfaces painted on it. Returns the scale.
+     * @param {*} mesh @param {number} elevation @param {string} [itemId]
+     */
+    placeItem(mesh, elevation, itemId) {
       const s = on ? frame.scaleOf(elevation) : 1;
       place(mesh, s);
       if (mesh?.geometry && Math.abs(s - 1) >= EPS) byGeometry.set(mesh.geometry, s);
+      if (itemId != null && Math.abs(s - 1) >= EPS) byItemId.set(itemId, s);
       // Only blended layers can take a step of the shadow between them: three draws every opaque mesh
       // before any blended one, so an opaque layer always sits under the whole shadow.
       if (on && mesh?.visible !== false && mesh?.material?.transparent === true && Number.isFinite(mesh.renderOrder))
@@ -163,6 +171,26 @@ export function createParallaxSubsystem({ fovDeg = 45 } = {}) {
     /** Move a mesh to an explicit scale (a layer whose elevation the caller already resolved). */
     placeScale(mesh, s) {
       place(mesh, on ? s : 1);
+    },
+    /**
+     * THE MASKS RIDE WITH THEIR ART (2026-11-04, the author: "Parallax mode doesn't work if our masks
+     * don't all align up correctly"). A surface painted on a drawable — a tile's `_Specular`,
+     * `_Window`, prism, iridescence or fluid quad — is its own mesh in its own scene, with the same
+     * world-px corners as the tile's colour mesh. It takes that tile's scale this frame, so the shine
+     * sits on the metal it was painted for. A drawable this frame did not move (or did not place at
+     * all) leaves it at scale 1, which is where its art is too.
+     * @param {*} mesh @param {string} itemId @returns {number} the scale given.
+     */
+    placeLike(mesh, itemId) {
+      const s = on ? (byItemId.get(itemId) ?? 1) : 1;
+      place(mesh, s);
+      return s;
+    },
+    /** The scale drawable `itemId`'s art got this frame (1 when unmoved or off). */
+    itemScale: (itemId) => (on ? (byItemId.get(itemId) ?? 1) : 1),
+    /** Move a mesh that lies on floor `index`'s plane (a floor-wide surface) with that floor's art. */
+    placeFloor(mesh, index) {
+      place(mesh, on ? frame.scaleOf(frame.floorBase(index)) : 1);
     },
     /** A depth twin: same geometry as a colour mesh, so the same scale; unmoved when that mesh is. */
     placeProxy(mesh) {

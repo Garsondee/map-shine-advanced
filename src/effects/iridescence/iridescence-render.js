@@ -129,6 +129,7 @@ export function buildIridescenceSurfaceMaterial({
     cos,
     step,
     positionWorld,
+    positionLocal,
   } = THREE.TSL;
 
   // ── UNIFORMS — every IRIDESCENCE_PARAMS knob this material actually reads ──
@@ -201,7 +202,9 @@ export function buildIridescenceSurfaceMaterial({
   if (plan.flowEnabled) {
     // ── THE NOISE FLAVOUR — a JS-time branch, a genuinely different formula
     // per flavour (this function's own `noiseType` doc). ───────────────────
-    const worldXY = vec2(positionWorld.x, positionWorld.y).mul(uNoiseScale);
+    // Map-registered noise reads where the tile IS (`positionLocal`, world px; Parallax moves only the
+    // mesh transform), so the sheen stays on the paint as a lifted layer slides.
+    const worldXY = vec2(positionLocal.x, positionLocal.y).mul(uNoiseScale);
     let randomOffset;
     if (Number(noiseType) === 0) {
       // "Liquid" — V2's own two-octave sine field, rotated by the golden

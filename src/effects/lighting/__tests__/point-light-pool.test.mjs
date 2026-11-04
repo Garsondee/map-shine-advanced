@@ -21,7 +21,7 @@ import {
   applyParallaxToFootprint,
 } from '../point-light-pool.js';
 import { displacePoint } from '../../parallax/parallax-model.js';
-import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL, elevationRank } from '../point-light-illumination.js';
+import { LIGHT_ELEVATION_UNCONFIGURED_SENTINEL, elevationRank, setParallaxUndo } from '../point-light-illumination.js';
 
 const FLOORS = [
   { index: 0, id: 'basement', elevationBottom: -10, elevationTop: 0 },
@@ -330,5 +330,35 @@ export function run(t) {
     applyLightFootprint(oval2, { x: 0, y: 0, radius: 40, ellipseAlongPx: 100, ellipseAngleRad: 1 });
     applyParallaxToFootprint(oval2, eye, 0.5);
     ok('an oval keeps its shape and angle', oval2.scale.x === 50 && oval2.scale.y === 20 && oval2.rotation.z === 1);
+
+    // setParallaxUndo — the shader's `eye + (drawn − eye)·(1/s)` must return a moved pool's fragment to its
+    // map point, so the gobo, window reach and shadow fields stay on the pool (2026-11-04).
+    const vec3 = () => ({
+      x: NaN,
+      y: NaN,
+      z: NaN,
+      set(a, b, c) {
+        this.x = a;
+        this.y = b;
+        this.z = c;
+      },
+    });
+    const u = { value: vec3() };
+    setParallaxUndo(u, eye, 0.9);
+    const rimDrawn = { x: lowered.position.x + lowered.scale.x, y: lowered.position.y }; // local (1, 0)
+    const rimMap = {
+      x: u.value.x + (rimDrawn.x - u.value.x) * u.value.z,
+      y: u.value.y + (rimDrawn.y - u.value.y) * u.value.z,
+    };
+    ok(
+      '⭐ undo: a moved pool’s rim reads its map point (light 1400 + radius 100)',
+      Math.abs(rimMap.x - 1500) < 1e-9 && Math.abs(rimMap.y - 700) < 1e-9
+    );
+    setParallaxUndo(u, null, 0.9);
+    ok('undo: rest value when the light was not moved', u.value.x === 0 && u.value.y === 0 && u.value.z === 1);
+    setParallaxUndo(u, eye, 1);
+    ok('undo: rest value at scale 1', u.value.z === 1 && u.value.x === 0);
+    setParallaxUndo(null, eye, 0.9);
+    ok('undo: a material without the uniform is skipped', true);
   }
 }

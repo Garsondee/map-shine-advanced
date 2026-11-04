@@ -950,7 +950,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     vec3,
     uniform,
     texture,
-    positionWorld,
+    positionLocal,
     Fn,
     If,
     select,
@@ -1469,8 +1469,10 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
    * @returns {{offsetPx: *, gain: *, debugFlow: *, debugAux: *, debugDrops: *}}
    */
   function build({ maskGated = null } = {}) {
+    // The pane's flow field is registered to the map, so it reads where the glass IS (`positionLocal`:
+    // the window quad is baked in world px; Parallax moves only its transform), never where it is drawn.
     const body = Fn(() => {
-      const P = positionWorld.xy;
+      const P = positionLocal.xy;
       const result = vec3(0, 0, 1).toVar();
       const fl = fetchFlow(P);
       If(uPresence.greaterThan(0.5).and(fl.gate.greaterThan(0.01)), () => {
@@ -1528,7 +1530,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     let snowNodes = null;
     if (snow) {
       const sp = Fn(() => {
-        const P = positionWorld.xy;
+        const P = positionLocal.xy;
         const fl = fetchFlow(P);
         const off = vec2(0, 0).toVar();
         const gain = F(1).toVar();
@@ -1541,13 +1543,13 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
 
     // The instrument's two views, built from their own fetch so they read the flow even while the pane is dry.
     const flowView = Fn(() => {
-      const fl = fetchFlow(positionWorld.xy);
+      const fl = fetchFlow(positionLocal.xy);
       const dir = unitOrDownT(mix(fl.P, fl.S, fl.mix));
       const k = select(fl.kappa.greaterThan(0.01), F(1), F(0));
       return vec3(dir.x.mul(0.5).add(0.5), dir.y.mul(0.5).add(0.5), fl.h).mul(k);
     })();
     const auxView = Fn(() => {
-      const fl = fetchFlow(positionWorld.xy);
+      const fl = fetchFlow(positionLocal.xy);
       return vec3(fl.mix, fl.kappa, fl.h);
     })();
     return {

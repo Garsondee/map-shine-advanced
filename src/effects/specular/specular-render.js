@@ -78,6 +78,7 @@ import { ISLAND_PARALLAX_RANGE } from './specular-islands.js';
 import { SPECULAR_DEBUG_CHANNELS, SPECULAR_DEBUG_BOOST } from './specular.js';
 import { buildDebugChannelColor, pickEquals } from '../debug-channel-select.js';
 import { sharedFn } from '../../core/tsl-fn.js';
+import { pixelMapXYNode } from '../../scene/index.js';
 
 /**
  * Fraction of the authored file's resolution to upload for the SHIMMER's own
@@ -725,6 +726,7 @@ export function buildSpecularSurfaceMaterial({
   islandPackTexture,
   illumTexture,
   depthTexture = null,
+  depthFlagsTexture = null,
   positionNode = null,
   maskUvNode = null,
   uViewRect,
@@ -781,6 +783,7 @@ export function buildSpecularSurfaceMaterial({
     float,
     uniform,
     positionWorld,
+    positionLocal,
     smoothstep,
     step,
     clamp,
@@ -923,7 +926,47 @@ export function buildSpecularSurfaceMaterial({
   // `texture`-mode surface's own scrolled/rotated coordinate substitutes for
   // the raw quad UV here; every existing (floor) caller passes nothing and
   // gets exactly `uv()`, so this crop math is otherwise untouched.
-  const baseMaskUv = maskUvNode ?? uv();
+  //
+  // ── WHERE ON THE MAP THIS PIXEL IS (2026-11-04, Parallax) ───────────────
+  // The quad's vertices are baked in world px and Parallax moves a layer only through the mesh
+  // transform, so `positionLocal` is where this surface IS on the map and `positionWorld` is where it
+  // is DRAWN. But the pixel under the fragment may show another layer: the Big Bank's Ground
+  // `_Specular` paints the basement rails seen down the stairwell, and Parallax draws the basement
+  // smaller. `mapXY` is where the layer the pixel SHOWS has this point (`scene-eye.js#pixelMapXYNode`,
+  // from the depth pass's per-pixel scale), so the mask, the pattern and `_Outdoors` are all read at the
+  // paint for the art actually on screen. `mapDelta` is how far that is from this surface's own point:
+  // exactly 0 over its own layer on the viewed floor, so the common case samples what it always did.
+  // No flags texture (an older caller) → the surface's own point, still right over its own layer.
+  const meshMapXY = positionLocal.xy;
+  let mapXY = meshMapXY;
+  let baseMaskUv = maskUvNode ?? uv();
+  if (depthFlagsTexture) {
+    const plxSpanX = max(uViewRect.z.sub(uViewRect.x), float(1));
+    const plxSpanY = max(uViewRect.w.sub(uViewRect.y), float(1));
+    const plxScreenUv = vec2(
+      clamp(positionWorld.x.sub(uViewRect.x).div(plxSpanX), 0, 1),
+      clamp(positionWorld.y.sub(uViewRect.y).div(plxSpanY), 0, 1)
+    );
+    const plxEye = vec2(uViewRect.x.add(uViewRect.z), uViewRect.y.add(uViewRect.w)).mul(float(0.5));
+    mapXY = pixelMapXYNode(TSL, {
+      shownXY: positionWorld.xy,
+      eye: plxEye,
+      flagsG: texture(depthFlagsTexture, plxScreenUv).g,
+    }).toVar('specMapXY');
+    // The mask is addressed by the quad's UV, so the map step becomes a UV step through the quad's own
+    // (affine) Jacobian: screen derivatives of UV and of the map point, B·A⁻¹·delta. Exact for any
+    // rotated, flipped or tile-motion quad, since a quad is affine across its whole face.
+    const mapDelta = mapXY.sub(meshMapXY);
+    const dPx = dFdx(meshMapXY);
+    const dPy = dFdy(meshMapXY);
+    const dUx = dFdx(baseMaskUv);
+    const dUy = dFdy(baseMaskUv);
+    const det = dPx.x.mul(dPy.y).sub(dPy.x.mul(dPx.y));
+    const safeDet = abs(det).lessThan(float(1e-8)).select(float(1e-8), det);
+    const stepX = dPy.y.mul(mapDelta.x).sub(dPy.x.mul(mapDelta.y)).div(safeDet);
+    const stepY = dPx.x.mul(mapDelta.y).sub(dPx.y.mul(mapDelta.x)).div(safeDet);
+    baseMaskUv = baseMaskUv.add(dUx.mul(stepX)).add(dUy.mul(stepY)).toVar('specPlxMaskUv');
+  }
   const maskUv = vec2(
     mix(uMaskUvBounds.x, uMaskUvBounds.z, baseMaskUv.x),
     mix(uMaskUvBounds.y, uMaskUvBounds.w, baseMaskUv.y)
@@ -1023,7 +1066,11 @@ export function buildSpecularSurfaceMaterial({
   // ── PATTERN SPACE ──────────────────────────────────────────────────────
   const tSec = timeMsNode.mul(float(0.001)).toVar('specTimeSec');
   const patternScale = max(uPatternScale, float(1)).toVar('specPatternScale');
-  const worldUv = vec2(positionWorld.x, positionWorld.y).div(patternScale);
+  // Everything registered to the map — the pattern, the flicker, the sparkle cells, the `_Outdoors`
+  // read — uses `mapXY` (see THE MASK UV), so it stays glued to the paint as a layer slides; the
+  // screen-buffer lookups (`screenU`/`screenV`, the view direction) keep `positionWorld`, because
+  // `buf:scene.illum` and the depth buffer were drawn where the art is shown.
+  const worldUv = vec2(mapXY.x, mapXY.y).div(patternScale);
   // LADDER TIER 2 ('parallax'). `uViewCentre × islandParallax × strength /
   // patternScale` — at depth 1 this is V2's measured ≈1:1 world-space slide,
   // i.e. very nearly screen-locked. V2 buried the same relationship in a
@@ -1051,7 +1098,7 @@ export function buildSpecularSurfaceMaterial({
   // The SAME world-space read `buf:scene.attr`'s G channel uses — injected, so
   // there is exactly one copy of it. Null means no mask at all, which reads as
   // indoors, matching what `packFloorAttr` chooses for the same input.
-  const outdoorsNode = buildOutdoorsGate(TSL, { uOutdoorsRect, outdoorsTexNode });
+  const outdoorsNode = buildOutdoorsGate(TSL, { uOutdoorsRect, outdoorsTexNode, worldXY: mapXY });
   const outdoors = (outdoorsNode ?? float(0)).toVar('specOutdoors');
 
   /** V2's hash12, transcribed. The sin form rather than `TSL.hash`, matching
@@ -1348,8 +1395,10 @@ export function buildSpecularSurfaceMaterial({
   // shape texture (an older caller) or below the shimmer tier → compiled out.
   // Top level, ON PURPOSE: derivatives need uniform control flow, and the
   // shimmer below reads these from inside its presence `If`.
-  const dWorldX = dFdx(positionWorld.x);
-  const dWorldY = dFdy(positionWorld.y);
+  // The quad's own point, not `mapXY`: that one jumps at a layer edge, and a derivative across the jump
+  // would spike the sparkle cell size along every hole's rim.
+  const dWorldX = dFdx(meshMapXY.x);
+  const dWorldY = dFdy(meshMapXY.y);
   const safeDiv = (d) => abs(d).lessThan(float(1e-6)).select(float(1e-6), d);
   const uvPerWorldX = dFdx(maskUv).div(safeDiv(dWorldX)).toVar('specUvPerWorldX');
   const uvPerWorldY = dFdy(maskUv).div(safeDiv(dWorldY)).toVar('specUvPerWorldY');
@@ -1583,7 +1632,7 @@ export function buildSpecularSurfaceMaterial({
   // Two octaves at right angles, phased apart, over WORLD position — so
   // neighbouring metal flutters independently instead of the whole map pulsing
   // as one; `uFlickerScalePx` sets how large a coherent patch is.
-  const flickerUv = positionWorld.xy.div(max(uFlickerScalePx, float(1)));
+  const flickerUv = mapXY.div(max(uFlickerScalePx, float(1)));
   const flickerT = tSec.mul(uFlickerSpeed);
   const flickerA = mx_noise_float(vec2(flickerUv.x.add(flickerT), flickerUv.y.sub(flickerT.mul(float(0.7)))));
   const flickerB = mx_noise_float(
@@ -1759,7 +1808,7 @@ export function buildSpecularSurfaceMaterial({
     if (!shapeEnabled) return float(0);
     const pxPerScreen = abs(dWorldX);
     const cellSize = max(uPanState.w, pxPerScreen.mul(float(SPARKLE_MIN_SCREEN_PX))).toVar('specSparkleCell');
-    const cellUv = vec2(positionWorld.x, positionWorld.y).div(cellSize);
+    const cellUv = vec2(mapXY.x, mapXY.y).div(cellSize);
     const cell = floor(cellUv);
     const jitter = vec2(hash12(cell.add(vec2(3.1, 7.7))), hash12(cell.add(vec2(5.3, 1.9))))
       .sub(vec2(0.5, 0.5))

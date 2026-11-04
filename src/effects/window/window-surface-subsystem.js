@@ -1279,6 +1279,8 @@ export function createWindowSurfaceSubsystem({
      * true JS early-return rather than issuing a render call for a hidden
      * mesh (Effects.md Law 4: gating by uniform is not gating). */
     hasContent: () => mesh.visible,
+    /** The floor quad, so Parallax can move it with its floor's art (vertices stay in world px). */
+    surfaceMeshes: () => [mesh],
     /**
      * SCENE READINESS (vt/settle.js probe `windowMaskLoad`) — is a cookie-mask
      * fetch in flight right now? See water-surface-subsystem's own copy of this

@@ -112,6 +112,16 @@ function unreachableFromBoot() {
   return _unreachableCache;
 }
 
+/**
+ * Surfaces `parallax/surfaces-ride-their-art` lets stay at scale 1, each with its reason. Keep it short:
+ * every entry is a place a mask can part from its art.
+ */
+export const PARALLAX_SCREEN_LOCKED_SURFACES = {
+  'src/effects/water/water-surface-subsystem.js':
+    'drawn for the VIEWED floor only, which Parallax keeps at scale 1 (it moves for the length of a ' +
+    'floor-change glide); its refraction capture and resolve pass are screen-space by design',
+};
+
 /** Vendored third-party code is never ours to police. */
 const IGNORED = [`${sep}vendor${sep}`, `${sep}__tests__${sep}`];
 
@@ -837,6 +847,42 @@ export const RULES = [
       "conversation about the zone's public API — have it in the open, in the door file, not by " +
       'reaching around it.',
     ratchet: true,
+  },
+
+  // ===================================================================
+  // PARALLAX — THE MASKS RIDE WITH THEIR ART (2026-11-04). The author:
+  // "Parallax mode doesn't work if our masks don't all align up correctly."
+  // ===================================================================
+  {
+    id: 'parallax/surfaces-ride-their-art',
+    pattern: /__never__/, // file-level rule; see `scan`
+    scan: (rel, lines) => {
+      const norm = rel.replace(/\\/g, '/');
+      if (!/src\/effects\/.+-surface-subsystem\.js$/.test(norm)) return [];
+      if (Object.keys(PARALLAX_SCREEN_LOCKED_SURFACES).some((f) => norm.endsWith(f))) return [];
+      const code = lines.filter((l) => !/^\s*(\*|\/\/)/.test(l));
+      const buildsQuad = code.findIndex((l) => /buildQuadPositions\s*\(/.test(l));
+      if (buildsQuad < 0) return [];
+      const handsOver = code.some((l) => /forEachSurfaceMesh\s*\(|surfaceMeshes\s*:/.test(l));
+      if (handsOver) return [];
+      const at = lines.findIndex((l) => /buildQuadPositions\s*\(/.test(l) && !/^\s*(\*|\/\/)/.test(l));
+      return [{ line: at + 1, text: '(builds a world-px surface quad but never hands it to Parallax)' }];
+    },
+    allow: [],
+    why:
+      'Parallax moves a layer by its mesh transform. A surface painted on that layer (a `_Specular`, ' +
+      '`_Window`, prism, iridescence or fluid quad) is its OWN mesh in its OWN scene, so unless the ' +
+      'viewer moves it too it stays at scale 1 while the art beneath it shrinks or rises: the shine ' +
+      'slides off the metal by r·|1 − 1/s| px as the view pans (2026-11-04, Big Bank stairwell). The ' +
+      'first cut of Parallax moved only the colour meshes and their depth twins, and every surface ' +
+      'built since then would have been born with the same gap.',
+    instead:
+      'Expose the quad: `forEachSurfaceMesh(cb)` → cb(mesh, itemId) for a per-tile surface, or ' +
+      "`surfaceMeshes: () => [mesh]` for a floor-wide one, and call the viewer's " +
+      '`placeTileSurfaceForParallax` / `placeFloorSurfaceForParallax` right after its `sync`. In the ' +
+      "shader, read map-registered data at the pixel's map point (`scene-eye.js#pixelMapXYNode`, or " +
+      '`positionLocal` for a quad baked in world px), never at `positionWorld`. A surface that truly ' +
+      'cannot move goes in PARALLAX_SCREEN_LOCKED_SURFACES with the reason.',
   },
 
   // ===================================================================

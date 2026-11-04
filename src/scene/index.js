@@ -60,6 +60,8 @@ export {
   layerScaleDecodeNode,
   liftedLookupNode,
   liftedLookup,
+  pixelMapXYNode,
+  pixelMapXY,
 } from './scene-eye.js';
 
 // THE MASK AUTHORITY (scene/mask-authority.js's header is the map). The

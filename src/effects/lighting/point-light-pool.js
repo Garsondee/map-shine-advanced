@@ -96,6 +96,7 @@ import {
   LIGHT_ELEVATION_UNCONFIGURED_SENTINEL,
   elevationRank,
   setCandleFalloff,
+  setParallaxUndo,
 } from './point-light-illumination.js';
 import { buildPointLightColorationMaterial, computeColorationAlpha } from './point-light-coloration.js';
 import { canBatchLight, computeBucketKey, isColorationEligible } from './point-light-batch.js';
@@ -583,6 +584,7 @@ function createLightEntry({
     uWindExposure: uIllumWindExposure,
     uWindResponse: uIllumWindResponse,
     uLightExpectedDepth,
+    uParallaxUndo,
     uApLampHeight,
     apApertures,
     uBeamDirection: uIllumBeamDirection,
@@ -788,6 +790,9 @@ function createLightEntry({
     uColorationAttenuationEased: colorationBuilt.uAttenuationEased,
     uColorationAlpha: colorationBuilt.uColorationAlpha,
     uColorationLightExpectedDepth: colorationBuilt.uLightExpectedDepth,
+    // PARALLAX — both materials undo the same move (`setParallaxUndo`, written beside the footprint).
+    uParallaxUndo,
+    uColorationParallaxUndo: colorationBuilt.uParallaxUndo,
     uLightColor: colorationBuilt.uLightColor,
     uShadows: colorationBuilt.uShadows,
     // ANIMATED LIGHTS — GPU-ONLY (2026-07-20): these four raw uniforms are
@@ -2553,6 +2558,9 @@ export function createPointLightPool({
       // positioned/scaled back out to world space by applyLightFootprint.
       applyLightFootprint(entry.mesh, light);
       if (plxMoved) applyParallaxToFootprint(entry.mesh, lightParallax.eye, plxScale);
+      // ...and the shader undoes that move for everything registered to the map (gobo, window reach,
+      // sun and cloud shadow), so they stay on the pool instead of sliding off it as the view pans.
+      setParallaxUndo(entry.uParallaxUndo, plxMoved ? lightParallax.eye : null, plxScale);
       entry.mesh.visible = true;
       // APERTURE SHADOW DEBUG — round 10: the ONE surviving standalone
       // Object3D (shares `geometry` with `entry.mesh` but needs its OWN
@@ -2710,6 +2718,7 @@ export function createPointLightPool({
       // Same rotated oval footprint as the illumination mesh (see above).
       applyLightFootprint(entry.colorationMesh, light);
       if (plxMoved) applyParallaxToFootprint(entry.colorationMesh, lightParallax.eye, plxScale);
+      setParallaxUndo(entry.uColorationParallaxUndo, plxMoved ? lightParallax.eye : null, plxScale);
       entry.colorationMesh.visible = true;
       // SAME unfloored value as the illumination mesh above — coloration's
       // falloff uses the identical formula, so both channels harden/soften

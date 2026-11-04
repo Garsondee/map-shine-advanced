@@ -1455,8 +1455,12 @@ export function buildPointLightSharedTerms({
   cookieTexture = null,
   illumReach = 1,
   penumbra = null,
+  mapXY = null,
 }) {
   const { float, screenUV, smoothstep, length, positionWorld, mix } = THREE.TSL;
+  // Where this fragment is on the MAP (see `buildParallaxUndoNode`): the gobo and the window reach compare
+  // it with the light's own map position, so they read it, never the drawn spot.
+  const worldXY = mapXY ?? positionWorld.xy;
 
   // dist: Foundry's own vUvs/dist derivation collapses, in this project's
   // local-unit-radius space, to exactly this.
@@ -1567,7 +1571,7 @@ export function buildPointLightSharedTerms({
   if (apertureCount > 0) {
     const goboResult = buildApertureGoboTerm({
       THREE,
-      positionWorldXY: positionWorld.xy,
+      positionWorldXY: worldXY,
       dist,
       apertureCount,
       cols: apGoboCols,
@@ -1606,7 +1610,7 @@ export function buildPointLightSharedTerms({
   if (windowReach && windowReach.count > 0) {
     const reachResult = buildWindowReachTerm({
       THREE,
-      positionWorldXY: positionWorld.xy,
+      positionWorldXY: worldXY,
       windowCount: windowReach.count,
       shared: windowReach.shared,
       profileTexture: windowReach.texture,
@@ -1719,7 +1723,12 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     wind: windInputs,
     beamDirection,
     penumbra = null,
+    mapXY = null,
   } = inputs;
+  // Where this fragment is on the MAP — `buildParallaxUndoNode`'s output for a light Parallax moved, the
+  // drawn spot otherwise. Every map-registered read below (sun-shadow field, cloud field, and through
+  // the shared terms the gobo and the window reach) takes it.
+  const worldXY = mapXY ?? positionWorld.xy;
 
   /**
    * ============================================================================
@@ -1784,6 +1793,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   } = buildPointLightSharedTerms({
     THREE,
     localUnitXY: localXY,
+    mapXY: worldXY,
     attenuationEased: uAttenuationEased,
     expectedDepth: uLightExpectedDepth,
     falloffModel,
@@ -2013,8 +2023,8 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     // Clamped, never wrapped — a light overhanging a field's edge reads the
     // nearest edge value rather than a caster from the far side of the map.
     const sampleSlot = (slot) => {
-      const u = positionWorld.x.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
-      const v = positionWorld.y.sub(slot.uRect.y).div(slot.uRect.w.sub(slot.uRect.y));
+      const u = worldXY.x.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
+      const v = worldXY.y.sub(slot.uRect.y).div(slot.uRect.w.sub(slot.uRect.y));
       return slot.texNode.sample(vec2(u.clamp(0, 1), v.clamp(0, 1))).r;
     };
     // ⚠️ THE FLOOR SOURCE IS `buf:scene.depth`, NOT `buf:scene.attr` (2026-08-05
@@ -2049,7 +2059,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   // rather than into an un-shadowed flat colour the field never knew about.
   if (buildCloudField && buildCloudGroundVis && cloudUniforms) {
     const cloudVis = buildCloudGroundVis(THREE.TSL, {
-      worldXY: positionWorld.xy,
+      worldXY,
       uniforms: cloudUniforms,
       buildField: buildCloudField,
       offset: cloudOffsetNode ?? vec2(0, 0),
@@ -2397,6 +2407,37 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
  *   function's own return statement. `uApLampHeight`/`apApertures` are
  *   `null` when `apertureCount` is 0.
  */
+/**
+ * A MOVED LIGHT STILL KNOWS WHERE IT IS (2026-11-04). Parallax draws a light on another floor scaled
+ * about the eye with that floor's art (`point-light-pool.js#applyParallaxToFootprint`), so the
+ * fragment's `positionWorld` is where the pool is DRAWN. Everything the light compares against —
+ * its own centre, its apertures, the window it reaches through, the sun-shadow and cloud fields — is
+ * registered to the MAP. Before this, those reads slid off the pool by `r·|1 − 1/s|` as the view
+ * panned (the author: "lights not being correctly aligned when looking between floors"). One uniform
+ * per material, `(eyeX, eyeY, 1/s)`, undoes the move: `eye + (drawn − eye)·(1/s)`. Its rest value
+ * `(0, 0, 1)` returns the drawn spot itself, so an unmoved light reads exactly what it always did.
+ * @param {*} TSL
+ * @returns {{uParallaxUndo: *, mapXY: *}}
+ */
+export function buildParallaxUndoNode(TSL) {
+  const { uniform, vec3, positionWorld } = TSL;
+  const uParallaxUndo = uniform(vec3(0, 0, 1));
+  const mapXY = uParallaxUndo.xy.add(positionWorld.xy.sub(uParallaxUndo.xy).mul(uParallaxUndo.z));
+  return { uParallaxUndo, mapXY };
+}
+
+/**
+ * Write {@link buildParallaxUndoNode}'s uniform for this frame: the eye and `1/s` while Parallax has
+ * moved the light, the rest value otherwise.
+ * @param {*} u - the uniform (or null for a material built without one).
+ * @param {{x:number,y:number}|null} eye @param {number} s
+ */
+export function setParallaxUndo(u, eye, s) {
+  if (!u) return;
+  if (eye && Number.isFinite(s) && s > 1e-4 && Math.abs(s - 1) >= 1e-5) u.value.set(eye.x, eye.y, 1 / s);
+  else u.value.set(0, 0, 1);
+}
+
 export function buildPointLightIlluminationMaterial({
   THREE,
   uBackgroundColor,
@@ -2489,12 +2530,14 @@ export function buildPointLightIlluminationMaterial({
   // — starts at 0 (harmless: point-light-pool.js's per-frame refresh
   // overwrites it before this material ever draws a real frame).
   const uLightExpectedDepth = uniform(float(0));
+  const plxUndo = buildParallaxUndoNode(THREE.TSL);
 
   const { finalNode, alphaNode, backgroundFloor, combinedFalloff, finalColorExposed, uApLampHeight, apApertures } =
     buildIlluminationShadingCore({
       THREE,
       inputs: {
         localUnitXY: positionLocal.xy,
+        mapXY: plxUndo.mapXY,
         ratio: uRatio,
         attenuationEased: uAttenuationEased,
         exposure: uExposure,
@@ -2575,6 +2618,8 @@ export function buildPointLightIlluminationMaterial({
     // "unconfigured" case left to special-case (`scene/depth-authority.js#
     // rankOfElevation`'s own point).
     uLightExpectedDepth,
+    // PARALLAX — `(eyeX, eyeY, 1/s)` for a light Parallax moved, `(0, 0, 1)` otherwise (`setParallaxUndo`).
+    uParallaxUndo: plxUndo.uParallaxUndo,
     uSpeedRaw,
     uReverseSign,
     uSeed,

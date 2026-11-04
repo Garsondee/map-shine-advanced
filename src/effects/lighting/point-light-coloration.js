@@ -114,7 +114,7 @@
  */
 
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
-import { buildPointLightSharedTerms } from './point-light-illumination.js';
+import { buildPointLightSharedTerms, buildParallaxUndoNode } from './point-light-illumination.js';
 import { penumbraAttributeInputs } from './light-penumbra.js';
 import { createWindHandle } from '../../world/index.js';
 import { getSafeProfile } from '../../core/safe-mode.js';
@@ -197,6 +197,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     wind: windInputs,
     beamDirection,
     penumbra = null,
+    mapXY = null,
   } = inputs;
 
   // dist / FALLOFF / THE HEIGHT-ELEVATION GATE / APERTURE GOBO — S2.13
@@ -237,6 +238,7 @@ export function buildColorationShadingCore({ THREE, inputs, shared, flags }) {
     beamShape,
     cookieTexture,
     penumbra,
+    mapXY,
   });
 
   // WINDOW REACH and SOFT WALL EDGES: the coloration is `colour * falloff`, so scaling the falloff
@@ -466,6 +468,7 @@ export function buildPointLightColorationMaterial({
   // per-frame value, the SAME small deliberate duplication `uAttenuationEased`
   // above already is.
   const uBeamDirection = beamShape ? uniform(vec2(0, -1)) : null;
+  const plxUndo = buildParallaxUndoNode(THREE.TSL);
 
   let uSpeedRaw = null;
   let uReverseSign = null;
@@ -494,6 +497,7 @@ export function buildPointLightColorationMaterial({
     THREE,
     inputs: {
       localUnitXY: positionLocal.xy,
+      mapXY: plxUndo.mapXY,
       attenuationEased: uAttenuationEased,
       colorationAlpha: uColorationAlpha,
       lightColor: uLightColor,
@@ -563,6 +567,7 @@ export function buildPointLightColorationMaterial({
     // resolved expected-depth into both materials without knowing which is
     // which.
     uLightExpectedDepth,
+    uParallaxUndo: plxUndo.uParallaxUndo,
     uLightColor,
     uShadows,
     uSpeedRaw,

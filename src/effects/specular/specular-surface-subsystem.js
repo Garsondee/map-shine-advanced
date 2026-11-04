@@ -102,6 +102,7 @@ export function createSpecularSurfaceSubsystem({
   createPackTexture,
   illumTexture,
   depthTexture = null,
+  depthFlagsTexture = null,
   resolveExpectedDepth,
   uViewRect,
   uOutdoorsRect,
@@ -246,6 +247,7 @@ export function createSpecularSurfaceSubsystem({
       shapeTexture,
       illumTexture,
       depthTexture,
+      depthFlagsTexture,
       uViewRect,
       uOutdoorsRect,
       outdoorsTexNode,
@@ -911,6 +913,8 @@ export function createSpecularSurfaceSubsystem({
      * true JS early-return rather than issuing a render call for a hidden mesh
      * (Effects.md Law 4: gating by uniform is not gating). */
     hasContent: () => mesh.visible,
+    /** The floor quad, so Parallax can move it with its floor's art (vertices stay in world px). */
+    surfaceMeshes: () => [mesh],
     /**
      * What the presentation monitor reads (`diag/presentation-monitor.js`, loading audit §6.7):
      * the floor whose shine is ACTUALLY on the mesh right now — the active slot's own floor, not the

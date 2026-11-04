@@ -1050,7 +1050,43 @@ export function run(t) {
   // File-level `scan` rules cannot be fed a bare corpse line — they carry their
   // own dedicated proof section above (and this assertion keeps THAT honest:
   // a scan rule with no bespoke proof shows up here as uncovered).
-  const scanRulesProven = new Set(['zones/one-door', 'graph/reachable-from-boot', 'vt/residency-one-writer']);
+  {
+    // parallax/surfaces-ride-their-art — a surface quad Parallax never moves is a mask parted from its art.
+    const rule = RULES.find((r) => r.id === 'parallax/surfaces-ride-their-art');
+    t.ok("'parallax/surfaces-ride-their-art' exists and is a file-level scan rule", typeof rule?.scan === 'function');
+    if (rule) {
+      const quad = ['  const buf = buildQuadPositions(item.corners);'];
+      t.ok(
+        'a surface subsystem that builds a quad and hands nothing over trips the wall',
+        rule.scan('src/effects/glow/glow-surface-subsystem.js', quad).length === 1
+      );
+      t.ok(
+        'handing over per-tile meshes passes',
+        rule.scan('src/effects/glow/glow-surface-subsystem.js', [...quad, '    forEachSurfaceMesh(cb) {']).length === 0
+      );
+      t.ok(
+        'handing over a floor quad passes',
+        rule.scan('src/effects/glow/glow-surface-subsystem.js', [...quad, '    surfaceMeshes: () => [mesh],'])
+          .length === 0
+      );
+      t.ok(
+        'a mention in a comment does not count as handing over',
+        rule.scan('src/effects/glow/glow-surface-subsystem.js', [...quad, '   * forEachSurfaceMesh(cb) later'])
+          .length === 1
+      );
+      t.ok(
+        'a declared screen-locked surface is exempt',
+        rule.scan('src/effects/water/water-surface-subsystem.js', quad).length === 0
+      );
+      t.ok('other files are not its business', rule.scan('src/effects/glow/glow-render.js', quad).length === 0);
+    }
+  }
+  const scanRulesProven = new Set([
+    'zones/one-door',
+    'graph/reachable-from-boot',
+    'vt/residency-one-writer',
+    'parallax/surfaces-ride-their-art',
+  ]);
   t.ok(
     `every rule has at least one proof case (${covered.size + scanRulesProven.size}/${RULES.length})`,
     RULES.every((r) => covered.has(r.id) || (typeof r.scan === 'function' && scanRulesProven.has(r.id)))

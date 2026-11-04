@@ -164,3 +164,30 @@ export function liftedLookup(xy, eye, eyeHeight, s, throwPerPx) {
     y: eye.y + (xy.y - eye.y) / k - throwPerPx.y * h,
   };
 }
+
+/**
+ * WHERE ON THE MAP THIS PIXEL IS (2026-11-04, the author: "Parallax mode doesn't work if our masks don't
+ * all align up correctly"). A surface can be drawn over pixels that show a DIFFERENT layer than its own:
+ * the Big Bank's Ground `_Specular` has the basement's brass rails painted into the stairwell hole, so
+ * from Ground the Ground shine lands on basement art. Parallax draws that basement smaller about the eye,
+ * so a lookup at the pixel's on-screen spot reads the paint for a point the basement is no longer drawn
+ * at. This reads the scale of the layer the pixel actually shows (the depth pass's G byte) and returns
+ * where that layer's point is on the map: `eye + (shown − eye) / s`. On the viewed floor `s` decodes to
+ * exactly 1, so the answer is the on-screen spot, unchanged. No throw toward the sun, unlike
+ * {@link liftedLookupNode}: a mask is painted on its layer, not cast onto the ground below it.
+ * @param {*} TSL
+ * @param {{shownXY:*, eye:*, flagsG:*}} a - vec2 / vec2 / float nodes: the fragment's drawn world
+ *   position, the view centre, and the depth colour attachment's G at this pixel.
+ * @returns {*} vec2 node, world px.
+ */
+export function pixelMapXYNode(TSL, { shownXY, eye, flagsG }) {
+  const { float } = TSL;
+  const s = layerScaleDecodeNode(TSL, flagsG);
+  return eye.add(shownXY.sub(eye).div(s.max(float(1e-4))));
+}
+
+/** {@link pixelMapXYNode} in plain JS, for tests. @param {{x:number,y:number}} shown @param {{x:number,y:number}} eye @param {number} g01 */
+export function pixelMapXY(shown, eye, g01) {
+  const s = Math.max(1e-4, decodeLayerScale01(g01));
+  return { x: eye.x + (shown.x - eye.x) / s, y: eye.y + (shown.y - eye.y) / s };
+}

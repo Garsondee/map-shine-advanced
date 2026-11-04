@@ -10425,6 +10425,7 @@ async function startVtPanViewerUnserialized({
       // nothing changed, and it owns its own mask-url change detection.
       profiler?.begin(Z.lightFluidSync);
       fluidSurface.sync(view?.floorIndex ?? 0);
+      placeTileSurfaceForParallax(fluidSurface);
       // FLUID'S OWN SHADOW TINT (mythica-machina-press#546) — right after
       // sync() (not a separate profiler zone: this is the cheap, "at most a
       // handful of Map lookups" cost class `setSunShadowFloorIndex`'s own
@@ -10788,6 +10789,7 @@ async function startVtPanViewerUnserialized({
         if (rank === null) continue;
         const windowSurface = getWindowSurfaceForFloor(floor.index);
         windowSurface.sync(floor.index);
+        placeFloorSurfaceForParallax(windowSurface.surfaceMeshes?.(), floor.index);
         if (windowSurface.hasContent()) renderer.render(windowSurface.scene, camera);
       }
       // mythica-machina-press#538/#539 — the per-TILE population, same
@@ -10800,6 +10802,7 @@ async function startVtPanViewerUnserialized({
       // bracket of its own.
       tileEffectSyncedFloor.windowTiles = view?.floorIndex ?? 0;
       windowTileSurface.sync(view?.floorIndex ?? 0);
+      placeTileSurfaceForParallax(windowTileSurface);
       if (windowTileSurface.hasContent()) renderer.render(windowTileSurface.scene, camera);
       profiler?.end(Z.lightDrawWindow);
       renderer.autoClearColor = previousAutoClearColor;
@@ -11315,12 +11318,14 @@ async function startVtPanViewerUnserialized({
       // read on screen as "the effect does nothing", with every test green.
       profiler?.begin(Z.surfSpecularSync);
       specularSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
+      placeFloorSurfaceForParallax(specularSurface.surfaceMeshes?.(), view?.floorIndex ?? 0);
       profiler?.end(Z.surfSpecularSync);
       // mythica-machina-press#538/#539 — the per-TILE population, synced
       // right alongside the floor one; see `specularTileSurface`'s own
       // construction for why this stays single-viewed-floor scope.
       tileEffectSyncedFloor.specularTiles = view?.floorIndex ?? 0;
       specularTileSurface.sync(view?.floorIndex ?? 0, view ? viewToWorldRect(view, canvasW / canvasH) : null);
+      placeTileSurfaceForParallax(specularTileSurface);
       const floorHasContent = specularSurface.hasContent();
       const tilesHaveContent = specularTileSurface.hasContent();
       // ⚠️ EITHER, NOT JUST THE FLOOR — a scene with metal painted ONLY on
@@ -11420,6 +11425,7 @@ async function startVtPanViewerUnserialized({
         capturedRect: prismRefraction.capturedRect,
         capturedTexSize: { width: prismRefraction.width ?? 1, height: prismRefraction.height ?? 1 },
       });
+      placeTileSurfaceForParallax(prismSurface);
 
       // THE CLOCK + PARALLAX — pushed AFTER sync() has ensured every live
       // entry's own material actually exists. `cameraOffsetPx` is a genuine
@@ -11489,6 +11495,7 @@ async function startVtPanViewerUnserialized({
 
       tileEffectSyncedFloor.iridescence = view?.floorIndex ?? 0;
       iridescenceSurface.sync(items);
+      placeTileSurfaceForParallax(iridescenceSurface);
 
       // THE CLOCK + CAMERA CENTRE — pushed AFTER sync() has ensured every
       // live entry's own material actually exists. `cameraCenter` is the
@@ -16891,6 +16898,8 @@ async function startVtPanViewerUnserialized({
       createMaskTexture: createMaskDataTexture,
       illumTexture: sceneIllum.texture,
       depthTexture: sceneDepth.depthTexture ?? null,
+      // PARALLAX (2026-11-04): the per-pixel layer scale, so the mask is read where the art on screen is.
+      depthFlagsTexture: sceneDepth.texture ?? null,
       // STAGE 3 (2026-08-05) — composed exactly like `point-light-pool.js`'s
       // own `resolveExpectedDepth` above (environmental-light's call site),
       // but resolved by ITEM ID rather than by elevation: specular has real
@@ -16953,6 +16962,7 @@ async function startVtPanViewerUnserialized({
       createPackTexture: createSpecularPackTexture,
       illumTexture: sceneIllum.texture,
       depthTexture: sceneDepth.depthTexture ?? null,
+      depthFlagsTexture: sceneDepth.texture ?? null,
       // PER ITEM, not per floor — `depthAuthority.rankOf` takes any item id,
       // and a tile-attached surface's own quad IS that tile, so its expected
       // depth is simply the TILE's own rank: "is anything ranked above ME"
@@ -22765,7 +22775,7 @@ async function startVtPanViewerUnserialized({
                 t.parallaxKind = detectSelfVegetationKind(item.src, VEGETATION_KINDS) ?? null;
               if (t.parallaxKind) e = Math.max(e, base + vegetationHeightFt(t.parallaxKind, vegState?.params));
             }
-            parallaxSubsystem.placeItem(t.mesh, e);
+            parallaxSubsystem.placeItem(t.mesh, e, item.id);
             if (t.shadow) parallaxSubsystem.placeItem(t.shadow.mesh, base);
           }
         }
@@ -22780,6 +22790,29 @@ async function startVtPanViewerUnserialized({
       }
       for (const entry of depthProxyEntries) parallaxSubsystem.placeProxy(entry.mesh);
       for (const entry of depthPrepassEntries) parallaxSubsystem.placeProxy(entry.mesh);
+    }
+
+    /**
+     * THE MASKS RIDE WITH THEIR ART (2026-11-04) — a tile's own `_Specular`/`_Window`/prism/iridescence/
+     * fluid quad takes the scale its tile's art got this frame (`parallax-subsystem.js#placeLike`).
+     * Called right after each tile surface's `sync`, so a quad built this frame is placed before it
+     * draws. Each of those shaders reads world-registered data by `positionLocal` (the tile's true world
+     * px) and screen buffers by the moved position, so mask, illumination and depth all agree.
+     * Not gated on Parallax being on: off, every call puts a moved mesh back once and is then a
+     * WeakSet miss per quad (a handful a frame).
+     * @param {{forEachSurfaceMesh?: Function}} surface
+     */
+    function placeTileSurfaceForParallax(surface) {
+      surface?.forEachSurfaceMesh?.(placeLikeItem);
+    }
+    function placeLikeItem(mesh, itemId) {
+      parallaxSubsystem.placeLike(mesh, itemId);
+    }
+
+    /** A floor-wide surface (a floor's `_Specular`/`_Window`/water quad) moves with that floor's art. */
+    function placeFloorSurfaceForParallax(meshes, floorIndex) {
+      if (!meshes) return;
+      for (const m of meshes) parallaxSubsystem.placeFloor(m, floorIndex);
     }
 
     /** Parallax's cull rect: the view, reached out by how far the lowest layer shrinks, so a lower floor's

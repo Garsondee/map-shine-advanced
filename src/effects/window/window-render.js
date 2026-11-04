@@ -379,6 +379,7 @@ export function buildWindowSurfaceMaterial({
     float,
     uniform,
     positionWorld,
+    positionLocal,
     smoothstep,
     step,
     clamp,
@@ -681,7 +682,11 @@ export function buildWindowSurfaceMaterial({
     // SUN & ROOMS (window-room-light.js). Built here, like the rain, so the gated build constructs its own copy
     // inside the `Fn()`. The full decode below stays at the painted spot (the static share keeps its glass and
     // prism); the moving beam's taps are added after it, warped by the same glass/rain offset (`warpUv`).
-    const room = roomLight ? roomLight.prepare(positionWorld.xy) : null;
+    // TWO WORLD POSITIONS (2026-11-04, Parallax): the room map and the glass pattern are registered to
+    // the map, so they read `positionLocal` (where the glass IS — the quad is baked in world px and only
+    // its transform moves); the screen-buffer lookup below keeps `positionWorld` (where it is DRAWN).
+    const mapXY = positionLocal.xy;
+    const room = roomLight ? roomLight.prepare(mapXY) : null;
     let warpUv = null;
     // Built HERE, inside this function, on purpose: the gated build calls this again inside an `Fn()`, and the
     // rain nodes (with their own `If()`s and flow-texture taps) must be constructed in that same context.
@@ -699,7 +704,7 @@ export function buildWindowSurfaceMaterial({
       const striationStretch = float(1)
         .add(uGlassStriation.mul(float(GLASS_STRIATION_STRETCH)))
         .toVar('winGlassStretch');
-      const fieldBase = rotate2d(TSL, positionWorld.xy.div(glassScaleSafe), striationAngleRad);
+      const fieldBase = rotate2d(TSL, mapXY.div(glassScaleSafe), striationAngleRad);
       const fieldP = vec2(fieldBase.x.div(striationStretch), fieldBase.y).add(uGlassSeedOffset).toVar('winGlassP');
 
       /**
@@ -841,7 +846,7 @@ export function buildWindowSurfaceMaterial({
         const tap = sampleCookieAt(warpUv ? uvBlur.add(warpUv) : uvBlur, 'winRoomTap');
         return tap.cookie.mul(tap.presence).mul(inFile(uvK));
       };
-      const folded = roomLight.combine(room, beamAt, cookie, positionWorld.xy);
+      const folded = roomLight.combine(room, beamAt, cookie, mapXY);
       cookie = folded.cookie;
       roomDebug = { rooms: room.debugRooms, wallDist: room.debugWallDist, sun: room.debugSun, gate: folded.debugGate };
     }

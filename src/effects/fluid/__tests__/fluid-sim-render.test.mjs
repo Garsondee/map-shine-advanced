@@ -198,8 +198,10 @@ export function run(t) {
         Array.isArray(built.stateTexNodes) && built.stateTexNodes.length > 0
       );
       ok(
-        'stateTexNodes names EXACTLY two samples — fill AND the meniscus`s fillAhead, both re-pointable',
-        Array.isArray(built.stateTexNodes) && built.stateTexNodes.length === 2
+        // 2026-11-04: plus the two flask-softening taps either side of the (warped) lookup — every state read
+        // must be in the list, or that tap would keep sampling a stale ping-pong target.
+        'stateTexNodes names EXACTLY four samples — fill, two flask-softening taps and the meniscus`s fillAhead, all re-pointable',
+        Array.isArray(built.stateTexNodes) && built.stateTexNodes.length === 4
       );
       ok(
         'the retired analytic-scroll uniforms are GONE, not dangling (params/no-dead-controls)',

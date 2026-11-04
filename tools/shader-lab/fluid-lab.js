@@ -52,6 +52,8 @@ export const VIEWS = Object.freeze({
   coil: { cx: 6300, cy: 5760, w: 1300 },
   bottom: { cx: 6650, cy: 7450, w: 1900 },
   flask: { cx: 7020, cy: 6390, w: 760 },
+  // The two flasks at the bottom-left of the wide view (where the straight colour wedges showed, 2026-11-04).
+  lflask: { cx: 4080, cy: 6930, w: 900 },
 });
 
 /** Ambient illum per time of day — roughly what the viewer's illum buffer holds on the Lair. */

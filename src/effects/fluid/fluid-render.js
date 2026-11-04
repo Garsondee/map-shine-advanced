@@ -320,18 +320,10 @@ export function buildFluidSurfaceMaterials({
     let lengthPx = float(4096);
     let agitation = float(0.2);
     let mood = float(1);
+    // Where the tube is wide, before the state is read (the lookup below depends on it).
+    const wideAt = smoothstep(R.mul(2.0), R.mul(3.4), radiusPx);
+    let sState = s;
     if (plan.fillEnabled) {
-      const st = texture(stateTexture, vec2(s, stateV));
-      const ahead = texture(stateTexture, vec2(clamp(s.add(FLUID_FRONT_EPSILON), 0, 1), stateV));
-      stateTexNodes.push(st, ahead);
-      phi = st.r;
-      g = st.g;
-      energy = max(st.b, float(0));
-      froth = clamp(st.a, 0, 1.5);
-      // Fronts: a near-step in φ (the meniscus) or in the reagent (a reacting boundary) spikes a one-bin
-      // difference and reads flat everywhere else.
-      front = clamp(abs(ahead.r.sub(st.r)).mul(26), 0, 1).mul(max(st.r, ahead.r));
-      react = clamp(abs(ahead.g.sub(st.g)).mul(14), 0, 1).mul(smoothstep(0.15, 0.6, max(st.r, ahead.r)));
       if (tubeTexture) {
         const tube = texture(tubeTexture, vec2(float(0.75), stateV));
         travel = tube.r;
@@ -339,13 +331,54 @@ export function buildFluidSurfaceMaterials({
         agitation = tube.b;
         mood = tube.a;
       }
+      // BREAK THE WEDGES (2026-11-04 — the author, on a flask cut into straight colour wedges: "Sometimes
+      // especially in wide areas we get these, arrows/lines/chevrons as a result of the way that the tubes are
+      // calculated. How can we break them up so they look less even and perfect?"). Every texel's `s` is the arc
+      // length of its NEAREST centreline point, so across a flask `s` is a Voronoi fan of the skeleton: constant along
+      // straight lines, folding into a chevron at every bend — and a colour front read at `s` is cut along exactly
+      // those lines. The lookup is pushed along the tube by a slow, swirling 2-D noise (two octaves, drifting), up to
+      // ~1.9 local radii in a flask and a third of a radius in a pipe (a pipe's menisci only wobble a little), so a
+      // front pours into a flask as a ragged, curling boundary instead of slicing it.
+      const pw = quadUv.mul(itemSize).div(R.mul(10));
+      const swirl = mx_noise_float(vec3(pw, tSec.mul(0.07)))
+        .add(mx_noise_float(vec3(pw.mul(2.3).add(vec2(13.1, 7.7)), tSec.mul(0.13).add(5.0))).mul(0.45))
+        .mul(1.4);
+      const warpPx = radiusPx.mul(mix(float(0.33), float(1.9), wideAt));
+      // Reflected at the tube ends, not clamped: a flask at a root (s ≈ 0) clamped a whole tongue of itself onto the
+      // root bin, where fresh reagent and energy enter (a pale band curling round the neck in the lab).
+      const sRaw = abs(s.add(swirl.mul(warpPx).div(lengthPx)));
+      sState = float(1).sub(abs(float(1).sub(sRaw)));
+    }
+    if (plan.fillEnabled) {
+      const st0 = texture(stateTexture, vec2(sState, stateV));
+      // ...and in a flask the step is SOFTENED: two more taps a radius up and down the tube blend in, so a new reagent
+      // swirls in over the flask rather than arriving as a hard edge.
+      const softS = radiusPx.mul(0.7).div(lengthPx);
+      const stUp = texture(stateTexture, vec2(clamp(sState.add(softS), 0, 1), stateV));
+      const stDn = texture(stateTexture, vec2(clamp(sState.sub(softS), 0, 1), stateV));
+      const st = mix(st0, st0.mul(0.5).add(stUp.mul(0.25)).add(stDn.mul(0.25)), wideAt);
+      const ahead = texture(stateTexture, vec2(clamp(sState.add(FLUID_FRONT_EPSILON), 0, 1), stateV));
+      stateTexNodes.push(st0, stUp, stDn, ahead);
+      phi = st.r;
+      g = st.g;
+      energy = max(st.b, float(0));
+      froth = clamp(st.a, 0, 1.5);
+      // Fronts: a near-step in φ (the meniscus) or in the reagent (a reacting boundary) spikes a one-bin
+      // difference and reads flat everywhere else.
+      front = clamp(abs(ahead.r.sub(st.r)).mul(26), 0, 1).mul(max(st.r, ahead.r));
+      // In a flask the warped boundary is a curl, not a line: a full-strength seam traced it as stacked contour
+      // lines (a map, not a potion) — there it keeps a third of its strength.
+      react = clamp(abs(ahead.g.sub(st.g)).mul(14), 0, 1)
+        .mul(smoothstep(0.15, 0.6, max(st.r, ahead.r)))
+        .mul(float(1).sub(wideAt.mul(0.67)));
     }
     // A FLASK (the tube widens well past a pipe) is a RESERVOIR: it never drains dry as a slug passes, it holds
     // most of a fill and brightens when a slug arrives (the lab showed flasks blinking full↔empty every second).
     const wide = smoothstep(R.mul(2.0), R.mul(3.4), radiusPx);
     const pipeLiquid = smoothstep(float(0.06), float(0.55), phi);
     const liquid = mix(pipeLiquid, float(0.62).add(pipeLiquid.mul(0.38)), wide);
-    const along = s.mul(lengthPx).sub(travel);
+    // Streaks, patches and flares ride the same broken-up lookup, so none of them runs straight across a flask either.
+    const along = sState.mul(lengthPx).sub(travel);
     // COLOUR DRIFT (round 3 — "a better and more unpredictable colour range"): the body is never quite one
     // reagent. A slow, long noise riding the flow nudges the palette position up to ±0.4 of a step, so a slug
     // mottles toward its neighbouring reagents in patches several pipe-widths long — more with Variety, none at 0.

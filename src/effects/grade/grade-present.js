@@ -15,25 +15,27 @@
  *          primary ops → tone map → 3D LUT
  *     → present (canvas sRGB encode)
  *
- * WHY THE TONE MAP IS COMPILE-TIME: it is a different three built-in `Fn` per
- * curve, baked into the node graph — you cannot swap `agxToneMapping` for
- * `acesFilmicToneMapping` through a uniform. So a tone-map CHANGE rebuilds the
- * fragment node (`rebuildFragment`), which is cheap and rare (an author picks a
- * film response once). The LUT, by contrast, is a texture + a strength uniform —
- * both live — so the LUT node is ALWAYS compiled in and gated by strength (0 =
- * a one-fetch no-op), never a recompile.
+ * THE TONE MAP IS LIVE (2026-11-04; it was compile-time until then). Each curve
+ * is a different three built-in `Fn`, so it used to be baked into the node
+ * graph and a tone-map CHANGE rebuilt the fragment. That stopped being "rare"
+ * the day Looks could fade one in: Noir (ACES) blacked the canvas for seconds
+ * while this shader recompiled. Every curve is now a layout function compiled
+ * in once, picked by `uToneMap` (`grade-ops.js#buildToneMapSwitchNode`). The
+ * LUT is likewise a texture + a strength uniform, ALWAYS compiled in and gated
+ * by strength (0 = a one-fetch no-op), never a recompile. What still rebuilds
+ * (stylize, vision mode, sharpen, fog hold, lens, grid, temperature) keeps the
+ * old shape on screen while the new one compiles (`material`, below).
  *
  * Ships neutral: env grade identity, artistic grade identity, tone map `none`,
  * LUT strength 0 — the whole thing is `present(scene.lit)` unchanged until the
  * Colour Grade effect resolves its own params. As of 2026-08-31 its resolved
  * `toneMapping` default is ALSO `'none'` (grade.js), so on a fresh scene this
- * construction-time state and the cascade's resolved state already agree —
- * no rebuild fires until an author actually picks a film response.
+ * construction-time state and the cascade's resolved state already agree.
  *
  * @module effects/grade/grade-present
  */
 
-import { buildGradeNode, IDENTITY_GRADE } from './grade-ops.js';
+import { buildGradeNode, IDENTITY_GRADE, toneMapIndex } from './grade-ops.js';
 import { buildDynamicRangeNode } from '../dynamic-range-render.js';
 import { buildOutdoorsGate } from '../lighting/environmental-light.js';
 import { STYLIZE_LOOK_NAMES } from '../stylize.js';
@@ -75,6 +77,8 @@ import {
 // every screen-position mask here is read through the lens's own warp so it lands on the same pixels.
 import { lensWarpUv } from '../lens-render.js';
 import { layoutFn } from '../../core/tsl-fn.js';
+import { markCompileDeferrable } from '../../core/compile-policy.js';
+import { createLogger } from '../../core/log.js';
 // FOUNDRY'S GRID + OUTLINE (2026-11-02), drawn here, last, over the finished frame (that module's header).
 import {
   createFoundryGridUniforms,
@@ -85,6 +89,8 @@ import {
   buildSceneOutlineAlpha,
   compositeFoundryOverlay,
 } from '../grid/foundry-grid-render.js';
+
+const log = createLogger('grade-present');
 
 const STYLE_NAMES_SAFE = new Set(STYLIZE_LOOK_NAMES);
 const PLAYER_VISION_MODE_NAMES_SAFE = new Set(PLAYER_VISION_GRADE_MODE_KEYS);
@@ -220,23 +226,49 @@ export function buildGradePresentMaterial({
 
   const gateCompiled = !!outdoorsTexNode;
 
-  const material = new THREE.NodeMaterial();
-  material.depthTest = false;
-  material.depthWrite = false;
+  const makeMaterial = () => {
+    const m = new THREE.NodeMaterial();
+    m.depthTest = false;
+    m.depthWrite = false;
+    // Redrawn every frame, and a new shape is only shown once compiled (`flushRebuild`): a worker compile is safe.
+    return markCompileDeferrable(m, 'the present: a rebuilt shape waits off screen until it has compiled');
+  };
+  /**
+   * THE MATERIAL THE PRESENT DRAWS, and the one waiting to replace it (2026-11-04, beads mmp-qqz / mmp-e2i). The
+   * author: *"Can we make sure that any of these potentially problematic shader compilations are dealt with ... so
+   * that they don't trigger multiple seconds of a black canvas"*. This shader is 50-90k characters, so the governor
+   * compiles it on a worker (`core/compile-policy.js`, heavy) and three draws NOTHING until it is ready: a rebuild
+   * used to leave the canvas black for seconds. Now a rebuild after the first is built onto a SECOND material,
+   * compiled in the background (`flushRebuild`'s `prepare`), and this one keeps drawing until it is ready. Both
+   * read the same uniform and texture nodes, so a fade carries on in the old shape meanwhile.
+   */
+  let material = makeMaterial();
+  /** The rebuilt material compiling in the background, or null. */
+  let pendingMaterial = null;
+  /** Bumped per background build, so a stale finish never swaps in an older shape. */
+  let pendingGen = 0;
+  /** In-place builds of `material` (a `prepare` that finishes after another in-place build proves nothing). */
+  let shownVersion = 0;
+  /** Has `material`'s current shape finished compiling? Only then is it worth holding on screen. */
+  let shownReady = false;
+  /** What the hold has done, for diagnostics: background builds started, swapped in, superseded, failed. */
+  const holdStats = { held: 0, swapped: 0, superseded: 0, failed: 0, inPlace: 0, cacheHits: 0, warmed: 0 };
 
-  /** The tone-map curve currently BAKED into the fragment (a compile-time
-   * choice — see the header). Rebuilt when it changes. */
-  let currentToneMapping = 'none';
+  /**
+   * THE FILM RESPONSE, LIVE (2026-11-04): `grade-ops.js#toneMapIndex`. It used to be baked into the fragment, so
+   * a Look with a different curve (Noir: ACES) rebuilt this whole shader; now every curve is compiled in once and
+   * this uniform picks one (`buildToneMapSwitchNode`).
+   */
+  const uToneMap = uniform(float(0));
   /** Are the render-scale governor's post-upscale sharpen taps currently
-   * COMPILED IN (2026-08-27)? A structural choice, same shape as
-   * `currentToneMapping` — see `setPostUpscaleSharpenActive`'s own doc.
+   * COMPILED IN (2026-08-27)? A structural choice (a rebuild on change) —
+   * see `setPostUpscaleSharpenActive`'s own doc.
    * Ships `false`: neutral until the governor ever actually renders below
    * native, matching this whole file's "ships neutral" header promise. */
   let sharpenActive = false;
   /** The Stylize effect's `style` currently BAKED into the fragment
-   * (mythica-machina-press#36) — same "different Fn per choice, so a
-   * compile-time rebuild, not a uniform switch" reasoning as
-   * `currentToneMapping` right above. `amount` (how much to blend the style
+   * (mythica-machina-press#36) — a different Fn per choice, so a
+   * compile-time rebuild, not a uniform switch. `amount` (how much to blend the style
    * in) is a live uniform, `uStylizeAmount` below — it doesn't need a
    * rebuild, only the CHOICE of transform does. */
   let currentStyle = 'none';
@@ -391,15 +423,218 @@ export function buildGradePresentMaterial({
   function rebuildFragment(reason = 'unknown') {
     pendingRebuild.push(reason);
   }
-  /** Build the fragment now if anything asked for it since the last build. Returns true when it rebuilt. */
-  function flushRebuild() {
+  /**
+   * Build the fragment now if anything asked for it since the last build. Returns true when it rebuilt.
+   *
+   * `prepare(material) => Promise` compiles a material for the present's draw without drawing it (the viewer
+   * passes `renderer.compileAsync` on a quad, called right where the present draws, so it compiles for the same
+   * target). With it, a rebuild while the current shape is on screen and compiled is built onto a new material
+   * and swapped in only when `prepare` resolves; the old one keeps drawing meanwhile (see `material`). Without
+   * it (tests, one-shot probes), or before the first shape has ever compiled (a load: nothing to hold yet, and a
+   * second compile would only slow it), the build goes into the current material as it always did.
+   *
+   * A shape that has compiled before (a warmed variant, or one shown earlier) is swapped in AT ONCE from
+   * `variants`, with no build and no compile.
+   * @param {((m: *) => Promise<unknown>)|null} [prepare]
+   */
+  function flushRebuild(prepare = null) {
     if (pendingRebuild.length === 0) return false;
-    buildFragmentNow([...new Set(pendingRebuild)].join('+'));
+    const reason = [...new Set(pendingRebuild)].join('+');
+    pendingRebuild = [];
+    const key = structKey();
+    const cached = prepare && shownReady ? variants.get(key) : null;
+    if (cached) {
+      if (pendingMaterial) supersedePending();
+      variants.delete(key);
+      retireShown();
+      material = cached;
+      shownKey = key;
+      shownVersion++;
+      shownReady = true;
+      holdStats.cacheHits++;
+      rebuildHistory.push(`${reason} (ready)`);
+      if (rebuildHistory.length > 40) rebuildHistory.shift();
+      return true;
+    }
+    if (!prepare || !shownReady) {
+      if (pendingMaterial) supersedePending();
+      buildFragmentNow(reason, material);
+      shownKey = key;
+      shownVersion++;
+      shownReady = false;
+      holdStats.inPlace++;
+      if (prepare) {
+        const m = material;
+        const v = shownVersion;
+        runPrepare(prepare, m).then((ok) => {
+          if (ok && m === material && v === shownVersion) shownReady = true;
+        });
+      }
+      return true;
+    }
+    if (pendingMaterial) supersedePending();
+    const next = makeMaterial();
+    buildFragmentNow(reason, next);
+    pendingMaterial = next;
+    const gen = ++pendingGen;
+    holdStats.held++;
+    runPrepare(prepare, next).then((ok) => {
+      if (gen !== pendingGen || pendingMaterial !== next) {
+        next.dispose();
+        return;
+      }
+      if (!ok) holdStats.failed++;
+      // Swapped even when the compile failed: the old behaviour (draw it, three skips it until ready) is the
+      // floor, never a material that is silently never shown.
+      retireShown();
+      material = next;
+      pendingMaterial = null;
+      shownKey = key;
+      shownVersion++;
+      shownReady = ok;
+      holdStats.swapped++;
+    });
     return true;
   }
-  function buildFragmentNow(reason) {
-    pendingRebuild = [];
+  /** A newer build replaces the one compiling: that one is disposed once its own compile settles (above). */
+  function supersedePending() {
+    pendingMaterial = null;
+    holdStats.superseded++;
+  }
+
+  /**
+   * THE SHAPES ALREADY COMPILED (2026-11-04). Every structural choice the fragment bakes in, as one string: two
+   * builds with the same key are the same shader. `variants` keeps materials whose shape has compiled and that
+   * are not on screen: the shape shown before the last swap, and the ones `warmVariants` compiled during the
+   * load. Going back to one is a pointer swap. Never holds `material` or `pendingMaterial`.
+   */
+  function structKey(o = {}) {
+    const v = (k, cur) => (k in o ? o[k] : cur);
+    return [
+      v('sharpen', sharpenActive) ? 's' : '-',
+      v('style', currentStyle),
+      v('vision', currentPlayerVisionMode),
+      v('frost', frostCompiled) ? 'f' : '-',
+      v('heat', heatRippleCompiled) ? 'h' : '-',
+      v('fogHold', fogHoldActive) ? 'F' : '-',
+      v('lens', lensWarpCompiled) ? 'L' : '-',
+      String(v('grid', gridShape)),
+      v('outline', outlineCompiled) ? 'O' : '-',
+    ].join('|');
+  }
+  const MAX_VARIANTS = 6;
+  /** @type {Map<string, *>} key -> a compiled, off-screen material (oldest first). */
+  const variants = new Map();
+  /** The key of the shape `material` holds. */
+  let shownKey = structKey();
+  function keepVariant(key, m) {
+    const old = variants.get(key);
+    if (old && old !== m) old.dispose();
+    variants.delete(key);
+    variants.set(key, m);
+    while (variants.size > MAX_VARIANTS) {
+      const [k, oldest] = variants.entries().next().value;
+      variants.delete(k);
+      oldest.dispose();
+    }
+  }
+  /** The drawn material is leaving the screen: keep it if its shape compiled, else dispose it. */
+  function retireShown() {
+    if (shownReady) keepVariant(shownKey, material);
+    else material.dispose();
+  }
+
+  /**
+   * COMPILE OTHER SHAPES NOW, OFF SCREEN (2026-11-04) — for the load's warm-up, so a later Look that turns on
+   * frost, or the render-scale governor flipping the sharpen taps, finds its shader ready instead of compiling it
+   * then. Each entry is a set of structural overrides (`{frost: true}`, `{sharpen: false}`, ...) applied to the
+   * CURRENT shape; one already shown or kept is skipped. Builds `max` of them per call (each is a JS graph build
+   * on this thread, so the caller spreads them over frames) and returns when their compiles settle.
+   * @param {(m: *) => Promise<unknown>} prepare - as `flushRebuild`'s.
+   * @param {Array<Record<string, *>>} list
+   * @param {number} [max]
+   * @returns {Promise<{built: string[], skipped: string[], failed: string[]}>}
+   */
+  function warmVariants(prepare, list, max = Infinity) {
+    const built = [];
+    const skipped = [];
+    const waits = [];
+    for (const o of list) {
+      const key = structKey(o);
+      if (key === shownKey || variants.has(key) || built.includes(key) || built.length >= max) {
+        skipped.push(key);
+        continue;
+      }
+      const saved = {
+        sharpenActive,
+        currentStyle,
+        currentPlayerVisionMode,
+        frostCompiled,
+        heatRippleCompiled,
+        fogHoldActive,
+        lensWarpCompiled,
+        gridShape,
+        outlineCompiled,
+      };
+      if ('sharpen' in o) sharpenActive = !!o.sharpen && !!buildPostUpscaleSharpenNode;
+      if ('frost' in o) frostCompiled = !!o.frost && !!tempNoiseNode;
+      if ('heat' in o) heatRippleCompiled = !!o.heat && !!tempNoiseNode;
+      if ('style' in o) currentStyle = o.style;
+      const realKey = structKey();
+      const m = makeMaterial();
+      try {
+        buildFragmentNow(`warm ${realKey}`, m);
+      } finally {
+        ({
+          sharpenActive,
+          currentStyle,
+          currentPlayerVisionMode,
+          frostCompiled,
+          heatRippleCompiled,
+          fogHoldActive,
+          lensWarpCompiled,
+          gridShape,
+          outlineCompiled,
+        } = saved);
+      }
+      if (realKey === shownKey || variants.has(realKey)) {
+        // An override this material cannot have (no noise texture, no sharpen builder) lands on a shape we hold.
+        m.dispose();
+        skipped.push(realKey);
+        continue;
+      }
+      built.push(realKey);
+      holdStats.warmed++;
+      waits.push(
+        runPrepare(prepare, m).then((ok) => {
+          if (ok) keepVariant(realKey, m);
+          else m.dispose();
+          return ok ? null : realKey;
+        })
+      );
+    }
+    return Promise.all(waits).then((r) => ({ built, skipped, failed: r.filter(Boolean) }));
+  }
+  /** Call `prepare` NOW (the renderer is in the present's state) and settle to true / false, never throwing. */
+  function runPrepare(prepare, m) {
+    let p;
+    try {
+      p = Promise.resolve(prepare(m));
+    } catch (err) {
+      p = Promise.reject(err);
+    }
+    return p.then(
+      () => true,
+      (err) => {
+        log.warn('background compile of the present failed; drawing it as before:', err);
+        return false;
+      }
+    );
+  }
+  function buildFragmentNow(reason, target = material) {
     rebuildHistory.push(reason);
+    // The texture object the sharpen taps capture (see `rebindLit`); null when they are not compiled in.
+    target.userData.msaSharpenTex = sharpenActive && buildPostUpscaleSharpenNode ? presentTexNode.value : null;
     if (rebuildHistory.length > 40) rebuildHistory.shift();
     /** Where the colour at screen `screenUv` came from in the frame the masks describe (see
      * `lensWarpCompiled`): the lens's own warp, or the same uv when the lens is off. */
@@ -471,7 +706,7 @@ export function buildGradePresentMaterial({
             )
           : afterEnv;
         const gradedLook = buildGradeNode(TSL, exposedEnv, uArt, {
-          toneMapping: currentToneMapping,
+          toneMapIndex: uToneMap,
           lutTexture: lutTexNode,
           lutStrength: uArt.lutStrength,
           lampGlow,
@@ -696,10 +931,10 @@ export function buildGradePresentMaterial({
     // same encode here with the same node three's output pass uses (`renderOutput(None, sRGB)`), and the
     // viewer sets the renderer's output space to linear, so the present is one draw straight into the canvas.
     const presentOut = vec4(finalRgb, presentTexNode.a);
-    material.fragmentNode = directSrgb
+    target.fragmentNode = directSrgb
       ? TSL.renderOutput(presentOut, THREE.NoToneMapping, THREE.SRGBColorSpace)
       : presentOut;
-    material.needsUpdate = true;
+    target.needsUpdate = true;
   }
 
   function easedVisionPower(nowMs) {
@@ -731,9 +966,36 @@ export function buildGradePresentMaterial({
   buildFragmentNow('built');
 
   return {
-    material,
+    /** The material the present draws THIS frame. It changes when a background rebuild is swapped in, so read it
+     * after `flushRebuild`, every frame. */
+    get material() {
+      return material;
+    },
+    /** What the rebuild hold has done (see `material`); `pending` is true while a new shape compiles. */
+    holdInfo: () => ({
+      ...holdStats,
+      pending: !!pendingMaterial,
+      shownReady,
+      shown: shownKey,
+      kept: [...variants.keys()],
+      // The live film response and saturation the Look grade is drawing with right now.
+      toneMap: uToneMap.value,
+      saturation: uArt.saturation.value,
+    }),
+    /** Dispose the drawn material and any still compiling (a compile that settles later disposes its own). */
+    dispose: () => {
+      pendingGen++;
+      pendingMaterial = null;
+      for (const m of variants.values()) m.dispose();
+      variants.clear();
+      material.dispose();
+    },
+    /** Compile other shapes off screen, for the load's warm-up (see `warmVariants`). */
+    warmVariants,
+    /** The compiled shapes held off screen, by key (diagnostics). */
+    variantKeys: () => [...variants.keys()],
     /** Apply every rebuild asked for since the last draw, as ONE build (see `rebuildFragment`). Call before
-     * drawing the present. */
+     * drawing the present, with `prepare` to keep the old shape on screen while the new one compiles. */
     flushRebuild,
     presentTexNode,
     /** Why the fragment was rebuilt, oldest first (see `rebuildFragment`). */
@@ -845,19 +1107,17 @@ export function buildGradePresentMaterial({
     },
     /**
      * Push the artistic grade. `gradeParams` are the primary ops; `tail` is
-     * `{toneMapping, lutStrength}`. Rebuilds the fragment ONLY if the tone-map
-     * curve changed (compile-time), else just writes uniforms.
+     * `{toneMapping, lutStrength}`. Uniform writes only: the film response is a
+     * live switch (`uToneMap`), so a Look with another curve never rebuilds.
      */
     setArtGrade: (gradeParams, tail = {}) => {
       writeGradeUniforms(uArt, gradeParams);
       if (uArt.lutStrength)
         uArt.lutStrength.value = Number.isFinite(Number(tail.lutStrength)) ? Number(tail.lutStrength) : 0;
-      const nextTone = tail.toneMapping || 'none';
-      if (nextTone !== currentToneMapping) {
-        currentToneMapping = nextTone;
-        rebuildFragment('tone map');
-      }
+      uToneMap.value = toneMapIndex(tail.toneMapping || 'none');
     },
+    /** The film response the present draws with (`grade-ops.js#TONE_MAP_INDEX`), for diagnostics. */
+    toneMapIndex: () => uToneMap.value,
     /** Swap the 3D LUT texture (a parsed .cube uploaded as a Data3DTexture). */
     setLut: (tex) => {
       if (lutTexNode && tex) lutTexNode.value = tex;
@@ -952,13 +1212,23 @@ export function buildGradePresentMaterial({
     rebindLit: (tex) => {
       presentTexNode.value = tex;
       material.needsUpdate = true;
+      if (pendingMaterial) pendingMaterial.needsUpdate = true;
+      // A kept shape whose sharpen taps were built on ANOTHER texture object is dropped (it compiles again if
+      // asked). A resize keeps the object (RenderTarget#setSize resizes it in place), so warmed shapes survive it.
+      for (const [k, m] of [...variants]) {
+        const built = m.userData?.msaSharpenTex;
+        if (built && built !== tex) {
+          variants.delete(k);
+          m.dispose();
+        }
+      }
       // If the post-upscale sharpen is active, its own taps were built
       // against whatever `presentTexNode.value` was at the LAST rebuild —
-      // force a fresh one so they never sample a stale texture object
-      // identity a resize could (rarely, but see rebuildFragment's own
-      // comment) have changed. The native path (sharpenActive false) is
-      // untouched: this is a no-op call that costs nothing extra.
-      if (sharpenActive) rebuildFragment('lit rebind (sharpen)');
+      // rebuild so they never sample a stale texture object. Only when the
+      // object really changed (2026-11-04): a resize mutates it in place,
+      // and this used to recompile the ~60k-character present on every
+      // render-scale step. The native path (sharpenActive false) is untouched.
+      if (sharpenActive && material.userData?.msaSharpenTex !== tex) rebuildFragment('lit rebind (sharpen)');
     },
     /**
      * Re-point at a DIFFERENT, ALREADY-SAME-SHAPE texture, EVERY FRAME — no

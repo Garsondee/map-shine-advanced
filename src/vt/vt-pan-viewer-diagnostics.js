@@ -565,6 +565,7 @@ export function buildViewerDiagnostics({
   postContentPipelinesCreated = null,
   postContentPasses = null,
   presentRebuilds = null,
+  presentHold = null,
   pipelineGovernor = null,
   warmUpError = null,
   warmUpSimError = null,
@@ -756,6 +757,9 @@ export function buildViewerDiagnostics({
       // Each post-content warm-up pass, timed; why the present shader was rebuilt (2026-11-02).
       postContentPasses,
       presentRebuilds,
+      // The rebuild hold (grade-present.js `material`, 2026-11-04): a rebuilt present compiles in the background
+      // while the old one draws; `pending` true = one is compiling right now.
+      presentHold,
       // THE PIPELINE GOVERNOR'S CENSUS (vt/pipeline-governor.js, epic mmp-fpu): how many pipelines were made
       // on a worker thread versus on the GPU process's main thread, which compiles are still running, and the
       // slowest ones with their WGSL size. The number to watch is the slowest SYNCHRONOUS compile: past ~10 s

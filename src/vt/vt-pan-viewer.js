@@ -9468,8 +9468,25 @@ async function startVtPanViewerUnserialized({
       setPostUpscaleSharpenStrength(resolvePostUpscaleSharpenStrength(initialInternalScale));
       gradePresent.setPostUpscaleSharpenActive(initialInternalScale < 0.9995);
     }
-    const presentMaterial = gradePresent.material;
-    const presentQuad = new THREE.QuadMesh(presentMaterial);
+    const presentQuad = new THREE.QuadMesh(gradePresent.material);
+    /**
+     * COMPILE A REBUILT PRESENT WITHOUT SHOWING IT (2026-11-04, mmp-qqz). `gradePresent.flushRebuild` hands a
+     * rebuilt material here and keeps drawing the old one until this resolves, so a structural change (a stylize
+     * pick, a vision mode, the lens's first frame, a new grid style) no longer blanks the canvas for the seconds
+     * this ~50-90k-character shader takes to compile on its worker. Called right where the present draws, so
+     * `compileAsync` reads the same render target the draw will (the canvas). Its own quad: the present's must
+     * keep its material until the swap. Never dispose its geometry (three's one shared QuadGeometry).
+     */
+    const presentCompileQuad = new THREE.QuadMesh();
+    function preparePresent(material) {
+      presentCompileQuad.material = material;
+      return renderer.compileAsync(presentCompileQuad, presentCompileQuad.camera);
+    }
+    /** Apply the present's pending rebuilds and point its quad at the material that draws this frame. */
+    function flushPresent(prepare) {
+      gradePresent.flushRebuild(prepare);
+      presentQuad.material = gradePresent.material;
+    }
 
     /** Re-point the present material at a freshly-allocated target (resize). */
     function rebindPresent() {
@@ -10229,8 +10246,9 @@ async function startVtPanViewerUnserialized({
       gradePresent.setLensWarp(lensK !== null, lensK ?? 0);
       syncFoundryOverlay();
       // Every structural change asked for since the last frame, applied as ONE shader build (grade-present.js
-      // `rebuildFragment`) — a load used to build this ~50k-character shader seven times.
-      gradePresent.flushRebuild();
+      // `rebuildFragment`) — a load used to build this ~50k-character shader seven times. After the first shape
+      // has compiled, a rebuild compiles in the background and the old shape keeps drawing (`preparePresent`).
+      flushPresent(preparePresent);
       // THE SUN-SHADOW DEBUG VIEW (author, 2026-07-26) — when a view is picked
       // it REPLACES the present entirely rather than blending over it: the
       // point is to see the shadow field alone, on white, with nothing else in
@@ -26062,7 +26080,7 @@ async function startVtPanViewerUnserialized({
           // compile something", and the weather scenarios compiling things is not that answer.
           afterPlan = readPipelineCount();
           planEndMs = perfNowMs();
-          return warmUpWeatherStates();
+          return warmUpWeatherStates().then(() => warmUpPresentVariants());
         })
         .catch((err) => {
           log.warn('post-content effect warm-up failed — effects will compile on first draw:', err);
@@ -26192,6 +26210,87 @@ async function startVtPanViewerUnserialized({
       log.info(
         `weather shaders compiled behind the curtain: ${weatherWarmCreated} pipeline(s) in ${Math.round(perfNowMs() - t0)} ms`,
         counts
+      );
+    }
+
+    /**
+     * COMPILE THE PRESENT'S OTHER SHAPES NOW, BEHIND THE CURTAIN (2026-11-04). The author: *"make sure that any of
+     * these potentially problematic shader compilations are dealt with during loading so that they don't trigger
+     * multiple seconds of a black canvas"*. The present (`grade-present.js`, ~60k characters) bakes a few choices
+     * into its shader, and two of them change during play: Temperature Effects' frost and heat ripple (a Look
+     * such as Blizzard, Frozen or Infernal turns them on; measured on Big Bank, 2026-11-04) and the render-scale
+     * governor's sharpen taps (it flips them whenever it leaves or returns to native resolution). Each was a
+     * seconds-long compile the first time. A rebuild no longer blanks the canvas (the old shape holds until the
+     * new one is ready), but frost would still arrive seconds after its Look, so those shapes are compiled here,
+     * one per frame, and the present swaps them in at once later. Warming is an optimisation: a failure is logged
+     * and the shape compiles when first used.
+     */
+    let presentWarmStarted = false;
+    let presentWarmReport = null;
+    async function warmUpPresentVariants() {
+      if (presentWarmStarted || !view) return;
+      presentWarmStarted = true;
+      const t0 = perfNowMs();
+      // The shape on screen must have compiled first: the variants are that shape with one choice changed.
+      for (let i = 0; i < 600 && !gradePresent.holdInfo().shownReady; i++) await nextAnimationFrame();
+      const readyWaitMs = Math.round(perfNowMs() - t0);
+      if (!gradePresent.holdInfo().shownReady) {
+        log.warn('present warm-up skipped: the present never finished compiling (its shapes compile when first used)');
+        return;
+      }
+      const t = gradePresent.temperatureCompiled();
+      const sharpenNow = resolveCurrentInternalScale() < 0.9995;
+      const wanted = [
+        { frost: true, heat: t.heatRipple },
+        { frost: t.frost, heat: true },
+        { frost: true, heat: true },
+        { sharpen: !sharpenNow },
+      ];
+      const built = [];
+      const failed = [];
+      const steps = [];
+      const waits = [];
+      // One shape started per frame (its graph is built on this thread), all compiling at once on worker threads
+      // (measured on the shared-GPU rig: ~18 ms to build, ~9.7 s to compile each; one after another was 29 s).
+      // Started right after a frame, so the renderer is back on the canvas, the present's own target.
+      for (let i = 0; i < wanted.length; i++) {
+        onLoadProgress?.({ phase: 'warming', done: i, total: wanted.length, detail: 'colour grade variants' });
+        await nextAnimationFrame();
+        try {
+          const tb = perfNowMs();
+          const prev = renderer.getRenderTarget();
+          if (prev !== null) renderer.setRenderTarget(null);
+          const wait = gradePresent.warmVariants(preparePresent, [wanted[i]], 1);
+          if (prev !== null) renderer.setRenderTarget(prev);
+          const tc = perfNowMs();
+          waits.push(
+            wait.then((r) => {
+              built.push(...r.built);
+              failed.push(...r.failed);
+              steps.push({
+                built: r.built.length,
+                buildMs: Math.round(tc - tb),
+                readyAfterMs: Math.round(perfNowMs() - t0),
+              });
+            })
+          );
+        } catch (err) {
+          log.warn('present warm-up: one shape failed to build — it will compile when first used:', err);
+        }
+      }
+      await Promise.all(waits);
+      onLoadProgress?.({ phase: 'warming', done: wanted.length, total: wanted.length });
+      presentWarmReport = {
+        built,
+        failed,
+        kept: gradePresent.variantKeys(),
+        ms: Math.round(perfNowMs() - t0),
+        readyWaitMs,
+        steps,
+      };
+      log.info(
+        `present shapes compiled behind the curtain: ${built.length} in ${presentWarmReport.ms} ms`,
+        presentWarmReport
       );
     }
 
@@ -30911,7 +31010,7 @@ async function startVtPanViewerUnserialized({
       /** Tear down buf:scene.color + the present chain (see disposeActive). */
       disposeSceneColor() {
         allocator.dispose(sceneColor);
-        presentMaterial.dispose();
+        gradePresent.dispose();
         // NOT presentQuad.geometry — QuadMesh shares ONE module-level
         // QuadGeometry across every QuadMesh in the process
         // (three.webgpu.js:49456, `var _geometry2 = new QuadGeometry()`).
@@ -30987,7 +31086,7 @@ async function startVtPanViewerUnserialized({
         // this leaks one Data3DTexture per distinct preset the author tried.
         for (const tex of lutTextureCache.values()) tex?.dispose?.();
         lutTextureCache.clear();
-        presentMaterial.dispose?.();
+        gradePresent.dispose();
         envLight.compositeMaterial.dispose();
       },
       /** Tear down scene.sunShadow + the bake material + the caster height
@@ -31552,7 +31651,7 @@ async function startVtPanViewerUnserialized({
         renderer.setRenderTarget(sceneColor);
         renderer.render(scene, camera);
         renderer.setRenderTarget(null);
-        gradePresent.flushRebuild();
+        flushPresent(null);
         presentQuad.render(renderer);
 
         return {
@@ -33129,6 +33228,8 @@ async function startVtPanViewerUnserialized({
           postContentPipelinesCreated,
           postContentPasses: postContentPasses.slice(),
           presentRebuilds: gradePresent.rebuildHistory?.() ?? null,
+          // What the rebuild hold did (grade-present.js `material`): a rebuild keeps the old shape on screen.
+          presentHold: gradePresent.holdInfo?.() ? { ...gradePresent.holdInfo(), warm: presentWarmReport } : null,
           pipelineGovernor,
           warmUpError,
           warmUpSimError,

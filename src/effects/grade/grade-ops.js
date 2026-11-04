@@ -46,6 +46,8 @@
  * @module effects/grade/grade-ops
  */
 
+import { sharedFn } from '../../core/tsl-fn.js';
+
 /** Rec.709 luminance weights. Used for the luminance-preserving saturation. */
 export const LUMA = Object.freeze([0.2126, 0.7152, 0.0722]);
 
@@ -319,6 +321,51 @@ export function buildHighlightRolloffNode(TSL, c, knee = HIGHLIGHT_KNEE, whiten 
 
 /** The tone-map option keys, for an `enum` param's choices. */
 export const TONE_MAP_NAMES = Object.freeze(Object.keys(TONE_MAP_FNS));
+
+/**
+ * THE TONE MAP AS A LIVE SWITCH (2026-11-04). The author: *"When selecting the 'Noir' look the screen goes
+ * black"*. Noir is the one Look with a film response other than the roll-off (ACES), and the curve used to be
+ * baked into the present shader, so picking it rebuilt a ~50-90k-character shader that compiles off the main
+ * thread for seconds, and three draws nothing while it does. Now every curve is compiled in once, behind one
+ * uniform: the number below. All of them are layout functions (three's own, and the roll-off below), so the
+ * shader carries each once, and only the chosen branch runs (the condition is a uniform, so every pixel of a
+ * frame takes the same branch).
+ * @type {Readonly<Record<string, number>>}
+ */
+export const TONE_MAP_INDEX = Object.freeze(Object.fromEntries(TONE_MAP_NAMES.map((k, i) => [k, i])));
+
+/** The switch value for a tone-map name; an unknown name is `none` (0). @param {string} name @returns {number} */
+export function toneMapIndex(name) {
+  return TONE_MAP_INDEX[name] ?? 0;
+}
+
+/**
+ * Every tone-map curve, chosen at draw time by `modeNode` (a float holding {@link toneMapIndex}). Same curves and
+ * the same exposure-1 call as the baked tail below. TSL passed in.
+ * @param {*} TSL @param {*} c vec3 @param {*} modeNode float uniform
+ * @returns {*} vec3
+ */
+export function buildToneMapSwitchNode(TSL, c, modeNode) {
+  const { float, vec3, If } = TSL;
+  const pick = sharedFn(TSL, 'msaGradeToneMapSwitch', { c: 'vec3', mode: 'float' }, 'vec3', ({ c: col, mode }) => {
+    const out = vec3(col).toVar();
+    // Highest index first, each branch "mode > i - 0.5", so a float that drifts by rounding still lands right.
+    const curves = TONE_MAP_NAMES.map((name, i) => ({ fn: TONE_MAP_FNS[name], i }))
+      .filter((k) => k.fn)
+      .sort((a, b) => b.i - a.i);
+    let chain = null;
+    for (const { fn, i } of curves) {
+      const body = () => {
+        if (fn === 'highlightRolloff') out.assign(buildHighlightRolloffNode(TSL, col));
+        else if (typeof TSL[fn] === 'function') out.assign(TSL[fn](col, float(1)));
+      };
+      const cond = mode.greaterThan(float(i - 0.5));
+      chain = chain ? chain.ElseIf(cond, body) : If(cond, body);
+    }
+    return out;
+  });
+  return pick(c, modeNode);
+}
 
 /** @param {number} x @returns {number} */
 function clamp01(x) {
@@ -751,6 +798,8 @@ export function applyHazeToGrade(grade, haze) {
  *   uniforms make the primary a provable no-op.
  * @param {object} [tail] - the whole-frame display tail, Look scope only:
  * @param {string} [tail.toneMapping] - a `TONE_MAP_FNS` key; `'none'`/absent skips it.
+ * @param {*} [tail.toneMapIndex] - a float uniform holding `toneMapIndex(name)`: when given, every curve is
+ *   compiled in and this picks one at draw time (`toneMapping` is then ignored). The present uses it.
  * @param {*} [tail.lutTexture] - a 3D LUT texture node, or null (skips the LUT).
  * @param {*} [tail.lutStrength] - float node 0..1; 0 makes the LUT a no-op.
  * @returns {*} vec3 graded colour (linear, ready for the canvas sRGB encode).
@@ -849,7 +898,10 @@ export function buildGradeNode(TSL, colorNode, u, tail) {
   // --- THE TAIL: tone map → 3D LUT (Look scope only) ----------------------
   if (tail) {
     const fnName = TONE_MAP_FNS[tail.toneMapping];
-    if (fnName === 'highlightRolloff') {
+    if (tail.toneMapIndex) {
+      // THE LIVE SWITCH (see TONE_MAP_INDEX): every curve compiled in, the uniform picks one.
+      c = buildToneMapSwitchNode(TSL, c, tail.toneMapIndex);
+    } else if (fnName === 'highlightRolloff') {
       c = buildHighlightRolloffNode(TSL, c);
     } else if (fnName && typeof TSL[fnName] === 'function') {
       // Three's tone-map Fns take (color, exposure); the grade already spent its

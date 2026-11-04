@@ -61,17 +61,17 @@ export async function run(t) {
   try {
     // ---- the setting ----
     delete globalThis.game;
-    ok('with no game at all, forcing defaults reads as OFF (never a throw)', isForcingDefaults() === false);
+    ok('with no game at all, forcing defaults reads as ON, the default (never a throw)', isForcingDefaults() === true);
 
     globalThis.game = fakeGame();
-    ok('before the setting is registered, it reads as OFF', isForcingDefaults() === false);
+    ok('before the setting is registered, it reads as ON, the default', isForcingDefaults() === true);
 
     let changes = 0;
     registerForceDefaultsSettings({ onChange: () => (changes += 1) });
-    ok('registered, it starts OFF (the world gets its authored looks)', isForcingDefaults() === false);
+    ok('registered, it starts ON (one settings arrangement for every level)', isForcingDefaults() === true);
     ok(
       'it is a world-scope bool kept out of Foundry config',
-      globalThis.game.store[`map-shine-advanced.${FORCE_DEFAULTS_KEY}`] === false
+      globalThis.game.store[`map-shine-advanced.${FORCE_DEFAULTS_KEY}`] === true
     );
 
     const on = await writeForceDefaults(true);

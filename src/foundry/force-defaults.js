@@ -38,7 +38,9 @@ export function registerForceDefaultsSettings(options = {}) {
         key: FORCE_DEFAULTS_KEY,
         scope: 'world',
         kind: 'bool',
-        default: false,
+        // ON by default (2026-11-04): the goal is ONE settings arrangement that works for every level, so no
+        // scene shows its own tuning unless the GM switches this off.
+        default: true,
         config: false,
         name: 'Force default effect settings (world)',
         hint: "Every effect draws Map Shine's shipped defaults, ignoring each scene's tuning. Nothing is deleted.",
@@ -50,14 +52,15 @@ export function registerForceDefaultsSettings(options = {}) {
 
 /**
  * Is the world forcing defaults right now? Never throws: before the setting is registered (or with no
- * `game`) the answer is "no", i.e. the look is whatever each scene authored.
+ * `game`) the answer is "yes", the setting's own default (ON since 2026-11-04).
  * @returns {boolean}
  */
 export function isForcingDefaults() {
   try {
-    return readSetting(FORCE_DEFAULTS_NAMESPACE, FORCE_DEFAULTS_KEY) === true;
+    return readSetting(FORCE_DEFAULTS_NAMESPACE, FORCE_DEFAULTS_KEY) !== false;
   } catch (_err) {
-    return false;
+    // Not registered yet / no `game`: the setting's own default, so boot never flashes a scene's tuning.
+    return true;
   }
 }
 

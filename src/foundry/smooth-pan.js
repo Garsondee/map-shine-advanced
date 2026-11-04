@@ -137,9 +137,15 @@ export function installSmoothPan({ onReady = null } = {}) {
   const glide = { running: false, v: { x: 0, y: 0 }, last: null, shift: false, tickFn: null };
   const counts = { glides: 0, glideTicks: 0, tapsPassedThrough: 0 };
 
-  const D = () => globalThis.foundry?.helpers?.interaction?.ClientKeybindings?.MOVEMENT_DIRECTIONS ?? {
-    UP: 'up', LEFT: 'left', DOWN: 'down', RIGHT: 'right', ASCEND: 'ascend', DESCEND: 'descend',
-  };
+  const D = () =>
+    globalThis.foundry?.helpers?.interaction?.ClientKeybindings?.MOVEMENT_DIRECTIONS ?? {
+      UP: 'up',
+      LEFT: 'left',
+      DOWN: 'down',
+      RIGHT: 'right',
+      ASCEND: 'ascend',
+      DESCEND: 'descend',
+    };
 
   // ---- 1. drag throttle ---------------------------------------------------
   const applyDrag = () => {

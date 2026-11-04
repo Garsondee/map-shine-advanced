@@ -56,7 +56,10 @@ export function run(t) {
     p.setMode(2);
     const { drawn } = simulate(p, 200, () => 1, 50000);
     const g = gaps(drawn);
-    ok('divisor 2 draws every 2nd refresh', g.every((x) => Math.abs(x - 2 * REFRESH) < 1e-6));
+    ok(
+      'divisor 2 draws every 2nd refresh',
+      g.every((x) => Math.abs(x - 2 * REFRESH) < 1e-6)
+    );
     ok('divisor 2 is pacing', p.isPacing());
   }
   {
@@ -155,7 +158,10 @@ export function run(t) {
       return d === 2 ? 3 : 2;
     };
     simulate(p, 6000, machine, 50000);
-    ok('after a burst raised it to 4, it comes back to 3 while 2 stays blocked', phase === 'calm' && p.status().divisor === 3);
+    ok(
+      'after a burst raised it to 4, it comes back to 3 while 2 stays blocked',
+      phase === 'calm' && p.status().divisor === 3
+    );
   }
 
   // ---- what the governor reads ------------------------------------------------

@@ -65,5 +65,8 @@ test('zoom factor: whole at medium zoom, weak when fully zoomed out, monotone be
 });
 
 test('zoom factor: no measurement means the full cut (the safe side for interiors)', () => {
-  assert.equal(interiorCutZoomFactor({ viewWidthWorldPx: 0, viewHeightWorldPx: 0, sceneWidthPx: 0, sceneHeightPx: 0 }), 1);
+  assert.equal(
+    interiorCutZoomFactor({ viewWidthWorldPx: 0, viewHeightWorldPx: 0, sceneWidthPx: 0, sceneHeightPx: 0 }),
+    1
+  );
 });

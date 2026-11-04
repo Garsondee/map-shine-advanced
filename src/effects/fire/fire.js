@@ -1138,7 +1138,7 @@ export const FIRE_PARAMS = Object.freeze({
     default: 0.75,
     category: 'Smoke',
     label: 'Smoke firelight reach',
-    help: 'How far up the column the firelight carries before it has faded to dark (share of the smoke\'s life).',
+    help: "How far up the column the firelight carries before it has faded to dark (share of the smoke's life).",
   },
   smokeLineWidth: {
     type: 'float',

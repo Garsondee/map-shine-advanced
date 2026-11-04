@@ -48,10 +48,32 @@ const pacing = opt('pacing', null); // off|auto|1..4: MapShine.setFramePacing fo
 const smooth = opt('smooth', null); // on|off: MapShine.setSmoothPan for the run (left as set)
 
 const EFFECT_IDS = [
-  'albedoClarity', 'apertureGobo', 'bloom', 'candleFlame', 'depthOfField', 'fire', 'fluid', 'grade',
-  'gust', 'lightning', 'motionTileShadows', 'specular', 'strike', 'sunShadows', 'thunder',
-  'tokenGrounding', 'vegetation', 'water', 'wind', 'window', 'uiWindowShadow', 'doorGraphics',
-  'smellyFlies', 'maggots', 'fireflies', 'dust',
+  'albedoClarity',
+  'apertureGobo',
+  'bloom',
+  'candleFlame',
+  'depthOfField',
+  'fire',
+  'fluid',
+  'grade',
+  'gust',
+  'lightning',
+  'motionTileShadows',
+  'specular',
+  'strike',
+  'sunShadows',
+  'thunder',
+  'tokenGrounding',
+  'vegetation',
+  'water',
+  'wind',
+  'window',
+  'uiWindowShadow',
+  'doorGraphics',
+  'smellyFlies',
+  'maggots',
+  'fireflies',
+  'dust',
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

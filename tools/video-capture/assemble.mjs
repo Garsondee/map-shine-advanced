@@ -24,11 +24,20 @@ const opt = (n, d) => {
 const plan = JSON.parse(fs.readFileSync(opt('plan'), 'utf8'));
 const dir = path.resolve(opt('dir'));
 const out = path.resolve(opt('out', path.join(dir, 'final.mp4')));
-const ffmpeg = opt('ffmpeg', process.env.FFMPEG) ?? (() => {
-  const b = path.join(process.env.APPDATA ?? '', 'Python', 'Python314', 'site-packages', 'imageio_ffmpeg', 'binaries');
-  const f = fs.existsSync(b) && fs.readdirSync(b).find((x) => /^ffmpeg.*\.exe$/i.test(x));
-  return f ? path.join(b, f) : 'ffmpeg';
-})();
+const ffmpeg =
+  opt('ffmpeg', process.env.FFMPEG) ??
+  (() => {
+    const b = path.join(
+      process.env.APPDATA ?? '',
+      'Python',
+      'Python314',
+      'site-packages',
+      'imageio_ffmpeg',
+      'binaries'
+    );
+    const f = fs.existsSync(b) && fs.readdirSync(b).find((x) => /^ffmpeg.*\.exe$/i.test(x));
+    return f ? path.join(b, f) : 'ffmpeg';
+  })();
 const fontDir = path.join(process.env.WINDIR ?? 'C:/Windows', 'Fonts').replace(/\\/g, '/');
 const font = (f) => `${fontDir}/${f}`.replace(/:/g, '\\:');
 const esc = (t) => String(t).replace(/\\/g, '\\\\').replace(/'/g, '\u2019').replace(/:/g, '\\:').replace(/%/g, '\\%');
@@ -85,15 +94,42 @@ const encArgs =
       // coded at lower quality; on a pan that is a 30 Hz sharpness flicker
       // (38% peak-to-peak measured) that reads as jitter and vanishes when the
       // camera stops. Without them: 3.8%, steadier than the source.
-      ['-c:v', 'libx264', '-preset', opt('preset', 'fast'), '-crf', opt('crf', '16'),
-        '-x264-params', opt('x264-params', 'bframes=0')]
+      [
+        '-c:v',
+        'libx264',
+        '-preset',
+        opt('preset', 'fast'),
+        '-crf',
+        opt('crf', '16'),
+        '-x264-params',
+        opt('x264-params', 'bframes=0'),
+      ]
     : ['-c:v', encoder, '-b:v', opt('bitrate', '80M')];
 const args = [
-  '-hide_banner', '-loglevel', 'error', '-stats', '-y',
+  '-hide_banner',
+  '-loglevel',
+  'error',
+  '-stats',
+  '-y',
   ...shots.flatMap((s) => ['-i', s.file]),
-  '-filter_complex', parts.join(';'),
-  '-map', `[${last}]`, ...encArgs, '-pix_fmt', 'yuv420p', '-r', String(plan.fps ?? 60),
-  '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-movflags', '+faststart', out,
+  '-filter_complex',
+  parts.join(';'),
+  '-map',
+  `[${last}]`,
+  ...encArgs,
+  '-pix_fmt',
+  'yuv420p',
+  '-r',
+  String(plan.fps ?? 60),
+  '-color_primaries',
+  'bt709',
+  '-color_trc',
+  'bt709',
+  '-colorspace',
+  'bt709',
+  '-movflags',
+  '+faststart',
+  out,
 ];
 const total = offset + fade;
 console.log(`[assemble] ${shots.length} shots, ${total.toFixed(1)} s -> ${out}`);

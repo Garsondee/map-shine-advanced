@@ -24,7 +24,10 @@
     "ChatMessage": "readonly",
     "renderTemplate": "readonly",
     "fromUuid": "readonly",
-    "fromUuidSync": "readonly"
+    "fromUuidSync": "readonly",
+    "MapShine": "readonly",
+    "VideoFrame": "readonly",
+    "VideoEncoder": "readonly"
   },
   "ignorePatterns": [
     "legacy/",
@@ -76,6 +79,13 @@
       "env": {
         "node": true,
         "browser": false
+      }
+    },
+    {
+      "files": ["tools/video-capture/record.mjs", "tools/pan-smoothness/measure.mjs"],
+      "env": {
+        "node": true,
+        "browser": true
       }
     },
     {

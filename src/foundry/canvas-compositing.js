@@ -978,8 +978,20 @@ export function paceFoundryRender() {
     if (!app?.ticker || !app.renderer || app.__msaPaced) return false;
     const LOW = globalThis.PIXI?.UPDATE_PRIORITY?.LOW ?? -25;
     let skip = false;
-    app.ticker.add(() => { skip = !framePacer.decide(app.ticker.lastTime); }, null, LOW + 1);
-    app.ticker.add(() => { skip = false; }, null, LOW - 1);
+    app.ticker.add(
+      () => {
+        skip = !framePacer.decide(app.ticker.lastTime);
+      },
+      null,
+      LOW + 1
+    );
+    app.ticker.add(
+      () => {
+        skip = false;
+      },
+      null,
+      LOW - 1
+    );
     const renderer = app.renderer;
     const render = renderer.render;
     renderer.render = function pacedRender(object, options) {
@@ -993,7 +1005,10 @@ export function paceFoundryRender() {
     app.__msaPaced = true;
     return true;
   } catch (err) {
-    log.error("pacing Foundry's canvas draw failed — with frame pacing on, its chrome may move between map frames:", err);
+    log.error(
+      "pacing Foundry's canvas draw failed — with frame pacing on, its chrome may move between map frames:",
+      err
+    );
     return false;
   }
 }

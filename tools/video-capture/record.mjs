@@ -173,8 +173,21 @@ function startStreamSink({ file, fps, ext }) {
           fs.closeSync(fd);
           const ff = spawn(
             findFfmpeg(),
-            ['-hide_banner', '-loglevel', 'error', '-y', '-framerate', String(fps), '-i', raw, '-c', 'copy',
-              '-movflags', '+faststart', file],
+            [
+              '-hide_banner',
+              '-loglevel',
+              'error',
+              '-y',
+              '-framerate',
+              String(fps),
+              '-i',
+              raw,
+              '-c',
+              'copy',
+              '-movflags',
+              '+faststart',
+              file,
+            ],
             { stdio: ['ignore', 'ignore', 'pipe'] }
           );
           let err = '';
@@ -318,8 +331,14 @@ const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder,
     MapShine.setWeatherArchetype(shot.weather.from, 'video', { immediate: true });
     const fromState = { ...MapShine.getWeatherState().state };
     const keysW = Object.keys(fromState).filter((k) => Number.isFinite(fromState[k]) && Number.isFinite(toState[k]));
-    weatherBlend = { fromState, toState, keysW, ease: ease[shot.weather.ease] ?? ease.smooth,
-      start: shot.weather.startT ?? 0, end: shot.weather.endT ?? 1 };
+    weatherBlend = {
+      fromState,
+      toState,
+      keysW,
+      ease: ease[shot.weather.ease] ?? ease.smooth,
+      start: shot.weather.startT ?? 0,
+      end: shot.weather.endT ?? 1,
+    };
   }
   const applyWeather = (u) => {
     if (!weatherBlend) return;
@@ -471,7 +490,8 @@ const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder,
       if (enc) {
         if (encError) throw encError;
         const isHevc = encoder.codec.startsWith('hvc1') || encoder.codec.startsWith('hev1');
-        const qpOpt = encoder.qp != null ? (isHevc ? { hevc: { quantizer: encoder.qp } } : { avc: { quantizer: encoder.qp } }) : {};
+        const qpOpt =
+          encoder.qp != null ? (isHevc ? { hevc: { quantizer: encoder.qp } } : { avc: { quantizer: encoder.qp } }) : {};
         enc.encode(f.videoFrame, { keyFrame: i % Math.round(fps * (encoder.keySec ?? 2)) === 0, ...qpOpt });
         f.videoFrame.close();
         while (enc.encodeQueueSize > 3) await sleep(1);
@@ -576,11 +596,39 @@ async function run() {
     const { width, height } = await page.evaluate(() => MapShine.capture.status());
     const file = path.join(out, `${shot.name}.mp4`);
     const ffmpegArgs = [
-      '-hide_banner', '-loglevel', 'error', '-y',
-      '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${width}x${height}`, '-r', String(fps), '-i', '-',
-      '-c:v', plan.codec ?? 'libx264', '-preset', plan.preset ?? 'slow', '-crf', String(plan.crf ?? 14),
-      '-pix_fmt', 'yuv420p', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709',
-      '-r', String(fps), '-movflags', '+faststart', file,
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-f',
+      'rawvideo',
+      '-pix_fmt',
+      'rgba',
+      '-s',
+      `${width}x${height}`,
+      '-r',
+      String(fps),
+      '-i',
+      '-',
+      '-c:v',
+      plan.codec ?? 'libx264',
+      '-preset',
+      plan.preset ?? 'slow',
+      '-crf',
+      String(plan.crf ?? 14),
+      '-pix_fmt',
+      'yuv420p',
+      '-color_primaries',
+      'bt709',
+      '-color_trc',
+      'bt709',
+      '-colorspace',
+      'bt709',
+      '-r',
+      String(fps),
+      '-movflags',
+      '+faststart',
+      file,
     ];
     // Default: Chrome's hardware encoder, straight off the GPU canvas.
     // "encoder": "x264" reads every frame back as RGBA and encodes with

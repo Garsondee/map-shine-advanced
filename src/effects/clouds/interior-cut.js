@@ -52,8 +52,7 @@ function boxPass(src, dst, w, h, radius, vertical) {
       dst[base + i * stride] = sum * inv;
       const add = i + r + 1;
       const sub = i - r;
-      sum +=
-        src[base + (add >= len ? len - 1 : add) * stride] - src[base + (sub < 0 ? 0 : sub) * stride];
+      sum += src[base + (add >= len ? len - 1 : add) * stride] - src[base + (sub < 0 ? 0 : sub) * stride];
     }
   }
 }

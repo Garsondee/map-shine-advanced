@@ -228,7 +228,10 @@ export function run(t) {
     t.ok('perfNowMs() moved by exactly the video time', close(perfNowMs() - p0, 2000, 1e-6));
     // Drift: video time minus real time — an outside real clock plus the drift
     // reads the video's instant (the tile-motion adapter's use).
-    t.ok('drift puts an outside real clock on video time', close(performance.now() + captureDriftMs(), perfNowMs(), 0.5));
+    t.ok(
+      'drift puts an outside real clock on video time',
+      close(performance.now() + captureDriftMs(), perfNowMs(), 0.5)
+    );
     advanceCaptureClock(-50);
     advanceCaptureClock(NaN);
     t.ok('negative or NaN steps never move video time backwards', close(perfNowMs() - p0, 2000, 1e-6));

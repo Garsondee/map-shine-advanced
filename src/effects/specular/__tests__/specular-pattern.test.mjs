@@ -554,7 +554,8 @@ export function run(t) {
   ok(
     'full light matches what ROUND 24 shipped (knee 0.01, steepness 10.5, gain 0.23) within 2%',
     Math.abs(
-      shineLightResponse(1, R25) / shineLightResponse(1, { knee: 0.01, steepness: 10.5, softness: 0.66, gain: 0.23 }) - 1
+      shineLightResponse(1, R25) / shineLightResponse(1, { knee: 0.01, steepness: 10.5, softness: 0.66, gain: 0.23 }) -
+        1
     ) < 0.02
   );
   // The twin is only worth its assertions while the shader still computes the

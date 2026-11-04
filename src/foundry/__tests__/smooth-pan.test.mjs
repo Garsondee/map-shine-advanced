@@ -17,7 +17,10 @@ export function run(t) {
     const one = glideStep({ x: 0, y: 0 }, target, 0.02);
     const h1 = glideStep({ x: 0, y: 0 }, target, 0.01);
     const h2 = glideStep(h1.v, target, 0.01);
-    ok('two 10 ms steps travel exactly as far as one 20 ms step', near(h1.dx + h2.dx, one.dx, 1e-9) && near(h1.dy + h2.dy, one.dy, 1e-9));
+    ok(
+      'two 10 ms steps travel exactly as far as one 20 ms step',
+      near(h1.dx + h2.dx, one.dx, 1e-9) && near(h1.dy + h2.dy, one.dy, 1e-9)
+    );
     ok('...and end at the same speed', near(h2.v.x, one.v.x, 1e-9) && near(h2.v.y, one.v.y, 1e-9));
     // 7/14/21 ms frames (an uneven 144 Hz cadence) vs even 14 ms frames over the same time
     let v = { x: 0, y: 0 };
@@ -53,7 +56,10 @@ export function run(t) {
 
   // ---- key direction (Foundry's own sums) ---------------------------------------
   ok('right', JSON.stringify(panKeyDirection(['right'], D)) === JSON.stringify({ x: 1, y: 0, zoom: false }));
-  ok('up+left diagonal', JSON.stringify(panKeyDirection(new Set(['up', 'left']), D)) === JSON.stringify({ x: -1, y: -1, zoom: false }));
+  ok(
+    'up+left diagonal',
+    JSON.stringify(panKeyDirection(new Set(['up', 'left']), D)) === JSON.stringify({ x: -1, y: -1, zoom: false })
+  );
   ok('left+right cancel', panKeyDirection(['left', 'right'], D).x === 0);
   ok('ascend/descend hand the key back to Foundry (zoom)', panKeyDirection(['up', 'ascend'], D).zoom === true);
 

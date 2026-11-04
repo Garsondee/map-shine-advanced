@@ -126,7 +126,7 @@ import { createPanCompileProbe } from './pan-compile-probe.js';
 // INTERIOR CUT (2026-11-04): a very soft hole in the cloud tops over building interiors.
 import { buildInteriorCutGrid, interiorCutZoomFactor } from '../effects/index.js';
 import { createWindGridTextureFactory } from './wind-grid-textures.js';
-import { createSettleTracker, createReadinessRegistry, READINESS_STAGE } from './settle.js';
+import { createSettleTracker, createReadinessRegistry, READINESS_STAGE, summarizeSettleWork } from './settle.js';
 import {
   buildCoverageCellMask,
   buildCoverageIndices,
@@ -679,7 +679,14 @@ import {
   // CANOPY LIGHT (2026-10-28) — trees and bushes pass part of a light below them.
   pushCanopyLightUniforms,
 } from '../effects/index.js';
-import { makeFrameClock, DEFAULT_PAUSE_RAMP_SEC, perfNowMs } from '../core/frame-clock.js';
+import {
+  makeFrameClock,
+  DEFAULT_PAUSE_RAMP_SEC,
+  perfNowMs,
+  beginCaptureClock,
+  advanceCaptureClock,
+  endCaptureClock,
+} from '../core/frame-clock.js';
 import { createPipelineGovernor } from './pipeline-governor.js';
 import { createRendererKeeper, hdrOutputRequested } from './kept-renderer.js';
 import { planWeatherWarmUp, formatWeatherWarmDetail } from './weather-warm-plan.js';
@@ -1022,6 +1029,9 @@ function disposeActive() {
   // requests are not queued behind them (loading audit L-10). Jobs already inside the worker
   // finish — they warm the persistent cache the next visit reads.
   _active.markTornDown?.();
+  // A scene change or Stop mid-video must never leave the world on the frozen
+  // video capture clock (core/frame-clock.js): hand time back to the real one.
+  endCaptureClock();
   // KEEP THE DEVICE (vt/kept-renderer.js): pin every live pipeline BEFORE the materials below are disposed —
   // three drops a pipeline the moment nothing uses it — so the next scene finds the ones it shares in three's
   // own cache. False for a lost device (three marks it before the slide calls us), WebGL2 or the revert
@@ -5652,6 +5662,8 @@ async function startVtPanViewerUnserialized({
       errors: 0,
       lastError: null,
       lastRealDtSec: 0,
+      /** The in-flight meter readback (a Promise), or null — video capture awaits it. */
+      pending: null,
     };
 
     // ========================================================================
@@ -12879,7 +12891,9 @@ async function startVtPanViewerUnserialized({
       dr.on = true;
       if (!dr.stats) return; // no meter answer yet: the transform waits (identity) for its first reading
       const p = st.params ?? {};
-      const snap = renderScaleHeld || !dr.curve;
+      // `captureSnapExposure`: video capture priming a shot (captureSettle) —
+      // a cut starts fully adapted, like a scene load does.
+      const snap = renderScaleHeld || !dr.curve || captureSnapExposure;
       if (snap) dr.snaps++;
       const target = Math.log2(Math.max(1e-6, dr.stats.illumP50));
       dr.logIllum = snap ? target : dynamicRangeAdapt(dr.logIllum, target, dr.lastRealDtSec, p.adaptSeconds);
@@ -12909,7 +12923,10 @@ async function startVtPanViewerUnserialized({
       drMeterQuad.render(renderer);
       renderer.setRenderTarget(null);
       dr.inFlight = true;
-      renderer
+      // Kept as `dr.pending` so video capture can wait for it: offline frames
+      // must not let a reading land on whichever frame real time happens to
+      // reach (see captureSettle).
+      dr.pending = renderer
         .readRenderTargetPixelsAsync(drMeterTarget, 0, 0, DYNAMIC_RANGE_METER_W, DYNAMIC_RANGE_METER_H)
         .then((px) => {
           dr.reads++;
@@ -16008,6 +16025,83 @@ async function startVtPanViewerUnserialized({
       cache.coarseReservePages = currentCoarseBudget.totalBudgetPages;
     }
     let loopActive = false; // tracks whether the render loop is running (batch uploads pause/restore it)
+    // VIDEO CAPTURE MODE (2026-11-04) — see `captureBegin` on `_active`. While
+    // on, the live loop is stopped and frames are drawn one at a time on the
+    // capture clock (core/frame-clock.js), never by requestAnimationFrame.
+    let captureActive = false;
+    /** The render-scale setting in force before capture, restored by `captureEnd`. */
+    let captureSavedRenderScale = null;
+    /** Reused 2D canvas the WebGPU frame is copied into for readback. */
+    let captureCopyCanvas = null;
+    let captureFrameIndex = 0;
+    /** True only while captureSettle primes a shot: Dynamic Range snaps instead of easing. */
+    let captureSnapExposure = false;
+    /**
+     * Capture's "wait without moving time": adopt Foundry's camera, run the
+     * residency pass it implies, and keep drawing at the CURRENT capture time
+     * (frame-clock dt 0 — nothing moves) until every readiness counter is zero
+     * and at least `minFrames` frames have been drawn. Bounded by both a frame
+     * count and a real-time budget so a counter that never clears cannot hang
+     * a render; that case is reported, never hidden.
+     */
+    async function captureSettle({
+      minFrames = 0,
+      readyTimeoutMs = 30000,
+      maxWarmFrames = 2000,
+      snapExposure = false,
+    } = {}) {
+      if (followFoundryCamera) syncFoundryCamera();
+      let warmFrames = 0;
+      let waitedMs = 0;
+      let timedOut = false;
+      let blockers = [];
+      // SNAP EXPOSURE (a shot's first frame, found by the proof runs: the
+      // first run after a load brightened 101 -> 135 luma over seconds while
+      // Dynamic Range eased). Enough dt-0 frames for the meter to read THIS
+      // view twice, each reading awaited, with the controller snapping.
+      if (snapExposure) minFrames = Math.max(minFrames, DR_METER_EVERY * 2 + 2);
+      captureSnapExposure = snapExposure;
+      try {
+        for (;;) {
+          await captureAwaitMeter();
+          await scheduleResidencyUpdate();
+          const { raw, keys } = readiness.collect();
+          const work = summarizeSettleWork(raw, keys);
+          if (work.totalOutstanding === 0 && warmFrames >= minFrames) break;
+          if (warmFrames >= maxWarmFrames || waitedMs >= readyTimeoutMs) {
+            timedOut = true;
+            blockers = work.blockers.map((b) => `${b.label} (${b.count})`);
+            break;
+          }
+          renderFrame(perfNowMs()); // dt 0: the world does not move
+          warmFrames++;
+          await new Promise((resolve) => setTimeout(resolve, 4));
+          waitedMs += 4;
+        }
+        // One more draw so the controller applies the last reading it waited
+        // for while still snapping.
+        if (snapExposure) {
+          await captureAwaitMeter();
+          renderFrame(perfNowMs());
+          warmFrames++;
+        }
+      } finally {
+        captureSnapExposure = false;
+      }
+      return { warmFrames, timedOut, blockers };
+    }
+    /** Wait for Dynamic Range's in-flight meter readback, so a reading lands
+     * on the NEXT video frame every time instead of whenever real time says. */
+    async function captureAwaitMeter() {
+      const pending = dr.inFlight ? dr.pending : null;
+      if (pending) {
+        try {
+          await pending;
+        } catch {
+          /* the meter's own catch already counted it */
+        }
+      }
+    }
     let onPageDecodedFailures = 0; // ingest-seam containment counter (first 3 logged, all counted)
 
     /**
@@ -24055,7 +24149,12 @@ async function startVtPanViewerUnserialized({
       // frame's gap is measured against the last real frame and lands under
       // HITCH_THRESHOLD_MS (50ms — comfortably above this cap's ~33.3ms),
       // never registering as a false hitch.
-      if (getCameraPathPlaying() && lastFrameStartMs !== null && now - lastFrameStartMs < CAMERA_PATH_FRAME_CAP_MS)
+      if (
+        !captureActive &&
+        getCameraPathPlaying() &&
+        lastFrameStartMs !== null &&
+        now - lastFrameStartMs < CAMERA_PATH_FRAME_CAP_MS
+      )
         return;
 
       // HITCH DETECTION — see this file's own header note on frameGapTimes
@@ -29874,6 +29973,135 @@ async function startVtPanViewerUnserialized({
       afterNextFrame(fn) {
         if (typeof fn === 'function') nextFrameCallbacks.push(fn);
       },
+      /**
+       * VIDEO CAPTURE MODE (2026-11-04, author request: hitch-free 4K60 map
+       * videos). Stops the live loop and puts time on the capture clock
+       * (core/frame-clock.js's header says why that one switch is enough);
+       * from here on a frame is only drawn by `captureFrame`. Pins the
+       * internal render scale (default native '1') so the render-scale
+       * governor cannot drop resolution mid-video because offline frames are
+       * slow — their slowness is the point, not a load signal.
+       * @param {{renderScale?: string|null}} [opts] - a render-scale setting
+       *   string ('1', '1.25', '1.5', ...), or null to keep the current one.
+       */
+      async captureBegin({ renderScale = '1' } = {}) {
+        if (viewerTornDown) throw new Error('capture: the viewer has been torn down');
+        if (!captureActive) {
+          captureActive = true;
+          captureFrameIndex = 0;
+          captureSavedRenderScale = renderScaleUserSetting;
+          loopActive = false;
+          renderer.setAnimationLoop(null);
+          beginCaptureClock();
+        }
+        if (renderScale != null) {
+          renderScaleUserSetting = String(renderScale);
+          await resizeInternalTargets();
+        }
+        // PRIME before the first video frame (found by the first proof run:
+        // frame 0 came out BLACK, with a 37 ms step). The first draw after
+        // the targets are reallocated lands on empty buffers, and the frame
+        // clock's last tick was the live loop's, so its first capture step
+        // carried the live gap. A few frames at capture time 0 — nothing
+        // moves — fill the buffers and re-base the frame clock on the
+        // capture clock, so frame 0 is a real picture exactly 1/fps in.
+        // Exposure SNAPS to this view too, so a shot opens adapted, not easing.
+        await captureSettle({ minFrames: 4, snapExposure: true });
+        return this.captureStatus();
+      },
+      /**
+       * Draw ONE video frame: wait (without moving time) until everything the
+       * current camera needs is resident and compiled, then step the capture
+       * clock by exactly `dtMs`, draw, and read the pixels back in the same
+       * task — the only time a WebGPU canvas's image is still readable.
+       *
+       * Waiting happens at the PREVIOUS frame's time: "warm" draws re-render
+       * with dt 0 (nothing moves) so uploads and first-draw compiles can land,
+       * and only then does the clock advance. So frame n is always exactly
+       * n * dtMs into the video, however long the wait took.
+       *
+       * The caller moves Foundry's camera (canvas.pan) BEFORE calling this.
+       *
+       * `readback`: true → `pixels` (RGBA bytes, via a 2D copy — slow at 4K);
+       * 'videoframe' → `videoFrame` (a WebCodecs VideoFrame of the canvas,
+       * for an in-page encoder; the caller must close() it); false → neither.
+       * @param {{dtMs?: number, readback?: boolean|'videoframe', readyTimeoutMs?: number, maxWarmFrames?: number}} [opts]
+       */
+      async captureFrame({
+        dtMs = 1000 / 60,
+        readback = true,
+        readyTimeoutMs = 30000,
+        maxWarmFrames = 2000,
+        timestampUs = null,
+      } = {}) {
+        if (!captureActive) throw new Error('capture: call captureBegin() first');
+        if (viewerTornDown) throw new Error('capture: the viewer has been torn down');
+        const { warmFrames, timedOut, blockers } = await captureSettle({ readyTimeoutMs, maxWarmFrames });
+        advanceCaptureClock(dtMs);
+        renderFrame(perfNowMs());
+        const time = lastEnvSnapshot?.env?.time ?? null;
+        let pixels = null;
+        let videoFrame = null;
+        const width = canvas.width;
+        const height = canvas.height;
+        if (readback === 'videoframe') {
+          // WebCodecs straight off the GPU canvas, in this same task: no 2D
+          // copy, no 33 MB CPU readback. The caller encodes and closes it.
+          videoFrame = new VideoFrame(canvas, {
+            timestamp: Number.isFinite(timestampUs) ? timestampUs : Math.round(captureFrameIndex * dtMs * 1000),
+            duration: Math.round(dtMs * 1000),
+          });
+        } else if (readback) {
+          if (!captureCopyCanvas) captureCopyCanvas = document.createElement('canvas');
+          if (captureCopyCanvas.width !== width) captureCopyCanvas.width = width;
+          if (captureCopyCanvas.height !== height) captureCopyCanvas.height = height;
+          const ctx = captureCopyCanvas.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(canvas, 0, 0);
+          pixels = ctx.getImageData(0, 0, width, height).data;
+        }
+        const index = captureFrameIndex++;
+        return {
+          index,
+          width,
+          height,
+          pixels,
+          videoFrame,
+          warmFrames,
+          timedOut,
+          blockers,
+          tMs: time?.tMs ?? null,
+          dtSec: time?.dtSec ?? null,
+          timeScale: time?.timeScale ?? null,
+        };
+      },
+      /** Hand time back to the real clocks and restart the live loop. Idempotent. */
+      captureEnd() {
+        if (!captureActive) return this.captureStatus();
+        captureActive = false;
+        endCaptureClock();
+        if (captureSavedRenderScale != null) {
+          renderScaleUserSetting = captureSavedRenderScale;
+          captureSavedRenderScale = null;
+          requestInternalRescale();
+        }
+        if (!viewerTornDown) {
+          loopActive = true;
+          renderer.setAnimationLoop(renderFrame);
+        }
+        return this.captureStatus();
+      },
+      captureStatus() {
+        return {
+          active: captureActive,
+          frames: captureFrameIndex,
+          width: canvas.width,
+          height: canvas.height,
+          renderScaleSetting: renderScaleUserSetting,
+          internalScale: resolveCurrentInternalScale(),
+          internalWidth: internalW,
+          internalHeight: internalH,
+        };
+      },
       onResize,
       resizeObserver,
       onFullscreenChange,
@@ -33230,6 +33458,27 @@ export function getVtPanViewerGpuZoneStatus() {
 export function setVtPanViewerRenderScaleSetting(value) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setRenderScaleSetting(value);
+}
+
+/**
+ * VIDEO CAPTURE MODE (2026-11-04) — the running viewer's offline frame stepper
+ * (see `captureBegin`/`captureFrame` on the viewer for the contract). Exposed
+ * to tools as `MapShine.capture`; `tools/video-capture/` drives it.
+ */
+export async function beginVtPanViewerCapture(opts) {
+  if (!_active?.captureBegin) throw new Error('capture: no viewer is running');
+  return _active.captureBegin(opts);
+}
+export async function captureVtPanViewerVideoFrame(opts) {
+  if (!_active?.captureFrame) throw new Error('capture: no viewer is running');
+  return _active.captureFrame(opts);
+}
+export function endVtPanViewerCapture() {
+  endCaptureClock();
+  return _active?.captureEnd ? _active.captureEnd() : { active: false };
+}
+export function getVtPanViewerCaptureStatus() {
+  return _active?.captureStatus ? _active.captureStatus() : { active: false, reason: 'no viewer is running' };
 }
 
 /**

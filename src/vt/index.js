@@ -39,6 +39,10 @@ export {
   // RENDER-SCALE GOVERNOR (2026-08-27) — the player's own resolution-quality
   // setting (Auto = governor-controlled, or a fixed rung) and its live state.
   setVtPanViewerRenderScaleSetting,
+  beginVtPanViewerCapture,
+  captureVtPanViewerVideoFrame,
+  endVtPanViewerCapture,
+  getVtPanViewerCaptureStatus,
   getVtPanViewerRenderScaleState,
   getVtPanViewerAdapterInfo,
   getVtPanViewerGpuDevice,

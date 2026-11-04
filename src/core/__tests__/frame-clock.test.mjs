@@ -6,7 +6,18 @@
  * (`legacy/core/time.js#setFoundryPaused`) had no tests at all — it was correct,
  * and nothing would have told anyone if it stopped being.
  */
-import { makeFrameClock, DEFAULT_MAX_DT_SEC, DEFAULT_PAUSE_RAMP_SEC } from '../frame-clock.js';
+import {
+  makeFrameClock,
+  DEFAULT_MAX_DT_SEC,
+  DEFAULT_PAUSE_RAMP_SEC,
+  perfNowMs,
+  wallClockMs,
+  beginCaptureClock,
+  advanceCaptureClock,
+  endCaptureClock,
+  isCaptureClockActive,
+  captureDriftMs,
+} from '../frame-clock.js';
 
 export function run(t) {
   const close = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -181,5 +192,57 @@ export function run(t) {
       'every documented field is present',
       ['frame', 'tMs', 'dtSec', 'realMs', 'realDtSec', 'timeScale', 'paused'].every((k) => k in snap)
     );
+  }
+
+  // ---- the video capture clock (2026-11-04) ---------------------------------
+  // Offline video frames must sit EXACTLY 1/fps apart whatever the machine did
+  // in between — so while the capture clock is on, every sanctioned clock reads
+  // the video's time, and a default-built frame clock ticks in exact steps.
+  {
+    endCaptureClock();
+    t.ok('the capture clock starts off', isCaptureClockActive() === false && captureDriftMs() === 0);
+    t.ok('advancing an OFF capture clock is a no-op', advanceCaptureClock(1000) === 0);
+
+    beginCaptureClock();
+    const p0 = perfNowMs();
+    const w0 = wallClockMs();
+    const clock = makeFrameClock(); // the DEFAULT source — what the viewer builds
+    clock.tick();
+    // Burn real time: under the capture clock none of it may be seen.
+    const spinUntil = performance.now() + 15;
+    while (performance.now() < spinUntil) {
+      /* real time passes; video time must not */
+    }
+    t.ok('perfNowMs() stands still while the capture clock is on', perfNowMs() === p0);
+    t.ok('wallClockMs() stands still while the capture clock is on', wallClockMs() === w0);
+    const dts = [];
+    for (let i = 0; i < 120; i++) {
+      advanceCaptureClock(1000 / 60);
+      dts.push(clock.tick().dtSec);
+    }
+    t.ok(
+      'a default-built frame clock steps EXACTLY 1/60 s per video frame, all 120 frames',
+      dts.every((d) => close(d, 1 / 60, 1e-9))
+    );
+    t.ok('wallClockMs() moved by exactly the video time', close(wallClockMs() - w0, 2000, 1e-6));
+    t.ok('perfNowMs() moved by exactly the video time', close(perfNowMs() - p0, 2000, 1e-6));
+    // Drift: video time minus real time — an outside real clock plus the drift
+    // reads the video's instant (the tile-motion adapter's use).
+    t.ok('drift puts an outside real clock on video time', close(performance.now() + captureDriftMs(), perfNowMs(), 0.5));
+    advanceCaptureClock(-50);
+    advanceCaptureClock(NaN);
+    t.ok('negative or NaN steps never move video time backwards', close(perfNowMs() - p0, 2000, 1e-6));
+
+    beginCaptureClock(); // idempotent: must not restart the epoch mid-video
+    t.ok('begin twice keeps the running video time', close(perfNowMs() - p0, 2000, 1e-6));
+
+    endCaptureClock();
+    t.ok('after end the real clock is back', isCaptureClockActive() === false && captureDriftMs() === 0);
+    const r0 = perfNowMs();
+    const spin2 = performance.now() + 2;
+    while (performance.now() < spin2) {
+      /* real time passes again */
+    }
+    t.ok('after end perfNowMs() follows real time again', perfNowMs() > r0);
   }
 }

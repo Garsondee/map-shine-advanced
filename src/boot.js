@@ -345,6 +345,10 @@ import {
   // setting and its live state (settings-panel row + diagnostics readout).
   setVtPanViewerRenderScaleSetting,
   getVtPanViewerRenderScaleState,
+  beginVtPanViewerCapture,
+  captureVtPanViewerVideoFrame,
+  endVtPanViewerCapture,
+  getVtPanViewerCaptureStatus,
   getVtPanViewerAdapterInfo,
   getVtPanViewerGpuDevice,
   setVtPanViewerIllumDiagnostic,
@@ -1449,6 +1453,17 @@ MapShine.getGeometryComposition = getVtPanViewerGeometryComposition;
 // long soft shadows, 12 → short crisp ones, cloud 0.9 → almost none.
 MapShine.setSunHour = setVtPanViewerSunHour;
 MapShine.setCloudCover = setVtPanViewerCloudCover;
+// VIDEO CAPTURE MODE (2026-11-04) — hitch-free offline video frames. A tool
+// (tools/video-capture/) calls `await MapShine.capture.begin()`, then per
+// frame: `canvas.pan({...})` + `await MapShine.capture.frame()` (returns the
+// frame's RGBA pixels, exactly 1/60 s of world time after the last one),
+// then `MapShine.capture.end()`. See core/frame-clock.js's capture clock.
+MapShine.capture = Object.freeze({
+  begin: beginVtPanViewerCapture,
+  frame: captureVtPanViewerVideoFrame,
+  end: endVtPanViewerCapture,
+  status: getVtPanViewerCaptureStatus,
+});
 // DIAGNOSTIC ONLY (perf goal attempt 2, 2026-09-24) — price the illum fill's
 // terms: `MapShine.setIllumDiagnostic({noClouds:true})` etc., `({})` restores.
 MapShine.setIllumDiagnostic = setVtPanViewerIllumDiagnostic;

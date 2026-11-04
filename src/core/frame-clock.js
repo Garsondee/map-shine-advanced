@@ -90,7 +90,75 @@ export const DEFAULT_PAUSE_RAMP_SEC = 5;
  * @returns {number} milliseconds since the Unix epoch.
  */
 export function wallClockMs() {
-  return Date.now();
+  return captureClock ? captureClock.startWallMs + captureClock.elapsedMs : Date.now();
+}
+
+/**
+ * ============================================================================
+ * THE CAPTURE CLOCK (2026-11-04) — time that only moves when a video frame does
+ * ============================================================================
+ * The author records a YouTube video of every map. A screen recorder films the
+ * screen in real time, so one compile, one GC pause or one slow page upload
+ * lands in the video as a stutter, however fast the engine usually is.
+ *
+ * Capture mode (`vt-pan-viewer.js#captureBegin/captureFrame`) renders OFFLINE
+ * instead: it stops the live loop and, for video frame n, sets the time to
+ * exactly n/fps, renders, reads the pixels back and moves on. A frame that took
+ * 400 ms to make still sits exactly 1/60 s after the one before it in the
+ * video. For that to hold, EVERY clock the picture depends on must read the
+ * video's time, not the wall's — and because this file is already the only door
+ * to `performance.now()`/`Date.now()` in `src/` (`time/one-clock`), turning the
+ * capture clock on HERE is the whole switch: `perfNowMs()`, `wallClockMs()` and
+ * a frame clock built on the default source all follow it, with no per-effect
+ * wiring to forget.
+ *
+ * While it is on, time does not move by itself: a burst of work inside one
+ * video frame reads zero elapsed time (so time-sliced work simply finishes in
+ * one go, which is what offline rendering wants). `captureDriftMs()` is for
+ * adapters that read a clock this file does not own (Foundry's
+ * `game.time.serverTime`): add it to keep that clock in step with the video.
+ *
+ * Off by default; nothing changes for a normal session.
+ * @type {{startPerfMs:number, startWallMs:number, elapsedMs:number}|null}
+ */
+let captureClock = null;
+
+/** Start the capture clock at the current real instant. Idempotent. */
+export function beginCaptureClock() {
+  if (captureClock) return;
+  captureClock = { startPerfMs: performance.now(), startWallMs: Date.now(), elapsedMs: 0 };
+}
+
+/**
+ * Move the capture clock forward by exactly `ms` (one video frame, normally).
+ * A no-op when the capture clock is off; negative or non-finite steps are ignored.
+ * @param {number} ms
+ * @returns {number} capture milliseconds elapsed since `beginCaptureClock`, or 0 when off.
+ */
+export function advanceCaptureClock(ms) {
+  if (!captureClock) return 0;
+  if (Number.isFinite(ms) && ms > 0) captureClock.elapsedMs += ms;
+  return captureClock.elapsedMs;
+}
+
+/** Hand time back to the real clocks. Idempotent. */
+export function endCaptureClock() {
+  captureClock = null;
+}
+
+/** @returns {boolean} is the capture clock driving time right now? */
+export function isCaptureClockActive() {
+  return captureClock !== null;
+}
+
+/**
+ * How far the capture clock's "now" is from the real one, in ms (0 when off).
+ * Add it to a reading of an outside real-time clock to get that clock's value
+ * at the video's current instant.
+ * @returns {number}
+ */
+export function captureDriftMs() {
+  return captureClock ? captureClock.startPerfMs + captureClock.elapsedMs - performance.now() : 0;
 }
 
 /**
@@ -116,7 +184,7 @@ export function wallClockMs() {
  *   worker's) own navigation/start — meaningless compared across reloads.
  */
 export function perfNowMs() {
-  return performance.now();
+  return captureClock ? captureClock.startPerfMs + captureClock.elapsedMs : performance.now();
 }
 
 /** Below this the world counts as stopped (`paused` true, `tMs` effectively frozen). */
@@ -125,7 +193,8 @@ const STOPPED_EPSILON = 1e-6;
 /**
  * @param {object} [options]
  * @param {() => number} [options.now] - milliseconds source. Injected for tests;
- *   defaults to `performance.now` (this file is the sanctioned home for it).
+ *   defaults to `perfNowMs` (this file is the sanctioned home for it), so a
+ *   default-built clock follows the capture clock above when it is on.
  * @param {number} [options.maxDtSec]
  * @param {number} [options.scale] - starting time scale (1 = normal speed).
  * @returns {{
@@ -135,7 +204,7 @@ const STOPPED_EPSILON = 1e-6;
  *   getScale: () => number,
  * }}
  */
-export function makeFrameClock({ now = () => performance.now(), maxDtSec = DEFAULT_MAX_DT_SEC, scale = 1 } = {}) {
+export function makeFrameClock({ now = perfNowMs, maxDtSec = DEFAULT_MAX_DT_SEC, scale = 1 } = {}) {
   let frame = 0;
   let lastMs = null;
   /** Accumulated SIM milliseconds — scaled, starts at 0. See the header. */

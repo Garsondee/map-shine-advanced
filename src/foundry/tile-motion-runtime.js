@@ -33,7 +33,7 @@ import {
   buildMotionGraph,
   convertTileMotionToTileScrollFlags,
 } from './tile-motion.js';
-import { wallClockMs, perfNowMs } from '../core/frame-clock.js';
+import { wallClockMs, perfNowMs, captureDriftMs } from '../core/frame-clock.js';
 
 const NAMESPACE = 'map-shine-advanced';
 const TILE_FLAG_KEY = 'tileMotion';
@@ -62,7 +62,11 @@ let cachedTileEditActive = false;
 /** @returns {number} `game.time.serverTime` (shared across clients), falling back to the one sanctioned wall clock. */
 function nowMs() {
   const s = typeof game !== 'undefined' ? Number(game?.time?.serverTime) : NaN;
-  return Number.isFinite(s) && s > 0 ? s : wallClockMs();
+  // `serverTime` runs on the real clock; under the video capture clock
+  // (core/frame-clock.js) add the drift so a moving tile follows the video's
+  // time, frame-exact, instead of the time each frame happened to finish at.
+  // `wallClockMs()` already follows the capture clock by itself.
+  return Number.isFinite(s) && s > 0 ? s + captureDriftMs() : wallClockMs();
 }
 
 /** @returns {*|null} the active scene document, or null outside a live canvas. */

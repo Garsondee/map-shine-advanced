@@ -73,6 +73,26 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     label: 'Zoom sensitivity',
     help: "How readily the tops appear as the camera zooms out — a multiplier on the camera's own virtual eye height. 1 is this feature's own derived starting point (tied to the old V2 cloud effect's shipped zoom thresholds); above 1 makes the tops appear sooner (at a less zoomed-out view); below 1 makes them wait for a wider view before appearing. Never affects the ground shadow, which draws at every zoom.",
   },
+  interiorCut: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.92,
+    category: 'Look',
+    label: 'Clear building interiors',
+    help: 'Cuts a very soft, blurred hole through the cloud tops wherever the map is marked as indoors (the dark parts of its outdoors mask), so clouds stop covering the insides of buildings. 0 = off; 1 = interiors fully clear. Only the tops are cut; the ground shadow is untouched.',
+  },
+  interiorCutZoomedOut: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.12,
+    category: 'Look',
+    label: 'Interior clearing when zoomed out',
+    help: 'How much of that clearing is left when the view takes in the whole map. The clearing is full strength up close and at medium zoom and fades away as you zoom out, so the sky can cover everything evenly. 0 = gone when fully zoomed out; 1 = never fades.',
+  },
   // ── Storybook (2026-11-03; round 7 dial set) — the dials of effects/clouds/storybook-clouds.js. Defaults mirror
   // that file's STORYBOOK_DECK_DEFAULTS (a test holds them equal). Used only while the Clouds card's style is
   // Storybook.

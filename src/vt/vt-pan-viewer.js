@@ -111,6 +111,8 @@ import {
 // caller for these instead of new logic. Intra-zone.
 import { coarseAlphaGridDims, extractAlphaGrid } from './coarse-alpha.js';
 import { createPanCompileProbe } from './pan-compile-probe.js';
+// INTERIOR CUT (2026-11-04): a very soft hole in the cloud tops over building interiors.
+import { buildInteriorCutGrid, interiorCutZoomFactor } from '../effects/index.js';
 import { createWindGridTextureFactory } from './wind-grid-textures.js';
 import { createSettleTracker, createReadinessRegistry, READINESS_STAGE } from './settle.js';
 import {
@@ -4013,6 +4015,30 @@ async function startVtPanViewerUnserialized({
      * IS submitted, but a fully-closed gate must not submit it at all — the
      * precipitation zoom gate's own "shrinks the submitted draw list" test). */
     let cloudTopsAwake = false;
+    /** INTERIOR CUT (2026-11-04) — the outdoors mask, area-averaged and blurred WIDE on the CPU
+     * (`effects/clouds/interior-cut.js`), so the tops pay one bilinear tap for a very soft hole over
+     * building interiors. 255 = open sky. The placeholder is all open (cuts nothing); the node is
+     * rebound by `bakeOutdoorsTexture`, never rebuilt. `uTopsInteriorCut` = dial × zoom law, per frame. */
+    const interiorCutPlaceholder = Object.assign(
+      new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType),
+      { needsUpdate: true }
+    );
+    let interiorCutTexture = null;
+    const topsInteriorTexNode = THREE.TSL.texture(interiorCutPlaceholder);
+    const uTopsInteriorRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
+    const uTopsInteriorCut = THREE.TSL.uniform(THREE.TSL.float(0));
+    /** The cloud-tops opacity multiplier: 1 over open sky, down to 1 − cut inside a building. Wide
+     * smoothstep on the already-blurred mask, so the hole has no visible rim. */
+    const buildTopsInteriorKeep = () => {
+      const { float, smoothstep } = THREE.TSL;
+      const open = buildOutdoorsMaskAtXY(THREE.TSL, {
+        uOutdoorsRect: uTopsInteriorRect,
+        outdoorsTexNode: topsInteriorTexNode,
+        worldXY: THREE.TSL.positionWorld.xy,
+      });
+      const inside = float(1).sub(smoothstep(0.1, 0.9, open));
+      return float(1).sub(uTopsInteriorCut.mul(inside));
+    };
     /** STORYBOOK CLOUDS (2026-11-03) — the deck's own uniforms (drift and wind direction stay the shared
      * `cloudUniforms`' own, so both styles drift identically). Pushed every frame the sky has cloud, because
      * the ground-shadow cache reads them at every zoom, not only while the tops are awake. */
@@ -4226,7 +4252,7 @@ async function startVtPanViewerUnserialized({
           });
           const m = new THREE.NodeMaterial();
           m.colorNode = sb.rgb;
-          m.opacityNode = sb.alpha.mul(uTopsOpacity);
+          m.opacityNode = sb.alpha.mul(uTopsOpacity).mul(buildTopsInteriorKeep());
           m.transparent = true;
           m.depthTest = false;
           m.depthWrite = false;
@@ -4379,7 +4405,7 @@ async function startVtPanViewerUnserialized({
       });
       const material = new THREE.NodeMaterial();
       material.colorNode = tops.rgb;
-      material.opacityNode = tops.alpha.mul(uTopsOpacity).mul(mapBoundsMask);
+      material.opacityNode = tops.alpha.mul(uTopsOpacity).mul(mapBoundsMask).mul(buildTopsInteriorKeep());
       material.transparent = true;
       material.depthTest = false;
       material.depthWrite = false;
@@ -5247,6 +5273,34 @@ async function startVtPanViewerUnserialized({
       tex.wrapT = THREE.ClampToEdgeWrapping;
       tex.needsUpdate = true;
 
+      // INTERIOR CUT: the same mask, coarse and blurred wide, for the cloud tops (CPU, once per bake).
+      try {
+        const cut = buildInteriorCutGrid(grid.data, grid.spec);
+        const cutTex = new THREE.DataTexture(
+          expandGridToRgba(cut.data, cut.w, cut.h, 255),
+          cut.w,
+          cut.h,
+          THREE.RGBAFormat,
+          THREE.UnsignedByteType
+        );
+        cutTex.minFilter = THREE.LinearFilter;
+        cutTex.magFilter = THREE.LinearFilter;
+        cutTex.wrapS = THREE.ClampToEdgeWrapping;
+        cutTex.wrapT = THREE.ClampToEdgeWrapping;
+        cutTex.needsUpdate = true;
+        topsInteriorTexNode.value = cutTex;
+        uTopsInteriorRect.value.set(
+          grid.spec.x,
+          grid.spec.y,
+          grid.spec.x + grid.spec.width,
+          grid.spec.y + grid.spec.height
+        );
+        interiorCutTexture?.dispose();
+        interiorCutTexture = cutTex;
+      } catch (err) {
+        log.warn('clouds: interior cut bake failed, tops cover interiors —', err?.message ?? err);
+        topsInteriorTexNode.value = interiorCutPlaceholder;
+      }
       outdoorsTexture?.dispose();
       outdoorsTexture = tex;
       envLight.outdoorsTexNode.value = tex;
@@ -13528,6 +13582,18 @@ async function startVtPanViewerUnserialized({
             uTopsMagnification.value = topsGate.magnification;
           }
           uTopsOpacity.value = topsOpacityDial * topsGate.fade;
+          // INTERIOR CUT: whole at close and medium zoom, mostly gone once the view takes in the whole map.
+          const cutDial = Number.isFinite(tp.interiorCut) ? tp.interiorCut : 0.92;
+          const cutKeep = Number.isFinite(tp.interiorCutZoomedOut) ? tp.interiorCutZoomedOut : 0.12;
+          uTopsInteriorCut.value =
+            cutDial *
+            interiorCutZoomFactor({
+              viewWidthWorldPx: topsViewRect ? topsViewRect.maxX - topsViewRect.minX : 0,
+              viewHeightWorldPx: topsViewRect ? topsViewRect.maxY - topsViewRect.minY : 0,
+              sceneWidthPx: dimensions.sceneRect.width,
+              sceneHeightPx: dimensions.sceneRect.height,
+              zoomedOutKeep: cutKeep,
+            });
         } else {
           uTopsOpacity.value = 0;
         }

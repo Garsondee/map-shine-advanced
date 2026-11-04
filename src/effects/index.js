@@ -724,6 +724,23 @@ export { STYLIZE, STYLIZE_PARAMS, STYLIZE_LOOK_NAMES } from './stylize.js';
 // (schema + manifest + presets) and the TSL pyramid builders, imported through
 // this door exactly as grade/candle are.
 export { BLOOM, BLOOM_PARAMS, BLOOM_PRESETS, bloomPreset, bloomEffectiveThreshold } from './bloom.js';
+// AUTO EXPOSURE (2026-11-04) — the spread meter + capped exposure limiter, and the bloom tie-in
+// (threshold follows exposure, glow held to a share of the scene light). Pure maths + declaration;
+// the meter shader is auto-exposure-render.js.
+export {
+  AUTO_EXPOSURE,
+  AUTO_EXPOSURE_PARAMS,
+  AUTO_EXPOSURE_DEFAULTS,
+  METER_W as AUTO_EXPOSURE_METER_W,
+  METER_H as AUTO_EXPOSURE_METER_H,
+  meterStats as autoExposureMeterStats,
+  autoExposureTarget,
+  adaptExposure,
+  bloomThresholdScale,
+  glowBudgetScale,
+  rangeCompression as autoExposureRangeCompression,
+} from './auto-exposure.js';
+export { buildExposureMeterMaterial } from './auto-exposure-render.js';
 // LENS (mythica-machina-press#57) — the THIRD `post` stage effect: the
 // camera's own glass, grain and shutter, ported from V2's own real
 // LensEffectV2.js/lens-shader.js (recovered from git history — see

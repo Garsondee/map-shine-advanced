@@ -102,6 +102,7 @@ export {
   getVtPanViewerIsolateItemId,
   sampleVtPanViewerIllumPixel,
   probeVtPanViewerPixels,
+  getVtPanViewerAutoExposureInfo,
   runInteractiveVtPanViewerPixelProbe,
   pickVtPanViewerWorldPoint,
   probeVtPanViewerWindAndParticles,

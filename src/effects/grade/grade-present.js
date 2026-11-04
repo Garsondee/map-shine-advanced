@@ -236,6 +236,15 @@ export function buildGradePresentMaterial({
    * rebuild, only the CHOICE of transform does. */
   let currentStyle = 'none';
   const uStylizeAmount = uniform(float(0));
+  /** AUTO EXPOSURE (2026-11-04, effects/auto-exposure.js) — the camera's metered exposure in stops,
+   * applied to the scene-referred image BEFORE the artistic grade, so the tone map and the Look's
+   * own exposure work on the exposed picture. 0 multiplies by exactly 1. */
+  const uAutoExposure = uniform(float(0));
+  /** …and its RANGE COMPRESSOR (auto-exposure.js#rangeCompression / #compressGain, mirrored exactly):
+   * exposed luminance above `uAutoCompKnee` is compressed by `uAutoCompRatio` in stops. Ratio 1 = off
+   * (the gain is then exactly 2^0 = 1). */
+  const uAutoCompKnee = uniform(float(1));
+  const uAutoCompRatio = uniform(float(1));
 
   /** The player vision-mode grade currently BAKED into the fragment
    * (mythica-machina-press#77 Stage 2b) — same "different Fn per choice, so
@@ -447,7 +456,13 @@ export function buildGradePresentMaterial({
       // The artistic grade + zone exposure + vignette + stylize, as a function of the lamp-glow
       // sample so the fog hold below can build the REMEMBERED ground's copy without it.
       const artShot = (lampGlow) => {
-        const gradedLook = buildGradeNode(TSL, afterEnv, uArt, {
+        const exposedRaw = afterEnv.mul(TSL.pow(float(2), uAutoExposure));
+        const compL = TSL.dot(exposedRaw, TSL.vec3(0.2126, 0.7152, 0.0722)).max(1e-6);
+        const compOver = TSL.log2(compL.div(uAutoCompKnee.max(1e-6)));
+        const compT = compOver.add(0.5).clamp(0.0, 1.0);
+        const compSoft = TSL.select(compOver.greaterThan(0.5), compOver, compT.mul(compT).mul(0.5));
+        const exposedEnv = exposedRaw.mul(TSL.pow(float(2), compSoft.mul(uAutoCompRatio.sub(1.0))));
+        const gradedLook = buildGradeNode(TSL, exposedEnv, uArt, {
           toneMapping: currentToneMapping,
           lutTexture: lutTexNode,
           lutStrength: uArt.lutStrength,
@@ -723,6 +738,17 @@ export function buildGradePresentMaterial({
      * as `setArtGrade`'s tone-map handling) — `amount` alone never rebuilds.
      * @param {string} style @param {number} amount
      */
+    /** Push the auto exposure (stops; effects/auto-exposure.js). A live uniform, never a rebuild. */
+    setAutoExposure: (stops, compKnee = 1, compRatio = 1) => {
+      const v = Number(stops);
+      uAutoExposure.value = Number.isFinite(v) ? Math.min(4, Math.max(-4, v)) : 0;
+      const k = Number(compKnee);
+      const r = Number(compRatio);
+      uAutoCompKnee.value = k > 0 ? k : 1;
+      uAutoCompRatio.value = Number.isFinite(r) ? Math.min(1, Math.max(0.1, r)) : 1;
+    },
+    /** The auto exposure currently applied (stops), for the debug readout. */
+    getAutoExposure: () => uAutoExposure.value,
     setStylize: (style, amount) => {
       const next = STYLE_NAMES_SAFE.has(style) ? style : 'none';
       if (next !== currentStyle) {

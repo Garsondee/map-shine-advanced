@@ -570,6 +570,16 @@ import {
   buildGradePresentMaterial,
   buildBloomMaterials,
   bloomEffectiveThreshold,
+  // AUTO EXPOSURE (2026-11-04) — effects/auto-exposure.js has the maths and the why.
+  buildExposureMeterMaterial,
+  AUTO_EXPOSURE_METER_W,
+  AUTO_EXPOSURE_METER_H,
+  autoExposureMeterStats,
+  autoExposureTarget,
+  adaptExposure,
+  bloomThresholdScale,
+  glowBudgetScale,
+  autoExposureRangeCompression,
   // LENS (mythica-machina-press#57) — see effects/lens-render.js's own
   // header for the two materials' shapes and effects/lens-motion.js's own
   // header for why the autofocus/motion/light-burn MATHS is imported
@@ -1543,6 +1553,8 @@ async function startVtPanViewerUnserialized({
   getDoorRenderState,
   getVegetationRenderState,
   getBloomRenderState,
+  // AUTO EXPOSURE (2026-11-04) — same seam shape as bloom's (effects/auto-exposure.js).
+  getAutoExposureRenderState,
   getLensRenderState,
   // FOUNDRY'S GRID + OUTLINE (2026-11-02): boot hands both halves of `foundry/scene-grid.js` — read
   // what Foundry would draw, and hide/show Foundry's own PIXI copies. Omitted ⇒ Foundry keeps drawing them.
@@ -1891,6 +1903,8 @@ async function startVtPanViewerUnserialized({
   // injection discipline as the candle/vegetation seams. Default = the effect
   // off, so an un-wired caller (the torture fixture) runs no bloom pass at all.
   getBloomRenderState ??= () => ({ enabled: false, params: {} });
+  // AUTO EXPOSURE's seam — default off, so an un-wired caller renders no meter and exposes at 0.
+  getAutoExposureRenderState ??= () => ({ enabled: false, params: {} });
   // LENS's data seam (effects/lens-render.js, mythica-machina-press#57): same
   // injection discipline as bloom's own seam just above. Default = the
   // effect off, so an un-wired caller (the torture fixture) runs no lens
@@ -5490,6 +5504,57 @@ async function startVtPanViewerUnserialized({
     const bloomCompositeQuad = new THREE.QuadMesh(bloom.compositeMaterial);
 
     // ========================================================================
+    // AUTO EXPOSURE (2026-11-04) — effects/auto-exposure.js has the maths and the why. A 96×54 meter
+    // of scene.lit (and of the glow the bloom is about to add) is drawn inside runPostBloomPass and
+    // read back ASYNCHRONOUSLY (mapAsync; nothing waits on it) every AE_METER_EVERY frames, one read
+    // in flight at a time. The answer moves a target exposure; the exposure itself adapts every frame
+    // on the real frame delta and reaches the present pass through gradePresent.setAutoExposure.
+    // ========================================================================
+    const AE_METER_EVERY = 4;
+    const aeMeterTarget = allocator.create('autoExposure.meter', {
+      resolvedW: AUTO_EXPOSURE_METER_W,
+      resolvedH: AUTO_EXPOSURE_METER_H,
+      screenSized: false,
+      type: THREE.FloatType,
+      colorSpace: THREE.NoColorSpace,
+      filter: 'nearest',
+      depth: false,
+    });
+    const aeMeter = buildExposureMeterMaterial({
+      THREE,
+      litTexture: sceneLit.texture,
+      coreTexture: bloomMips[0].texture,
+      atmoTexture: bloomMips[bloomActiveAtmoTop].texture,
+      bloomUniforms: bloom.uniforms,
+      // The same camera rect + map rect the bloom's outdoor clamp uses: padding is left out of the meter.
+      uViewRect: envLight.uViewRect,
+      uSceneRect: envLight.uOutdoorsRect,
+    });
+    const aeMeterQuad = new THREE.QuadMesh(aeMeter.material);
+    /** The live controller state (see `stepAutoExposure`). Exposed read-only via getAutoExposureInfo. */
+    const ae = {
+      on: false,
+      ev: 0, // the exposure applied now (stops)
+      target: 0, // where the meter says it should go
+      bloomScale: 1, // bloom strength multiplier from the glow budget (applied now)
+      bloomScaleTarget: 1,
+      thresholdScale: 1,
+      compKnee: 1, // range compressor knee (exposed luminance) and ratio (1 = off), applied now
+      compRatio: 1,
+      compKneeTarget: 1,
+      compRatioTarget: 1,
+      stats: null, // the last meter answer (see auto-exposure.js#meterStats)
+      inFlight: false,
+      frame: 0,
+      reads: 0,
+      snaps: 0,
+      errors: 0,
+      lastError: null,
+      lastRealDtSec: 0,
+      bloomThreshold: null, // the threshold the bright pass used last (scene units), for the fire's inverse-bloom
+    };
+
+    // ========================================================================
     // DEPTH OF FIELD (docs/planning/Depth-of-Field.md) — the SECOND `post`
     // stage effect, and the first POST-stage consumer of buf:scene.depth.
     // Reads its floor-index colour payload (sceneDepth.texture), builds a
@@ -5906,7 +5971,7 @@ async function startVtPanViewerUnserialized({
       // glow back, which washes a painted flame out to flat yellow-white (measured here: cream (0.99, 0.73, 0.16) arrived as
       // (3.2, 2.1, 0.3)). The flame paints the inverse of that (`fire-billow-bloom.js`), so it needs the live params. A
       // getter, because the cascade re-resolves them and nothing here may cache one.
-      getBloomState: () => getBloomRenderState(),
+      getBloomState: () => getBloomStateAsDrawn(),
       // THE SHARED SHADOW (2026-11-01): the smoke's ground shadow follows the sun. A getter —
       // `shadowHandle` is declared further down and reassigned whenever the sky changes.
       getShadowHandle: () => shadowHandle,
@@ -12276,9 +12341,142 @@ async function startVtPanViewerUnserialized({
      * result back into scene.lit. Skips ENTIRELY when disabled — a true JS
      * early-return, zero GPU work (Effects.md: gating by uniform is not gating).
      */
-    function runPostBloomPass() {
+    /**
+     * AUTO EXPOSURE — one frame of the controller (effects/auto-exposure.js). The exposure and the
+     * glow-budget scale move toward the meter's last answer on the REAL frame delta (presentation
+     * pacing, like the weather ease — a slowed world must not stretch an eye's adaptation), and
+     * SNAP while the view is settling (scene load, floor change: `renderScaleHeld`), so the curtain
+     * never lifts on a sliding exposure. Off ⇒ everything back to identity, once.
+     */
+    function stepAutoExposure() {
+      const st = getAutoExposureRenderState();
+      const p = st?.params ?? {};
+      const on = !!st?.enabled && Number(p.strength ?? 1) > 0;
+      if (!on) {
+        if (ae.on || ae.ev !== 0 || ae.bloomScale !== 1) {
+          Object.assign(ae, {
+            ev: 0,
+            target: 0,
+            bloomScale: 1,
+            bloomScaleTarget: 1,
+            thresholdScale: 1,
+            compKnee: 1,
+            compRatio: 1,
+            compKneeTarget: 1,
+            compRatioTarget: 1,
+            stats: null,
+          });
+          gradePresent.setAutoExposure(0, 1, 1);
+        }
+        ae.on = false;
+        return;
+      }
+      ae.on = true;
+      const snap = renderScaleHeld || !ae.stats;
+      if (snap) ae.snaps++;
+      const dt = ae.lastRealDtSec;
+      ae.ev = snap ? ae.target : adaptExposure(ae.ev, ae.target, dt, p.adaptSeconds);
+      const lbNow = Math.log2(Math.max(1e-3, ae.bloomScale));
+      const lbTarget = Math.log2(Math.max(1e-3, ae.bloomScaleTarget));
+      ae.bloomScale = 2 ** (snap ? lbTarget : adaptExposure(lbNow, lbTarget, dt, p.adaptSeconds));
+      // The compressor eases at the same pace (its knee in stops, its ratio directly).
+      const lkNow = Math.log2(Math.max(1e-6, ae.compKnee));
+      const lkTarget = Math.log2(Math.max(1e-6, ae.compKneeTarget));
+      ae.compKnee = 2 ** (snap ? lkTarget : adaptExposure(lkNow, lkTarget, dt, p.adaptSeconds));
+      ae.compRatio = snap ? ae.compRatioTarget : adaptExposure(ae.compRatio, ae.compRatioTarget, dt, p.adaptSeconds);
+      ae.thresholdScale = bloomThresholdScale(ae.ev, p.bloomFollow);
+      gradePresent.setAutoExposure(ae.ev, ae.compKnee, ae.compRatio);
+    }
+
+    /**
+     * AUTO EXPOSURE — draw the meter (every AE_METER_EVERY frames, one read in flight) and start its
+     * asynchronous readback. Called from runPostBloomPass after the pyramid is built and BEFORE the
+     * composite, so R is the scene's own light and G is exactly the glow about to be added.
+     * @param {boolean} bloomDrawn - false when bloom is off (the glow channel is then zeroed)
+     */
+    function runAutoExposureMeter(bloomDrawn) {
+      if (!ae.on || ae.inFlight) return;
+      if (ae.frame++ % AE_METER_EVERY !== 0) return;
+      aeMeter.uBloomOn.value = bloomDrawn ? 1 : 0;
+      aeMeter.atmoTexNode.value = bloomMips[bloomActiveAtmoTop].texture;
+      renderer.setRenderTarget(aeMeterTarget);
+      aeMeterQuad.render(renderer);
+      renderer.setRenderTarget(null);
+      const scaleUsed = ae.bloomScale;
+      ae.inFlight = true;
+      renderer
+        .readRenderTargetPixelsAsync(aeMeterTarget, 0, 0, AUTO_EXPOSURE_METER_W, AUTO_EXPOSURE_METER_H)
+        .then((px) => {
+          const stats = autoExposureMeterStats(px, AUTO_EXPOSURE_METER_W, AUTO_EXPOSURE_METER_H);
+          ae.reads++;
+          if (!stats) return;
+          ae.stats = stats;
+          const p = getAutoExposureRenderState()?.params ?? {};
+          ae.target = autoExposureTarget(stats, {
+            strength: p.strength,
+            darkFloor: p.darkFloor,
+            brightCeiling: p.brightCeiling,
+            maxLift: p.maxLift,
+            maxCut: p.maxCut,
+          });
+          ae.bloomScaleTarget = bloomDrawn ? glowBudgetScale(stats, p.glowBudget, scaleUsed) : 1;
+          // The compressor works on the image AFTER the exposure it is heading for.
+          const comp = autoExposureRangeCompression(stats, ae.target, {
+            strength: p.strength,
+            lightRange: p.lightRange,
+          });
+          ae.compKneeTarget = comp.knee;
+          ae.compRatioTarget = comp.ratio;
+        })
+        .catch((err) => {
+          ae.errors++;
+          ae.lastError = String(err?.message ?? err);
+        })
+        .finally(() => {
+          ae.inFlight = false;
+        });
+    }
+
+    /**
+     * The bloom AS DRAWN, for consumers that predict it (the fire paints the inverse of the glow the
+     * bloom will add back — fire-billow-bloom.js): strength × the glow budget's scale, and the
+     * threshold the bright pass really used (daylight floor and exposure following included). Only
+     * the keys that predictor reads are touched, so U6 read tracking stays honest.
+     */
+    function getBloomStateAsDrawn() {
       const st = getBloomRenderState();
-      if (!st.enabled) return;
+      if (!st?.enabled) return st;
+      const p = st.params ?? {};
+      return {
+        ...st,
+        params: {
+          strength: bloomNum(p.strength, 1.0) * ae.bloomScale,
+          coreStrength: p.coreStrength,
+          coreTint: p.coreTint,
+          atmoStrength: p.atmoStrength,
+          atmoTint: p.atmoTint,
+          knee: p.knee,
+          threshold: ae.bloomThreshold ?? p.threshold,
+        },
+      };
+    }
+
+    /** A copy of the controller state for the console (`MapShine.autoExposure()`). */
+    function getAutoExposureInfo() {
+      return {
+        ...ae,
+        stats: ae.stats ? { ...ae.stats } : null,
+        appliedStops: gradePresent.getAutoExposure(),
+      };
+    }
+
+    function runPostBloomPass() {
+      stepAutoExposure();
+      const st = getBloomRenderState();
+      if (!st.enabled) {
+        runAutoExposureMeter(false);
+        return;
+      }
       const p = st.params || {};
 
       // LIVE TIER RE-POINT (2026-08-30) — cheap (two number comparisons, one
@@ -12298,13 +12496,14 @@ async function startVtPanViewerUnserialized({
       profiler?.begin(Z.bloomUniforms);
       const u = bloom.uniforms;
       // The daylight floor (bloom.js#bloomEffectiveThreshold): at noon, sunlit ground no longer glows.
-      u.threshold.value = bloomEffectiveThreshold(
-        bloomNum(p.threshold, 1.0),
-        bloomNum(p.dayThreshold, 0),
-        lastRaisedBackground
-      );
+      // AUTO EXPOSURE (2026-11-04): the threshold means "on screen", so it follows the exposure
+      // (× 2^-EV·follow), and the glow is held to its budget (strength × bloomScale). Both 1 when off.
+      u.threshold.value =
+        bloomEffectiveThreshold(bloomNum(p.threshold, 1.0), bloomNum(p.dayThreshold, 0), lastRaisedBackground) *
+        ae.thresholdScale;
+      ae.bloomThreshold = u.threshold.value;
       u.knee.value = bloomNum(p.knee, 0.5);
-      u.strength.value = bloomNum(p.strength, 1.0);
+      u.strength.value = bloomNum(p.strength, 1.0) * ae.bloomScale;
       u.coreStrength.value = bloomNum(p.coreStrength, 1.0);
       u.atmoStrength.value = bloomNum(p.atmoStrength, 0.5);
       u.spillEnabled.value = p.outdoorSpillSuppress === false ? 0 : 1;
@@ -12373,6 +12572,9 @@ async function startVtPanViewerUnserialized({
         bloomUpQuad.render(renderer);
       }
       profiler?.end(Z.bloomUpAtmo);
+
+      // 3b) AUTO EXPOSURE METER — the scene before its glow, and the glow about to be added.
+      runAutoExposureMeter(true);
 
       // 4) COMPOSITE — core (mip0) + atmosphere (mip3) additively into scene.lit.
       //    autoClearColor is still false here — an unguarded clear would wipe the
@@ -12824,6 +13026,8 @@ async function startVtPanViewerUnserialized({
       const dtGameHours = lastWeatherHour === null ? 0 : shortestHourDelta(lastWeatherHour, todHour);
       lastWeatherHour = todHour;
       const weatherState = weather.tick(time.realDtSec, { dtGameHours, hour: todHour });
+      // AUTO EXPOSURE adapts on the same real delta (presentation pacing) — see stepAutoExposure.
+      ae.lastRealDtSec = time.realDtSec;
       const weatherForSnapshot = weather.toSnapshotWeather();
       // ⚠️ `wind` WAS NEVER PASSED AT ALL until 2026-08-15, so `env.wind` was
       // permanently `DEFAULT_WIND` — {0, 0, 0} — no matter what the astrolabe
@@ -31740,6 +31944,8 @@ async function startVtPanViewerUnserialized({
        *   deltaFromPrev:{perBuffer:object, biggestJump:object}|null}>>}
        */
       probePixels: async (points) => runProbeOnPoints(points),
+      /** AUTO EXPOSURE's live controller state (effects/auto-exposure.js) — `MapShine.autoExposure()`. */
+      getAutoExposureInfo,
       /**
        * THE INTERACTIVE FLOW: arm (see `armInteractivePixelProbe`'s own
        * header for the full input-model reasoning), collect up to
@@ -33555,6 +33761,12 @@ export async function sampleVtPanViewerIllumPixel(worldX, worldY) {
  * `await MapShine.probePixels([{x, y}, {x, y}, {x, y}])`.
  * @param {Array<{x:number, y:number}>} points - 1..3 world positions.
  */
+/** AUTO EXPOSURE's live state (meter statistics, target and applied stops, bloom scales) for the console. */
+export function getVtPanViewerAutoExposureInfo() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getAutoExposureInfo?.() ?? { skipped: true, reason: 'not wired' };
+}
+
 export async function probeVtPanViewerPixels(points) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.probePixels(points);

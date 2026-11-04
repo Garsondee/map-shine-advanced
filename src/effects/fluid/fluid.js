@@ -137,7 +137,8 @@ export const FLUID_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.55,
+    // 0.55 → 0.75 (2026-11-04): "More dynamic and unpredictable changes would be nice."
+    default: 0.75,
     category: 'Motion',
     label: 'Reactions',
     help: 'How often the apparatus does something strange: a new reagent rushing down the pipes, a surge, a stall that lets go with a burp, a heartbeat of light, a fizz, a boil in the flasks. 0 = a calm, steady flow; 1 = a reaction every few seconds.',

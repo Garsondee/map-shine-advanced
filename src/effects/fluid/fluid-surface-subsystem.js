@@ -598,6 +598,7 @@ export function createFluidSurfaceSubsystem({
     if (Array.isArray(p.accent)) out.accent = p.accent;
     if (Number.isFinite(p.variety)) out.variety = p.variety;
     if (Number.isFinite(p.sparkle)) out.sparkle = p.sparkle;
+    if (Number.isFinite(p.chaos)) out.chaos = p.chaos;
     return out;
   }
 
@@ -776,6 +777,7 @@ export function createFluidSurfaceSubsystem({
       p.accent,
       p.variety,
       p.sparkle,
+      p.chaos,
     ]);
     if (key !== lastParamsKey) {
       lastParamsKey = key;
@@ -798,6 +800,7 @@ export function createFluidSurfaceSubsystem({
         if (Array.isArray(p.accent)) u.uAccent.value.set(p.accent[0], p.accent[1], p.accent[2]);
         if (Number.isFinite(p.variety)) u.uVariety.value = p.variety;
         if (Number.isFinite(p.sparkle)) u.uSparkle.value = p.sparkle;
+        if (Number.isFinite(p.chaos)) u.uChaos.value = p.chaos;
         palette.colors.forEach((c, i) => u.uPal[i]?.value.set(c[0], c[1], c[2]));
         u.uPalCount.value = palette.count;
       }
@@ -882,6 +885,19 @@ export function createFluidSurfaceSubsystem({
         flowSpeed,
       });
       entry.lastReactions = reacted;
+      // PRIME (2026-11-04): a freshly cleared sim starts FULL. Empty tubes took 7–10 s to fill after every scene
+      // load (the lab measured it); one tick with an enormous Q backtraces every bin past the root, so the whole
+      // tube takes the root's value — full goo of the current reagent — in a single, unconditionally stable step.
+      // Held for 30 ticks, not one: the advect pipeline compiles asynchronously, so the first draws after a bake
+      // can be skipped while it builds — a single priming tick was lost on every first load in the lab.
+      if (entry.simPrime > 0 && !entry.simNeedsClear && dtSec > 0) {
+        const pd = entry.simPumpTexture.image.data;
+        for (let row = 0; row < entry.net.tubes.length; row++) {
+          pd[row * 4] = 1e9;
+          pd[row * 4 + 1] = 1;
+        }
+        entry.simPrime--;
+      }
       entry.simPumpTexture.needsUpdate = true;
       entry.simTubeTexture.needsUpdate = true;
       entry.simAdvect.uEnergyKeep.value = energyKeep;
@@ -911,6 +927,7 @@ export function createFluidSurfaceSubsystem({
         // same-pass ordering assumption between "clear" and "render into".
         clears.push(entry.simPingRT, entry.simPongRT);
         entry.simNeedsClear = false;
+        entry.simPrime = 30;
       } else {
         const currentRT = entry.simPingIsCurrent ? entry.simPingRT : entry.simPongRT;
         const otherRT = entry.simPingIsCurrent ? entry.simPongRT : entry.simPingRT;

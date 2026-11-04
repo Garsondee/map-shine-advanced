@@ -74,6 +74,10 @@ const FLUID_SILHOUETTE_EDGE1 = 0.6;
 /** One sim bin at the design resolution (`FLUID_PROFILE_SAMPLES`), the step for the front finder. */
 const FLUID_FRONT_EPSILON = 1 / 512;
 
+/** How bright the goo is where nothing is lighting it up (a patch, a flare, a front, a pulse): a dim, deeply
+ * coloured liquid, so the bright parts read by contrast. */
+const FLUID_DIM_BODY = 0.1;
+
 /** Thin-film strength default (the glass rim's sheen). */
 export const FLUID_TIER3_IRIDESCENCE = 0.3;
 
@@ -153,6 +157,7 @@ export function buildFluidSurfaceMaterials({
   structure = FLUID_TIER5_STRUCTURE,
   bubbles = FLUID_TIER6_BUBBLES,
   sparkle = FLUID_TIER6_SPARKLE,
+  chaos = 0.75,
   palette = null,
   tier = FLUID_DEFAULT_TIER,
 }) {
@@ -204,6 +209,7 @@ export function buildFluidSurfaceMaterials({
   const uStructure = uniform(float(structure));
   const uBubbles = uniform(float(bubbles));
   const uSparkle = uniform(float(sparkle));
+  const uChaos = uniform(float(chaos));
   const tubeCountF = float(Math.max(1, tubeCount));
   const R = float(Math.max(4, pipeRadiusPx));
   const itemSize = vec2(Math.max(1, itemSizePx[0]), Math.max(1, itemSizePx[1]));
@@ -328,7 +334,7 @@ export function buildFluidSurfaceMaterials({
     // Deep at the walls, hot down the centreline; energy pushes the core toward white-hot.
     // Deep and saturated at the glass, the reagent's own colour through the body, white-hot only where energy
     // runs high (a front, a pulse) — the first pass mixed toward white everywhere and read as pastel.
-    const hot = mix(base.mul(1.3), vec3(1, 1, 1), clamp(float(0.06).add(energy.mul(0.3)), 0, 0.8));
+    const hot = mix(base.mul(1.3), vec3(1, 1, 1), clamp(float(0.04).add(energy.mul(0.4)), 0, 0.85));
     const deep = base.mul(base).mul(0.6);
 
     let flowMod = float(1);
@@ -353,16 +359,57 @@ export function buildFluidSurfaceMaterials({
       .mul(flowMod)
       .mul(float(1).add(energy.mul(0.85)))
       .mul(F.mood);
-    const out = col.mul(body).toVar();
+    // ONLY A LITTLE OF IT BURNS AT ONCE (2026-11-04). The author: "I'm happy for only a small amount to be bright
+    // and self illuminated at a time to help create contrast. More dynamic and unpredictable changes would be
+    // nice." The goo's resting state is a DIM coloured liquid; `lit` says where it burns right now:
+    //   - slow PATCHES riding the flow (about a quarter of the pipe at any moment),
+    //   - FLARES: every stretch of pipe (cells ~18 pipe radii long, riding the flow) rolls its own dice on its own
+    //     clock and now and then swells into a bright knot and fades (a ~1.5 s swell, never a strobe) — more often
+    //     with Reactions and while the tube is agitated, so the apparatus is never doing the same thing twice;
+    //   - whatever the reactions carry: energy waves, slug fronts, reacting seams.
+    const patch = smoothstep(
+      float(0.32),
+      float(0.62),
+      mx_noise_float(vec3(along.div(R.mul(26)), F.g.mul(0.37), tSec.mul(0.09)))
+    );
+    const fc = along.div(R.mul(18));
+    const fCell = floor(fc);
+    const fClock = tSec.div(3.1).add(cellHash(vec2(fCell, 3.7)).mul(5));
+    const fRoll = cellHash(vec2(fCell, floor(fClock)));
+    const fRate = float(0.06).add(uChaos.mul(0.14)).add(F.agitation.mul(0.12));
+    const fOn = smoothstep(float(1).sub(fRate), float(1).sub(fRate).add(0.02), fRoll);
+    const fEnv = pow(sin(fract(fClock).mul(Math.PI)), float(2));
+    const fd = fract(fc).sub(0.5);
+    const flare = fOn.mul(fEnv).mul(exp(fd.mul(fd).div(0.05).negate()));
+    const lit = clamp(
+      patch
+        .mul(0.75)
+        .add(flare.mul(1.4))
+        .add(max(energy.sub(0.15), float(0)).mul(0.6))
+        .add(F.front)
+        .add(F.react),
+      0,
+      1.6
+    );
+    const glowAmt = mix(float(FLUID_DIM_BODY), float(1), lit);
+    const out = col.mul(body).mul(glowAmt).toVar();
     // Filaments carry a hint of the NEXT reagent — a potion is never quite one colour.
     const filCol = mix(hot, paletteAt(F.g.add(1)).mul(1.4), uVariety.mul(0.35));
-    out.addAssign(filCol.mul(filament).mul(liquid).mul(th).mul(1.25));
+    out.addAssign(
+      filCol
+        .mul(filament)
+        .mul(liquid)
+        .mul(th)
+        .mul(1.25)
+        .mul(float(0.25).add(lit.mul(0.75)))
+    );
     // A thin hot thread down the centreline, where the light path through the goo is longest.
     out.addAssign(
       hot
         .mul(liquid)
         .mul(pow(th, float(8)))
-        .mul(0.28)
+        .mul(0.32)
+        .mul(lit)
     );
 
     // The FRONTS: a foaming meniscus where a slug arrives, a white-hot seam where two reagents react.
@@ -389,10 +436,13 @@ export function buildFluidSurfaceMaterials({
         const nextC = paletteAt(F.g.add(1));
         const swirlCol = mix(base, nextC, clamp(sw.mul(0.7).add(0.15), 0, 0.85).mul(uVariety));
         const swirled = mix(deep, swirlCol.mul(1.1), clamp(sw.mul(0.45).add(0.35), 0, 1)).add(hot.mul(veins).mul(0.8));
+        // A flask burns in swirling regions of its own, as well as wherever the pipe's `lit` reaches it.
+        const flaskLit = max(lit, smoothstep(float(0.3), float(0.65), sw.add(sw2.mul(0.5))));
         const flaskBody = swirled
           .mul(liquid)
           .mul(float(0.38).add(th.mul(0.45)))
-          .mul(float(1).add(energy.mul(0.9)));
+          .mul(float(1).add(energy.mul(0.9)))
+          .mul(mix(float(FLUID_DIM_BODY * 1.4), float(1), flaskLit));
         out.assign(mix(out, flaskBody, wide.mul(uStructure)));
         if (plan.bubblesEnabled) {
           // BOILING: cells that appear, swell and pop as the time axis moves through them — faster when agitated.
@@ -526,6 +576,7 @@ export function buildFluidSurfaceMaterials({
       uStructure,
       uBubbles,
       uSparkle,
+      uChaos,
     },
   };
 }

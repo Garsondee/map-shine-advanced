@@ -294,7 +294,7 @@ export function fluidReactionAt(tSec, st, chaos) {
         energy += 1.3 * burp - 0.08 * e;
         froth += 0.9 * burp;
         agitation += 0.8 * burp;
-        mood *= 1 - 0.45 * e;
+        mood *= 1 - 0.6 * e;
         mood += 0.45 * burp;
         solid = Math.max(solid, burp);
         break;
@@ -723,7 +723,7 @@ export function buildFluidLightSources({
       rg += sampleArr(t.reagent, s) / 3;
     }
     const id = `fluid:${itemId}:${idx}`;
-    let level = Math.min(1.6, phi * (0.62 + 0.55 * en));
+    let level = Math.min(1.6, phi * (0.45 + 0.75 * en));
     if (smooth) {
       const prev = smooth.get(id);
       level = prev === undefined ? level : prev + (level - prev) * k;

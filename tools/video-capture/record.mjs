@@ -360,9 +360,14 @@ const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder,
     }
     pieces = [];
     piecesBytes = 0;
+    // A Blob body, not the bytes: DevTools copies a bytes body into every
+    // Network.requestWillBeSent it sends Playwright, so at QP 18 (~200 Mbit/s)
+    // whole video pieces flowed through the CDP socket (1.4 GB of protocol for a
+    // 16 s shot) until Playwright dropped the page: "Target page, context or
+    // browser has been closed" at the end of long shots. Blob bodies are not inlined.
     const resp = await fetch(`${sinkUrl}/piece?i=${pieceIndex++}`, {
       method: 'POST',
-      body,
+      body: new Blob([body]),
       headers: { 'Content-Type': 'text/plain' },
     });
     if (!resp.ok) throw new Error(`sink refused a stream piece: ${await resp.text()}`);
@@ -474,7 +479,7 @@ const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder,
       } else {
         const resp = await fetch(`${sinkUrl}/frame?i=${i}`, {
           method: 'POST',
-          body: f.pixels,
+          body: new Blob([f.pixels]), // Blob: kept out of the CDP socket (see shipPieces)
           headers: { 'Content-Type': 'text/plain' },
         });
         if (!resp.ok) throw new Error(`sink refused frame ${i}: ${await resp.text()}`);

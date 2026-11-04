@@ -14381,8 +14381,10 @@ async function startVtPanViewerUnserialized({
      *
      * @param {string} id @param {string} [source] @returns {object}
      */
-    function setWeatherArchetype(id, source = 'console') {
-      const res = weather.applyArchetype(id, { immediate: !weatherEverApplied });
+    function setWeatherArchetype(id, source = 'console', { immediate = false } = {}) {
+      // `immediate`: land on the archetype NOW (video capture's shot setup —
+      // a shot must open in its weather, not 20 s of ease into it).
+      const res = weather.applyArchetype(id, { immediate: immediate === true || !weatherEverApplied });
       weatherEverApplied = true;
       weatherSource = source;
       const r = weather.read();
@@ -31345,6 +31347,8 @@ async function startVtPanViewerUnserialized({
       setWeatherSeed,
       /** Project the walk ahead without touching live state. */
       getWeatherForecast,
+      /** The weather manager's whole state (targets, eased state, settling) — read-only. */
+      getWeatherState: () => weather.read(),
       /** Release the Almanac's hold-off on one axis — the astrolabe's pin glyph. */
       unpinWeatherAxis,
       /** Start a weather event (slice 4). docs/planning/Weather-Manager.md §6. */
@@ -34564,9 +34568,9 @@ export function setVtPanViewerCloudCover(cover01, source) {
  * the scene-load restore both come through here.
  * @param {string} id @param {string} [source] @returns {object}
  */
-export function setVtPanViewerWeatherArchetype(id, source) {
+export function setVtPanViewerWeatherArchetype(id, source, options) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
-  return _active.setWeatherArchetype(id, source);
+  return _active.setWeatherArchetype(id, source, options);
 }
 
 /**
@@ -34600,6 +34604,11 @@ export function setVtPanViewerWeatherSeed(seed) {
 export function getVtPanViewerWeatherForecast(hoursAhead) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getWeatherForecast(hoursAhead);
+}
+/** The weather manager's live state (targets + eased state). @returns {object} */
+export function getVtPanViewerWeatherState() {
+  if (!_active?.getWeatherState) return { skipped: true, reason: 'viewer not started' };
+  return _active.getWeatherState();
 }
 /** @param {string} name @returns {boolean|{skipped:true}} */
 export function unpinVtPanViewerWeatherAxis(name) {

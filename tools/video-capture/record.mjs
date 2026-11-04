@@ -250,14 +250,28 @@ function startFrameSink({ ffmpegArgs, width, height }) {
 
 /** The per-shot page loop, serialised into the page. Runs entirely in-page so
  * no CDP round trip sits between frames. */
-const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder }) => {
+const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder, stills }) => {
   const ease = {
     linear: (u) => u,
     cosine: (u) => 0.5 - 0.5 * Math.cos(Math.PI * u),
     // smootherstep: zero velocity AND acceleration at both ends
     smooth: (u) => u * u * u * (u * (u * 6 - 15) + 10),
   };
-  const keys = [...shot.keys].sort((a, b) => a.t - b.t);
+  // Keep each KEY's frame on the map (storyboard.py's clamp_keys is the same
+  // rule): a 4K frame at zoom 0.6 is ~6,400 map px wide, so a key near the
+  // edge would otherwise film mostly black padding. Keys, not frames — per-
+  // frame clamping would stop the camera dead at the edge mid-move.
+  const sr = canvas.dimensions.sceneRect;
+  const vpNow = MapShine.capture.status();
+  const clampKey = (k) => {
+    if (shot.allowOutside) return { ...k };
+    const hw = vpNow.width / 2 / k.scale;
+    const hh = vpNow.height / 2 / k.scale;
+    const x = 2 * hw >= sr.width ? sr.x + sr.width / 2 : Math.min(Math.max(k.x, sr.x + hw), sr.x + sr.width - hw);
+    const y = 2 * hh >= sr.height ? sr.y + sr.height / 2 : Math.min(Math.max(k.y, sr.y + hh), sr.y + sr.height - hh);
+    return { ...k, x, y };
+  };
+  const keys = [...shot.keys].sort((a, b) => a.t - b.t).map(clampKey);
   const easing = ease[shot.easing] ?? ease.cosine;
   const camAt = (u) => {
     if (u <= keys[0].t) return keys[0];
@@ -277,6 +291,51 @@ const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder 
   const total = Math.max(1, Math.round(shot.seconds * fps));
   const dtMs = 1000 / fps;
   const stats = [];
+  const sleep0 = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // ---- SHOT SETUP: level, weather, wind, sun — all landed BEFORE capture begins.
+  if (shot.level) {
+    const lv = canvas.scene.levels.contents.find((l) => l.id === shot.level || l.name === shot.level);
+    if (!lv) throw new Error(`shot ${shot.name}: no level "${shot.level}"`);
+    if (canvas.level?.id !== lv.id) {
+      await canvas.scene.view({ level: lv.id });
+      for (let i = 0; i < 480; i++) {
+        const st = MapShine.capture.status();
+        if (!st.reason && canvas.level?.id === lv.id && MapShine.getSceneSettle?.()?.settled) break;
+        await sleep0(250);
+      }
+    }
+  }
+  // Weather: a name lands immediately; {from, to} lands on `from` and is then
+  // blended per VIDEO frame (frame-exact, unlike the manager's own real-ish ease).
+  let weatherBlend = null;
+  if (typeof shot.weather === 'string') {
+    MapShine.setWeatherArchetype(shot.weather, 'video', { immediate: true });
+  } else if (shot.weather?.from && shot.weather?.to) {
+    MapShine.setWeatherArchetype(shot.weather.to, 'video', { immediate: true });
+    const toState = { ...MapShine.getWeatherState().state };
+    MapShine.setWeatherArchetype(shot.weather.from, 'video', { immediate: true });
+    const fromState = { ...MapShine.getWeatherState().state };
+    const keysW = Object.keys(fromState).filter((k) => Number.isFinite(fromState[k]) && Number.isFinite(toState[k]));
+    weatherBlend = { fromState, toState, keysW, ease: ease[shot.weather.ease] ?? ease.smooth,
+      start: shot.weather.startT ?? 0, end: shot.weather.endT ?? 1 };
+  }
+  const applyWeather = (u) => {
+    if (!weatherBlend) return;
+    const { fromState, toState, keysW, start, end } = weatherBlend;
+    const s = weatherBlend.ease(Math.min(1, Math.max(0, (u - start) / Math.max(1e-9, end - start))));
+    const patch = {};
+    for (const k of keysW) patch[k] = fromState[k] + (toState[k] - fromState[k]) * s;
+    MapShine.setWeatherTargets(patch, { immediate: true });
+  };
+  // Per-axis override on top of the archetype (e.g. a lighter snow than the
+  // 'snow' row's 0.6), landed immediately.
+  if (shot.weatherAxes) MapShine.setWeatherTargets(shot.weatherAxes, { immediate: true });
+  if (shot.wind) await MapShine.setWind(shot.wind);
+  // Sun: a number holds; [from, to] is a time-lapse across the shot (linear).
+  const sunAt = (u) =>
+    Array.isArray(shot.sunHour) ? shot.sunHour[0] + (shot.sunHour[1] - shot.sunHour[0]) * u : shot.sunHour;
+  if (shot.sunHour != null) MapShine.setSunHour(sunAt(0));
   if (shot.setup) await new Function('return (async () => {' + shot.setup + '})()')();
   // Frame 0's camera BEFORE capture starts, so the begin-of-shot load happens
   // with the right view and the first frame needs no long wait.
@@ -351,10 +410,42 @@ const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder 
       canvas.pan(camAt(0));
       await MapShine.capture.frame({ dtMs, readback: false });
     }
+    // STILLS (preview): the shot's real setup, a few frames at chosen points,
+    // saved as half-size JPEGs — a lit, weathered storyboard in seconds.
+    if (stills) {
+      const shrink = document.createElement('canvas');
+      for (const [j, u] of stills.entries()) {
+        const cam = camAt(u);
+        canvas.pan({ x: cam.x, y: cam.y, scale: cam.scale });
+        if (Array.isArray(shot.sunHour)) MapShine.setSunHour(sunAt(u));
+        applyWeather(u);
+        // a short settle at the new spot so particles/exposure are not mid-jump
+        for (let k = 0; k < 20; k++) await MapShine.capture.frame({ dtMs, readback: false });
+        const f = await MapShine.capture.frame({ dtMs, readback: true });
+        const full = new ImageData(new Uint8ClampedArray(f.pixels.buffer), f.width, f.height);
+        const tmp = document.createElement('canvas');
+        tmp.width = f.width;
+        tmp.height = f.height;
+        tmp.getContext('2d').putImageData(full, 0, 0);
+        shrink.width = f.width / 2;
+        shrink.height = f.height / 2;
+        shrink.getContext('2d').drawImage(tmp, 0, 0, shrink.width, shrink.height);
+        const blob = await new Promise((r) => shrink.toBlob(r, 'image/jpeg', 0.9));
+        const resp = await fetch(`${sinkUrl}/still?name=${encodeURIComponent(`${shot.name}-${j}`)}`, {
+          method: 'POST',
+          body: blob,
+          headers: { 'Content-Type': 'text/plain' },
+        });
+        if (!resp.ok) throw new Error(`still sink: ${await resp.text()}`);
+      }
+      return { status, stats: [], encoderInfo: null };
+    }
     for (let i = 0; i < total; i++) {
       const u = total === 1 ? 0 : i / (total - 1);
       const cam = camAt(u);
       canvas.pan({ x: cam.x, y: cam.y, scale: cam.scale });
+      if (Array.isArray(shot.sunHour)) MapShine.setSunHour(sunAt(u));
+      applyWeather(u);
       const f = await MapShine.capture.frame({
         dtMs,
         readback: enc ? 'videoframe' : true,
@@ -383,6 +474,7 @@ const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder 
         timedOut: f.timedOut,
         blockers: f.blockers,
         cam,
+        sunHour: shot.sunHour != null ? sunAt(u) : null,
         stage: { x: canvas.stage.pivot.x, y: canvas.stage.pivot.y, scale: canvas.stage.scale.x },
       });
       if (stall?.everyFrames > 0 && i % stall.everyFrames === stall.everyFrames - 1) {
@@ -426,6 +518,40 @@ async function run() {
     if (game.paused) game.togglePause(false, { broadcast: true });
   });
   const report = [];
+  const stillsMode = argv.includes('--stills');
+  if (stillsMode) {
+    const dir = path.join(out, 'stills');
+    fs.mkdirSync(dir, { recursive: true });
+    const server = http.createServer((req, res) => {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      if (req.method !== 'POST') return void res.writeHead(204).end();
+      const name = new URL(req.url, 'http://x').searchParams.get('name').replace(/[^\w.-]/g, '_');
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        fs.writeFileSync(path.join(dir, `${name}.jpg`), Buffer.concat(chunks));
+        res.writeHead(200).end('ok');
+      });
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    for (const shot of plan.shots) {
+      if (only && shot.name !== only) continue;
+      const t0 = Date.now();
+      await page.evaluate(PAGE_SHOT_LOOP, {
+        shot,
+        fps,
+        sinkUrl: `http://127.0.0.1:${server.address().port}`,
+        stall: null,
+        renderScale: plan.renderScale ?? '1',
+        encoder: null,
+        stills: [0, 0.5, 1],
+      });
+      log(`stills ${shot.name}: ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+    }
+    server.close();
+    await browser.close().catch(() => {});
+    return;
+  }
   for (const shot of plan.shots) {
     if (only && shot.name !== only) continue;
     const { width, height } = await page.evaluate(() => MapShine.capture.status());
@@ -494,6 +620,38 @@ async function run() {
   await browser.close().catch(() => {});
 }
 
+/** `survey`: the scene facts a shot plan and its storyboard need, as JSON. */
+async function survey() {
+  const out = path.resolve(opt('out', path.join(HERE, 'out', 'survey.json')));
+  const { browser, page } = await connect();
+  const data = await page.evaluate(() => {
+    const d = canvas.dimensions;
+    const st = MapShine.capture.status();
+    return {
+      scene: { id: canvas.scene.id, name: canvas.scene.name },
+      sceneRect: { x: d.sceneRect.x, y: d.sceneRect.y, width: d.sceneRect.width, height: d.sceneRect.height },
+      gridSize: d.size,
+      viewport: { width: st.width, height: st.height },
+      zoom: { min: CONFIG.Canvas.minZoom ?? null, max: CONFIG.Canvas.maxZoom ?? null },
+      levels: canvas.scene.levels.contents.map((l) => ({
+        id: l.id,
+        name: l.name,
+        elevation: l.elevation?.bottom ?? null,
+        background: l.background?.src ?? null,
+        lights: canvas.scene.lights.contents
+          .filter((li) => [...(li.levels ?? [])].includes(l.id))
+          .map((li) => ({ x: li.x, y: li.y, dim: li.config?.dim ?? 0, color: li.config?.color ?? null })),
+      })),
+      viewedLevel: canvas.level?.id ?? null,
+      weatherArchetypes: MapShine.weatherArchetypes.map((a) => a.id),
+    };
+  });
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, JSON.stringify(data, null, 1));
+  log(`survey -> ${out}`);
+  await browser.close().catch(() => {});
+}
+
 async function evalScript() {
   const file = opt('file');
   const script = fs.readFileSync(file, 'utf8');
@@ -506,6 +664,7 @@ async function evalScript() {
 if (mode === 'boot') await boot();
 else if (mode === 'run') await run();
 else if (mode === 'eval') await evalScript();
+else if (mode === 'survey') await survey();
 else {
   console.log('usage: record.mjs boot|run|eval [options] — see the header of this file');
   process.exit(2);

@@ -393,6 +393,7 @@ import {
   setVtPanViewerWeatherVolatility,
   setVtPanViewerWeatherSeed,
   getVtPanViewerWeatherForecast,
+  getVtPanViewerWeatherState,
   unpinVtPanViewerWeatherAxis,
   addVtPanViewerWeatherEvent,
   releaseVtPanViewerWeatherEvent,
@@ -1482,6 +1483,14 @@ MapShine.setWeatherBiome = setVtPanViewerWeatherBiome;
 MapShine.setWeatherVolatility = setVtPanViewerWeatherVolatility;
 MapShine.setWeatherSeed = setVtPanViewerWeatherSeed;
 MapShine.getWeatherForecast = getVtPanViewerWeatherForecast;
+// VIDEO CAPTURE LEVERS (2026-11-04) — a shot must OPEN in its weather, and a
+// "storm rolls in" shot moves the axes per video frame itself:
+// `setWeatherArchetype(id, 'video', {immediate:true})`, `setWeatherTargets(
+// {cloudCover01, precip01, ...}, {immediate:true})`, `getWeatherState()`,
+// and the archetype table to blend between.
+MapShine.setWeatherTargets = setVtPanViewerWeatherTargets;
+MapShine.getWeatherState = getVtPanViewerWeatherState;
+MapShine.weatherArchetypes = WEATHER_ARCHETYPES;
 MapShine.unpinWeatherAxis = unpinVtPanViewerWeatherAxis;
 
 // EVENTS (slice 4, Weather-Manager.md §6) — console-first, same posture as the

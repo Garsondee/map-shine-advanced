@@ -37,6 +37,25 @@ stays running; `run` renders every shot in the plan to `<out>/<shot>.mp4` plus
 format is in the header of `record.mjs`. ffmpeg is found in imageio-ffmpeg's
 Python package, or pass `--ffmpeg <path>`.
 
+## Making a map video (the workflow, 2026-11-04)
+
+1. `record.mjs survey --out survey.json` — scene rect, levels, backgrounds, lights.
+2. Write `plan.json`: shots with `level`, `keys` (t/x/y/scale), `seconds`, `easing`,
+   `sunHour` (a number, or `[from, to]` for a time-lapse), `weather` (an archetype, or
+   `{from, to}` blended per video frame), `weatherAxes` (per-axis override), `wind`,
+   `caption`, `preRollSec`, optional `setup` (page script). Plan-level `titles` and
+   `transition`. Keys are pulled in so a frame never films off the map.
+3. `python storyboard.py --plan plan.json --survey survey.json --data <Foundry Data> --out storyboard`
+   — paths + first/last frames on the albedo, coverage at readable zoom (green/red),
+   timeline with sky colour, and an albedo contact sheet of every shot.
+4. `record.mjs run --plan plan.json --out render --stills` then `python stills_sheet.py render --plan plan.json`
+   — the REAL look (lighting, weather, time of day) of every shot's start/middle/end in
+   ~10 s per shot. This is where lighting problems show up, before a long render.
+5. `record.mjs run --plan plan.json --out render [--only <shot>]` — the 4K60 shots.
+6. `node assemble.mjs --plan plan.json --dir render --out final.mp4` — fades, captions, titles.
+
+Big Bank's plan is in `Mythica Machina Press/map-videos/big-bank/`.
+
 ## Measured (Big Bank, RX 6800 XT, 2026-11-04)
 
 - 4 s shot, 3840x2160, native render scale: **~90 ms per frame** (21 s to

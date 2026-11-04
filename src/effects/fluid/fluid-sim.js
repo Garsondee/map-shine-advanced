@@ -276,11 +276,17 @@ export function writeFluidTubeConstantsBuffer(out, tMs, tubes, personalities, qS
  * @param {*} args.pumpTexture - RGB = (Q, inject, lengthPx), `1 × tubeCount`, rewritten every tick (`writeFluidTubeConstantsBuffer`).
  * @returns {{material:*, quad:*, prevTexNodes:Array<*>, uDtSec:*}}
  */
-export function buildFluidAdvectMaterial({ THREE, prevStateTexture, profileTexture, pumpTexture }) {
+export function buildFluidAdvectMaterial({ THREE, prevStateTexture, profileTexture, pumpTexture, tubeTexture = null }) {
   const { texture, uv, vec2, vec4, float, uniform, max, clamp, step, mix } = THREE.TSL;
 
   const uv0 = uv();
   const uDtSec = uniform(float(0));
+  // THE REACTION CHANNELS (2026-11-04, `fluid-alchemy.js`): G = reagent position, B = energy, A = froth ride
+  // the SAME backtrace as φ — one sample, four channels, so a colour front or a pulse of light is carried
+  // exactly as the goo is (it speeds up through a neck, it stops when the pump stalls). Energy and froth fade
+  // as they travel; `uEnergyKeep`/`uFrothKeep` are this tick's `exp(-dt/τ)`, written by the subsystem.
+  const uEnergyKeep = uniform(float(1));
+  const uFrothKeep = uniform(float(1));
 
   const profileR = texture(profileTexture, uv0).r;
   const crossSection = max(profileR, float(FLUID_SIM_MIN_CROSS_SECTION_PX));
@@ -298,19 +304,26 @@ export function buildFluidAdvectMaterial({ THREE, prevStateTexture, profileTextu
   // the PUMP's `inject`, never to a stale self-sample — see the module header
   // for why that distinction is load-bearing, adversarially confirmed).
   const backtraceNode = texture(prevStateTexture, vec2(clampedSrcU, uv0.y));
-  const sampledPrev = backtraceNode.r;
+  const sampledPrev = backtraceNode;
 
   // `atRoot`: 1 exactly where the backtrace fell at or before the root ( ==
   // TSL's function-form `step(edge, x)`, NEVER the `.step()` method receiver
   // — `reference_tsl_method_chaining_trap` is the identical shape of bug as
   // the banned `.mix()` receiver, for a different function).
   const atRoot = step(rawSrcU, float(0));
+  // What enters the root: φ from the pump, and (when the alchemy is wired) the reagent/energy/froth from the
+  // tube texture's first texel. Without a tube texture those three channels inject 0 — the pre-alchemy sim.
+  const tubeInject = tubeTexture ? texture(tubeTexture, vec2(float(0.25), uv0.y)) : null;
+  const injectVec = tubeInject
+    ? vec4(injectValue, tubeInject.r, tubeInject.g, tubeInject.b)
+    : vec4(injectValue, float(0), float(0), float(0));
   // Function form ONLY (`reference_tsl_method_chaining_trap`): `a.mix(b,t)`
   // silently means `mix(b,t,a)`, not `mix(a,b,t)`.
-  const result = mix(sampledPrev, injectValue, atRoot);
+  const carried = vec4(sampledPrev.r, sampledPrev.g, sampledPrev.b.mul(uEnergyKeep), sampledPrev.a.mul(uFrothKeep));
+  const result = mix(carried, injectVec, atRoot);
 
   const material = new THREE.NodeMaterial();
-  material.fragmentNode = vec4(result, 0, 0, 1);
+  material.fragmentNode = result;
   const quad = new THREE.QuadMesh(material);
-  return { material, quad, prevTexNodes: [backtraceNode], uDtSec };
+  return { material, quad, prevTexNodes: [backtraceNode], uDtSec, uEnergyKeep, uFrothKeep };
 }

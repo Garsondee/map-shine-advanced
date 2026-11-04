@@ -218,6 +218,15 @@ export function buildFluidPack({ net } = {}) {
     data[o + 3] = radiusPx;
   }
 
+  // CHANNEL A, SMOOTHED BY SHAPE (2026-11-04). The per-bin radius above is a function of ARC LENGTH alone, so a
+  // flask — which the geodesic crosses as concentric arcs from its inlet — reads narrow at its far end and steps
+  // from bin to bin (the lab showed a stair-step across a flask). The radius of the LARGEST DISK that fits the
+  // tube and covers this texel is the honest "how wide is it here": every texel of a round flask gets the
+  // flask's radius, every pipe texel the pipe's. Built by stamping the maximal disks centred on the medial axis
+  // (texels whose wall distance is a local maximum), so it costs the axis length times a small disk, not the
+  // tube area times a large one. `max` with the per-bin value keeps every existing reading at least as wide.
+  stampMaximalBalls(net, data);
+
   return {
     spec: net.spec,
     width: w,
@@ -226,6 +235,57 @@ export function buildFluidPack({ net } = {}) {
     tubeCount: net.tubeCount,
     maxTubeWidthTexels,
   };
+}
+
+/**
+ * Raise channel A of `data` to the maximal-inscribed-disk radius (world px) at every tube texel. See the call
+ * site in {@link buildFluidPack} for why.
+ * @param {object} net @param {Float32Array} data
+ */
+function stampMaximalBalls(net, data) {
+  const { w, h, texelW, texelH } = net.spec;
+  const D = net.wallDistByTexel;
+  const ids = net.tubeIdByTexel;
+  if (!D || !(texelW > 0) || !(texelH > 0)) return;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const id = ids[i];
+      if (!id) continue;
+      const d = D[i];
+      if (!(d > 0)) continue;
+      // A medial-axis texel: no same-tube neighbour is further from the wall.
+      let ridge = true;
+      for (let dy = -1; dy <= 1 && ridge; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          if ((!dx && !dy) || xx < 0 || xx >= w) continue;
+          const j = yy * w + xx;
+          if (ids[j] === id && D[j] > d) {
+            ridge = false;
+            break;
+          }
+        }
+      }
+      if (!ridge) continue;
+      const rx = Math.ceil(d / texelW);
+      const ry = Math.ceil(d / texelH);
+      const d2 = d * d;
+      for (let yy = Math.max(0, y - ry); yy <= Math.min(h - 1, y + ry); yy++) {
+        const wy = (yy - y) * texelH;
+        for (let xx = Math.max(0, x - rx); xx <= Math.min(w - 1, x + rx); xx++) {
+          const wx = (xx - x) * texelW;
+          if (wx * wx + wy * wy > d2) continue;
+          const j = yy * w + xx;
+          if (ids[j] !== id) continue;
+          const o = j * FLUID_PACK_CHANNELS + 3;
+          if (data[o] < d) data[o] = d;
+        }
+      }
+    }
+  }
 }
 
 /**

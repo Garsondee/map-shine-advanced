@@ -25,7 +25,7 @@
  * `tiers` entries below are real code.
  *
  * **Still NOT built, so the manifest must not be read as claiming them:**
- * optics, emission-as-a-light and spray — plus the ONE half of `bubbles`
+ * optics and spray (the light shipped 2026-11-04 as tier 7) — plus the ONE half of `bubbles`
  * itself that shipping tier 6 could not honestly claim (pinning to a
  * specific wall, see `deferredRungs`' own `bubble-wall-pin` entry for why).
  * Those are the `deferredRungs` below, named and ordered, and none of them
@@ -52,33 +52,51 @@ export const FLUID_PARAMS = Object.freeze({
     default: '#26f2b3',
     category: 'Look',
     label: 'Goo colour',
-    help: 'The base colour of the fluid. Pushed into HDR by Glow, so a saturated colour here reads as a lit, glowing liquid rather than as paint. The iridescent film shifts it around this base rather than replacing it.',
+    help: 'The first reagent: the colour the goo starts as and keeps returning to. It glows from the inside (deep at the glass, hot down the middle) and lights the floor around the pipes in the same colour.',
+  },
+  accent: {
+    type: 'color',
+    space: 'srgb',
+    default: '#9e47ff',
+    category: 'Look',
+    label: 'Reaction colour',
+    help: 'The second reagent. When the apparatus "transmutes", the new colour rushes down the pipes as a fizzing front. Variety decides whether more colours (found by turning these two round the colour wheel) join in.',
+  },
+  variety: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.6,
+    category: 'Look',
+    label: 'Variety',
+    help: 'How many reagents the apparatus cycles through. 0 = only the goo colour (reactions still surge and flash, but never change colour); about 0.3 = goo and reaction colour; 1 = four colours.',
   },
   glow: {
     type: 'float',
     min: 0,
     max: 4,
     step: 0.05,
-    // RAISED 1.6 → 4 = THE SCHEMA'S OWN MAX (2026-09-08) — new live-tuned
-    // default. Recovered from a stash that missed both this file's own
-    // commit and the 0.6.4 release; applied 2026-09-18.
-    default: 4,
+    // 2026-11-04: the goo now draws AFTER the light composite (it is a light source, the night no longer
+    // multiplies it down), so the old live-tuned 4 — chosen to fight that darkening — blew it white. Measured on
+    // the real viewer at Wizard's Lair night: Dynamic Range exposes +1.5 EV and punches emitters like flames, so
+    // at 1.0 90% of a flask clipped to white; 0.35 keeps the teal and the swirls (0.3 → 65% clipped, day still
+    // reads as glowing liquid).
+    default: 0.35,
     category: 'Look',
     label: 'Glow',
-    help: 'How brightly the goo burns. Above about 1 it starts to bloom, which is where the "magic" reading comes from — turn it down for a mundane liquid in a plain glass tube, up for something you would not want to drink.',
+    help: 'How brightly the goo burns. It is its own light, so it glows at night as strongly as by day (the Dynamic Range camera then makes it pop like a flame). Higher values bleach toward white-hot; lower keeps more of its colour.',
   },
   iridescence: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.01,
-    // RAISED 0.8 → 1 = THE SCHEMA'S OWN MAX (2026-09-08) — new live-tuned
-    // default. Recovered from a stash that missed both this file's own
-    // commit and the 0.6.4 release; applied 2026-09-18.
-    default: 1,
+    // 2026-11-04: a thin film on the glass rim only. At 1 over the whole body it read as a pastel rainbow.
+    default: 0.3,
     category: 'Look',
-    label: 'Sheen',
-    help: 'An oil-on-water rainbow across the fluid. It is driven by the real thickness of liquid the light passes through, so it bands across the tube and shifts at the front of every slug rather than drifting independently. At 0 the goo is a flat colour.',
+    label: 'Glass sheen',
+    help: 'An oil-on-water rainbow on the glass walls of the pipe, banded by how thick the tube is there. 0 = plain glass.',
   },
   opacity: {
     type: 'float',
@@ -107,10 +125,22 @@ export const FLUID_PARAMS = Object.freeze({
     // RAISED 1 → 3 = THE SCHEMA'S OWN MAX (2026-09-08) — new live-tuned
     // default. Recovered from a stash that missed both this file's own
     // commit and the 0.6.4 release; applied 2026-09-18.
-    default: 3,
+    // 2026-11-04: 3 → 1.25. The lab's kymograph measured ~2,700 px/s at 3 — 45 px a frame, more than the
+    // goo's own texture features, so the streaks and bubbles strobed instead of travelling.
+    default: 1.25,
     category: 'Motion',
     label: 'Flow speed',
-    help: 'Scales how fast the pump drives goo through every tube. 1 is the pump`s own natural pace; 0 stops it dead, which is useful for a dormant apparatus. Each tube keeps its own rhythm of surges and gaps — this only speeds all of them up or down together, uniformly. Also sets how fast the marbling pattern (Structure) drifts, so slowing the flow slows the pattern with it.',
+    help: 'Scales how fast the pump drives goo through every tube. 1 is the pump`s own natural pace; 0 stops it dead, which is useful for a dormant apparatus. Each tube keeps its own rhythm of surges and gaps — this only speeds all of them up or down together. The streaks, bubbles and sparkles ride the real flow, so they slow with it.',
+  },
+  chaos: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.55,
+    category: 'Motion',
+    label: 'Reactions',
+    help: 'How often the apparatus does something strange: a new reagent rushing down the pipes, a surge, a stall that lets go with a burp, a heartbeat of light, a fizz, a boil in the flasks. 0 = a calm, steady flow; 1 = a reaction every few seconds.',
   },
   // ── Detail ──────────────────────────────────────────────────────────────
   structure: {
@@ -118,23 +148,51 @@ export const FLUID_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    // LOWERED 0.5 → 0.26 (2026-09-08) — new live-tuned default. Recovered
-    // from a stash that missed both this file's own commit and the 0.6.4
-    // release; applied 2026-09-18.
-    default: 0.26,
+    default: 0.7,
     category: 'Detail',
-    label: 'Structure',
-    help: 'Marbling and grain that ride WITH the flow rather than sitting still on top of it — driven by the material coordinate τ, not the mask`s own fixed position. At 0 the goo is a flat colour with no visible texture; higher values read as a more mottled, organic liquid.',
+    label: 'Streaks',
+    help: 'Streaks and turbulence that rush WITH the goo (and swirling marble in the flasks). At 0 the goo is an even glow.',
   },
   bubbles: {
     type: 'float',
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.5,
+    default: 0.6,
     category: 'Detail',
     label: 'Bubbles',
-    help: 'Gas riding the flow — small bright bubbles that drift with τ the same way Structure`s marbling does, bunch visibly where a tube narrows, and flare where the liquid ends. At 0 the goo carries no bubbles at all.',
+    help: 'Gas bubbles slipping along faster than the goo (bright rims, hollow middles), and boiling in the flasks. Reactions make more of them.',
+  },
+  sparkle: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.6,
+    category: 'Detail',
+    label: 'Sparkle',
+    help: 'Tiny motes of light carried in the goo, each twinkling on its own clock. Reactions stir up more of them.',
+  },
+  // ── Light ───────────────────────────────────────────────────────────────
+  light: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 0.6,
+    category: 'Light',
+    label: 'Light on the map',
+    help: 'How strongly the goo lights the floor and walls around the pipes, in its own colour. It follows the goo: an empty stretch goes dark, a reaction front lights the room as it passes. 0 = no light.',
+  },
+  lightRadius: {
+    type: 'float',
+    min: 0.25,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Light',
+    label: 'Light reach',
+    help: 'How far that light spreads. 1 suits pipes about a grid square apart; the flasks reach further on their own.',
   },
 });
 
@@ -255,7 +313,7 @@ export const FLUID = Object.freeze({
     Object.freeze({
       n: 4,
       name: 'fill',
-      fromProfile: 'quality',
+      fromProfile: 'standard',
       cost: Object.freeze({ class: 'C5', estMsPerMp: 0.08 }),
       adds:
         'THE SIM (`fluid-sim.js`, `fluid-pump.js`): a semi-Lagrangian ping-pong per masked item, ' +
@@ -269,7 +327,7 @@ export const FLUID = Object.freeze({
     Object.freeze({
       n: 5,
       name: 'structure',
-      fromProfile: 'quality',
+      fromProfile: 'standard',
       // ⚠️ C5, NOT the C2 `Fluid.md` §7's original design-time sketch guessed
       // — the SAME correction tier `fill` above already had to make, for the
       // SAME reason: `cost.class` in this manifest is the CEILING the rung
@@ -302,7 +360,7 @@ export const FLUID = Object.freeze({
     Object.freeze({
       n: 6,
       name: 'bubbles',
-      fromProfile: 'extreme',
+      fromProfile: 'standard',
       // C5, inheriting tier 5's own ceiling (Law 3 — non-decreasing), NOT the
       // C4 this rung's own deferred note guessed before anything was built —
       // the SAME correction `fill` and `structure` above each already had to
@@ -330,6 +388,21 @@ export const FLUID = Object.freeze({
         'different MaterialX primitive because a cellular field reads as discrete bubbles where a fractal ' +
         'one reads as continuous marbling. NOT built here: pinning to a specific wall — see the ' +
         '`bubble-wall-pin` deferred rung below for the real, still-open reason.',
+    }),
+    Object.freeze({
+      n: 7,
+      name: 'light',
+      // 2026-11-04 — the former `emission` deferred rung, built: the author asked for the goo to "illuminate the
+      // map around it with a subtle light". Up to 14 lights per masked item through the point-light pool (the
+      // fire's own path: wall-clipped, darkness-aware, coloured), each reading the goo beside it from a CPU twin
+      // of the sim. C6: every light is an extra draw in the shared light passes.
+      fromProfile: 'standard',
+      cost: Object.freeze({ class: 'C6', estMsPerMp: 0.1 }),
+      adds:
+        'THE GOO LIGHTS THE ROOM (`fluid-alchemy.js#buildFluidLightSources`): light anchors baked along the tube ' +
+        'net, each a point light in the reagent`s colour, brightness following the fill and energy of the goo ' +
+        'beside it — an empty stretch goes dark, a reaction front lights the floor as it passes. Through the ' +
+        'point-light pool (`getFireLightSources`), so walls clip it and darkness Regions govern it.',
     }),
   ]),
   /**
@@ -368,12 +441,6 @@ export const FLUID = Object.freeze({
         'C5. Dependent read of buf:scene.color: the tube as a CYLINDRICAL LENS magnifying the art ' +
         'beneath, chromatic dispersion on the same offset, bubble lensing. First rung that forces ' +
         'surface.fluid to become a real pass — the same rule surface.water states for its own tier 5.',
-    }),
-    Object.freeze({
-      name: 'emission',
-      note:
-        'C6. The goo becomes a real light source: its emission injected so the glow spills onto the ' +
-        'floor and nearby walls. An extra small target and a stage-crossing read into light.accumulate.',
     }),
     Object.freeze({
       name: 'spray',

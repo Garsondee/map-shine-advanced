@@ -696,38 +696,26 @@ export function run(t) {
     'performance buys the cylinder (the pack read) and nothing above it',
     resolveEffectTier(FLUID, { profile: 'performance' }).tier === 1
   );
+  // 2026-11-04 (mmp-283): the author's own profile is `standard`, and the sim, its reactions, the streaks,
+  // the bubbles and the map light ARE the effect she asked for ("fun, dynamic ... illuminate the map") — so
+  // `standard` now buys every rung. `performance` keeps the cheap round tube; `low` the flat glow.
   ok(
-    'standard buys film on top of the cylinder, but not the real simulation or structure',
+    'standard buys every rung: the simulation, structure, bubbles and the light',
     (() => {
       const p = fluidTierPlan(resolveEffectTier(FLUID, { profile: 'standard' }).tier);
-      return p.cylinderEnabled && p.filmEnabled && !p.fillEnabled && !p.structureEnabled;
+      return (
+        p.cylinderEnabled && p.filmEnabled && p.fillEnabled && p.structureEnabled && p.bubblesEnabled && p.lightEnabled
+      );
     })()
   );
   ok(
-    'quality is the first profile to buy the real simulation and the structure noise',
+    'performance buys only the round tube — no sim, no light',
     (() => {
-      const p = fluidTierPlan(resolveEffectTier(FLUID, { profile: 'quality' }).tier);
-      return p.fillEnabled && p.structureEnabled;
+      const p = fluidTierPlan(resolveEffectTier(FLUID, { profile: 'performance' }).tier);
+      return p.cylinderEnabled && !p.fillEnabled && !p.lightEnabled;
     })()
   );
-  // === 🔒 TIER 6 (BUBBLES) ANTI-DRIFT, 2026-09-14 ===========================
-  // Mirrors vegetation.js's own tier-6 (`torque-sway`) anti-drift block: a
-  // genuinely NEW top rung, not an extension of tier 5's own reservation —
-  // `bubbles` needed its own `fromProfile: 'extreme'` once built, so `extreme`
-  // now climbs one rung past `quality` for fluid, unlike the water precedent
-  // this assertion used to cite (water`s own ladder really does still stop
-  // at `quality` — see that effect`s own test block a few dozen lines up).
-  ok(
-    "extreme resolves to tier 6, not 5 — bubbles is the ladder's new, genuinely-highest rung",
-    resolveEffectTier(FLUID, { profile: 'extreme' }).tier === 6
-  );
-  ok(
-    'quality (one rung below extreme) does NOT reach bubbles — only extreme does',
-    (() => {
-      const p = fluidTierPlan(resolveEffectTier(FLUID, { profile: 'quality' }).tier);
-      return !p.bubblesEnabled;
-    })()
-  );
+  ok('extreme resolves to the top rung (7, light)', resolveEffectTier(FLUID, { profile: 'extreme' }).tier === 7);
   ok(
     'the fluid fallback tier IS what the default profile resolves to — no second authority',
     resolveEffectTier(FLUID, { profile: DEFAULT_PERFORMANCE_PROFILE }).tier === FLUID_DEFAULT_TIER

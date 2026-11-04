@@ -128,16 +128,13 @@ export function run(t) {
         built.absorbMaterial.side === THREE.DoubleSide && built.emitMaterial.side === THREE.DoubleSide
       );
 
-      // ── THE MRT KEY — must be the literal string 'attr', not 'gAttr' ──────
-      // This shipped WRONG for one round (see fluid-render.js's own header):
-      // a wrong key is silently skipped by MRTNode, no error, no effect. The
-      // only way to catch it without a live GPU is to read the built node's
-      // OWN declared keys back out.
-      const absorbKeys = Object.keys(built.absorbMaterial.mrtNode?.outputNodes ?? {});
-      const emitKeys = Object.keys(built.emitMaterial.mrtNode?.outputNodes ?? {});
-      ok(`absorb's mrtNode uses the key 'attr' (got: ${absorbKeys.join(',')})`, absorbKeys.includes('attr'));
-      ok(`emit's mrtNode uses the key 'attr' (got: ${emitKeys.join(',')})`, emitKeys.includes('attr'));
-      ok('neither uses the wrong key `gAttr`', !absorbKeys.includes('gAttr') && !emitKeys.includes('gAttr'));
+      // ── NO MRT OVERRIDE (2026-11-04) ─────────────────────────────────────
+      // Both passes now draw onto scene.lit, after the light composite: that
+      // target has no `attr` attachment and no renderer-global MRT, so an
+      // `mrt({attr})` override left the fragment output struct EMPTY ("structures
+      // must have at least one member" — the fluid lab's first draw).
+      ok('absorb carries no mrtNode (scene.lit has no attr attachment)', !built.absorbMaterial.mrtNode);
+      ok('emit carries no mrtNode (scene.lit has no attr attachment)', !built.emitMaterial.mrtNode);
 
       // ONE uniforms object for both materials — not `absorbUniforms` /
       // `emitUniforms` — is what makes a single param-sync write in

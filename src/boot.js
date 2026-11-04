@@ -373,6 +373,8 @@ import {
   setVtPanViewerWindAmbient,
   setVtPanViewerWindGustiness,
   getVtPanViewerFireStatus,
+  getVtPanViewerFluidStatus,
+  triggerVtPanViewerFluidReaction,
   getVtPanViewerLeafShedStatus,
   getVtPanViewerCritterStatus,
   setVtPanViewerSunHour,
@@ -11643,6 +11645,9 @@ function install() {
    * (Water-Testament W0). */
   MapShine.setWaterDebug = water.setDebugChannel;
   MapShine.setFluid = fluid.setFluid;
+  // The goo's reactions on demand (`MapShine.fluidReact('transmute')`; kinds in fluid-alchemy.js) and its chain report.
+  MapShine.fluidReact = (kind, tubeIndex = null) => triggerVtPanViewerFluidReaction(kind, tubeIndex);
+  MapShine.getFluidStatus = () => getVtPanViewerFluidStatus();
 
   /**
    * THE DEBUG-CHANNEL PICKER — water's own copy of `buildSpecularDebugSelect()`

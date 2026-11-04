@@ -86,7 +86,25 @@ import {
   computeFluidLengthQScale,
 } from './fluid-sim.js';
 import { fluidPumpPersonality } from './fluid-pump.js';
+import {
+  fluidPalette,
+  createFluidReactionState,
+  writeFluidTubeTick,
+  forceFluidReaction,
+  FLUID_REACTION_KINDS,
+  FLUID_TUBE_TEXELS,
+  computeFluidHostGate,
+  fluidLightAnchors,
+  createFluidLightTwin,
+  stepFluidLightTwin,
+  buildFluidLightSources,
+  FLUID_ENERGY_DECAY_S,
+  FLUID_FROTH_DECAY_S,
+} from './fluid-alchemy.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
+
+/** The host art is decoded at most this big for the gate (a 6,750 px tile → 4,096: ink lines stay ≥ 2 px). */
+const FLUID_HOST_GATE_MAX_DIM = 4096;
 
 const log = createLogger('FluidSurface');
 
@@ -150,7 +168,7 @@ const FLUID_RENDER_ORDER_EMIT_MAGNITUDE = 0.01;
  */
 export function createFluidSurfaceSubsystem({
   THREE,
-  scene,
+  // `scene` (the main one) is still passed by the viewer but no longer drawn into — see `emitScene`.
   getFluidMaskItems,
   loadMaskImage,
   createPackTexture,
@@ -158,6 +176,11 @@ export function createFluidSurfaceSubsystem({
   disposeSimRenderTarget,
   getFluidRenderState,
   timeMsNode,
+  // THE HOST GATE (2026-11-04) — `(url, maxDim) => Promise<{data: RGBA bytes, width, height}|null>`, the host
+  // tile's own art decoded small, and `(bytes, w, h) => texture` for the single-channel gate it becomes. Both
+  // optional: without them the goo glows over the host's whole quad, ink and brass included.
+  loadHostImage = null,
+  createGateTexture = null,
   // The tube-net + pack bake (extractTubeNet/buildFluidPack — a geodesic pass
   // + two-pass chamfer distance transform + connected-component flood fill)
   // runs inside loadAndBake's own async continuation, never a synchronous
@@ -198,6 +221,18 @@ export function createFluidSurfaceSubsystem({
 
   /** One entry per masked item, keyed by item id. */
   const entries = new Map();
+  /**
+   * THE GOO'S OWN SCENE (2026-11-04). Both meshes draw here, and the viewer renders it onto `scene.lit` AFTER the
+   * light composite — the goo is a light source, so the night must not multiply it down (`fluid-render.js`'s
+   * header has the measurement). `scene` (the main one) is no longer drawn into.
+   */
+  const emitScene = new THREE.Scene();
+  /** This frame's light descriptors across every presented item (the point-light pool reads them). */
+  let currentLights = [];
+  /** Per-light smoothing memory for the brightness (keys = light source ids). */
+  const lightSmooth = new Map();
+  /** The sim clock as of the last tick — a forced reaction is stamped on THIS clock, not the caller's. */
+  let lastTickMs = 0;
   let enabled = true;
   let syncs = 0;
   /** Floor PREPARE draws every entry once, off screen, so its shader pipeline is
@@ -283,6 +318,29 @@ export function createFluidSurfaceSubsystem({
       }
 
       entry.packTexture = createPackTexture(entry.pack.data, entry.pack.width, entry.pack.height);
+      entry.pipeRadiusPx = typicalPipeRadius(entry.net);
+      entry.itemSizePx = quadSize(item.corners);
+      entry.lightAnchors = fluidLightAnchors(entry.net, item.corners);
+      // THE HOST GATE — the host's own art, decoded small, says where its ink and brass hide the goo.
+      if (typeof loadHostImage === 'function' && typeof createGateTexture === 'function' && item.hostUrl) {
+        try {
+          const host = await loadHostImage(item.hostUrl, FLUID_HOST_GATE_MAX_DIM);
+          if (entries.get(item.id) !== entry || entry.url !== item.url) return;
+          if (host?.data) {
+            entry.hostGateTexture?.dispose?.();
+            entry.hostGateTexture = createGateTexture(
+              computeFluidHostGate(host.data, host.width, host.height),
+              host.width,
+              host.height
+            );
+          }
+        } catch (err) {
+          log.warn(
+            `fluid host gate failed for item ${item.id} (${item.hostUrl}) — the goo glows over its fittings:`,
+            err
+          );
+        }
+      }
       buildSim(entry);
       buildMesh(entry, image.texture);
       log.info(
@@ -344,12 +402,22 @@ export function createFluidSurfaceSubsystem({
     // is never sampled (prepareSimTick always writes fresh values before the
     // first render), so an all-zero initial buffer is fine.
     entry.simPumpTexture = createPackTexture(new Float32Array(tubeCount * 4), 1, tubeCount);
+    // THE ALCHEMY (2026-11-04, `fluid-alchemy.js`): per tube, what enters the root besides φ (reagent, energy,
+    // froth) and what the surface shader reads (travel, length, agitation). Rewritten every tick like the pump.
+    entry.simTubeTexture = createPackTexture(
+      new Float32Array(tubeCount * FLUID_TUBE_TEXELS * 4),
+      FLUID_TUBE_TEXELS,
+      tubeCount
+    );
+    entry.reactions = createFluidReactionState(tubeCount);
+    entry.lightTwin = createFluidLightTwin(entry.net);
 
     entry.simAdvect = buildFluidAdvectMaterial({
       THREE,
       prevStateTexture: entry.simPingRT.texture,
       profileTexture: entry.simProfileTexture,
       pumpTexture: entry.simPumpTexture,
+      tubeTexture: entry.simTubeTexture,
     });
   }
 
@@ -362,11 +430,16 @@ export function createFluidSurfaceSubsystem({
     if (entry.simPongRT) disposeSimRenderTarget(entry.simPongRT);
     entry.simProfileTexture?.dispose?.();
     entry.simPumpTexture?.dispose?.();
+    entry.simTubeTexture?.dispose?.();
     entry.simAdvect?.material?.dispose?.();
     entry.simPingRT = null;
     entry.simPongRT = null;
     entry.simProfileTexture = null;
     entry.simPumpTexture = null;
+    entry.simTubeTexture = null;
+    entry.reactions = null;
+    entry.lightTwin = null;
+    entry.lights = [];
     entry.simAdvect = null;
     entry.simPersonalities = null;
     entry.simQScales = null;
@@ -406,16 +479,7 @@ export function createFluidSurfaceSubsystem({
     // REGARDLESS of tier — only the MATERIAL's read of it is gated
     // (`fluid-render.js#fluidTierPlan`) — so `stateTexture` here is always a
     // real texture, never a placeholder for "not built yet".
-    entry.built = buildFluidSurfaceMaterials({
-      THREE,
-      maskTexture,
-      packTexture: entry.packTexture,
-      stateTexture: entry.simPingRT.texture,
-      tubeCount: entry.simTubeCount,
-      timeMsNode,
-      tier: entry.builtForTier,
-      ...pickParams(renderState().params ?? {}),
-    });
+    entry.built = buildFluidSurfaceMaterials(materialArgs(entry, entry.builtForTier));
     entry.geometry = geometry;
 
     // Host-relative, not a fixed global band — see FLUID_RENDER_ORDER_*
@@ -434,10 +498,30 @@ export function createFluidSurfaceSubsystem({
     entry.emitMesh.renderOrder = hostRenderOrder - FLUID_RENDER_ORDER_EMIT_MAGNITUDE;
     entry.emitMesh.frustumCulled = false;
 
-    scene.add(entry.absorbMesh);
-    scene.add(entry.emitMesh);
+    emitScene.add(entry.absorbMesh);
+    emitScene.add(entry.emitMesh);
     lastParamsKey = '';
     refreshVisibility();
+  }
+
+  /** Everything the material builder takes for one entry — shared by the first build and a tier rebuild. */
+  function materialArgs(entry, tier) {
+    const p = pickParams(renderState().params ?? {});
+    return {
+      THREE,
+      maskTexture: entry.maskTexture,
+      packTexture: entry.packTexture,
+      stateTexture: entry.simPingRT.texture,
+      tubeCount: entry.simTubeCount,
+      timeMsNode,
+      tier,
+      tubeTexture: entry.simTubeTexture,
+      hostGateTexture: entry.hostGateTexture ?? null,
+      pipeRadiusPx: entry.pipeRadiusPx ?? 20,
+      itemSizePx: entry.itemSizePx ?? [4096, 4096],
+      palette: fluidPalette(p.tint, p.accent, p.variety),
+      ...p,
+    };
   }
 
   /**
@@ -454,16 +538,7 @@ export function createFluidSurfaceSubsystem({
   function rebuildMaterialsForTier(entry, tier) {
     entry.warmed = false;
     const oldBuilt = entry.built;
-    entry.built = buildFluidSurfaceMaterials({
-      THREE,
-      maskTexture: entry.maskTexture,
-      packTexture: entry.packTexture,
-      stateTexture: entry.simPingRT.texture,
-      tubeCount: entry.simTubeCount,
-      timeMsNode,
-      tier,
-      ...pickParams(renderState().params ?? {}),
-    });
+    entry.built = buildFluidSurfaceMaterials(materialArgs(entry, tier));
     entry.absorbMesh.material = entry.built.absorbMaterial;
     entry.emitMesh.material = entry.built.emitMaterial;
     oldBuilt?.absorbMaterial?.dispose?.();
@@ -485,8 +560,8 @@ export function createFluidSurfaceSubsystem({
    * below, not this. */
   function disposeMesh(entry) {
     entry.warmed = false; // a new mesh/material is a new pipeline to warm
-    if (entry.absorbMesh) scene.remove(entry.absorbMesh);
-    if (entry.emitMesh) scene.remove(entry.emitMesh);
+    if (entry.absorbMesh) emitScene.remove(entry.absorbMesh);
+    if (entry.emitMesh) emitScene.remove(entry.emitMesh);
     entry.built?.absorbMaterial?.dispose?.();
     entry.built?.emitMaterial?.dispose?.();
     entry.geometry?.dispose?.();
@@ -502,6 +577,8 @@ export function createFluidSurfaceSubsystem({
   function disposeEntry(entry) {
     disposeSim(entry);
     disposeMesh(entry);
+    entry.hostGateTexture?.dispose?.();
+    entry.hostGateTexture = null;
   }
 
   /** Only the keys the material takes, so an unknown param cannot ride in.
@@ -518,6 +595,9 @@ export function createFluidSurfaceSubsystem({
     if (Number.isFinite(p.flowSpeed)) out.flowSpeed = p.flowSpeed;
     if (Number.isFinite(p.structure)) out.structure = p.structure;
     if (Number.isFinite(p.bubbles)) out.bubbles = p.bubbles;
+    if (Array.isArray(p.accent)) out.accent = p.accent;
+    if (Number.isFinite(p.variety)) out.variety = p.variety;
+    if (Number.isFinite(p.sparkle)) out.sparkle = p.sparkle;
     return out;
   }
 
@@ -587,6 +667,7 @@ export function createFluidSurfaceSubsystem({
       // The tile was dragged, rotated or resized: move the quad rather than
       // rebaking — the mask and its tube net are unchanged, only where they sit.
       entry.corners = item.corners;
+      if (entry.net) entry.lightAnchors = fluidLightAnchors(entry.net, item.corners);
       const pos = entry.geometry.getAttribute('position');
       const buf = buildQuadPositions(item.corners);
       for (let i = 0; i < buf.length; i++) pos.array[i] = buf[i];
@@ -684,9 +765,21 @@ export function createFluidSurfaceSubsystem({
     // uniform, `fluid-render.js`) — it is ALSO read fresh every tick in
     // `prepareSimTick` below to scale the pump's `Q`, a genuinely separate
     // JS-side use of the SAME param value, not a duplicate of this write.
-    const key = JSON.stringify([p.tint, p.glow, p.iridescence, p.opacity, p.flowSpeed, p.structure, p.bubbles]);
+    const key = JSON.stringify([
+      p.tint,
+      p.glow,
+      p.iridescence,
+      p.opacity,
+      p.flowSpeed,
+      p.structure,
+      p.bubbles,
+      p.accent,
+      p.variety,
+      p.sparkle,
+    ]);
     if (key !== lastParamsKey) {
       lastParamsKey = key;
+      const palette = fluidPalette(p.tint, p.accent, p.variety);
       for (const entry of entries.values()) {
         if (!entry.built) continue;
         // ONE uniforms set, shared by construction: `buildFluidSurfaceMaterials`
@@ -702,6 +795,11 @@ export function createFluidSurfaceSubsystem({
         if (Number.isFinite(p.flowSpeed)) u.uFlowSpeed.value = p.flowSpeed;
         if (Number.isFinite(p.structure)) u.uStructure.value = p.structure;
         if (Number.isFinite(p.bubbles)) u.uBubbles.value = p.bubbles;
+        if (Array.isArray(p.accent)) u.uAccent.value.set(p.accent[0], p.accent[1], p.accent[2]);
+        if (Number.isFinite(p.variety)) u.uVariety.value = p.variety;
+        if (Number.isFinite(p.sparkle)) u.uSparkle.value = p.sparkle;
+        palette.colors.forEach((c, i) => u.uPal[i]?.value.set(c[0], c[1], c[2]));
+        u.uPalCount.value = palette.count;
       }
     }
     refreshVisibility();
@@ -724,6 +822,8 @@ export function createFluidSurfaceSubsystem({
   function prepareSimTick(nowMs, dtSec) {
     const clears = [];
     const advects = [];
+    currentLights = [];
+    lastTickMs = nowMs;
     if (!enabled) return { clears, advects };
 
     // Below tier 4 ('fill'), the material never reads the sim state at all
@@ -737,8 +837,15 @@ export function createFluidSurfaceSubsystem({
     // to keep this fix scoped to the real per-frame win).
     if (!fluidTierPlan(resolveTier()).fillEnabled) return { clears, advects };
 
-    const flowSpeedRaw = Number(renderState().params?.flowSpeed);
+    const params = renderState().params ?? {};
+    const flowSpeedRaw = Number(params.flowSpeed);
     const flowSpeed = Number.isFinite(flowSpeedRaw) ? Math.max(0, flowSpeedRaw) : 1;
+    const chaos = Number.isFinite(params.chaos) ? params.chaos : 0.5;
+    const plan = fluidTierPlan(resolveTier());
+    const lightStrength = plan.lightEnabled && Number.isFinite(params.light) ? Math.max(0, params.light) : 0;
+    const palette = lightStrength > 0 ? fluidPalette(params.tint, params.accent, params.variety) : null;
+    const energyKeep = Math.exp(-Math.max(0, dtSec) / FLUID_ENERGY_DECAY_S);
+    const frothKeep = Math.exp(-Math.max(0, dtSec) / FLUID_FROTH_DECAY_S);
 
     for (const entry of entries.values()) {
       // A parked entry (another floor's) is not drawn, so its sim is not stepped:
@@ -761,15 +868,41 @@ export function createFluidSurfaceSubsystem({
         entry.simPersonalities,
         entry.simQScales
       );
-      if (flowSpeed !== 1) {
-        // Scaling Q by the SAME factor `dtSec` would achieve is the smallest
-        // possible hook for a live "flow speed" control: `v = Q/A`, so
-        // multiplying Q here scales every tube's advection velocity uniformly
-        // without touching `fluid-pump.js`'s own already-tested arithmetic.
-        const data = entry.simPumpTexture.image.data;
-        for (let row = 0; row < entry.net.tubes.length; row++) data[row * 4] *= flowSpeed;
-      }
+      // THE ALCHEMY: this tick's reactions scale Q (with the live flow speed — `v = Q/A`, so multiplying Q is
+      // the smallest hook that speeds every tube up uniformly), set what enters each root besides φ, and move
+      // each tube's travel coordinate by how far its goo actually flowed.
+      const reacted = writeFluidTubeTick({
+        tubeData: entry.simTubeTexture.image.data,
+        pumpData: entry.simPumpTexture.image.data,
+        tubes: entry.net.tubes,
+        reactions: entry.reactions,
+        tSec: nowMs / 1000,
+        dtSec,
+        chaos,
+        flowSpeed,
+      });
+      entry.lastReactions = reacted;
       entry.simPumpTexture.needsUpdate = true;
+      entry.simTubeTexture.needsUpdate = true;
+      entry.simAdvect.uEnergyKeep.value = energyKeep;
+      entry.simAdvect.uFrothKeep.value = frothKeep;
+      // THE LIGHT: the CPU twin follows the same Q and root values, and each anchor reads the goo beside it.
+      if (lightStrength > 0 && entry.lightTwin && entry.lightAnchors?.length) {
+        stepFluidLightTwin(entry.lightTwin, entry.simPumpTexture.image.data, entry.simTubeTexture.image.data, dtSec);
+        const lights = buildFluidLightSources({
+          itemId: entry.id,
+          anchors: entry.lightAnchors,
+          twin: entry.lightTwin,
+          palette,
+          strength: lightStrength,
+          radiusScale: Number.isFinite(params.lightRadius) ? params.lightRadius : 1,
+          fade: entry.built?.uniforms?.uFadeMul?.value ?? 1,
+          elevation: Number.isFinite(entry.elevation) ? entry.elevation : 0,
+          smooth: lightSmooth,
+          dtSec,
+        });
+        for (const l of lights) currentLights.push(l);
+      }
 
       if (entry.simNeedsClear) {
         // Skip advection entirely THIS tick — both RTs are about to be zeroed,
@@ -811,6 +944,7 @@ export function createFluidSurfaceSubsystem({
       enabled,
       syncs,
       bakes,
+      lights: currentLights.length,
       // Zero masked items with tubes painted on the map means the LOOKUP is
       // wrong, not the shader. That distinction cost two rounds.
       maskedItemCount: [...entries.values()].filter((e) => e.presented).length,
@@ -842,6 +976,17 @@ export function createFluidSurfaceSubsystem({
         // not per-item — compare the two if a rebuild is ever suspected of
         // going stale). `null` means this item has never been built at all.
         perfTier: e.builtForTier,
+        // THE ALCHEMY's own links: is the host gate in, how many light anchors, what each tube is doing now.
+        hostGate: !!e.hostGateTexture,
+        pipeRadiusPx: e.pipeRadiusPx ?? null,
+        lightAnchors: e.lightAnchors?.length ?? 0,
+        reactions: (e.lastReactions ?? []).map((r) => ({
+          kind: r.kind,
+          env: Number(r.env.toFixed(2)),
+          reagent: Number(r.reagent.toFixed(2)),
+          energy: Number(r.energy.toFixed(2)),
+          qMul: Number(r.qMul.toFixed(2)),
+        })),
         warnings: e.net ? e.net.warnings : [],
         tubes: e.net
           ? e.net.tubes.map((t) => ({
@@ -987,11 +1132,51 @@ export function createFluidSurfaceSubsystem({
     return out;
   }
 
+  /** Empty every tube and restart its reactions' travel (the lab's `reset`; a GM "drain" one day). */
+  function resetSim() {
+    for (const entry of entries.values()) {
+      if (!entry.simAdvect) continue;
+      entry.simNeedsClear = true;
+      if (entry.net) {
+        entry.reactions = createFluidReactionState(entry.net.tubeCount);
+        entry.lightTwin = createFluidLightTwin(entry.net);
+      }
+    }
+    lightSmooth.clear();
+  }
+
+  /**
+   * Make a reaction happen now — on one tube (`tubeIndex`) or on every tube of every item. Debug buttons and the
+   * console (`MapShine.fluidReact('transmute')`); the hook a future "a spell was cast here" event would use.
+   * @param {string} kind - one of {@link FLUID_REACTION_KINDS}.
+   * @param {number} [nowMs] - the shared clock; defaults to the last tick's.
+   * @param {number} [tubeIndex]
+   * @returns {number} how many tubes reacted.
+   */
+  function triggerReaction(kind, nowMs = lastTickMs, tubeIndex = null) {
+    let n = 0;
+    for (const entry of entries.values()) {
+      if (!entry.reactions) continue;
+      entry.reactions.forEach((st, i) => {
+        if (tubeIndex !== null && i !== tubeIndex) return;
+        if (forceFluidReaction(st, kind, nowMs / 1000)) n++;
+      });
+    }
+    return n;
+  }
+
   return {
     sync,
     prepareSimTick,
     getStatus,
     dispose,
+    /** The goo's own scene — draw it onto `scene.lit` AFTER the light composite (see its declaration). */
+    emitScene,
+    /** This frame's light descriptors (point-light pool shape), built by `prepareSimTick`. */
+    lightSources: () => currentLights,
+    resetSim,
+    triggerReaction,
+    reactionKinds: () => [...FLUID_REACTION_KINDS],
     /** FLOOR PREPARE (loading audit P-05): start baking these items without presenting them. */
     prefetchItems,
     /** True when nothing is left to wait for on these items. */
@@ -1031,6 +1216,28 @@ export function createFluidSurfaceSubsystem({
 /** How many entries for items NOT on the drawn floor stay baked (hidden) before
  * the oldest are disposed — loading audit P-05. */
 const MAX_PARKED_ENTRIES = 24;
+
+/**
+ * The item's TYPICAL pipe half-width, world px — the scale every pattern is drawn at, so a flask does not stretch
+ * the streaks and a capillary does not crush them. The 35th percentile of every tube's radius profile: low enough
+ * that the flasks (a few wide bins) cannot drag it up.
+ * @param {object} net
+ * @returns {number}
+ */
+export function typicalPipeRadius(net) {
+  const all = [];
+  for (const t of net?.tubes ?? []) for (const r of t.radiusProfile ?? []) if (r > 0) all.push(r);
+  if (!all.length) return 20;
+  all.sort((a, b) => a - b);
+  return Math.max(4, all[Math.floor(all.length * 0.35)]);
+}
+
+/** A quad's world size from its corners (TL, TR, BR, BL): [|TR − TL|, |BL − TL|]. */
+export function quadSize(corners) {
+  if (!Array.isArray(corners) || corners.length !== 4) return [4096, 4096];
+  const [tl, tr, , bl] = corners;
+  return [Math.max(1, Math.hypot(tr.x - tl.x, tr.y - tl.y)), Math.max(1, Math.hypot(bl.x - tl.x, bl.y - tl.y))];
+}
 
 /** Have any of the four corners actually moved? */
 function cornersMoved(a, b) {

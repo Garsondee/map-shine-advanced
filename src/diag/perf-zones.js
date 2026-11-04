@@ -1207,6 +1207,19 @@ export const ZONES = Object.freeze(
       false,
       'runSurfaceIridescencePass'
     ),
+    // 2026-11-04: the goo draws onto scene.lit after the light composite (it is a light source), so it has its
+    // own render call now — bracketed here.
+    z(
+      'surface.fluidDraw',
+      'Fluid glow draw (post-light)',
+      'surface',
+      'surface.iridescence',
+      'fluid',
+      'gpu',
+      'conditional',
+      false,
+      'runSurfaceFluidPass'
+    ),
     z(
       'surface.drawDust',
       'Dust particle draw',
@@ -1901,8 +1914,8 @@ export const EFFECT_ZONING = Object.freeze({
     why: 'Draw (surface.specularDraw, now covering both the floor AND tile renders in one bracket — 2026-09-16, the tile render used to sit outside it entirely), per-frame CPU sync — floor (surface.specularSync) and tile (surface.specularTileSync, added 2026-09-16, previously unbracketed anywhere) — and both island-pack bakes — per-floor (surface.specularIslandBake) and per-tile (surface.specularTileIslandBake, added 2026-09-16 after its bracket was found calling a zone id with no declaration) — are all zoned; before the 2026-08-06 pass, floor sync and the per-floor bake ran with zero profiler coverage despite running every frame and on every mask load respectively.',
   }),
   fluid: Object.freeze({
-    coverage: 'partial',
-    why: "Its sim tick (sims.fluid), per-frame sync (light.fluidSurfaceSync) and tube-net/pack bake (light.fluidNetBake, added 2026-08-06) are zoned, but the absorb/emit surface draw is additively blended into geometry.world's shared scene at a fixed renderOrder — the same structural situation as water's tier-0 surface, no render call of its own to bracket.",
+    coverage: 'full',
+    why: "Its sim tick (sims.fluid), per-frame sync (light.fluidSurfaceSync), tube-net/pack bake (light.fluidNetBake, added 2026-08-06) and — since 2026-11-04, when the goo moved after the light composite as a light source — its own surface draw (surface.fluidDraw) are all zoned. Its map light rides the point-light pool, inside the shared light.drawPointLights/light.drawColoration zones, like fire's.",
   }),
   apertureGobo: Object.freeze({
     coverage: 'partial',

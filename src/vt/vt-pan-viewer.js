@@ -6073,6 +6073,8 @@ async function startVtPanViewerUnserialized({
      * itself, so the getter still catches every rebake — it just also
      * survives being constructed before `windHandle`'s first assignment.
      */
+    /** The goo's light descriptors — rebound to the fluid subsystem once it is built (see its construction). */
+    let fluidLightSources = () => [];
     const fireSubsystem = createFireSubsystem({
       THREE,
       getFireRenderState,
@@ -6608,7 +6610,14 @@ async function startVtPanViewerUnserialized({
       // Fire's lights, built during `fireSubsystem.sync()` just above in the
       // frame loop — so they are THIS frame's, on the same puff clock the
       // flame is drawing with.
-      getFireLightSources: () => fireSubsystem.lightSources(),
+      // ... and the goo's (2026-11-04, `fluid-alchemy.js#buildFluidLightSources`): same descriptor shape, same
+      // wall-clipped path. `fluidLightSources` is assigned once the fluid subsystem exists (declared later in
+      // this closure), so a call before then simply has no fluid lights.
+      getFireLightSources: () => {
+        const fire = fireSubsystem.lightSources();
+        const goo = fluidLightSources();
+        return goo.length ? [...(fire ?? []), ...goo] : fire;
+      },
       // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — see this
       // function's own destructured param doc above. `undefined` (an
       // un-wired caller) reaches `createPointLightPool`'s own `= null`
@@ -12048,6 +12057,24 @@ async function startVtPanViewerUnserialized({
     }
 
     /**
+     * THE GOO, AS A LIGHT SOURCE (2026-11-04) — `fluid-surface-subsystem.js#emitScene` (absorb multiply + emit
+     * add) drawn onto `scene.lit` AFTER the light composite, like the flames: drawn into `scene.color` before it,
+     * the night multiplied the glow down exactly like paint (`fluid-render.js`'s header has the numbers). Synced
+     * earlier in the frame (`light.fluidSurfaceSync`); this only draws.
+     */
+    function runSurfaceFluidPass() {
+      if (!fluidSurface.emitScene || fluidSurface.emitScene.children.length === 0) return;
+      const previousAutoClear = renderer.autoClearColor;
+      renderer.setRenderTarget(sceneLit);
+      renderer.autoClearColor = false;
+      profiler?.begin(Z.fluidDraw);
+      renderer.render(fluidSurface.emitScene, camera);
+      profiler?.end(Z.fluidDraw);
+      renderer.autoClearColor = previousAutoClear;
+      renderer.setRenderTarget(null);
+    }
+
+    /**
      * surface.particles (docs/planning/Particles.md §16) — draw the GPU particles
      * additively over the fully-lit scene. light.accumulate ended with
      * setRenderTarget(null), so re-bind sceneLit and GUARD the clear
@@ -13336,7 +13363,12 @@ async function startVtPanViewerUnserialized({
       'light.accumulate': runLightAccumulatePass,
       'surface.response': runSurfaceResponsePass,
       'surface.prism': runSurfacePrismPass,
-      'surface.iridescence': runSurfaceIridescencePass,
+      // The goo's own post-light draw rides the iridescence slot (same stage, same target, before water,
+      // particles, clouds and the vision gate) rather than a new graph node.
+      'surface.iridescence': () => {
+        runSurfaceIridescencePass();
+        runSurfaceFluidPass();
+      },
       'surface.water': runWaterRefractionCapturePass,
       'surface.particles': runSurfaceParticlesPass,
       'surface.cloudTops': runCloudTopsPass,
@@ -17382,11 +17414,46 @@ async function startVtPanViewerUnserialized({
       disposeSimRenderTarget: disposeFluidSimRenderTarget,
       getFluidRenderState,
       timeMsNode: uGlobalTimeMs, // THE shared clock — never a private one
+      // THE HOST GATE (2026-11-04): the host tile's own art, decoded small, so the goo stays behind its ink,
+      // brass and glints (`fluid-alchemy.js#computeFluidHostGate`).
+      loadHostImage: async (url, maxDim) => {
+        const response = await fetch(url);
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        const probe = await createImageBitmap(blob);
+        const s = Math.min(1, maxDim / Math.max(probe.width, probe.height));
+        const w = Math.max(1, Math.round(probe.width * s));
+        const h = Math.max(1, Math.round(probe.height * s));
+        probe.close();
+        const bmp = await createImageBitmap(blob, {
+          resizeWidth: w,
+          resizeHeight: h,
+          resizeQuality: 'high',
+          premultiplyAlpha: 'none',
+        });
+        const canvas = new OffscreenCanvas(w, h);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(bmp, 0, 0);
+        bmp.close();
+        return { data: ctx.getImageData(0, 0, w, h).data, width: w, height: h };
+      },
+      createGateTexture: (data, w, h) => {
+        const tex = new THREE.DataTexture(data, w, h, THREE.RedFormat, THREE.UnsignedByteType);
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.flipY = false;
+        tex.needsUpdate = true;
+        return tex;
+      },
       // So loadAndBake can bracket its own async-triggered bake
       // (light.fluidNetBake) — see this subsystem's own doc for why that
       // can't be bracketed from outside the way water's bake is.
       profiler,
     });
+
+    fluidLightSources = () => fluidSurface.lightSources();
 
     // THE ITEM → WORLD QUAD resolver, handed back to boot's per-item seams.
     //
@@ -24121,6 +24188,7 @@ async function startVtPanViewerUnserialized({
       // outer draw call needs a `Z.` entry here, and there is no refraction
       // bracket at all (this effect needs no scene-capture subsystem).
       iridescenceDraw: profiler?.indexOf('surface.iridescenceDraw') ?? -1,
+      fluidDraw: profiler?.indexOf('surface.fluidDraw') ?? -1,
       surfDust: profiler?.indexOf('surface.drawDust') ?? -1,
       surfGusts: profiler?.indexOf('surface.drawGusts') ?? -1,
       // Added 2026-09-16 (mythica-machina-press#552) — see runCloudTopsPass's
@@ -32736,6 +32804,8 @@ async function startVtPanViewerUnserialized({
        * host (a floor, when the tubes were painted on a tile).
        */
       getFluidStatus: () => fluidSurface.getStatus(),
+      /** Make the goo react now (`fluid-alchemy.js#FLUID_REACTION_KINDS`) — the console's `MapShine.fluidReact`. */
+      fluidReact: (kind, tubeIndex = null) => fluidSurface.triggerReaction(kind, undefined, tubeIndex),
       /** region-darkness's own pool state — for the Diagnostics report.
        * `activeRegions` should be > 0 whenever the scene has a visible,
        * non-hidden, elevation-band-matching region with an active "Adjust
@@ -35077,6 +35147,18 @@ export function sampleVtPanViewerSceneSettleNow() {
  * one question it was wired to answer.
  * @returns {object} the status, or `{skipped:true}` when nothing is running.
  */
+/** `MapShine.fluidReact(kind, tube?)` — fire a fluid reaction now (`transmute`, `surge`, `stall`, `pulse`, `fizz`, `boil`). */
+export function triggerVtPanViewerFluidReaction(kind, tubeIndex = null) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return { tubes: _active.fluidReact(kind, tubeIndex) };
+}
+
+/** `MapShine.getFluidStatus()` — the fluid subsystem's own chain report. */
+export function getVtPanViewerFluidStatus() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getFluidStatus();
+}
+
 export function getVtPanViewerFireStatus() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getFireStatus();

@@ -101,6 +101,7 @@ export function createFluidRegistration({
       params: {
         ...p,
         tint: typeof p.tint === 'string' ? hexToRgb01(p.tint) : undefined,
+        accent: typeof p.accent === 'string' ? hexToRgb01(p.accent) : undefined,
       },
       perfTier: readout.perfTier,
     };
@@ -260,7 +261,14 @@ export function createFluidSeams({ maskAuthority, getItems, getFloors, getItemCo
 
         const corners = getItemCorners(item);
         if (!corners) continue; // art not resolved yet — try again next frame
-        out.push({ id: item.id, url: status.url, corners, renderOrder: getItemRenderOrder(item) });
+        // `hostUrl`: the item's own art, for the goo's host gate (2026-11-04, `computeFluidHostGate`).
+        out.push({
+          id: item.id,
+          url: status.url,
+          hostUrl: item.src ?? null,
+          corners,
+          renderOrder: getItemRenderOrder(item),
+        });
       }
       return out;
     },

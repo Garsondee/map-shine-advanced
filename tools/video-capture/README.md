@@ -68,6 +68,35 @@ Big Bank's plan is in `Mythica Machina Press/map-videos/big-bank/`.
 - The same pan played live in the capture browser: 38-44 fps, frames up to
   76 ms apart, at half internal resolution (render scale "auto").
 
+## Pan jitter: it was the encoders (2026-11-04)
+
+Ingram saw a small jitter during pans in the first Big Bank cut that was absent when the
+camera was still. Measured on a constant-speed 4 px/frame test pan:
+
+- The RENDER is clean: global motion steady to ±0.03 px/frame, no duplicate or dropped frames,
+  a lossless reference wobbles only ~0.8% in sharpness, supersampling changes nothing.
+  (Edge content moves ~5% faster than the centre — that is the Lens barrel distortion.)
+- Capture encoder (Chrome hardware H.264, variable bitrate): detail drained across each 2 s
+  group and snapped back at the keyframe — +30% sharpness every 2 s, only while moving.
+  Fix: `bitrateMode: 'quantizer'`, QP 18 (now the default; ~200 Mbps at 4K60, ≈ lossless here).
+- Assembly encoder (x264 `-preset fast`): B-frames (every other frame) are coded at lower
+  quality — a 30 Hz sharpness flicker, 38% peak-to-peak on a pan. Fix: `bframes=0` (default).
+  Flattening `pbratio`/`ipratio` alone does NOT fix it.
+
+QA scripts: `qa_sharpness.py <clip>` (per-frame sharpness swing and its period — encoder
+pumping shows as a period of 2 frames or the keyframe interval) and `qa_cadence.py <clip>
+[start dur]` (per-frame motion; flags duplicates and uneven steps). Run both on a pan before
+uploading.
+
+Playback can add judder of its own: a 60 fps video on a 144 Hz monitor shows frames for
+2 or 3 refreshes unevenly. Judge smoothness on a 60/120 Hz display (or after YouTube's encode).
+
+Recording the LIVE canvas instead (OBS etc.): the live pan fixes and the *Frame pacing*
+setting are in `tools/pan-smoothness/README.md`. For a 60 fps recording, set the monitor
+to 120 Hz (or 60) and Frame pacing to "every 2nd refresh" (or Off at 60 Hz): every
+recorded frame is then a distinct, evenly spaced MSA frame. At 144 Hz, 60 fps capture
+samples 2.4 refreshes per frame and judders whatever MSA does.
+
 ## Known limits
 
 - Async work that lands on real time, not video time, is only partly fenced:

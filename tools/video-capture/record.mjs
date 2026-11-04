@@ -24,9 +24,10 @@
  *
  * Plan (JSON): {
  *   "fps": 60, "renderScale": "1",
- *   "encoder": { "codec": "avc1.640034", "bitrate": 120000000 },  // default: Chrome's hardware
- *              // encoder (WebCodecs), ~90 ms/frame at 4K. "x264" = RGBA readback + libx264
- *              // ("crf", "preset" apply), far slower (~4.7 s/frame measured).
+ *   "encoder": { "codec": "avc1.640034", "qp": 18 },  // default: Chrome's hardware encoder
+ *              // (WebCodecs) at a FIXED quantizer — variable bitrate pumped detail every 2 s on
+ *              // pans (README, "Pan jitter"). "qp": null + "bitrate" = variable bitrate.
+ *              // "x264" = RGBA readback + libx264 ("crf", "preset" apply), slower.
  *   "stall": { "everyFrames": 0, "ms": 0 },     // TEST ONLY: freeze the page between frames
  *   "shots": [ { "name": "01-sweep", "seconds": 6, "easing": "cosine", "preRollSec": 1.5,
  *                "setup": "optional page script run before the shot",
@@ -372,8 +373,12 @@ const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder,
       codec: encoder.codec,
       width: status.width,
       height: status.height,
-      bitrate: encoder.bitrate,
-      bitrateMode: 'variable',
+      // QUANTIZER (constant quality) is the default — found 2026-11-04: in
+      // 'variable' mode the hardware encoder starved P-frames while the camera
+      // moved (51 Mbps of a 120 Mbps target) so detail drained across each
+      // 2 s group and snapped back at the keyframe — a +30% sharpness pulse
+      // every 2 s that only shows during pans. A fixed QP per frame has none.
+      ...(encoder.qp != null ? { bitrateMode: 'quantizer' } : { bitrate: encoder.bitrate, bitrateMode: 'variable' }),
       framerate: fps,
       latencyMode: 'quality',
       hardwareAcceleration: encoder.hardware ?? 'prefer-hardware',
@@ -448,12 +453,21 @@ const PAGE_SHOT_LOOP = async ({ shot, fps, sinkUrl, stall, renderScale, encoder,
       applyWeather(u);
       const f = await MapShine.capture.frame({
         dtMs,
-        readback: enc ? 'videoframe' : true,
+        readback: 'videoframe',
         timestampUs: Math.round((i * 1e6) / fps),
       });
+      if (!enc) {
+        // x264 path: RGBA straight out of the VideoFrame (far faster than the
+        // 2D-canvas copy the first version used — ~4.7 s/frame).
+        f.pixels = new Uint8Array(f.videoFrame.allocationSize({ format: 'RGBA' }));
+        await f.videoFrame.copyTo(f.pixels, { format: 'RGBA' });
+        f.videoFrame.close();
+      }
       if (enc) {
         if (encError) throw encError;
-        enc.encode(f.videoFrame, { keyFrame: i % Math.round(fps * 2) === 0 });
+        const isHevc = encoder.codec.startsWith('hvc1') || encoder.codec.startsWith('hev1');
+        const qpOpt = encoder.qp != null ? (isHevc ? { hevc: { quantizer: encoder.qp } } : { avc: { quantizer: encoder.qp } }) : {};
+        enc.encode(f.videoFrame, { keyFrame: i % Math.round(fps * (encoder.keySec ?? 2)) === 0, ...qpOpt });
         f.videoFrame.close();
         while (enc.encodeQueueSize > 3) await sleep(1);
         if (piecesBytes > 8e6) await shipPieces();
@@ -572,6 +586,9 @@ async function run() {
         : {
             codec: plan.encoder?.codec ?? 'avc1.640034', // H.264 High @ L5.2 (4K60)
             bitrate: Number(plan.encoder?.bitrate ?? 120e6),
+            // constant quality by default; "qp": null in the plan returns to variable bitrate
+            qp: plan.encoder?.qp === null ? null : Number(plan.encoder?.qp ?? 16),
+            keySec: Number(plan.encoder?.keySec ?? 2),
             hardware: plan.encoder?.hardware ?? 'prefer-hardware',
           };
     const sink = encoder

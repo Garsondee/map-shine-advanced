@@ -81,7 +81,12 @@ for (let i = 1; i < shots.length; i++) {
 const encoder = opt('encoder', 'libx264');
 const encArgs =
   encoder === 'libx264'
-    ? ['-c:v', 'libx264', '-preset', opt('preset', 'fast'), '-crf', opt('crf', '16')]
+    ? // bframes=0 (found 2026-11-04): x264's B-frames — every other frame — are
+      // coded at lower quality; on a pan that is a 30 Hz sharpness flicker
+      // (38% peak-to-peak measured) that reads as jitter and vanishes when the
+      // camera stops. Without them: 3.8%, steadier than the source.
+      ['-c:v', 'libx264', '-preset', opt('preset', 'fast'), '-crf', opt('crf', '16'),
+        '-x264-params', opt('x264-params', 'bframes=0')]
     : ['-c:v', encoder, '-b:v', opt('bitrate', '80M')];
 const args = [
   '-hide_banner', '-loglevel', 'error', '-stats', '-y',

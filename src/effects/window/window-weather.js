@@ -164,7 +164,16 @@ export function windowDaylightTint({ dawnDusk, night, twilight01, dayFactor01, g
  * outdoors around it, neither much darker nor brighter."* 1.1 = a touch of
  * glare off the glass.
  */
-export const WINDOW_OUTDOOR_MATCH_DEFAULT = 2;
+export const WINDOW_OUTDOOR_MATCH_DEFAULT = 1.2;
+
+/**
+ * THE CEILING ON 'BRIGHTNESS VS OUTDOORS' (author, 2026-11-04): a window may light
+ * its room to at most 120% of the open ground outside - "some concentration/contrast
+ * of light existing indoors makes sense" - never the 2x the dial used to allow. The
+ * clamp lives in {@link windowTargetLight}, so a saved world still holding 2 is capped
+ * too, and both window subsystems (floor and tile) inherit it.
+ */
+export const WINDOW_OUTDOOR_MATCH_MAX = 1.2;
 
 /**
  * How fast painted coverage saturates: `fill = 1 − exp(−rate · raw)`. With the
@@ -211,7 +220,10 @@ export function windowTargetLight({
   const grey = luma(raw);
   const out = raw.map((v) => grey + (v - grey) * keep);
   const hue = Array.isArray(hueRgb) && hueRgb.length === 3 && hueRgb.every(Number.isFinite) ? hueRgb : [1, 1, 1];
-  const match = Number.isFinite(outdoorMatch) ? Math.max(0, outdoorMatch) : WINDOW_OUTDOOR_MATCH_DEFAULT;
+  const match = Math.min(
+    WINDOW_OUTDOOR_MATCH_MAX,
+    Number.isFinite(outdoorMatch) ? Math.max(0, outdoorMatch) : WINDOW_OUTDOOR_MATCH_DEFAULT
+  );
   const product = out.map((v, i) => v * Math.max(0, hue[i]));
   const lp = luma(product);
   const k = lp > 1e-6 ? (luma(out) / lp) * match : match;
@@ -301,7 +313,8 @@ export function buildWindowWeatherGainNode(
     .mul(float(1).sub(wave))
     .mul(r)
     .mul(dial('leadGlow'));
-  const storm = clamp(float(1).sub(darken).add(lead), clamp(dial('waveFloor'), float(0), float(1)), float(2));
+  // Weather only ever DIMS the light let in (ceiling 1): a pre-squall glow may not push a window past the outdoors.
+  const storm = clamp(float(1).sub(darken).add(lead), clamp(dial('waveFloor'), float(0), float(1)), float(1));
   // Inside a wave the light shifts toward the storm colour.
   const tint = mix(vec3(1, 1, 1), dials.waveTint ?? vec3(...D.waveTint), wave.mul(r).mul(dial('waveTintAmount')));
 

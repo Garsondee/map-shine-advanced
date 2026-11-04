@@ -11,6 +11,7 @@ import {
   windowTargetLight,
   windowLightDelta,
   WINDOW_OUTDOOR_MATCH_DEFAULT,
+  WINDOW_OUTDOOR_MATCH_MAX,
   WINDOW_WEATHER_DEFAULTS,
 } from '../window-weather.js';
 import { WINDOW_PARAMS } from '../window.js';
@@ -91,7 +92,7 @@ export function run(t) {
     const sun = computeSun(12);
     const { outdoor, inside } = room(sun, day, createSkyHandle({ sun, goldenHour01: 0.78 }));
     const r = luma(inside) / luma(outdoor);
-    ok(`⭐ noon: the greenhouse is about as bright as the garden (×${r.toFixed(2)})`, r > 0.95 && r < 2.1);
+    ok(`⭐ noon: the greenhouse is about as bright as the garden (×${r.toFixed(2)})`, r > 0.95 && r <= 1.2 + 1e-6);
   }
   {
     const sun = computeSun(18 - 0.4);
@@ -181,5 +182,19 @@ export function run(t) {
     ['outdoorHue', WINDOW_WEATHER_DEFAULTS.outdoorHue],
   ]) {
     ok(`WINDOW_PARAMS.${k} default mirrors the module default`, WINDOW_PARAMS[k]?.default === def);
+  }
+
+  // THE 120% CEILING (author, 2026-11-04): indoors may never be much brighter than outdoors.
+  {
+    const outdoor = [0.8, 0.8, 0.8];
+    for (const m of [1.2, 2, 2.5, 99]) {
+      const l = luma(windowTargetLight({ outdoorRgb: outdoor, outdoorMatch: m })) / luma(outdoor);
+      ok(
+        `outdoorMatch ${m} lets in at most 120% of the outdoors (x${l.toFixed(3)})`,
+        l <= WINDOW_OUTDOOR_MATCH_MAX + 1e-6
+      );
+    }
+    ok('the dial itself tops out at the ceiling', WINDOW_PARAMS.outdoorMatch.max === WINDOW_OUTDOOR_MATCH_MAX);
+    ok('the ceiling is 1.2', WINDOW_OUTDOOR_MATCH_MAX === 1.2);
   }
 }

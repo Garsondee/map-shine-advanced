@@ -57,12 +57,13 @@ export const WINDOW_PARAMS = Object.freeze({
   outdoorMatch: {
     type: 'float',
     min: 0.5,
-    max: 2.5,
+    max: 1.2,
     step: 0.01,
-    default: 2, // 2026-10-27 author's Studio export (was 1.1)
+    // 2026-11-04 author: indoors may be at most 120% of outdoors (was 2, range to 2.5).
+    default: 1.2,
     category: 'Look',
     label: 'Brightness vs outdoors',
-    help: 'How bright a fully painted (white) window patch is compared with the open ground outside, at every hour — noon sun, golden hour, moonlight. 1 = exactly as lit as outdoors; above 1 adds glare.',
+    help: 'How bright a fully painted (white) window patch is compared with the open ground outside, at every hour — noon sun, golden hour, moonlight. 1 = exactly as lit as outdoors; above 1 adds a little concentration, capped at 1.2 (120%) so a window can never light a room far past the ground outside.',
   },
   contrast: {
     type: 'float',

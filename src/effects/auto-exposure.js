@@ -87,7 +87,7 @@ export const AUTO_EXPOSURE_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.6,
+    default: 1, // 2026-11-04 author's export (was 0.6)
     category: 'Look',
     label: 'Strength',
     help: 'How far a scene that is too dark or too bright is moved back toward a readable brightness. 1 closes the whole gap (every scene ends up alike); lower keeps more of each scene’s own mood. Scenes that already read well are never touched.',
@@ -97,7 +97,7 @@ export const AUTO_EXPOSURE_PARAMS = Object.freeze({
     min: 0,
     max: 0.6,
     step: 0.01,
-    default: 0.2,
+    default: 0, // 2026-11-04 author's export (was 0.2)
     category: 'Look',
     label: 'Darkest mid-tone',
     help: 'How dark the middle of the picture may get before the camera opens up, as a screen brightness (0 black, 1 white). Lower allows darker, moodier scenes.',
@@ -107,7 +107,7 @@ export const AUTO_EXPOSURE_PARAMS = Object.freeze({
     min: 0.3,
     max: 3,
     step: 0.01,
-    default: 1,
+    default: 3, // 2026-11-04 author's export (was 1)
     category: 'Look',
     label: 'Brightest highlights',
     help: 'How bright the brightest twentieth of the picture may get before the camera stops down (1 = screen white). A few lamps never trip it; light that floods the frame does. Raise it to allow glaring scenes.',
@@ -117,7 +117,7 @@ export const AUTO_EXPOSURE_PARAMS = Object.freeze({
     min: 2,
     max: 8,
     step: 0.1,
-    default: 3.5,
+    default: 8, // 2026-11-04 author's export (was 3.5)
     category: 'Look',
     label: 'Light range',
     help: 'How many stops brighter than the middle of the picture its brightest light may read (each stop doubles). Past this, light more than two stops above the middle is gently compressed — lamps stay the brightest thing, just not glaring. 8 never compresses.',
@@ -128,7 +128,7 @@ export const AUTO_EXPOSURE_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 1,
+    default: 3, // 2026-11-04 author's export (was 1)
     category: 'Response',
     label: 'Most it may brighten',
     help: 'The furthest it will ever open up a dark scene, in stops (1 = twice as bright). Keeps night scenes dark, just not black.',
@@ -138,7 +138,7 @@ export const AUTO_EXPOSURE_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 1,
+    default: 3, // 2026-11-04 author's export (was 1)
     category: 'Response',
     label: 'Most it may darken',
     help: 'The furthest it will ever stop down a glaring scene, in stops (1 = half as bright).',
@@ -148,7 +148,7 @@ export const AUTO_EXPOSURE_PARAMS = Object.freeze({
     min: 0,
     max: 10,
     step: 0.1,
-    default: 2,
+    default: 1, // 2026-11-04 author's export (was 2)
     category: 'Response',
     label: 'Adapt time',
     help: 'How long the camera takes to settle after the light changes, in seconds. Adjusting to glare takes half as long, like an eye. 0 is instant. A floor change or scene load always settles at once.',
@@ -169,7 +169,7 @@ export const AUTO_EXPOSURE_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.15,
+    default: 1, // 2026-11-04 author's export (was 0.15)
     category: 'Light',
     label: 'Glow budget',
     help: 'The most light the bloom may add to the whole picture, as a share of the scene’s own light (0.15 = about a seventh). Glow around lamps is untouched; a haze that floods the frame is reined in, as a real lens would. 0 turns the budget off.',

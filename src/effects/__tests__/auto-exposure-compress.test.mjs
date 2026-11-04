@@ -5,7 +5,7 @@
  * middle and shadows, keep brightness order, shrink only `strength` of the excess, and never crush.
  */
 import {
-  AUTO_EXPOSURE_DEFAULTS as D,
+  AUTO_EXPOSURE_DEFAULTS,
   COMPRESS_KNEE_STOPS,
   MIN_COMPRESS_RATIO,
   rangeCompression,
@@ -13,6 +13,21 @@ import {
 } from '../auto-exposure.js';
 
 const near = (a, b, e = 1e-6) => Math.abs(a - b) <= e;
+
+// Pinned to the LAUNCH tuning (1e3f4f1f): the shipped defaults moved to the author's export on 2026-11-04
+// (floor 0, ceiling 3, range 8 — lift/cut/compress mostly idle), but these tests guard the laws, not the defaults.
+const REF = {
+  strength: 0.6,
+  darkFloor: 0.2,
+  brightCeiling: 1,
+  lightRange: 3.5,
+  maxLift: 1,
+  maxCut: 1,
+  adaptSeconds: 2,
+  bloomFollow: 1,
+  glowBudget: 0.15,
+};
+const D = { ...AUTO_EXPOSURE_DEFAULTS, ...REF };
 
 export function run(t) {
   const m = 0.03;

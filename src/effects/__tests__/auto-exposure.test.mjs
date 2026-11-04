@@ -30,7 +30,20 @@ function grid(f, g = () => 0) {
 }
 const N = METER_W * METER_H;
 const stats = (f, g) => meterStats(grid(f, g), METER_W, METER_H);
-const D = AUTO_EXPOSURE_DEFAULTS;
+// Pinned to the LAUNCH tuning (1e3f4f1f): the shipped defaults moved to the author's export on 2026-11-04
+// (floor 0, ceiling 3, range 8 — lift/cut/compress mostly idle), but these tests guard the laws, not the defaults.
+const REF = {
+  strength: 0.6,
+  darkFloor: 0.2,
+  brightCeiling: 1,
+  lightRange: 3.5,
+  maxLift: 1,
+  maxCut: 1,
+  adaptSeconds: 2,
+  bloomFollow: 1,
+  glowBudget: 0.15,
+};
+const D = { ...AUTO_EXPOSURE_DEFAULTS, ...REF };
 const near = (a, b, e = 1e-6) => Math.abs(a - b) <= e;
 
 export function run(t) {

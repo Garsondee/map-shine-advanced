@@ -15,6 +15,8 @@
  * @module ui/rooms/remote/fade-time
  */
 
+const FADE_STORAGE_KEY = 'msa-remote-fade-time';
+
 /** @type {ReadonlyArray<{label: string, ms: number}>} */
 export const TEMPO = Object.freeze([
   { label: 'Cut', ms: 0 },
@@ -31,6 +33,13 @@ export const TEMPO = Object.freeze([
  */
 export function createFadeTimeControl(initialIndex = 0) {
   let index = TEMPO[initialIndex] ? initialIndex : 0;
+  // The GM's last pick is kept (2026-11-06) — per browser, so it survives reloads and scenes.
+  try {
+    const saved = TEMPO.findIndex((t) => t.label === window.localStorage?.getItem(FADE_STORAGE_KEY));
+    if (saved >= 0) index = saved;
+  } catch (_) {
+    // storage blocked — the default applies each load
+  }
 
   const root = document.createElement('div');
   root.className = 'msa-fade-time';
@@ -46,6 +55,11 @@ export function createFadeTimeControl(initialIndex = 0) {
     btn.setAttribute('aria-pressed', String(i === index));
     btn.addEventListener('click', () => {
       index = i;
+      try {
+        window.localStorage?.setItem(FADE_STORAGE_KEY, tempo.label);
+      } catch (_) {
+        // storage blocked — the pick just isn't remembered
+      }
       for (const [j, b] of buttons.entries()) b.setAttribute('aria-pressed', String(j === index));
     });
     root.appendChild(btn);

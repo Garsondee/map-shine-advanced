@@ -691,6 +691,16 @@ ${R} .msa-more-size{display:flex; align-items:center; justify-content:space-betw
   font-size:.72rem; color:var(--ink0)}
 ${R} .msa-more-size .msa-scale-strip{position:static; transform:none; flex-direction:row; box-shadow:none; padding:2px}
 
+/* Play: the closed Sliders accordion under the astrolabe */
+${R} .msa-acc{border:1px solid var(--line, rgba(255,255,255,.14)); border-radius:8px; overflow:hidden}
+${R} .msa-acc>summary{display:flex; align-items:center; gap:6px; cursor:pointer; padding:7px 10px; list-style:none;
+  font-size:.64rem; letter-spacing:.2em; text-transform:uppercase}
+${R} .msa-acc>summary::-webkit-details-marker{display:none}
+${R} .msa-acc>summary::after{content:'▸'; margin-left:auto; transition:transform .15s}
+${R} .msa-acc[open]>summary::after{transform:rotate(90deg)}
+${R} .msa-acc>summary .ico{width:12px; height:12px; color:var(--shine)}
+${R} .msa-acc-body{padding:6px 8px 10px}
+
 /* Prep */
 ${R} .msa-prep{display:flex; flex-direction:column; gap:18px}
 ${R} .msa-prep-sec{display:flex; flex-direction:column; gap:8px}

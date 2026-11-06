@@ -307,6 +307,7 @@ export function installRemote(opts = {}) {
   let npSnap = null;
   let astrolabe = null;
   let astroHome = null;
+  let playMixerHandle = null;
   let mixAstroAnchor = null;
   let looksBoard = null;
   let runningOrder = null;
@@ -408,6 +409,26 @@ export function installRemote(opts = {}) {
     if (astrolabe?.root) {
       astroHome = document.createComment('astrolabe-home');
       astrolabe.root.after(astroHome);
+    }
+
+    // The faders, in a closed accordion under the astrolabe: a second, faders-only weather
+    // board, so Play can nudge rain/cloud/wind without a trip to Mix.
+    if (opts.weatherBoard && astroHome) {
+      const acc = document.createElement('details');
+      acc.className = 'msa-acc';
+      const sum = document.createElement('summary');
+      sum.innerHTML = `${iconMarkup('gauge')}<span>Sliders</span>`;
+      const accBody = document.createElement('div');
+      accBody.className = 'msa-acc-body msa-wx-host';
+      acc.append(sum, accBody);
+      astroHome.after(acc);
+      playMixerHandle = renderWeatherBoard(accBody, {
+        ...opts.weatherBoard,
+        externalFade: fadeTime,
+        scopeInHeader: true,
+        hideSunLatitude: true,
+        mixerOnly: true,
+      });
     }
 
     if (opts.looks) {
@@ -576,6 +597,7 @@ export function installRemote(opts = {}) {
      * second client's edit, a scene switch). */
     refreshWeatherBoard() {
       weatherBoardHandle?.refresh();
+      playMixerHandle?.refresh();
       paintScope();
       paintSceneName();
     },
@@ -591,6 +613,7 @@ export function installRemote(opts = {}) {
     },
     updateLiveWeatherAxisValues(values) {
       weatherBoardHandle?.updateLiveAxisValues?.(values);
+      playMixerHandle?.updateLiveAxisValues?.(values);
     },
     /** The Looks grid, the running order, the library list and the scene name. */
     refreshLooks() {

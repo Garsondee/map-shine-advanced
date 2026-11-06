@@ -466,7 +466,10 @@ export function renderWeatherBoard(container, ctx) {
   const chanBlock = document.createElement('div');
   chanBlock.append(blockLabel('gauge', chanTitle), faderHost);
 
-  wrap.append(...(ctx.externalFade ? [] : [fadeBlock]), moodsBlock, chanBlock);
+  // `mixerOnly` (2026-11-06): the Play tab's closed Mixer accordion is a second board that
+  // draws just the faders; every other block is built but never attached.
+  if (ctx.mixerOnly) wrap.append(chanBlock);
+  else wrap.append(...(ctx.externalFade ? [] : [fadeBlock]), moodsBlock, chanBlock);
   container.appendChild(wrap);
 
   function paintMode() {

@@ -287,8 +287,12 @@ const HEART = Object.freeze({ count: 3, orbit: 0.1, rad: 0.6, heat: 0.92, z: 0.1
 // THE LOBE RECORD
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Floats per lobe: three vec4 attributes. A = (x, y, radius, strength), B = (heat, stretch, dirX, dirY), C = (kind, tone, 0, 0). */
-export const LOBE_STRIDE = 12;
+/**
+ * Floats per lobe: four vec4 attributes. A = (x, y, radius, strength), B = (heat, stretch, dirX, dirY), C = (kind, tone, across,
+ * z), D = (seed, 0, 0, 0). `seed` (2026-11-06, mmp-9un.6) is a smoke puff's own 0..1 random, constant for its whole life, so the
+ * painterly grain is drawn in the puff's own frame and travels with it instead of sitting still on the map.
+ */
+export const LOBE_STRIDE = 16;
 export const KIND_FLAME = 0;
 export const KIND_SMOKE = 1;
 export const KIND_COAL = 2;
@@ -581,7 +585,22 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   let lastR = 0;
   // `stretch` is the old area-preserving elongation; a chain lobe passes its own `along` and `across` instead
   // (long and as wide as before: a tongue should not thin as it is stretched along its own path).
-  const put = (x, y, z, radius, strength, heat, stretch, dx, dy, kind, tone, along = null, across = null) => {
+  const put = (
+    x,
+    y,
+    z,
+    radius,
+    strength,
+    heat,
+    stretch,
+    dx,
+    dy,
+    kind,
+    tone,
+    along = null,
+    across = null,
+    seed01 = 0
+  ) => {
     if (kind === KIND_FLAME && leanG > 0.01) {
       // the wind lays the whole body over: shear downwind with height, and press the flame down
       const shear = tune.windShear * leanG * z;
@@ -610,6 +629,10 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     buf[o + 9] = tone;
     buf[o + 10] = across === null ? 1 / Math.sqrt(st) : across;
     buf[o + 11] = z;
+    buf[o + 12] = seed01;
+    buf[o + 13] = 0;
+    buf[o + 14] = 0;
+    buf[o + 15] = 0;
     lastX = proj[0];
     lastY = proj[1];
     lastR = radius * M;
@@ -980,7 +1003,10 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       wdx,
       wdy,
       KIND_SMOKE,
-      tone
+      tone,
+      null,
+      null,
+      r1
     );
   }
 
@@ -1101,6 +1127,10 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     out[o + 9] = tone;
     out[o + 10] = 1 / (1 + tune.smokeStreak * 0.25 * leanG * a);
     out[o + 11] = z;
+    out[o + 12] = r1;
+    out[o + 13] = 0;
+    out[o + 14] = 0;
+    out[o + 15] = 0;
     n++;
   }
   return { count: n - start };

@@ -247,6 +247,7 @@ export function createBillowRenderer({
     geometry.setAttribute('lobeA', new THREE.InterleavedBufferAttribute(interleaved, 4, 0));
     geometry.setAttribute('lobeB', new THREE.InterleavedBufferAttribute(interleaved, 4, 4));
     geometry.setAttribute('lobeC', new THREE.InterleavedBufferAttribute(interleaved, 4, 8));
+    geometry.setAttribute('lobeD', new THREE.InterleavedBufferAttribute(interleaved, 4, 12));
     geometry.instanceCount = 0;
     return { array, geometry, interleaved };
   };
@@ -332,6 +333,7 @@ export function createBillowRenderer({
   const lobeA = attribute('lobeA', 'vec4'); // x, y, radius, strength
   const lobeB = attribute('lobeB', 'vec4'); // heat, along, dirX, dirY
   const lobeC = attribute('lobeC', 'vec4'); // kind, tone, across, z
+  const lobeD = attribute('lobeD', 'vec4'); // seed (a smoke puff's own constant random), 0, 0, 0
 
   const splatVertex = Fn(() => {
     const corner = positionGeometry.xy.mul(2);
@@ -346,6 +348,7 @@ export function createBillowRenderer({
   const vLocal = Fn(() => positionGeometry.xy.mul(2))().toVarying('vBillowLocal');
   const vData = Fn(() => vec4(lobeA.w, lobeB.x, lobeC.x, lobeC.y))().toVarying('vBillowData');
   const vRad = Fn(() => lobeA.z)().toVarying('vBillowRad');
+  const vSeed = Fn(() => lobeD.x)().toVarying('vBillowSeed');
   const applySplatState = (material) => {
     material.transparent = true;
     material.depthTest = false;
@@ -398,7 +401,18 @@ export function createBillowRenderer({
     const k = mix(k0.mul(k0), kPlat, crisp);
     const w = vData.x.mul(k);
     // B carries the STEAM weight (a doused fire's smoke is wet: whiter, denser)
-    return vec4(w, w.mul(vData.w), w.mul(vData.y), float(0));
+    // A carries THE PUFF'S OWN GRAIN (2026-11-06, mmp-9un.6 — Ingram: the grain sat still on the map while the smoke flowed
+    // through it). Drawn in the puff's frame (its local position x its radius, in world px, offset by its seed), so it rises,
+    // leans and spreads with the puff; density-weighted so the resolve reads it back as A / density. Same two octaves and
+    // frequencies as the old world-anchored grain; the fine one band-limited to the field's resolution.
+    const pf = vLocal.mul(vRad).add(vec2(vSeed.mul(197.3), vSeed.mul(131.9)));
+    const gt = U.time.mul(U.warpSpeed);
+    const worldPerTexelS = U.rectSize.x.mul(U.texel.x);
+    const fineKeep = float(1).sub(smoothstep(float(0.12), float(0.25), worldPerTexelS.mul(0.16)));
+    const gBroad = mx_noise_float(vec3(pf.x.mul(0.035), pf.y.mul(0.035), gt.mul(0.25).add(21.7)));
+    const gFine = mx_noise_float(vec3(pf.x.mul(0.16).add(13.1), pf.y.mul(0.16), gt.mul(0.6).add(4.2)));
+    const puffGrain = gBroad.mul(0.65).add(gFine.mul(0.35).mul(fineKeep));
+    return vec4(w, w.mul(vData.w), w.mul(vData.y), w.mul(puffGrain));
   })();
   applySplatState(smokeSplat);
 
@@ -658,7 +672,11 @@ export function createBillowRenderer({
     const S0 = s0.x;
     const grainBroad = mx_noise_float(vec3(local.x.mul(0.035), local.y.mul(0.035), tt.mul(0.25).add(21.7)));
     const grainFine = mx_noise_float(vec3(local.x.mul(0.16).add(13.1), local.y.mul(0.16), tt.mul(0.6).add(4.2)));
-    const grain = grainBroad.mul(0.65).add(grainFine.mul(0.35).mul(bandLimit(0.16)));
+    const worldGrain = grainBroad.mul(0.65).add(grainFine.mul(0.35).mul(bandLimit(0.16)));
+    // the grain each puff carries (its splat's A / density). Overlapping puffs average their grains, which flattens it, so it is
+    // lifted back by 1.35; where there is no smoke at all the world grain stands in (it only ever shapes clear air there).
+    const carried = clamp(s0.w.div(max(S0, float(0.001))).mul(1.35), float(-1), float(1));
+    const grain = mix(worldGrain, carried, smoothstep(float(0.02), float(0.12), S0));
     const S = S0.add(grain.mul(U.smokeGrain).mul(0.7));
     const toneS = s0.y.div(max(S0, float(0.001))).clamp(0, 1);
     // the field's B channel is steam (+) or soot (-), density weighted
@@ -683,13 +701,15 @@ export function createBillowRenderer({
     // like a 16-bit game; dithering here means a painter's scumble, not dots): where the smoke is part-covered, two octaves of
     // SMOOTH noise thin it in soft patches and streaks, so the feather is a dry-brushed, uneven veil with the floor showing
     // through in places. Nothing is quantised to a pixel grid; the solid body and the clear air are untouched.
-    const scumble = mx_noise_float(vec3(local.x.mul(0.06), local.y.mul(0.045), tt.mul(0.3).add(17.3)))
+    const worldScumble = mx_noise_float(vec3(local.x.mul(0.06), local.y.mul(0.045), tt.mul(0.3).add(17.3)))
       .mul(0.6)
       .add(
         mx_noise_float(vec3(local.x.mul(0.15).add(4.1), local.y.mul(0.11), tt.mul(0.5).add(2.6)))
           .mul(0.4)
           .mul(bandLimit(0.15))
       );
+    // the fringe's dry-brush thinning rides with the puffs too (their carried grain), wherever there is smoke to thin
+    const scumble = mix(worldScumble, carried, smoothstep(float(0.02), float(0.12), S0));
     const fringe = float(1).sub(smoothstep(float(0.5), float(0.95), sCoverSoft));
     const sCover = sCoverSoft.mul(
       float(1).sub(

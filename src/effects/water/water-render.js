@@ -1808,9 +1808,15 @@ export function buildWaterSurfaceMaterial({
     // ONE term still free to draw past the edge of the map, which is the same
     // bug wearing its own inverse (`feedback_gate_and_self_exclusion_answer_
     // different_questions`).
+    // ⚠️ ONLY WHERE THE MASK IS PAINTED (2026-11-06, mmp-7kx.2 — Ingram: "the water effect is intruding a long way into the
+    // shapes of the boats/piers ... make sure that the water effect ends where the _Water mask does dark"). Measured on
+    // Docklands: the band darkened a boat's outer hull plank ~12 levels while the mask there is a hard 0. The band now reaches
+    // only onto land the author painted above black (a soft, damp shallows ramp); a hard-edged boat, pier or wall stays dry.
+    const paintedWet = smoothstep(float(0), float(WATER_PRESENCE_EDGE0 * 8), maskTexNode.r);
     wetBand = float(1)
       .sub(smoothstep(float(0), max(uWetBandPx, float(1)), sdf))
       .mul(float(1).sub(inside))
+      .mul(paintedWet)
       .mul(inRect)
       .mul(uWetStrength);
   }
@@ -3017,10 +3023,16 @@ export function buildWaterSurfaceMaterial({
   // full-resolution presence, so `shoreDry` is smooth to the pixel; each term mixes from
   // its old value (open water, `shoreDry` = 0) toward a gentler one over dry ground.
   const shoreDry = float(1).sub(inside);
-  const foamCover = totalFoam.mul(totalFoam).mul(mix(float(1), uShoreFoamDryCover, shoreDry));
-  const foamGlow = totalFoam.mul(float(2).sub(totalFoam)).mul(mix(float(1), uShoreFoamDryGlow, shoreDry));
+  // ⚠️ NO FOAM OVER UNPAINTED LAND (2026-11-06, mmp-7kx.2 — Ingram, on Docklands: "the white foam is overlapping the black ink
+  // border" of a boat). Foam and landed spray were allowed onto any dry pixel near the shore, so they washed over hulls, piers
+  // and their ink lines, where the _Water mask is a hard black. On land they now show only where the author painted the mask
+  // above black (a soft shallows ramp); out on the water nothing changes.
+  const paintedLand = smoothstep(float(0), float(WATER_PRESENCE_EDGE0 * 8), maskTexNode.r);
+  const shoreFoam = totalFoam.mul(mix(float(1), paintedLand, shoreDry));
+  const foamCover = shoreFoam.mul(shoreFoam).mul(mix(float(1), uShoreFoamDryCover, shoreDry));
+  const foamGlow = shoreFoam.mul(float(2).sub(shoreFoam)).mul(mix(float(1), uShoreFoamDryGlow, shoreDry));
   const foamHide = float(1).sub(foamCover);
-  const foamLift = float(1).add(totalFoam.mul(shoreDry).mul(uShoreFoamDryLift));
+  const foamLift = float(1).add(shoreFoam.mul(shoreDry).mul(uShoreFoamDryLift));
 
   const absorbMaterial = new THREE.NodeMaterial();
   // The water passes are redrawn every frame, so it may compile on a worker thread (core/compile-policy.js). At tiers 4-5 one of these is 130-160k chars of WGSL and took 10-12 s to compile cold on the dev machine — long enough, compiled on the GPU process's main thread, to trip Chrome's 15 s watchdog on a slower GPU.

@@ -164,6 +164,10 @@ ${IN} .msa-jump .msa-chip{padding:2px 9px; font-size:.68rem}
 ${IN} .msa-section{scroll-margin-top:52px}
 ${IN} .msa-section-body{display:flex; flex-wrap:wrap; gap:4px}
 
+/* the defaults lock (mmp-emn.5): a banner says why, the controls under it grey out but stay usable */
+${IN} .msa-card-lock{padding:7px 10px; border:1px solid var(--warn); border-radius:6px; color:var(--ink1);
+  font-size:.72rem; line-height:1.35; background:var(--bg2)}
+${IN} .msa-card--locked .msa-param-row{opacity:.45}
 ${IN} .msa-card{position:relative; display:flex; flex-direction:column; gap:8px;
   padding:12px 14px 12px 16px; background:var(--bg1); border:1px solid var(--line);
   border-left:3px solid var(--acc, var(--shine)); border-radius:var(--r-card)}

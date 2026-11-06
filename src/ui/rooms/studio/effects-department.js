@@ -683,6 +683,18 @@ function buildStudioEffectCard(model, nav) {
     jump.remove();
   }
 
+  // THE DEFAULTS LOCK, MADE OBVIOUS (2026-11-06, mmp-emn.5 — Ingram: a GM changing a card while 'Only Use Defaults' is on
+  // would wonder why nothing happens). The card's controls grey out under a banner saying why; edits still save.
+  if (model.defaultsLocked) {
+    card.classList.add('msa-card--locked');
+    const banner = el(
+      'div',
+      'msa-card-lock',
+      "'Only Use Defaults' is on: changes here are saved, but the scene shows the defaults until you turn it off."
+    );
+    card.insertBefore(banner, card.children[1] ?? null);
+  }
+
   return card;
 }
 
@@ -1066,7 +1078,25 @@ function buildEffectTile(id, model, onOpen) {
  * already uses.
  * @param {EffectCardModel} model @param {string} id @param {object} ctx
  */
+/** One warning per effect per session, however many sliders a GM drags while the defaults lock is on (the card's banner stays). */
+const defaultsLockWarned = new Set();
+function warnDefaultsLocked(ctx, id) {
+  if (defaultsLockWarned.has(id)) return;
+  defaultsLockWarned.add(id);
+  ctx.warn?.("Map Shine: 'Only Use Defaults' is on, so this change is saved but will not show until you turn it off.");
+}
+
 function decorateModel(model, id, ctx) {
+  // THE DEFAULTS LOCK (mmp-emn.5): grey the card and warn on an edit the lock will hide. A `perScene` param (a fact about
+  // this map, e.g. water flow direction) is exempt from the lock, so editing it raises no warning.
+  if (typeof ctx.isForcingDefaults === 'function' && ctx.isForcingDefaults() && typeof model.onChange === 'function') {
+    model.defaultsLocked = true;
+    const inner = model.onChange;
+    model.onChange = (key, value) => {
+      if (model.schema?.[key]?.perScene !== true) warnDefaultsLocked(ctx, id);
+      return inner(key, value);
+    };
+  }
   // MY PRESETS (mythica-machina-press#102) — thin per-model bindings onto
   // ctx's generic (any effectId) preset API. Omitted (ctx doesn't supply them)
   // ⇒ the card's whole "my presets" section simply doesn't render.

@@ -1914,6 +1914,9 @@ function install() {
       saveEffectPreset: (effectId, name) => MapShine.saveEffectPreset(effectId, name),
       applyEffectPreset: (effectId, name) => MapShine.applyEffectPreset(effectId, name),
       deleteEffectPreset: (effectId, name) => MapShine.deleteEffectPreset(effectId, name),
+      // the defaults lock, shown on every effect card (mmp-emn.5)
+      isForcingDefaults: () => isForcingDefaults(),
+      warn: (msg) => globalThis.ui?.notifications?.warn?.(msg),
     });
     // Flush every card registered before __studio existed (see
     // registerEffectCardSafe's own comment above) — one-time, in the same

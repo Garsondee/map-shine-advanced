@@ -33,6 +33,7 @@
 export const WATER_PARAMS = Object.freeze({
   // ── Look ────────────────────────────────────────────────────────────────
   depth: {
+    perScene: true, // a fact about this map (pond vs river, its scale, its depth), not a look
     type: 'float',
     min: 0,
     max: 1,
@@ -207,6 +208,7 @@ export const WATER_PARAMS = Object.freeze({
   // buildParamControl` already routes `bool` to `buildCheckboxRow`. Same road
   // the compass itself travels since mythica-machina-press#565.
   flowEnabled: {
+    perScene: true, // a fact about this map (pond vs river, its scale, its depth), not a look
     type: 'bool',
     // ON. A scene saved before this param existed has no stored value at all,
     // and `waterFlowSpeedPx`'s own `=== false` test means it keeps flowing —
@@ -218,6 +220,7 @@ export const WATER_PARAMS = Object.freeze({
     help: 'The master switch for the two Motion controls below it. Off parks the surface where it stands — the water stops travelling downstream, but the Flow dial and the compass keep the speed and heading you set, so switching it back on resumes exactly as before with no pause to rebuild the current. This is the TRAVEL, not all motion: surface chop and wind ripple carry on regardless, which is what a still pond or a flooded cellar actually looks like. Leave it on for any river.',
   },
   flowSpeedPx: {
+    perScene: true, // a fact about this map (pond vs river, its scale, its depth), not a look
     type: 'float',
     min: 0,
     max: 400,

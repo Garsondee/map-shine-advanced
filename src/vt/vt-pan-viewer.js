@@ -6127,7 +6127,13 @@ async function startVtPanViewerUnserialized({
       // rendered by `tickFireField` (`renderer-state/graph-only`), and its smoke is lit by the scene's own light.
       createTarget: createFireFieldTarget,
       disposeTarget: disposeFireFieldTarget,
-      lighting: { illumTexNode: envLight.illumTexNode, colorationTexNode: envLight.colorationTexNode },
+      // + the _Outdoors mask: an outdoor fire's flame and smoke never draw over indoor ground (mmp-9un.4)
+      lighting: {
+        illumTexNode: envLight.illumTexNode,
+        colorationTexNode: envLight.colorationTexNode,
+        outdoorsTexNode: envLight.outdoorsTexNode,
+        uOutdoorsRect: envLight.uOutdoorsRect,
+      },
       // So sync() can bracket its own per-frame cost (light.fireSync) —
       // perf-instrumentation-audit-2026-08-12, same shape as specular's own
       // `profiler` a few call sites down.

@@ -289,7 +289,7 @@ const HEART = Object.freeze({ count: 3, orbit: 0.1, rad: 0.6, heat: 0.92, z: 0.1
 
 /**
  * Floats per lobe: four vec4 attributes. A = (x, y, radius, strength), B = (heat, stretch, dirX, dirY), C = (kind, tone, across,
- * z), D = (seed, 0, 0, 0). `seed` (2026-11-06, mmp-9un.6) is a smoke puff's own 0..1 random, constant for its whole life, so the
+ * z), D = (seed, outdoor clip, 0, 0). `seed` (2026-11-06, mmp-9un.6) is a smoke puff's own 0..1 random, constant for its whole life, so the
  * painterly grain is drawn in the puff's own frame and travels with it instead of sitting still on the map.
  */
 export const LOBE_STRIDE = 16;
@@ -518,6 +518,9 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   const tune = tuneOverride ? { ...BILLOW_TUNE, ...tuneOverride } : BILLOW_TUNE;
   const sz = fireSizes(f, tune);
   const { R, out: outdoor, turb, plume, height } = sz;
+  // THE OUTDOOR CLIP (2026-11-06, mmp-9un.4): an outdoor fire's lobes are told so, and draw nothing over indoor ground (the
+  // splat reads _Outdoors where it lands), so a column leaning up the page over a wall never shows inside the building
+  const outdoorClip = clamp01((outdoor - 0.4) / 0.2);
   const q = clamp(env.quality ?? 1, 0.2, 1);
   const anim = Math.max(0.05, env.animSpeed ?? 1);
   const t = env.tSec * anim;
@@ -630,7 +633,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     buf[o + 10] = across === null ? 1 / Math.sqrt(st) : across;
     buf[o + 11] = z;
     buf[o + 12] = seed01;
-    buf[o + 13] = 0;
+    buf[o + 13] = outdoorClip;
     buf[o + 14] = 0;
     buf[o + 15] = 0;
     lastX = proj[0];
@@ -1049,6 +1052,7 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
   const power = billowPower(vit, clamp01(m.stress01 ?? 0));
   const smokePower = billowPower(vit, 0.3 * clamp01(m.stress01 ?? 0));
   const outdoor = clamp01(m.outdoor01 ?? 1);
+  const outdoorClip = clamp01((outdoor - 0.4) / 0.2); // see emitFireLobes
   const coalHeat = clamp01(m.coal01 ?? 0.35 + 0.65 * vit);
   const wet = clamp01(clamp01(m.rain01 ?? 0) * (0.35 + 0.65 * (1 - power)) * (0.3 + 0.7 * coalHeat));
   // the same smoke amount as one flame's (a hearth's goes up the flue, rain makes steam), times how much of the mass burns
@@ -1128,7 +1132,7 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     out[o + 10] = 1 / (1 + tune.smokeStreak * 0.25 * leanG * a);
     out[o + 11] = z;
     out[o + 12] = r1;
-    out[o + 13] = 0;
+    out[o + 13] = outdoorClip;
     out[o + 14] = 0;
     out[o + 15] = 0;
     n++;

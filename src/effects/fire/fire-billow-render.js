@@ -206,6 +206,7 @@ export function createBillowRenderer({
     mix,
     clamp,
     smoothstep,
+    step,
     positionGeometry,
     texture,
     dot,
@@ -333,7 +334,7 @@ export function createBillowRenderer({
   const lobeA = attribute('lobeA', 'vec4'); // x, y, radius, strength
   const lobeB = attribute('lobeB', 'vec4'); // heat, along, dirX, dirY
   const lobeC = attribute('lobeC', 'vec4'); // kind, tone, across, z
-  const lobeD = attribute('lobeD', 'vec4'); // seed (a smoke puff's own constant random), 0, 0, 0
+  const lobeD = attribute('lobeD', 'vec4'); // seed (a smoke puff's own constant random), outdoor clip 0..1, 0, 0
 
   const splatVertex = Fn(() => {
     const corner = positionGeometry.xy.mul(2);
@@ -349,6 +350,26 @@ export function createBillowRenderer({
   const vData = Fn(() => vec4(lobeA.w, lobeB.x, lobeC.x, lobeC.y))().toVarying('vBillowData');
   const vRad = Fn(() => lobeA.z)().toVarying('vBillowRad');
   const vSeed = Fn(() => lobeD.x)().toVarying('vBillowSeed');
+  const vClip = Fn(() => lobeD.y)().toVarying('vBillowClip');
+  const vSplatWorld = Fn(() => splatVertex().xy)().toVarying('vBillowSplatWorld');
+  // THE OUTDOOR CLIP (mmp-9un.4 — Ingram: an outdoor fire's column showed inside the building it leans over, even from a token
+  // standing in that room). A lobe of an outdoor fire keeps only what lands on outdoor ground; off the map (the padding, the
+  // table) counts as outdoors. Indoor fires (clip 0) are untouched.
+  const outdoorKeep = () => {
+    const oTex = lighting?.outdoorsTexNode;
+    const oRect = lighting?.uOutdoorsRect;
+    if (!oTex || !oRect) return float(1);
+    const p = vSplatWorld;
+    const ou = p.x.sub(oRect.x).div(oRect.z.sub(oRect.x));
+    const ov = p.y.sub(oRect.y).div(oRect.w.sub(oRect.y));
+    const inside = step(float(0), ou)
+      .mul(step(ou, float(1)))
+      .mul(step(float(0), ov))
+      .mul(step(ov, float(1)));
+    const sampled = oTex.sample(vec2(ou.clamp(0, 1), ov.clamp(0, 1))).r;
+    const outdoors = mix(float(1), sampled, inside);
+    return mix(float(1), smoothstep(float(0.3), float(0.7), outdoors), vClip);
+  };
   const applySplatState = (material) => {
     material.transparent = true;
     material.depthTest = false;
@@ -372,7 +393,7 @@ export function createBillowRenderer({
     const k = float(1)
       .sub(smoothstep(U.plateau, float(1), qd))
       .mul(float(1).sub(U.dome.mul(qd.mul(qd))));
-    const w = vData.x.mul(k);
+    const w = vData.x.mul(k).mul(outdoorKeep());
     const isCoal = select(vData.z.greaterThan(1.5), float(1), float(0));
     const flame = float(1).sub(isCoal);
     // each puff is hotter at its middle than at its rim: a soft gradient inside every disc
@@ -399,7 +420,7 @@ export function createBillowRenderer({
       .mul(float(1).sub(smoothstep(float(120), float(240), vRad).mul(0.6)))
       .mul(float(1).sub(smoothstep(float(0.25), float(0.7), vData.w)));
     const k = mix(k0.mul(k0), kPlat, crisp);
-    const w = vData.x.mul(k);
+    const w = vData.x.mul(k).mul(outdoorKeep());
     // B carries the STEAM weight (a doused fire's smoke is wet: whiter, denser)
     // A carries THE PUFF'S OWN GRAIN (2026-11-06, mmp-9un.6 — Ingram: the grain sat still on the map while the smoke flowed
     // through it). Drawn in the puff's frame (its local position x its radius, in world px, offset by its seed), so it rises,

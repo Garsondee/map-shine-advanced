@@ -24,6 +24,7 @@ import {
   WATER_SHORE_FOAM_SOFT_PX,
   WATER_FOAM_TEXTURE_PX,
   fleckReachPxNumber,
+  FLECK_MOTION,
 } from '../water-shore-mask.js';
 import { WATER_PARAMS } from '../water.js';
 
@@ -218,31 +219,39 @@ export function run(t) {
   // at several current speeds, and check none lands farther from its launch
   // than the bound allows beyond the emitter band.
   {
-    const LIFE = 4.5;
-    const AIR = 0.7;
+    const M = FLECK_MOTION;
+    const frac = (x) => x - Math.floor(x);
     let worst = 0;
     let worstBound = Infinity;
     let violations = 0;
     for (const speedPx of [0, 20, 60, 150, 400]) {
       const bound = fleckReachPxNumber({ speedPx, emitterBandPx: 0 });
-      for (let k = 0; k < 6; k++) {
-        for (let gen = 0; gen < 40; gen++) {
-          for (let step = 0; step <= 90; step++) {
-            const tau = (step / 90) * LIFE;
-            const speed = 50 + (130 - 50) * ((gen * 0.3719 + k * 0.4142) % 1);
-            const tAir = Math.min(tau, AIR);
-            const airFrac = tAir / AIR;
-            const flight = speed * tAir * (1 - airFrac * 0.4);
-            const afterAir = Math.max(tau - AIR, 0);
-            const scatter = Math.abs(((gen * 0.7311 + k * 0.1913) % 1) - 0.5) * 2 * 18;
-            const ride = (speedPx + scatter) * afterAir;
-            const lead = 30; // worst-case hLead = 1
-            const dist = lead + flight + ride + 8 * Math.SQRT2 + 2;
-            if (dist > worst) {
-              worst = dist;
-              worstBound = bound;
+      for (let g = 0; g < M.GENERATIONS; g++) {
+        for (let k = 0; k < M.DIRECTIONS; k++) {
+          for (let gen = 0; gen < 40; gen++) {
+            const hSpeed = frac(gen * 0.3719 + k * 0.4142 + g * 0.29);
+            const hAir = frac(gen * 0.5521 + k * 0.3317 + g * 0.61);
+            const speed = M.SPEED_MIN + (M.SPEED_MAX - M.SPEED_MIN) * hSpeed;
+            const airSec = M.AIR_MIN + (M.AIR_MAX - M.AIR_MIN) * hAir;
+            const apex = M.APEX * (0.4 + 0.3 * hSpeed + 0.3 * hAir);
+            for (let step = 0; step <= 90; step++) {
+              const tau = (step / 90) * M.LIFE;
+              const tAir = Math.min(tau, airSec);
+              const airFrac = tAir / airSec;
+              const flight = speed * tAir * (1 - airFrac * 0.4);
+              const height = tau <= airSec ? 4 * airFrac * (1 - airFrac) : 0;
+              const wind = M.WIND * tAir; // full wind, worst case
+              const afterAir = Math.max(tau - airSec, 0);
+              const scatter = Math.abs(frac(gen * 0.7311 + k * 0.1913 + g * 0.37) - 0.5) * 2 * M.SCATTER;
+              const ride = (speedPx + scatter) * afterAir;
+              const dot = M.RADIUS_MAX * 1.3 + 1;
+              const dist = M.LEAD + flight + apex * height + wind + ride + M.CELL * Math.SQRT2 + dot;
+              if (dist > worst) {
+                worst = dist;
+                worstBound = bound;
+              }
+              if (dist > bound) violations++;
             }
-            if (dist > bound) violations++;
           }
         }
       }

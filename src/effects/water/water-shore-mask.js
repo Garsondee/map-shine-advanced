@@ -311,73 +311,85 @@ export function buildMaskShoreDensity(
   };
 }
 
-/** Fleck cell size, world px — at most one fleck per cell per (direction, generation). */
-const FLECK_CELL_PX = 8;
+/** Fleck cell size, world px — at most one fleck per cell per (direction, generation) frame. (2026-11-06: 8 -> 6, with 30
+ * frames instead of 12, about four times the flecks — Ingram: "a lot more of these dots flying around".) */
+const FLECK_CELL_PX = 6;
 /** One fleck's whole life, seconds: a short flight, then a long ride on the current. */
 const FLECK_LIFE_SEC = 4.5;
-/** Time in the air, seconds. */
-const FLECK_AIR_SEC = 0.7;
+/** Time in the air, seconds — each frame has its own, between these. */
+const FLECK_AIR_MIN_SEC = 0.45;
+const FLECK_AIR_MAX_SEC = 0.95;
 /** A fleck that lands on dry ground is gone this long after landing, seconds. */
 const FLECK_GROUND_FADE_SEC = 0.35;
-/** Launch directions per generation (each a shared flight frame). */
-const FLECK_DIRECTIONS = 6;
+/** Launch directions per generation (each a shared flight frame), and generations (staggered launch times). */
+const FLECK_DIRECTIONS = 10;
+const FLECK_GENERATIONS = 3;
 /** Fraction of cells that throw a fleck where the emitter is fully on. */
 const FLECK_DENSITY = 1;
 /** Launch speed range, world px/s. */
-const FLECK_SPEED_MIN = 50;
-const FLECK_SPEED_MAX = 130;
+const FLECK_SPEED_MIN = 40;
+const FLECK_SPEED_MAX = 150;
 /** Once on the water, each launch group also slides sideways at up to ± this, world px/s,
  * so a batch thrown together spreads out instead of travelling as a sheet. */
 const FLECK_SCATTER_PX = 18;
 /** Each fleck's launch point sits up to this far BACK along its own flight path, world
- * px. Every fleck of a (direction, generation) frame moves together, and the emitter is
- * a line along the wall — so without this a whole batch left that line at the same
- * instant and travelled as a dotted line. With it, a batch is a cloud: some flecks
- * already well out, some only just leaving, as if thrown at different speeds. */
+ * px, so a batch leaves the wall as a cloud rather than a dotted line. */
 const FLECK_LEAD_PX = 30;
-/** The author's own number: *"simple 2x2 and 1x1 75% opacity foam pixels"* — at the
- * top of its arc a fleck is a little brighter. */
+/** THE ARC (2026-11-06): the highest a fleck rises up the page at the top of its flight, world px (seen from above at the
+ * map's slight tilt, a ballistic throw climbs up the screen and falls back). Each frame reaches 40-100% of it. */
+const FLECK_APEX_PX = 22;
+/** The wind's push on a fleck in the air, world px/s at full wind — a nudge, not a gale. */
+const FLECK_WIND_PX = 45;
+/** Fleck radius range, world px (round dots, 2026-11-06 — Ingram: "small circles, not squares"). */
+const FLECK_RADIUS_MIN = 0.55;
+const FLECK_RADIUS_MAX = 1.25;
+/** At the top of its arc a fleck is a little brighter (and a little bigger). */
 const FLECK_OPACITY = 0.75;
 
 /**
- * BREAK SPRAY — 1×1 and 2×2 world-pixel flecks of foam, thrown up where the current
- * smashes into a hard edge, gliding back down, then riding the current downstream
- * if they land on water, or fading out if they land on dry ground.
- * Author: *"flecks of foam which got launched up into the air then which glide back
- * down and land on the water then get carried down stream or land on the ground
- * outside the water and fade out."*
+ * BREAK SPRAY — small round flecks of foam, thrown up where the current smashes into a hard edge, flying a ballistic arc
+ * (nudged by the wind), then riding the current downstream if they land on water, or fading out if they land on ground —
+ * which they may: flecks are allowed outside the water.
+ * Author: *"flecks of foam which got launched up into the air then which glide back down and land on the water then get
+ * carried down stream or land on the ground outside the water and fade out."*
  *
- * STATELESS, and BORN AT THE SOURCE: every (direction, generation) is a frame that
- * carries all its flecks the same way — out along its launch direction for the
- * flight, then (for a pixel on water) with the local current — so a pixel finds the
- * one fleck that can be on it by undoing that frame's displacement, and then asks
- * the EMITTER at that fleck's own spawn point (`sprayAt`, the sim pack's G) whether
- * it was ever thrown. That is what lets a fleck end up far from the face that threw
- * it. Whether it landed on water or ground is asked at its landing point
- * (`waterAt`), so a drifting fleck is never conjured where one landed on stone.
- * The test is on the integer pixel of the moving frame, so a fleck is always exactly
- * 1×1 or 2×2 map pixels and steps a whole pixel at a time.
+ * STATELESS, and BORN AT THE SOURCE: every (direction, generation) is a frame that carries all its flecks the same way —
+ * out along its launch direction and up its arc for the flight, then (for a pixel on water) with the current — so a pixel
+ * finds the one fleck that can be on it by undoing that frame's displacement, and then asks the EMITTER at that fleck's own
+ * spawn point (`sprayAt`) whether it was ever thrown. Whether it landed on water or ground is asked at its landing point
+ * (`waterAt`). 2026-11-06 (mmp-7kx.1 — Ingram: same size, same speed, same distance, a whole unit ejected at once in one
+ * direction): 30 frames instead of 12, each with its own speed, air time and arc height, staggered over three launch
+ * generations, so neighbours no longer travel as one sheet; and each fleck is a soft round dot of its own radius.
  *
  * @param {*} THREE
  * @param {object} args
  * @param {*} args.worldXY - vec2 world px.
  * @param {*} args.tSec
- * @param {*} args.velocityPx - vec2 world px/s, the local current at this pixel.
+ * @param {*} args.velocityPx - vec2 world px/s, the current the flecks ride once landed.
  * @param {*} args.insideHere - 0..1, is this pixel water.
  * @param {(w: *) => *} args.sprayAt - world vec2 → emitter 0..1 there.
  * @param {(w: *) => *} args.waterAt - world vec2 → water presence 0..1 there.
  * @param {*} args.uSpray - strength, 0 = off.
- * @param {*} [args.shoreAbsDist] - |signed distance| to the nearest shore, world px
- *   (the body pack's SDF). Given, the fleck loop only runs within reach of a
- *   shore (see {@link fleckReachPx}) — `sprayAt`/`waterAt` must then sample at an
- *   EXPLICIT level, since they run inside a per-pixel branch.
- * @param {*} [args.emitterBandPx] - how far from the SDF's own zero contour a
- *   spray emitter can sit, world px (a few sim/body texels — see the caller).
+ * @param {*} [args.windVec] - vec2, wind direction x strength 0..1 (world axes). Absent = still air.
+ * @param {*} [args.shoreAbsDist] - |signed distance| to the nearest shore, world px. Given, the fleck loop only runs within
+ *   reach of a shore (see {@link fleckReachPx}) — `sprayAt`/`waterAt` must then sample at an EXPLICIT level.
+ * @param {*} [args.emitterBandPx] - how far from the SDF's own zero contour a spray emitter can sit, world px.
  * @returns {*} coverage 0..1
  */
 export function buildBreakSpecks(
   THREE,
-  { worldXY, tSec, velocityPx, insideHere, sprayAt, waterAt, uSpray, shoreAbsDist = null, emitterBandPx = null }
+  {
+    worldXY,
+    tSec,
+    velocityPx,
+    insideHere,
+    sprayAt,
+    waterAt,
+    uSpray,
+    windVec = null,
+    shoreAbsDist = null,
+    emitterBandPx = null,
+  }
 ) {
   const {
     vec2,
@@ -394,50 +406,58 @@ export function buildBreakSpecks(
     clamp,
     smoothstep,
     fwidth,
+    length,
     mx_cell_noise_float,
     Fn,
     If,
   } = THREE.TSL;
   const cellPx = float(FLECK_CELL_PX);
   const inWater = step(float(0.5), insideHere);
-  // The 12-fleck loop, as a function so the gated path below can run it
-  // inside a branch. Unchanged maths.
+  const windPx = windVec ? windVec.mul(float(FLECK_WIND_PX)) : vec2(0, 0);
+  // the edge of a dot: about one screen pixel of soft edge, never sharper than a third of a world px
+  const aa = max(fwidth(worldXY.x), float(0.35));
   const fleckCoverage = () => {
     let out = float(0);
-    for (let g = 0; g < 2; g++) {
+    for (let g = 0; g < FLECK_GENERATIONS; g++) {
       for (let k = 0; k < FLECK_DIRECTIONS; k++) {
-        const phase = tSec.div(float(FLECK_LIFE_SEC)).add(float(g * 0.5 + k * 0.137));
+        const phase = tSec.div(float(FLECK_LIFE_SEC)).add(float(g / FLECK_GENERATIONS + k * 0.137));
         const generation = floor(phase);
         const age = fract(phase);
         const tau = age.mul(float(FLECK_LIFE_SEC));
-        // This frame's launch: direction k, turned a different amount every generation,
-        // at a speed of its own.
-        const turn = fract(generation.mul(float(0.618034)).add(float(k * 0.271)));
+        // This frame's own throw: a direction turned differently every generation, a speed, an air time and an arc height.
+        const turn = fract(generation.mul(float(0.618034)).add(float(k * 0.271 + g * 0.113)));
         const angle = float(k / FLECK_DIRECTIONS)
           .add(turn.mul(float(1 / FLECK_DIRECTIONS)))
           .mul(float(2 * Math.PI));
-        const speed = mix(
-          float(FLECK_SPEED_MIN),
-          float(FLECK_SPEED_MAX),
-          fract(generation.mul(float(0.3719)).add(float(k * 0.4142)))
-        );
+        const hSpeed = fract(generation.mul(float(0.3719)).add(float(k * 0.4142 + g * 0.29)));
+        const hAir = fract(generation.mul(float(0.5521)).add(float(k * 0.3317 + g * 0.61)));
+        const speed = mix(float(FLECK_SPEED_MIN), float(FLECK_SPEED_MAX), hSpeed);
+        const airSec = mix(float(FLECK_AIR_MIN_SEC), float(FLECK_AIR_MAX_SEC), hAir);
+        const apex = float(FLECK_APEX_PX).mul(float(0.4).add(hSpeed.mul(0.3)).add(hAir.mul(0.3)));
         const dir = vec2(cos(angle), sin(angle));
-        const tAir = min(tau, float(FLECK_AIR_SEC));
-        const airFrac = tAir.div(float(FLECK_AIR_SEC));
-        // Out along the launch direction, slowing as it falls.
+        const tAir = min(tau, airSec);
+        const airFrac = tAir.div(airSec);
+        const airborne = step(tau, airSec);
+        // Out along the launch direction (slowing as it falls), up and back down its arc, and a nudge downwind.
         const flight = dir
           .mul(speed)
           .mul(tAir)
           .mul(float(1).sub(airFrac.mul(float(0.4))));
-        const landOffset = dir.mul(speed).mul(float(FLECK_AIR_SEC * 0.6));
-        const afterAir = max(tau.sub(float(FLECK_AIR_SEC)), float(0));
+        const height = airFrac.mul(float(1).sub(airFrac)).mul(float(4)).mul(airborne);
+        const lift = vec2(0, apex.mul(height).negate());
+        const windDrift = windPx.mul(tAir);
+        const landOffset = dir
+          .mul(speed)
+          .mul(airSec.mul(float(0.6)))
+          .add(windPx.mul(airSec));
+        const afterAir = max(tau.sub(airSec), float(0));
         const scatter = vec2(dir.y.negate(), dir.x).mul(
-          fract(generation.mul(float(0.7311)).add(float(k * 0.1913)))
+          fract(generation.mul(float(0.7311)).add(float(k * 0.1913 + g * 0.37)))
             .sub(float(0.5))
             .mul(float(2 * FLECK_SCATTER_PX))
         );
         const drift = velocityPx.add(scatter).mul(afterAir).mul(inWater);
-        const q = worldXY.sub(flight).sub(drift);
+        const q = worldXY.sub(flight).sub(lift).sub(windDrift).sub(drift);
 
         const cell = floor(q.div(cellPx));
         const seed = vec3(cell.x, cell.y, generation.add(float(k * 131 + g * 977)));
@@ -446,40 +466,35 @@ export function buildBreakSpecks(
         const hY = mx_cell_noise_float(seed.add(vec3(0, 29, 0)));
         const hSize = mx_cell_noise_float(seed.add(vec3(0, 0, 71)));
         const hLead = mx_cell_noise_float(seed.add(vec3(53, 0, 19)));
-        // Spawn well inside the cell, so a 2×2 fleck is never clipped by a neighbour.
-        const spawn = cell.add(vec2(hX, hY).mul(float(0.5)).add(float(0.25))).mul(cellPx);
+        // Spawn in the middle of the cell, so even the biggest dot is never clipped by a neighbour.
+        const spawn = cell.add(vec2(hX, hY).mul(float(0.4)).add(float(0.3))).mul(cellPx);
         // Waves come in sets: a whole stretch of wall throws, or doesn't, per generation.
         const hBurst = mx_cell_noise_float(
-          vec3(floor(spawn.x.div(float(48))), floor(spawn.y.div(float(48))), generation.add(float(k * 7)))
+          vec3(floor(spawn.x.div(float(48))), floor(spawn.y.div(float(48))), generation.add(float(k * 7 + g * 3)))
         );
-        // Where this fleck actually left the water: back along its own path by its lead.
         const launchedAt = spawn.sub(dir.mul(hLead.mul(float(FLECK_LEAD_PX))));
         const thrown = step(hExist, sprayAt(launchedAt).mul(float(FLECK_DENSITY)).mul(uSpray)).mul(
           step(float(0.35), hBurst)
         );
 
         const landedWet = step(float(0.25), waterAt(spawn.add(landOffset)));
-        const airborne = step(tau, float(FLECK_AIR_SEC));
         const riding = inWater.mul(landedWet).mul(float(1).sub(smoothstep(float(0.65), float(1), age)));
         const grounded = float(1)
           .sub(inWater)
           .mul(float(1).sub(landedWet))
-          .mul(float(1).sub(smoothstep(float(FLECK_AIR_SEC), float(FLECK_AIR_SEC + FLECK_GROUND_FADE_SEC), tau)));
+          .mul(float(1).sub(smoothstep(airSec, airSec.add(float(FLECK_GROUND_FADE_SEC)), tau)));
         const visible = airborne
           .add(float(1).sub(airborne).mul(riding.add(grounded)))
           .mul(smoothstep(float(0), float(0.02), age));
 
-        // Height of the arc: 2×2 and a touch brighter near the top.
-        const height = airFrac.mul(float(1).sub(airFrac)).mul(float(4)).mul(airborne);
-        const size = float(1).add(max(step(float(0.5), height), step(float(0.55), hSize)));
-        const corner = floor(spawn);
-        const pix = floor(q);
-        const inside = step(corner.x.sub(float(0.5)), pix.x)
-          .mul(step(pix.x, corner.x.add(size).sub(float(0.5))))
-          .mul(step(corner.y.sub(float(0.5)), pix.y))
-          .mul(step(pix.y, corner.y.add(size).sub(float(0.5))));
+        // A soft round dot of its own size, a touch bigger and brighter near the top of its arc.
+        const radius = mix(float(FLECK_RADIUS_MIN), float(FLECK_RADIUS_MAX), hSize).mul(
+          float(1).add(height.mul(float(0.3)))
+        );
+        const d = length(q.sub(spawn));
+        const dot = float(1).sub(smoothstep(radius.sub(aa.mul(0.5)), radius.add(aa.mul(0.5)), d));
         const bright = mix(float(FLECK_OPACITY), float(0.95), height);
-        out = max(out, inside.mul(thrown).mul(visible).mul(bright));
+        out = max(out, dot.mul(thrown).mul(visible).mul(bright));
       }
     }
     return out;
@@ -489,16 +504,9 @@ export function buildBreakSpecks(
     const fadeOut = smoothstep(float(2.5), float(1), fwidth(worldXY.x));
     return clamp(fleckCoverage().mul(fadeOut), float(0), float(1));
   }
-  // ⚠️ ONLY WHERE A FLECK CAN BE (2026-10-25, Water-Performance-Audit W-06).
-  // The loop above is 12 flecks × 6 cell hashes + a burst hash + sin/cos + two
-  // DEPENDENT texture reads, and it ran on every pixel of both meshes. A fleck
-  // is thrown from a spray EMITTER, which production writes only on the
-  // water side of a solid face (`water-sim.js#sprayEmit` — not advected), so
-  // every pixel it can ever cover lies within `fleckReachPx` of a shore.
-  // Past that, and when zoomed out past the fade, and with spray at 0, the
-  // result was exactly 0 already. `fadeOut`'s derivative is ASSIGNED in the
-  // body before the `If` (uniform control flow) — a node merely built outside
-  // would still be emitted at its first use, inside the branch.
+  // ⚠️ ONLY WHERE A FLECK CAN BE (2026-10-25, Water-Performance-Audit W-06): every pixel a fleck can ever cover lies within
+  // `fleckReachPx` of a shore; past that, zoomed out past the fade, or with spray at 0, the result is exactly 0. `fadeOut`'s
+  // derivative is ASSIGNED before the `If` (uniform control flow).
   const reach = fleckReachPx(THREE.TSL, { velocityPx, emitterBandPx: emitterBandPx ?? float(64) });
   return Fn(() => {
     const fadeOut = smoothstep(float(2.5), float(1), fwidth(worldXY.x)).toVar('fleckFadeOut');
@@ -516,14 +524,20 @@ export function buildBreakSpecks(
   })();
 }
 
+/** The flight's own worst-case reach, world px: lead + fastest throw over the longest air time + wind + arc + a cell. */
+const FLECK_FLIGHT_REACH_PX =
+  FLECK_LEAD_PX +
+  FLECK_SPEED_MAX * FLECK_AIR_MAX_SEC +
+  FLECK_WIND_PX * FLECK_AIR_MAX_SEC +
+  FLECK_APEX_PX +
+  FLECK_CELL_PX +
+  2;
+
 /**
- * The farthest a break-spray fleck can be drawn from the SDF's zero contour,
- * world px — a CONSERVATIVE bound, summed term by term from
- * `buildBreakSpecks`' own motion: the emitter's own offset from the contour
- * (`emitterBandPx`), the lead back along its path (`FLECK_LEAD_PX`), the
- * flight (≤ max speed × air time), the ride on the current after landing
- * (≤ (|velocity| + scatter) × the rest of its life), and one cell plus a 2×2
- * fleck. Exported for the Node test that checks it against brute force.
+ * The farthest a break-spray fleck can be drawn from the SDF's zero contour, world px — a CONSERVATIVE bound, summed term
+ * by term from `buildBreakSpecks`' own motion: the emitter's offset from the contour, the lead, the flight (≤ max speed ×
+ * longest air time), the wind and the arc, the ride on the current after landing (≤ (|velocity| + scatter) × the rest of
+ * the longest life), and one cell plus a dot. Exported for the Node test that checks it against brute force.
  * @param {*} TSL @param {{velocityPx: *, emitterBandPx: *}} args
  * @returns {*} a float node
  */
@@ -531,21 +545,35 @@ export function fleckReachPx(TSL, { velocityPx, emitterBandPx }) {
   const { float, length } = TSL;
   const ride = length(velocityPx)
     .add(float(FLECK_SCATTER_PX))
-    .mul(float(FLECK_LIFE_SEC - FLECK_AIR_SEC));
-  return emitterBandPx.add(float(FLECK_LEAD_PX + FLECK_SPEED_MAX * FLECK_AIR_SEC + FLECK_CELL_PX + 2)).add(ride);
+    .mul(float(FLECK_LIFE_SEC - FLECK_AIR_MIN_SEC));
+  return emitterBandPx.add(float(FLECK_FLIGHT_REACH_PX)).add(ride);
 }
 
 /** {@link fleckReachPx} in plain numbers, for tests and reports. */
 export function fleckReachPxNumber({ speedPx, emitterBandPx }) {
   return (
     emitterBandPx +
-    FLECK_LEAD_PX +
-    FLECK_SPEED_MAX * FLECK_AIR_SEC +
-    FLECK_CELL_PX +
-    2 +
-    (Math.abs(speedPx) + FLECK_SCATTER_PX) * (FLECK_LIFE_SEC - FLECK_AIR_SEC)
+    FLECK_FLIGHT_REACH_PX +
+    (Math.abs(speedPx) + FLECK_SCATTER_PX) * (FLECK_LIFE_SEC - FLECK_AIR_MIN_SEC)
   );
 }
+
+/** The fleck motion constants, for the reach test's brute force. */
+export const FLECK_MOTION = Object.freeze({
+  LIFE: FLECK_LIFE_SEC,
+  AIR_MIN: FLECK_AIR_MIN_SEC,
+  AIR_MAX: FLECK_AIR_MAX_SEC,
+  SPEED_MIN: FLECK_SPEED_MIN,
+  SPEED_MAX: FLECK_SPEED_MAX,
+  SCATTER: FLECK_SCATTER_PX,
+  LEAD: FLECK_LEAD_PX,
+  APEX: FLECK_APEX_PX,
+  WIND: FLECK_WIND_PX,
+  CELL: FLECK_CELL_PX,
+  RADIUS_MAX: FLECK_RADIUS_MAX,
+  DIRECTIONS: FLECK_DIRECTIONS,
+  GENERATIONS: FLECK_GENERATIONS,
+});
 
 /** One flow-map cycle, seconds: how long the foam texture rides the current before it
  * is cross-faded to a fresh copy. Short enough that shear along a wall streaks it

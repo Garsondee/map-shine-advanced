@@ -2573,6 +2573,8 @@ export function buildWaterSurfaceMaterial({
         : (w) => waterSimTexNode.sample(maskUvOfWorld(w)).level(float(0)).g,
       waterAt: (w) => maskTexNode.sample(maskUvOfWorld(w)).level(float(0)).r,
       uSpray: maskShore.uSpray,
+      // the wind nudges a fleck in the air (2026-11-06, mmp-7kx.1)
+      windVec: uWindDir.mul(uWind01),
       shoreAbsDist: abs(bodyTexNode.r),
       emitterBandPx: max(simTexelWorld, bodyTexelWorld).mul(float(4)).add(float(32)),
     });
@@ -3028,7 +3030,9 @@ export function buildWaterSurfaceMaterial({
   // and their ink lines, where the _Water mask is a hard black. On land they now show only where the author painted the mask
   // above black (a soft shallows ramp); out on the water nothing changes.
   const paintedLand = smoothstep(float(0), float(WATER_PRESENCE_EDGE0 * 8), maskTexNode.r);
-  const shoreFoam = totalFoam.mul(mix(float(1), paintedLand, shoreDry));
+  // ...but the spray flecks MAY land outside the water (Ingram, 2026-11-06), so they are added back ungated.
+  const landedSpray = breakSpecks ? breakSpecks.mul(foamSharpnessFactor) : float(0);
+  const shoreFoam = max(totalFoam.mul(mix(float(1), paintedLand, shoreDry)), landedSpray);
   const foamCover = shoreFoam.mul(shoreFoam).mul(mix(float(1), uShoreFoamDryCover, shoreDry));
   const foamGlow = shoreFoam.mul(float(2).sub(shoreFoam)).mul(mix(float(1), uShoreFoamDryGlow, shoreDry));
   const foamHide = float(1).sub(foamCover);

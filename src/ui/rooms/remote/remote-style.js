@@ -696,7 +696,7 @@ ${R} .msa-acc{border:1px solid var(--line, rgba(255,255,255,.14)); border-radius
 ${R} .msa-acc>summary{display:flex; align-items:center; gap:6px; cursor:pointer; padding:7px 10px; list-style:none;
   font-size:.64rem; letter-spacing:.2em; text-transform:uppercase}
 ${R} .msa-acc>summary::-webkit-details-marker{display:none}
-${R} .msa-acc>summary::after{content:'▸'; margin-left:auto; transition:transform .15s}
+${R} .msa-acc>summary::after{content:'▸'; margin-left:auto; transition:transform 0.15s}
 ${R} .msa-acc[open]>summary::after{transform:rotate(90deg)}
 ${R} .msa-acc>summary .ico{width:12px; height:12px; color:var(--shine)}
 ${R} .msa-acc-body{padding:6px 8px 10px}

@@ -10013,10 +10013,28 @@ async function startVtPanViewerUnserialized({
      * residency window, isolate-item debug mode, a GM-hidden token) must stay
      * invisible after this returns, exactly as it was before this ran.
      */
+    /** The last frame's animating tiles (`resolveTileMotionFrame()`), so the fog-memory capture can leave them out. */
+    let lastTileMotionFrame = null;
     function captureMapOnlySnapshot() {
       const restore = [[doorGraphics.root, doorGraphics.root.visible]];
       doorGraphics.root.visible = false;
       for (const item of lastItems) {
+        // ⚠️ MOVING TILES ARE EXCLUDED TOO (2026-11-06, mmp-rk6.3 — Ingram: the orrery left trails, and looked slower and
+        // jerkier, as soon as a token was selected). Memory is remembered colour, refreshed only every
+        // SNAPSHOT_PUBLISH_INTERVAL_MS; a spinning arm captured into it stayed painted wherever it had been, and the soft fog
+        // band mixed that stale, stepping copy under the live one. Like a token, a tile that is animating right now is not
+        // scenery: it is left out, so memory holds the floor under it.
+        if (item.kind === 'tile') {
+          const tileId = item._placement?.tileDoc?.id;
+          if (tileId && lastTileMotionFrame?.has?.(tileId)) {
+            for (const t of itemStates.get(item.id)?.wholeImage?.tiles ?? []) {
+              if (!t.mesh) continue;
+              restore.push([t.mesh, t.mesh.visible]);
+              t.mesh.visible = false;
+            }
+          }
+          continue;
+        }
         if (item.kind === 'token') {
           const tiles = itemStates.get(item.id)?.wholeImage?.tiles;
           for (const t of tiles ?? []) {
@@ -23310,6 +23328,7 @@ async function startVtPanViewerUnserialized({
      */
     function syncAllTileMotionForFrame() {
       const frame = resolveTileMotionFrame();
+      lastTileMotionFrame = frame;
       for (const state of itemStates.values()) {
         if (state.item?.kind !== 'tile' || !state.wholeImage) continue;
         const tileId = state.item._placement?.tileDoc?.id;

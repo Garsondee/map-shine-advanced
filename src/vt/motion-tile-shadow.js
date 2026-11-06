@@ -538,7 +538,13 @@ export function buildMotionTileShadowMaterial(
     const myEdge = uIndex.sub(0.5 / 255);
     const noCoreAbove = TSL.step(rankHere.b, myEdge);
     const topBelow = TSL.step(rankHere.r, myEdge);
-    const belowCasters = noCoreAbove.mul(topBelow.add(float(1).sub(topBelow).mul(float(1).sub(rankHere.g))));
+    // THIS caster's own anti-aliased rim (2026-11-06, mmp-rk6.1): letting the shadow through only by (1 - rim alpha)
+    // left a light ring between a tile and its shadow. Over its OWN rim the cut is moved inward to the opaque core
+    // (alpha 0.5 -> 0.98 ramps it), so the floor seen through the soft edge is shadowed like the floor beside it.
+    // A DIFFERENT caster on top still blocks by its own alpha, as before.
+    const selfTop = TSL.step(myEdge, rankHere.r).mul(TSL.step(rankHere.r, uIndex.add(0.5 / 255)));
+    const topCover = TSL.mix(rankHere.g, TSL.smoothstep(0.5, 0.98, rankHere.g), selfTop);
+    const belowCasters = noCoreAbove.mul(topBelow.add(float(1).sub(topBelow).mul(float(1).sub(topCover))));
     // …and nothing above the whole stack covers the pixel.
     const notUnderRoof = depthTexture ? TSL.step(uTopDepth, texture(depthTexture, screenUV).x) : float(1);
     const below = belowCasters.mul(notUnderRoof).toVar();

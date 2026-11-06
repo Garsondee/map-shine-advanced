@@ -24518,6 +24518,14 @@ async function startVtPanViewerUnserialized({
       // stale-water fix actually depends on.
       const currentViewRect = viewToWorldRect(view, canvasW / canvasH);
       const windSpawnRect = clampRectToBounds(currentViewRect, dimensions.sceneRect);
+      // THE FIRE FIELD'S RECT (2026-11-06, mmp-9un.3): the visible part of the whole PADDED canvas, not just the scene's. A
+      // plume that rises past the board's edge (over the 3D table's velvet, or the padding) was cut there in a straight line.
+      const fireFieldRect = clampRectToBounds(currentViewRect, {
+        x: 0,
+        y: 0,
+        width: dimensions.width,
+        height: dimensions.height,
+      });
       // THE SCENE EYE — from the UNCLAMPED view (the eye is over what you see, not over the clamped spawn rect).
       frameSceneEye = resolveSceneEye(
         currentViewRect,
@@ -24587,7 +24595,7 @@ async function startVtPanViewerUnserialized({
           renderer,
           lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.dtSec ?? 0,
-          windSpawnRect,
+          fireFieldRect,
           frameSceneEye
         );
         // the billow flame's splat (the job list `sync` just prepared), straight away while no target is bound
@@ -25964,7 +25972,13 @@ async function startVtPanViewerUnserialized({
         gustEngine.step(renderer, { dtSec: WARM_UP_SIM_DT_SEC, tMs, worldRect: windSpawnRect });
       }
       if (fireSubsystem) {
-        fireSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, windSpawnRect);
+        const fireFieldRect = clampRectToBounds(currentViewRect, {
+          x: 0,
+          y: 0,
+          width: dimensions.width,
+          height: dimensions.height,
+        });
+        fireSubsystem.sync(renderer, tMs, WARM_UP_SIM_DT_SEC, fireFieldRect);
         tickFireField();
       }
       // No env snapshot yet at warm-up: flies read as a plain day and fireflies as "not yet", which

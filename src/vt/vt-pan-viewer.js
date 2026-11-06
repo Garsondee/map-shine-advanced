@@ -422,6 +422,7 @@ import {
   buildVisionGateMaterial,
   buildVisionExploredDimMaterial,
   buildVisionSnapshotPublishMaterial,
+  registerRevealCasterCover,
   buildVisionSoftResolveMaterial,
   buildVisionSoftBlurMaterial,
   buildVisionCoveragePublishMaterial,
@@ -2812,6 +2813,9 @@ async function startVtPanViewerUnserialized({
     // moving tiles cover (R, MAX across casters). A blurred coverage needs no more than 8 bits.
     const describeCasterShadow = () => ({ ...describeSceneColor(), type: THREE.UnsignedByteType });
     const sceneCasterShadow = allocator.create('scene.casterShadow', describeCasterShadow());
+    // Every fog-of-war reveal test reads `sceneIllum`; the moving tiles' shadows darken it, so they are registered
+    // against it and a passing shadow never flips seen ground to memory (vision-mask-render.js, mmp-rk6.3).
+    registerRevealCasterCover(sceneIllum.texture, sceneCasterShadow.texture);
     // buf:scene.casterRank (2026-11-04) — the top shadow-casting tile's stack index at each pixel, from its REAL
     // silhouette (the cascade gate; vt/motion-tile-shadow.js's CASCADE note says why not buf:scene.depth).
     const sceneCasterRank = allocator.create('scene.casterRank', describeCasterShadow());
@@ -5028,6 +5032,7 @@ async function startVtPanViewerUnserialized({
         uExploredRect: uVisionExploredRect,
         storeUnlit: true,
         exploredTexture: visionMask.exploredTexture,
+        snapshotPrevTexture: visionMask.exploredSnapshotPrevTarget.texture,
       })
     );
     // THE SOFT FOG FIELD (2026-11-02) — see `vision-mask-render.js`'s "THE SOFT FOG FIELD". Three plain
@@ -11576,6 +11581,9 @@ async function startVtPanViewerUnserialized({
                 renderer.setClearColor(prevSnapClear, prevVisionAlpha);
               }
               // NEVER auto-clear: persistent, same as the boolean buffer above.
+              // the snapshot as it stands, so the publish refills only remembered ground with no colour yet (mmp-rk6.3)
+              renderer.copyTextureToTexture(snapshotDraw.target.texture, visionMask.exploredSnapshotPrevTarget.texture);
+              renderer.setRenderTarget(snapshotDraw.target);
               const prevSnapAuto = renderer.autoClearColor;
               renderer.autoClearColor = false;
               visionSnapshotPublishQuad.render(renderer);

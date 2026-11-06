@@ -193,6 +193,30 @@ export function buildVisionFloorMaterial({ THREE }) {
  * @param {*} [args.screenUV] - the screen UV `mask` and `illum` were sampled at.
  * @returns {*} a boolean TSL node.
  */
+/**
+ * MOVING SHADOWS DO NOT HIDE WHAT A LIGHT SHOWS (2026-11-06, mmp-rk6.3 — Ingram: inside a room the token can see, the
+ * orrery's moving parts were partly invisible and 'clashed' with explored ground, updating in steps). The moving tiles'
+ * shadows multiply into `buf:scene.illum`, the same buffer every reveal test below reads, so an arm's passing shadow flipped
+ * the lit floor under it to 'not seen' (memory) and back, with the reveal fade dragging each flip out. The viewer registers
+ * the shadow coverage against its illumination texture; every reveal read then lifts covered ground to at least
+ * {@link REVEAL_CASTER_FLOOR} x coverage, so a passing shadow never takes away what the light reveals. Nothing else reads
+ * this lifted value: it exists only for the 'is it seen' question.
+ */
+const REVEAL_CASTER_FLOOR = 0.2;
+const revealCoverByIllum = new WeakMap();
+/** @param {*} illumTexture the scene illumination the reveal tests read @param {*} coverTexture moving-tile shadow coverage (R) */
+export function registerRevealCasterCover(illumTexture, coverTexture) {
+  if (illumTexture && coverTexture) revealCoverByIllum.set(illumTexture, coverTexture);
+}
+function sampleRevealIllum(THREE, illumTexture, at) {
+  const { texture, max, vec3, vec4, float } = THREE.TSL;
+  const illum = texture(illumTexture).sample(at);
+  const cover = revealCoverByIllum.get(illumTexture);
+  if (!cover) return illum;
+  const lift = texture(cover).sample(at).r.clamp(0, 1).mul(float(REVEAL_CASTER_FLOOR));
+  return vec4(max(illum.rgb, vec3(lift, lift, lift)), illum.a);
+}
+
 function buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed = null, screenUV = null }) {
   const { float, max } = THREE.TSL;
   // The SAME illumination the composite lit the frame with — deliberately not
@@ -271,7 +295,7 @@ export function sampleVisionRevealFactor({
 }) {
   const { texture, float, select } = THREE.TSL;
   const mask = texture(maskTexture).sample(screenUV);
-  const illum = texture(illumTexture).sample(screenUV);
+  const illum = sampleRevealIllum(THREE, illumTexture, screenUV);
   const revealed = buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed, screenUV });
   return { revealed, factor: select(revealed, float(1), float(0)) };
 }
@@ -439,7 +463,7 @@ export function createFogLookUniforms(TSL) {
 export function buildVisionSoftResolveMaterial({ THREE, maskTexture, illumTexture, threshold, extraRevealed = null }) {
   const { texture, uv, float, vec4, max, smoothstep, step, select } = THREE.TSL;
   const mask = texture(maskTexture).sample(uv());
-  const illum = texture(illumTexture).sample(uv());
+  const illum = sampleRevealIllum(THREE, illumTexture, uv());
   const luminance = max(max(illum.r, illum.g), illum.b);
   const lit = smoothstep(float(threshold), float(threshold * FOG_LIT_SOFT_SPAN), luminance);
   let soft = max(step(float(0.5), mask.r), step(float(0.5), mask.b).mul(lit));
@@ -664,7 +688,7 @@ export function sampleFogVisibility({
   const TSL = THREE.TSL;
   const field = texture(softTexture).sample(screenUV);
   const mask = texture(maskTexture).sample(screenUV);
-  const illum = texture(illumTexture).sample(screenUV);
+  const illum = sampleRevealIllum(THREE, illumTexture, screenUV);
   const revealed = buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed, screenUV });
   const hard = select(revealed, float(1), float(0));
   const t = fogBandT(TSL, field.r);
@@ -814,7 +838,7 @@ export function buildVisionGateMaterial({
   const { texture, uv, float, vec4, select } = THREE.TSL;
 
   const mask = texture(maskTexture).sample(uv());
-  const illum = texture(illumTexture).sample(uv());
+  const illum = sampleRevealIllum(THREE, illumTexture, uv());
   const revealed = buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed, screenUV: uv() });
 
   // wasFloorRevealed=true (or no doorFogProgress supplied at all) → factor 1,
@@ -912,7 +936,7 @@ export function buildVisionExploredDimMaterial({
   const { texture, uv, float, vec3, vec4, select, dot, mix, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
   const mask = texture(maskTexture).sample(uv());
-  const illum = texture(illumTexture).sample(uv());
+  const illum = sampleRevealIllum(THREE, illumTexture, uv());
   const revealed = buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed, screenUV: uv() });
 
   const { isExplored, bufferUv } = sampleExploredNode({
@@ -1034,6 +1058,7 @@ export function buildVisionSnapshotPublishMaterial({
   uExploredRect,
   storeUnlit = false,
   exploredTexture = null,
+  snapshotPrevTexture = null,
 }) {
   const { texture, uv, float, vec3, vec4, select, mix, vec2, step, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
@@ -1056,14 +1081,21 @@ export function buildVisionSnapshotPublishMaterial({
     .mul(step(screenV, float(1)));
 
   const mask = texture(maskTexture).sample(screenUv);
-  const illum = texture(illumTexture).sample(screenUv);
+  const illum = sampleRevealIllum(THREE, illumTexture, screenUv);
   const revealed = buildRevealedNode({ THREE, mask, illum, threshold });
   // REMEMBERED GROUND REFILLS ITS COLOUR (2026-11-02): memory reloaded from a token's saved coverage
   // (`foundry/fog-memory-persistence.js`) arrives without colour, so any remembered texel on screen takes
   // the map's own art again — what Foundry's fog shows in explored areas too. Only with `storeUnlit`
   // (plain art): a lit store would freeze tonight's darkness into it.
-  const remembered =
+  // ⚠️ ONLY WHERE IT HAS NO COLOUR YET (2026-11-06, mmp-rk6.3 — Ingram: remembered bushes outside the building kept moving,
+  // stepping about once a second, while the token inside could not see them). Without this test every remembered texel on
+  // screen was repainted from the LIVE map at every publish, so memory animated. `snapshotPrevTexture` is this buffer as it
+  // stood before this publish: alpha 1 = already coloured, left alone until the ground is really seen again.
+  let remembered =
     exploredTexture && storeUnlit ? texture(exploredTexture).sample(uv()).r.greaterThan(float(0.02)) : null;
+  if (remembered && snapshotPrevTexture) {
+    remembered = remembered.and(texture(snapshotPrevTexture).sample(uv()).a.lessThan(float(0.5)));
+  }
   const shouldWrite = (remembered ? revealed.or(remembered) : revealed).and(onScreen.greaterThan(float(0.5)));
 
   // LIT, NOT RAW ALBEDO — `captureMapOnlySnapshot()` re-renders the SAME
@@ -1279,6 +1311,9 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     depth: false,
   };
   const exploredSnapshotTarget = allocator.create(`${rtName}.exploredSnapshot`, exploredSnapshotRtDesc);
+  // A COPY OF THE SNAPSHOT taken just before each publish (2026-11-06, mmp-rk6.3), so the publish can tell remembered ground
+  // that already has its colour from ground that does not (a pass may not sample the target it writes).
+  const exploredSnapshotPrevTarget = allocator.create(`${rtName}.exploredSnapshotPrev`, { ...exploredSnapshotRtDesc });
 
   /**
    * THE REVEAL FADE's history, ping-pong (`buildVisionRevealHistoryMaterial`): world space over the
@@ -1544,6 +1579,7 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
         }
         allocator.resize(exploredTarget, tw, th, exploredRtDesc);
         allocator.resize(exploredSnapshotTarget, tw, th, exploredSnapshotRtDesc);
+        allocator.resize(exploredSnapshotPrevTarget, tw, th, { ...exploredSnapshotRtDesc });
       }
       const rw = Math.max(64, Math.round(tw / REVEAL_HISTORY_DIVISOR));
       const rh = Math.max(64, Math.round(th / REVEAL_HISTORY_DIVISOR));
@@ -1624,6 +1660,7 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     allocator.dispose(renderTarget);
     allocator.dispose(exploredTarget);
     allocator.dispose(exploredSnapshotTarget);
+    allocator.dispose(exploredSnapshotPrevTarget);
   }
 
   /** For the Diagnostics report — a mask that silently stopped drawing must be
@@ -1677,6 +1714,9 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     // effect module may not, so the readback itself lives at the call site
     // (`vt-pan-viewer.js`'s `probeExploredSnapshotColor`, next to its sibling
     // `probeMapOnlyGrid`) and this getter is the one door it reads through.
+    get exploredSnapshotPrevTarget() {
+      return exploredSnapshotPrevTarget;
+    },
     get exploredSnapshotTarget() {
       return exploredSnapshotTarget;
     },

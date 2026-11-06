@@ -237,6 +237,8 @@ export {
   // wires fire-render.js / bloom-render.js to it; this only makes the door
   // exist).
   sampleVisionRevealFactor,
+  // moving-tile shadows never hide what a light reveals (mmp-rk6.3)
+  registerRevealCasterCover,
 } from './vision/vision-mask-render.js';
 export {
   clipPolygonBySegmentShadow,

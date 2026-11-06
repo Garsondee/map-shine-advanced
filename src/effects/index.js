@@ -19,6 +19,7 @@ export { WIND_DIAGNOSTIC_PARTICLES } from './particles/wind-diagnostic-particles
 export { createGustEngine } from './particles/particle-engine.js';
 export { createFireParticleEngine } from './particles/particle-engine.js';
 export { createLeafShedEngine } from './particles/particle-engine.js';
+export { createWaterSprayEngine } from './particles/particle-engine.js';
 export {
   createCritterEngine,
   allocateCritterBuffers,

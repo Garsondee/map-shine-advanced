@@ -59,3 +59,6 @@ export { createCritterZoneBuffer } from './critter-zone-buffer.js';
 // the CPU says (under a canopy, in its colour) and flown by a kernel over the arena. See
 // leaf-shed-runtime.js's header for why a birth is decided on the CPU and everything after on the GPU.
 export { createLeafShedEngine } from './leaf-shed-runtime.js';
+// WATER SPRAY (2026-11-06) — a SIXTH runtime: foam flecks thrown off hard shores, each born on its own frame with its
+// own throw (the CPU plans births in effects/water/water-spray-shore.js), flown by a kernel. See its header.
+export { createWaterSprayEngine } from './water-spray-runtime.js';

@@ -57,7 +57,8 @@ import { waterKeyLightDirection } from './water-light.js';
 // The shared `flowEnabled` + `flowSpeedPx` resolver (mythica-machina-press
 // #581), beside `waterFlowVector` in the same file for the same reason — the
 // sim subsystem reads the identical function, never a second copy of the rule.
-import { waterFlowSpeedPx } from './water-field.js';
+import { waterFlowSpeedPx, waterFlowVector } from './water-field.js';
+import { extractSprayShore, planSprayBirths } from './water-spray-shore.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
 const log = createLogger('WaterSurface');
@@ -366,6 +367,11 @@ export function createWaterSurfaceSubsystem({
    * why the shader needs no "do I have a mask yet" uniform gate
    * (`tsl/no-uniform-gates`): `mesh.visible` is the gate, JS-side. */
   let maskTexture = createMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, 'linear');
+  /** The hard shore points the spray is thrown from, and the rect they were extracted over (mmp-7kx.1). */
+  let sprayShore = null;
+  let sprayData = null;
+  let sprayWhyNot = 'never asked';
+  let sprayRect = null;
   let maskInfo = null;
   let loadedUrl = null;
   let loading = false;
@@ -938,6 +944,13 @@ export function createWaterSurfaceSubsystem({
         if (!loaded) return; // already logged loudly by the loader
         maskTexture?.dispose?.();
         maskTexture = loaded.texture;
+        // THE SPRAY'S SHORE (2026-11-06, mmp-7kx.1): the hard shore points, from the bytes the loader already hands
+        // back (no readback, no second decode) — where the spray particles are thrown from.
+        // Kept by reference (it is the texture's own backing array — no copy); the points are extracted lazily
+        // against the body's REAL rect, which is still the 1x1 placeholder at this moment on a cold load.
+        sprayData = loaded.data ? { data: loaded.data, width: loaded.width, height: loaded.height } : null;
+        sprayShore = null;
+        sprayRect = null;
         maskInfo = {
           url,
           uploaded: `${loaded.width}x${loaded.height}`,
@@ -1483,6 +1496,60 @@ export function createWaterSurfaceSubsystem({
      * learned the expensive way a second time.
      */
     getFullResMaskTexture: () => (loadedUrl ? maskTexture : null),
+    /**
+     * THE SPRAY (2026-11-06, mmp-7kx.1): this frame's particle births off this floor's hard shores, and what the
+     * spray engine needs to fly them (the mask it lands them on, the current it rides). `null` = no spray here.
+     * @param {{dtSec:number, view:object, maxBirths:number}} o
+     */
+    /** Why the spray is (or is not) running here — for `MapShine.getWaterSprayStatus()`. */
+    getSprayDebug() {
+      return {
+        maskLoaded: !!loadedUrl,
+        whyNot: sprayWhyNot,
+        shorePoints: sprayShore?.count ?? 0,
+        spacingPx: sprayShore?.spacingPx ?? null,
+        rect: sprayRect,
+      };
+    },
+    planSpray({ dtSec, view, maxBirths }) {
+      if (!loadedUrl || !maskTexture || !sprayData) return (sprayWhyNot = 'mask not loaded'), null;
+      const r = waterBody.getRect();
+      if (!r || !(r.maxX - r.minX > 2) || !(r.maxY - r.minY > 2)) return (sprayWhyNot = 'water body not baked'), null;
+      if (
+        !sprayRect ||
+        sprayRect.minX !== r.minX ||
+        sprayRect.minY !== r.minY ||
+        sprayRect.maxX !== r.maxX ||
+        sprayRect.maxY !== r.maxY
+      ) {
+        sprayRect = { minX: r.minX, minY: r.minY, maxX: r.maxX, maxY: r.maxY };
+        sprayShore = extractSprayShore(sprayData.data, sprayData.width, sprayData.height, sprayRect);
+      }
+      if (!sprayShore?.count) return (sprayWhyNot = 'no hard shore in the mask'), null;
+      const state = getWaterRenderState();
+      if (state?.enabled === false) return (sprayWhyNot = 'water disabled'), null;
+      sprayWhyNot = null;
+      const p = state?.params ?? {};
+      const speed = waterFlowSpeedPx(p) ?? 0;
+      const [fx, fy] = waterFlowVector(Number.isFinite(p.flowAngleDeg) ? p.flowAngleDeg : 180);
+      const spray = Number.isFinite(p.breakSpray) ? p.breakSpray : 1;
+      const births = planSprayBirths(sprayShore, {
+        dtSec,
+        flowDir: [fx, fy],
+        flowSpeedPx: speed,
+        spray,
+        view,
+        maxBirths,
+      });
+      return {
+        births,
+        maskTexture,
+        rect: sprayRect,
+        currentPx: [fx * speed * 0.85, fy * speed * 0.85],
+        expectedDepth: lastExpectedDepth,
+        shorePoints: sprayShore.count,
+      };
+    },
     /**
      * Is this floor's water on screen this frame — absorb or in-scatter
      * visible (enabled, baked, mask loaded, depth rank resolved)? The frame

@@ -378,6 +378,7 @@ import {
   getVtPanViewerFluidStatus,
   triggerVtPanViewerFluidReaction,
   getVtPanViewerLeafShedStatus,
+  getVtPanViewerWaterSprayStatus,
   getVtPanViewerCritterStatus,
   setVtPanViewerSunHour,
   sweepVtPanViewerTimeOfDay,
@@ -10215,6 +10216,7 @@ function install() {
   MapShine.getFireStatus = () => getVtPanViewerFireStatus();
   // LEAF SHED's counts — canopy colours decoded, emitters, births per frame, the engine.
   MapShine.getLeafShedStatus = () => getVtPanViewerLeafShedStatus();
+  MapShine.getWaterSprayStatus = () => getVtPanViewerWaterSprayStatus();
 
   // THE CRITTERS' PER-FRAME COUNTS — `{smellyFlies, fireflies}`, each with the zone count, the zone
   // field's size, and every engine's tier, head-count and how much of the

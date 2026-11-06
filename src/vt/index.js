@@ -142,6 +142,7 @@ export {
   getVtPanViewerFluidStatus,
   triggerVtPanViewerFluidReaction,
   getVtPanViewerLeafShedStatus,
+  getVtPanViewerWaterSprayStatus,
   getVtPanViewerCritterStatus,
   setVtPanViewerEarlyZComposition,
   getVtPanViewerEarlyZComposition,

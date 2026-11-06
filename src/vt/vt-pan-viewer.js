@@ -504,6 +504,8 @@ import {
   // LEAF SHED (2026-10-31) — leaves and twigs torn off the canopies by a strong wind.
   createLeafShedEngine,
   createLeafShedSubsystem,
+  // WATER SPRAY (2026-11-06) — foam flecks off hard shores, real particles.
+  createWaterSprayEngine,
   // TABLE (2026-10-27) — the brass-rimmed velvet table round the scene.
   createTableSubsystem,
   TABLE_PARAMS,
@@ -9043,6 +9045,23 @@ async function startVtPanViewerUnserialized({
       },
     });
 
+    // WATER SPRAY (2026-11-06, mmp-7kx.1) — foam flecks thrown off hard shores, each on its own frame with its own
+    // throw (effects/particles/water-spray-runtime.js). The water surface plans the births (it owns the mask and the
+    // params); this owns the engine. The mask node starts on a 1x1 placeholder and is repointed once a mask loads.
+    const waterSprayMaskPlaceholder = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+    waterSprayMaskPlaceholder.needsUpdate = true;
+    const waterSpray = createWaterSprayEngine({
+      THREE,
+      capacity: 12000,
+      maskTexNode: THREE.TSL.texture(waterSprayMaskPlaceholder),
+      illumTexNode: envLight.illumTexNode,
+      colorationTexNode: envLight.colorationTexNode,
+      depthTexNode: envLight.depthTexNode,
+      depthFlagsTexNode: envLight.depthFlagsTexNode,
+    });
+    let waterSprayLive = false;
+    let waterSprayLast = null;
+
     // ------------------------------------------------------------------
     // THE WIND FIELD DEBUG OVERLAY (diag/wind-field-overlay.js, Wind.md Tier
     // 0 — "a way to visualise the field early on"). A grid of arrows over
@@ -11756,6 +11775,13 @@ async function startVtPanViewerUnserialized({
       // is a visibility check.
       // LEAF SHED — under the maggots and flies (leaves are on, or falling to, the ground), lit and
       // depth-gated the critters' way (critters/critter-surface.js).
+      // WATER SPRAY — over the water it was thrown from (the water drew in the world pass), lit like the leaves.
+      if (waterSprayLive) {
+        const prevSprayAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(waterSpray.scene, camera);
+        renderer.autoClearColor = prevSprayAutoClear;
+      }
       if (leafShed.hasContent && leafShed.scene) {
         const prevLeafAutoClear = renderer.autoClearColor;
         renderer.autoClearColor = false;
@@ -24703,6 +24729,34 @@ async function startVtPanViewerUnserialized({
         // Was its own `projectShadowOffset` (a 3× ceiling against everyone else's) and
         // the ambient light level for darkness (no cloud fade, a moonlit floor).
         const per = shadowHandle.forCaster({ heightPx: 100 });
+        // WATER SPRAY — births planned by the viewed floor's water surface, then one compute step. REAL seconds
+        // (presentation pacing, like the rain): a slowed world clock must not slow the spray.
+        {
+          const sprayFloor = view?.floorIndex ?? 0;
+          const sprayDt = lastEnvSnapshot?.env?.time?.realDtSec ?? 0;
+          const plan = waterSurfacesByFloor.get(sprayFloor)?.planSpray?.({
+            dtSec: sprayDt,
+            view: windSpawnRect,
+            maxBirths: 600,
+          });
+          waterSprayLast = plan ? { births: plan.births.length, shorePoints: plan.shorePoints } : null;
+          if (plan) {
+            const env = lastEnvSnapshot?.env;
+            const wf = windFlowVector(env?.wind?.directionDeg ?? 0);
+            const w01 = Number.isFinite(env?.wind?.speed01) ? env.wind.speed01 : 0;
+            waterSpray.setMask(plan.maskTexture, plan.rect);
+            waterSpray.setView({
+              currentPx: plan.currentPx,
+              windPx: [wf.x * w01 * 45, wf.y * w01 * 45],
+              expectedDepth: plan.expectedDepth ?? 0,
+            });
+            waterSpray.writeBirths(plan.births);
+            waterSpray.step(renderer, sprayDt);
+            waterSprayLive = waterSpray.hasContent;
+          } else {
+            waterSprayLive = false;
+          }
+        }
         leafShed.sync(renderer, {
           dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           tMs: lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
@@ -31426,6 +31480,13 @@ async function startVtPanViewerUnserialized({
       getFireStatus: () => fireSubsystem.getStatus(),
       /** Leaf Shed's own counts — canopy files decoded/pending/missing, emitters, births, the engine. */
       getLeafShedStatus: () => leafShed.getStatus(),
+      getWaterSprayStatus: () => ({
+        ...waterSpray.debugState(),
+        live: waterSprayLive,
+        lastPlan: waterSprayLast,
+        floors: [...waterSurfacesByFloor].map(([floor, s]) => ({ floor, ...(s.getSprayDebug?.() ?? {}) })),
+        viewedFloor: view?.floorIndex ?? null,
+      }),
       /**
        * THE CRITTERS' own per-frame counts — for each effect, the zone count, the field's size
        * and every engine's tier, head-count and how much of it the sky is showing.
@@ -35231,6 +35292,16 @@ export function getVtPanViewerFireStatus() {
 export function getVtPanViewerLeafShedStatus() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getLeafShedStatus();
+}
+
+/**
+ * The water spray particles' counts (mmp-7kx.1): births so far and this frame, shore points in the viewed floor's mask,
+ * whether the engine is drawing.
+ * @returns {object}
+ */
+export function getVtPanViewerWaterSprayStatus() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getWaterSprayStatus();
 }
 
 /**

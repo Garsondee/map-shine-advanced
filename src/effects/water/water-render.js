@@ -311,7 +311,7 @@ import {
   WATER_FOAM_PATCH_SIZE_PX,
 } from './water-shore.js';
 import { WATER_SIM_CLUMP_LO, WATER_SIM_CLUMP_HI, WATER_SIM_CLUMP_AA_PX } from './water-sim.js';
-import { buildMaskShoreDensity, buildFoamTexture, buildBreakSpecks } from './water-shore-mask.js';
+import { buildMaskShoreDensity, buildFoamTexture } from './water-shore-mask.js';
 import { buildDebugChannelColor } from '../debug-channel-select.js';
 import { WATER_DEBUG_CHANNELS } from './water.js';
 // Intra-zone: the ONE hex→byte decoder, already shared by the candle and by
@@ -2492,7 +2492,7 @@ export function buildWaterSurfaceMaterial({
     setShoreFoamVariation() {},
     setBreakSpray() {},
   };
-  let breakSpecks = null;
+  const breakSpecks = null;
   if (activeTier >= 4) {
     const tSecFoam = (timeMsNode ?? float(0)).mul(float(1 / 1000));
     // THE CURRENT AGAINST THE SHORE (2026-10-17, author: "make it react to the stream
@@ -2505,8 +2505,6 @@ export function buildWaterSurfaceMaterial({
     const facingDirRaw = mix(localFlowDirSafe, uFlowDir, nearBank);
     const facingDir = facingDirRaw.div(max(length(facingDirRaw), float(1e-4)));
     const bodyOutward = vec2(bodyTexNode.a, bodyTexNode.b.negate());
-    const maskUvOfWorld = (w) =>
-      vec2(clamp(w.x.sub(uMaskRect.x).div(spanX), 0, 1), clamp(w.y.sub(uMaskRect.y).div(spanY), 0, 1));
     const maskShore = buildMaskShoreDensity(THREE, {
       maskTexNode,
       maskUvAt: (offset) =>
@@ -2529,12 +2527,6 @@ export function buildWaterSurfaceMaterial({
     const downstream = smoothstep(float(-0.25), float(0.25), dot(bankTangent, uFlowDir)).mul(float(2)).sub(float(1));
     const alongBankPx = bankTangent.mul(downstream).mul(uFlowSpeedPx).mul(float(0.7));
     const currentPx = mix(localVel.mul(uFlowSpeedPx), alongBankPx, nearBank);
-    // Landed flecks ride the BULK current, which is the same everywhere. A fleck is
-    // found by undoing its drift at the pixel being shaded, so the drift must not vary
-    // between neighbouring pixels: with the local flow (≈4 px/s per px of shear beside a
-    // wall) two seconds of riding smeared every fleck to nothing — measured in the lab,
-    // no riding fleck survived. One drift for all keeps each one an exact 1×1/2×2.
-    const fleckCurrentPx = uFlowDir.mul(uFlowSpeedPx).mul(float(0.85));
     const simShoreFade = smoothstep(float(0), float(0.25), inside).mul(smoothstep(float(8), float(48), shoreDist));
     foamDensity = max(max(maskShore.density, waterSimFoam.mul(simShoreFade)), field.foam.mul(crestPatch));
     foamTexture = buildFoamTexture(THREE, {
@@ -2544,40 +2536,9 @@ export function buildWaterSurfaceMaterial({
       texturePx: maskShore.uTexturePx,
       velocityPx: currentPx,
     });
-    // BREAK SPRAY — `water-shore-mask.js#buildBreakSpecks`. Each fleck asks the EMITTER
-    // at its own spawn point — the sim pack's G (`water-sim.js#WATER_SIM_SPRAY_GAIN`:
-    // the current driving into a solid face whose water is already deep, i.e. a hard
-    // edge) — so it can fly, land and ride the current far from where it was thrown,
-    // and soft shores never throw one. Whether it landed wet or dry is the mask itself.
-    // GATED TO THE FLECK REACH OF A SHORE (W-06 — `buildBreakSpecks`' own doc).
-    // The two taps run inside that per-pixel branch, so they sample level 0
-    // explicitly (neither texture has mips: identical to the implicit LOD).
-    // The emitter band: a spray emitter sits within ~1 flow/sim texel of a
-    // solid face, read through a bilinear tap (+1 texel), measured against a
-    // body SDF good to ~1 body texel — four of the coarser texel, plus slack.
-    const simTexelWorld = max(
-      spanX.div(max(uWaterSimTexSize.x, float(1))),
-      spanY.div(max(uWaterSimTexSize.y, float(1)))
-    );
-    const bodyTexelWorld = max(
-      uBodyRect.z.sub(uBodyRect.x).div(max(uBodyTexSize.x, float(1))),
-      uBodyRect.w.sub(uBodyRect.y).div(max(uBodyTexSize.y, float(1)))
-    );
-    breakSpecks = buildBreakSpecks(THREE, {
-      worldXY: vec2(positionWorld.x, positionWorld.y),
-      tSec: tSecFoam,
-      velocityPx: fleckCurrentPx,
-      insideHere: inside,
-      sprayAt: waterSprayTexNode
-        ? (w) => waterSprayTexNode.sample(maskUvOfWorld(w)).level(float(0)).r
-        : (w) => waterSimTexNode.sample(maskUvOfWorld(w)).level(float(0)).g,
-      waterAt: (w) => maskTexNode.sample(maskUvOfWorld(w)).level(float(0)).r,
-      uSpray: maskShore.uSpray,
-      // the wind nudges a fleck in the air (2026-11-06, mmp-7kx.1)
-      windVec: uWindDir.mul(uWind01),
-      shoreAbsDist: abs(bodyTexNode.r),
-      emitterBandPx: max(simTexelWorld, bodyTexelWorld).mul(float(4)).add(float(32)),
-    });
+    // BREAK SPRAY is real particles now (2026-11-06, mmp-7kx.1): `effects/particles/water-spray-runtime.js`, births
+    // planned by `water-spray-shore.js`. The stateless fleck field that lived here moved every fleck of a group as
+    // one; `breakSpecks` stays null, so nothing here draws spray any more.
   }
   const foamDrawn = foamTexture ? (breakSpecks ? max(foamTexture, breakSpecks) : foamTexture) : null;
   const totalFoamBase = min(foamDrawn ?? max(field.foam.mul(crestPatch), waterSimFoamStructured), float(1)).mul(

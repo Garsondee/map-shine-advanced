@@ -28,6 +28,7 @@ import { run as runWaterSampling } from './water-sampling.test.mjs';
 import { run as runWaterBounds } from './water-bounds.test.mjs';
 import { run as runWaterShore } from './water-shore.test.mjs';
 import { run as runWaterShoreMask } from './water-shore-mask.test.mjs';
+import { run as runWaterSprayShore } from './water-spray-shore.test.mjs';
 import { run as runWaterRegistration } from './water-registration.test.mjs';
 import { run as runWaterSurfaceSubsystem } from './water-surface-subsystem.test.mjs';
 import { run as runWaterSurfaceRebuild } from './water-surface-rebuild.test.mjs';
@@ -70,6 +71,7 @@ const suites = [
   ['water-sampling', runWaterSampling],
   ['water-shore', runWaterShore],
   ['water-shore-mask', runWaterShoreMask],
+  ['water-spray-shore', runWaterSprayShore],
   ['water-light', runWaterLight],
   ['water-surface-subsystem', runWaterSurfaceSubsystem],
   // LAST, because these are the only suites that import the real THREE

@@ -774,6 +774,7 @@ const STARTER_GROUPS = Object.freeze({
   'moonlit-night': 'night',
   'pitch-black': 'night',
   'blood-moon': 'night',
+  'clear-still': 'weather',
   drizzle: 'weather',
   thunderstorm: 'weather',
   blizzard: 'weather',
@@ -998,6 +999,13 @@ export const STARTER_LOOKS = Object.freeze([
     [{ key: 'grade.colouriseColor', label: 'Moon colour' }]
   ),
   // ---- the weather (no hour: they play at whatever time it is) ----
+  // The blank sky (2026-11-06): nothing falling, nothing blowing. Weather only, no hour,
+  // and the neutral colour block, so it is the way back from any storm.
+  starter('clear-still', 'Clear and still', {
+    'weather.archetype': 'clear',
+    'wind.speed01': 0,
+    ...colour({}),
+  }),
   starter('drizzle', 'Drizzle', {
     'weather.archetype': 'drizzle',
     'weather.temperature01': 0.45,
@@ -1487,7 +1495,7 @@ export const STARTER_LOOKS = Object.freeze([
 ]);
 
 /** Bump when {@link STARTER_LOOKS} is replaced; {@link upgradeStarters} brings a stored library up once. */
-export const STARTER_SET_VERSION = 3;
+export const STARTER_SET_VERSION = 4;
 
 /** Starter ids of earlier sets, retired by {@link upgradeStarters}. */
 export const RETIRED_STARTER_IDS = Object.freeze([

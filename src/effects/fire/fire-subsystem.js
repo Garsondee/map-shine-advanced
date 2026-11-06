@@ -49,6 +49,14 @@ import { SHADOW_NOON_REFERENCE_DEPTH } from '../shadow-access.js';
 const EMBER_CAPACITY = 48;
 
 /**
+ * THE SMOKE'S HEIGHTS (2026-11-06, mmp-9un.1, Ingram: smoke must sit above bushes and blend through trees), in the
+ * scene's elevation units above the fire. Bushes default to 2 (max 30 is rare), trees to 25: smoke clears everything
+ * below LOW, shows at half strength through what sits between LOW and HIGH, and hides under anything taller (a roof).
+ */
+const SMOKE_OVER_FT = 6;
+const SMOKE_THROUGH_FT = 40;
+
+/**
  * The world size V2's absolute sprite sizes implicitly assume. The ember engine still scales to the fire's own measured
  * diameter, exactly as before (a 42-55 px hearth must not get 150-195 px sprites); see `fire-particle-runtime.js`.
  */
@@ -404,8 +412,16 @@ export function createFireSubsystem({
 
     // THE DEPTH-AUTHORITY OCCLUSION GATE'S INPUT (mythica-machina-press#469) — ONE value per sync, from a representative
     // fire (a floor's fires overwhelmingly share one ground elevation), not per billow.
-    const expectedDepth =
-      typeof resolveExpectedDepth === 'function' ? resolveExpectedDepth(fires[0]?.elevation ?? 0) : 0;
+    const fireElevation = fires[0]?.elevation ?? 0;
+    const expectedDepth = typeof resolveExpectedDepth === 'function' ? resolveExpectedDepth(fireElevation) : 0;
+    // The smoke's own gates. An indoor fire's smoke never reaches past its roof, so only an outdoor one blends through
+    // the taller band (a canopy) — indoors both gates sit at the low height.
+    const smokeExpectedDepthLow =
+      typeof resolveExpectedDepth === 'function' ? resolveExpectedDepth(fireElevation + SMOKE_OVER_FT) : 0;
+    const smokeExpectedDepthHigh =
+      typeof resolveExpectedDepth === 'function' && outdoor01 >= 0.5
+        ? resolveExpectedDepth(fireElevation + SMOKE_THROUGH_FT)
+        : smokeExpectedDepthLow;
 
     const effectiveCloud = cloud ?? EMPTY_SPAWN_CLOUD;
     const rect =
@@ -452,6 +468,8 @@ export function createFireSubsystem({
         mPerPx,
         quality: firePlan.spriteCountScale,
         expectedDepth,
+        smokeExpectedDepthLow,
+        smokeExpectedDepthHigh,
         eye,
         sunShadow: smokeSunShadow(getShadowHandle?.() ?? null),
         smokeSky: getSmokeSkyRgb?.() ?? null,

@@ -316,6 +316,11 @@ export function createBillowRenderer({
     // the fire stands behind) is stamped onto a cloud that floats over those walls. Default: no cap.
     smokeSky: uniform(vec3(64, 64, 64)),
     expectedDepth: uniform(float(0)),
+    // THE SMOKE'S OWN GATES (2026-11-06, mmp-9un.1): smoke rises, so it is gated at two heights above the fire instead of
+    // at the ground. Low: anything below it (a bush) never hides the smoke. High: anything between low and high (a tree
+    // canopy) lets the smoke through at half strength. Anything above both (a roof) still hides it. 0 = no gate (ground).
+    smokeExpectedDepthLow: uniform(float(0)),
+    smokeExpectedDepthHigh: uniform(float(0)),
     // THE SUN'S SHADOW (2026-11-01, the shadow consistency pass): xy = the shadow's unit
     // direction on the map (away from the sun), z = its length as a share of the box's
     // shadow room, w = the shared darkness relative to clear noon (0 at night). The
@@ -784,15 +789,20 @@ export function createBillowRenderer({
       min(uv0.x.div(U.texel.x), float(1).sub(uv0.x).div(U.texel.x)),
       min(uv0.y.div(U.texel.y), float(1).sub(uv0.y).div(U.texel.y))
     );
-    let gate = clamp(edgePxIn, float(0), float(1));
+    const edgeGate = clamp(edgePxIn, float(0), float(1));
+    let gate = float(1);
+    let smokeGate = float(1);
     if (depth?.depthTexNode && depth?.buildGate) {
-      gate = gate.mul(
+      const at = (expectedDepth) =>
         depth.buildGate(TSL, {
           depthTexNode: depth.depthTexNode,
           depthFlagsTexNode: depth.depthFlagsTexNode,
-          expectedDepth: U.expectedDepth,
-        })
-      );
+          expectedDepth,
+        });
+      gate = at(U.expectedDepth);
+      const low = at(U.smokeExpectedDepthLow);
+      const high = at(U.smokeExpectedDepthHigh);
+      smokeGate = low.add(float(1).sub(low).mul(high).mul(0.5));
     }
     // bottom to top: the smoke's shadow on the ground (black), the coal bed (painted over the ground), the flame (its glow added),
     // and OVER it the smoke, which fades in with its age (young smoke is clear, so it never overpowers the flame) and is only
@@ -804,8 +814,10 @@ export function createBillowRenderer({
     const underRgb = flamePre.add(coalPre.mul(float(1).sub(cover)));
     const fadeIn = smoothstep(float(0), max(U.smokeFadeIn, float(0.001)), toneS);
     const sOver = sCover.mul(mix(float(1), fadeIn, step1(U.smokeFadeIn))).mul(mix(float(1), U.smokeOverFlame, cover));
-    const outA = sOver.add(underA.mul(float(1).sub(sOver)));
-    const outRgb = smokeLinear.mul(sOver).add(underRgb.mul(float(1).sub(sOver)));
+    // the flame, coals and ground shadow are gated at the fire's own height; the smoke over them at its own (above)
+    const sOverG = sOver.mul(smokeGate);
+    const outA = sOverG.add(underA.mul(gate).mul(float(1).sub(sOverG)));
+    const outRgb = smokeLinear.mul(sOverG).add(underRgb.mul(gate).mul(float(1).sub(sOverG)));
     // THE BLOOM COUNTER: paint s*T so that the scene's bloom adds its share and hands T back (fire-billow-bloom.js). `s` is
     // solved from the colour's own max channel and this fire's on-screen size; it is exactly 1 when the bloom is off.
     const brT = max(max(outRgb.r, outRgb.g), outRgb.b);
@@ -813,7 +825,7 @@ export function createBillowRenderer({
     // the hottest cream heart is HDR on top of the (bloom-countered) painted colour, so it really does trigger the scene's bloom
     const coreAmt = smoothstep(float(0.7), float(1.0), tauB).mul(cover).mul(U.coreBloom).mul(float(1).sub(sOver));
     const coreHdr = vec3(1.0, 0.86, 0.5).mul(coreAmt);
-    return vec4(outRgb.mul(counter).add(coreHdr).mul(gate), outA.mul(gate));
+    return vec4(outRgb.mul(counter).add(coreHdr.mul(gate)).mul(edgeGate), outA.mul(edgeGate));
   })();
   resolveMaterial.transparent = true;
   resolveMaterial.depthTest = false;

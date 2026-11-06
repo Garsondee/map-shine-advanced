@@ -591,6 +591,7 @@ export function createBillowEngine({
      * @param {number} ctx.mPerPx
      * @param {number} [ctx.quality=1] the tier's lobe budget scale
      * @param {number} [ctx.expectedDepth=0]
+     * @param {number} [ctx.smokeExpectedDepthLow] [ctx.smokeExpectedDepthHigh] the smoke's own gates (mmp-9un.1)
      * @param {number[]} [ctx.sunShadow] [dirX, dirY, length 0..1, darkness vs clear noon] — the smoke's ground shadow
      * @param {number[]} [ctx.smokeSky] [r, g, b] sRGB — the scene's light with no lamp in it (the smoke reads no more than this)
      * @returns {{lifeByFire: Map<string,{vitality:number,coal:number,phase:string,stress01:number}>}}
@@ -1000,6 +1001,15 @@ export function createBillowEngine({
         smokeLinePx: billowSmokeScale(pxPerWorld, 50).linePx * (br.smokeLineWidth ?? 1),
       });
       renderer.uniforms.expectedDepth.value = Number.isFinite(ctx.expectedDepth) ? ctx.expectedDepth : 0;
+      // the smoke's own gates (mmp-9un.1); absent = the ground gate, as before
+      const uSmokeLow = renderer.uniforms.smokeExpectedDepthLow;
+      const uSmokeHigh = renderer.uniforms.smokeExpectedDepthHigh;
+      if (uSmokeLow && uSmokeHigh) {
+        uSmokeLow.value = Number.isFinite(ctx.smokeExpectedDepthLow)
+          ? ctx.smokeExpectedDepthLow
+          : renderer.uniforms.expectedDepth.value;
+        uSmokeHigh.value = Number.isFinite(ctx.smokeExpectedDepthHigh) ? ctx.smokeExpectedDepthHigh : uSmokeLow.value;
+      }
       // the smoke's ground shadow follows the shared sun (2026-11-01); absent = the old fixed look
       if (Array.isArray(ctx.sunShadow) && ctx.sunShadow.length === 4 && ctx.sunShadow.every(Number.isFinite)) {
         renderer.uniforms.sunShadow.value.set(...ctx.sunShadow);

@@ -62,9 +62,9 @@ export const FOG_OF_WAR_PARAMS = Object.freeze({
   revealSec: {
     type: 'float',
     min: 0,
-    max: 2,
+    max: 5,
     step: 0.01,
-    default: 0.32,
+    default: 0.9,
     category: 'Reveal',
     label: 'Reveal fade',
     help: 'Seconds for newly seen ground to fade in. Anything leaving sight still vanishes at once. 0 reveals instantly.',

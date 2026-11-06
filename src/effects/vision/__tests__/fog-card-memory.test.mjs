@@ -43,8 +43,8 @@ export function run(t) {
   );
   const d = resolveFogOfWarLook({ enabled: true, params: {} }, 150);
   ok(
-    'look: defaults are the look that shipped (edge 0.32 squares, ink 0.6, reveal 0.32 s)',
-    d.featherGrid === 0.32 && d.ink === 0.6 && d.revealTauSec === 0.32
+    'look: defaults are the look that shipped (edge 0.32 squares, ink 0.6, reveal 0.9 s: slowed 2026-11-06)',
+    d.featherGrid === 0.32 && d.ink === 0.6 && d.revealTauSec === 0.9
   );
   ok('look: sizes are grid squares turned into world px', d.inkCellPx === 0.6 * 150 && d.mistCellPx === 3.5 * 150);
   ok('look: memory brightness default matches the old EXPLORED_DIM_FACTOR', d.memoryDim === 0.35);

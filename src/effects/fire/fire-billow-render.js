@@ -526,6 +526,11 @@ export function createBillowRenderer({
   resolveMaterial.fragmentNode = Fn(() => {
     const local = vWorld.sub(U.rectMin);
     const uv0 = local.div(U.rectSize);
+    // ZOOM-STABLE DETAIL (2026-11-06, mmp-9un.2): the painterly noise is world-anchored, so zoomed out its fine octaves
+    // shrank below a pixel of the field and sparkled/swam. Each fine octave now fades out as its period drops under ~4
+    // field texels (the field follows the screen's density), so what survives is only detail the screen can draw.
+    const worldPerTexel = U.rectSize.x.mul(U.texel.x);
+    const bandLimit = (freq) => float(1).sub(smoothstep(float(0.12), float(0.25), worldPerTexel.mul(freq)));
     // ── edge roughening: slow noise advected through the lookup, two octaves ──
     const pn = local.mul(U.warpFreq);
     const tt = U.time.mul(U.warpSpeed);
@@ -653,7 +658,7 @@ export function createBillowRenderer({
     const S0 = s0.x;
     const grainBroad = mx_noise_float(vec3(local.x.mul(0.035), local.y.mul(0.035), tt.mul(0.25).add(21.7)));
     const grainFine = mx_noise_float(vec3(local.x.mul(0.16).add(13.1), local.y.mul(0.16), tt.mul(0.6).add(4.2)));
-    const grain = grainBroad.mul(0.65).add(grainFine.mul(0.35));
+    const grain = grainBroad.mul(0.65).add(grainFine.mul(0.35).mul(bandLimit(0.16)));
     const S = S0.add(grain.mul(U.smokeGrain).mul(0.7));
     const toneS = s0.y.div(max(S0, float(0.001))).clamp(0, 1);
     // the field's B channel is steam (+) or soot (-), density weighted
@@ -680,7 +685,11 @@ export function createBillowRenderer({
     // through in places. Nothing is quantised to a pixel grid; the solid body and the clear air are untouched.
     const scumble = mx_noise_float(vec3(local.x.mul(0.06), local.y.mul(0.045), tt.mul(0.3).add(17.3)))
       .mul(0.6)
-      .add(mx_noise_float(vec3(local.x.mul(0.15).add(4.1), local.y.mul(0.11), tt.mul(0.5).add(2.6))).mul(0.4));
+      .add(
+        mx_noise_float(vec3(local.x.mul(0.15).add(4.1), local.y.mul(0.11), tt.mul(0.5).add(2.6)))
+          .mul(0.4)
+          .mul(bandLimit(0.15))
+      );
     const fringe = float(1).sub(smoothstep(float(0.5), float(0.95), sCoverSoft));
     const sCover = sCoverSoft.mul(
       float(1).sub(
@@ -716,7 +725,11 @@ export function createBillowRenderer({
     // (the strokes run up the page, taller than wide, like a loaded brush dragged along a column)
     const dabN = mx_noise_float(vec3(local.x.mul(0.05).add(51.3), local.y.mul(0.02), tt.mul(0.12)))
       .mul(0.65)
-      .add(mx_noise_float(vec3(local.x.mul(0.11).add(7.7), local.y.mul(0.045), tt.mul(0.2).add(3.3))).mul(0.35));
+      .add(
+        mx_noise_float(vec3(local.x.mul(0.11).add(7.7), local.y.mul(0.045), tt.mul(0.2).add(3.3)))
+          .mul(0.35)
+          .mul(bandLimit(0.11))
+      );
     const dabT = smoothstep(float(-0.22), float(0.22), dabN);
     const dabThin = float(1).sub(smoothstep(float(0.0), float(0.7), dens));
     sRgb = mix(sRgb, mix(smokeDabCool, smokeDabWarm, dabT), U.smokeDabs.mul(float(0.5).add(dabThin.mul(0.5))));

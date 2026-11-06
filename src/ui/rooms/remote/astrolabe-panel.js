@@ -550,13 +550,13 @@ function renderCompactAstrolabe(container, ctx) {
     setTip(speedBtn, `How fast the clock runs (${formatRate(TIME_RATE_STEPS[idx])})`);
     modeNote.textContent = free ? 'Free clock' : 'World clock';
     modeNote.title = free
-      ? 'You set the hour. Change it in Prep.'
-      : "Foundry's game time sets the hour. Change it in Prep.";
+      ? 'You set the hour. Change it in Config.'
+      : "Foundry's game time sets the hour. Change it in Config.";
   }
 
   ctx.mountAstrolabeDial(dialSlot, {
     onLockedAttempt: () =>
-      onStatus('The World clock sets the hour — use Jump, or switch to the Free clock in Prep to drag it.'),
+      onStatus('The World clock sets the hour — use Jump, or switch to the Free clock in Config to drag it.'),
     onWindClick: ctx.onWindClick,
     onDateClick: () => jumpBtn.click(),
   });

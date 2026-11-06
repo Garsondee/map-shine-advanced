@@ -180,8 +180,8 @@ export function renderLooksBoard(container, ctx, env) {
       const timeSkipped = result.skipped.some((s) => s.key === 'time.hour');
       env.onStatus(
         timeSkipped
-          ? 'Played everything but the hour — the World clock owns time (switch in Prep).'
-          : `Played, but ${result.skipped.length} saved setting(s) no longer exist (Prep → Looks → Tidy).`
+          ? 'Played everything but the hour — the World clock owns time (switch in Config).'
+          : `Played, but ${result.skipped.length} saved setting(s) no longer exist (Config → Looks → Tidy).`
       );
     } else env.onStatus('');
     paint();

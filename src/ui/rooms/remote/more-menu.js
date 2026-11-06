@@ -116,7 +116,7 @@ export function installMoreMenu(anchor, host, ctx) {
   dev.type = 'button';
   function paintDev() {
     const on = ctx.getDevTools();
-    dev.innerHTML = `${iconMarkup('flask')}<span>Developer tools in Prep</span><span class="msa-more-state">${on ? 'On' : 'Off'}</span>`;
+    dev.innerHTML = `${iconMarkup('flask')}<span>Developer tools in Config</span><span class="msa-more-state">${on ? 'On' : 'Off'}</span>`;
     dev.setAttribute('aria-pressed', String(on));
   }
   dev.addEventListener('click', () => {

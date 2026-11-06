@@ -72,7 +72,7 @@ export const REMOTE_PRESSABLES = Object.freeze([
   '.msa-debug-more',
   '.msa-foot-btn', // the footer's buttons and links
   // The 2026-11-01 tabbed redesign:
-  '.msa-tab', // Play / Mix / Prep
+  '.msa-tab', // Play / Mix / Config
   '.msa-scope', // the header's This scene / All scenes chip
   '.msa-look', // a Look tile
   '.msa-look-add', // the Save look tile

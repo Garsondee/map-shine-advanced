@@ -64,7 +64,7 @@ const DEVTOOLS_STORAGE_KEY = 'msa-remote-devtools';
 export const REMOTE_TABS = Object.freeze([
   { id: 'play', label: 'Play', title: 'Everything you reach for mid-session: Looks, time, effects, GO.' },
   { id: 'mix', label: 'Mix', title: 'The weather and the mixer — every fader.' },
-  { id: 'prep', label: 'Prep', title: 'Set once: the clock, transitions, player lights, your Looks library.' },
+  { id: 'prep', label: 'Config', title: 'Options you change now and then, not every minute: the clock, transitions, player lights, your Looks library.' },
 ]);
 
 // THE REMOTE'S DEFAULT PLACEMENT — vertically centred on the left, clear of

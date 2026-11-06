@@ -306,6 +306,8 @@ export function installRemote(opts = {}) {
   let npBar = null;
   let npSnap = null;
   let astrolabe = null;
+  let astroHome = null;
+  let mixAstroAnchor = null;
   let looksBoard = null;
   let runningOrder = null;
   let pads = null;
@@ -401,6 +403,13 @@ export function installRemote(opts = {}) {
       onWindClick: () => windPopover.toggle(),
     });
 
+    // The astrolabe is one dial that mounts once: it lives under Play's Now Playing bar and
+    // travels to the top of Mix (showTab) so the clock is in reach while mixing weather.
+    if (astrolabe?.root) {
+      astroHome = document.createComment('astrolabe-home');
+      astrolabe.root.after(astroHome);
+    }
+
     if (opts.looks) {
       looksBoard = renderLooksBoard(play, opts.looks, fadeEnv);
       fadeSlots.set('play', looksBoard.fadeSlot);
@@ -424,6 +433,7 @@ export function installRemote(opts = {}) {
     mixFadeSlot.className = 'msa-fade-slot';
     mixHead.append(mixTitle, mixFadeSlot);
     mix.appendChild(mixHead);
+    mixAstroAnchor = mixHead;
     fadeSlots.set('mix', mixFadeSlot);
     if (opts.weatherBoard) {
       const wxHost = document.createElement('div');
@@ -467,6 +477,13 @@ export function installRemote(opts = {}) {
       b.tabIndex = tid === id ? 0 : -1;
     }
     for (const [tid, pane] of panes) pane.hidden = tid !== id;
+    if (astrolabe?.root && astroHome?.parentNode && mixAstroAnchor) {
+      if (id === 'mix') {
+        if (astrolabe.root.previousSibling !== mixAstroAnchor) mixAstroAnchor.after(astrolabe.root);
+      } else if (astroHome.previousSibling !== astrolabe.root) {
+        astroHome.before(astrolabe.root);
+      }
+    }
     const slot = fadeSlots.get(id);
     if (slot && fadeTime.root.parentElement !== slot) slot.appendChild(fadeTime.root);
     body.scrollTop = 0;

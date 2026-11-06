@@ -563,7 +563,8 @@ function renderCompactAstrolabe(container, ctx) {
   wrap.append(scaler, transport, statusLine);
   container.appendChild(wrap);
   sync();
-  return { syncFlowState: sync };
+  // `root` lets the shell carry the one dial between the Play and Mix tabs (the dial mounts once).
+  return { syncFlowState: sync, root: wrap };
 }
 
 /**

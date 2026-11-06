@@ -46,4 +46,18 @@ export function run(t) {
     'a registry made without the option never forces',
     Math.abs(plain.resolveAndApply('bloom', layers).params[key] - tuned) < 1e-9
   );
+
+  // perScene params (2026-11-06): a defaults lock must never override a value that describes THIS map.
+  const fake = {
+    id: 'fakePerScene',
+    params: {
+      look: { type: 'float', min: 0, max: 1, default: 0.5, label: 'Look' },
+      heading: { type: 'float', min: 0, max: 360, default: 180, label: 'Heading', perScene: true },
+    },
+  };
+  const real = createEffectRegistry({ forceDefaults: () => true });
+  real.register({ ...BLOOM, ...fake, manifestFake: true }, () => {});
+  const ps = real.resolveAndApply('fakePerScene', { paramLayers: [{ look: 0.9, heading: 45 }] });
+  ok('forcing: a perScene param keeps the scene value', ps.params.heading === 45);
+  ok('forcing: an ordinary param still returns to its default', ps.params.look === 0.5);
 }

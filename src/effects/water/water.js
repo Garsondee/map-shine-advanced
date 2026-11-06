@@ -244,6 +244,8 @@ export const WATER_PARAMS = Object.freeze({
     // Matches WATER_TIER2_FLOW_ANGLE_DEG (water-field.js); a Node test pins the
     // two equal, the same way `chop` and `glossiness` are pinned.
     default: 180,
+    // A fact about THIS map, not a look: a defaults lock / profile must never override it.
+    perScene: true,
     category: 'Motion',
     label: 'Flow direction',
     help: 'Which way the current runs, as a compass heading — the direction the water travels TOWARD. North is up the screen. Point it downstream and the whole surface travels that way; the banks still bend it locally, so you are setting the general heading, not steering every meander. A pond does not care: turn the Current switch off instead, which keeps this heading safe for whenever the water runs again.',

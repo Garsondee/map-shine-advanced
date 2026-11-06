@@ -67,6 +67,20 @@ import { resolveEffectEnabled, resolveEffectParams, resolveEffectTier } from './
  *   resolveAndApply: (id: string, layers?: object) => ResolvedEffect,
  * }}
  */
+/**
+ * The param layers cut down to the params flagged `perScene: true` in the schema.
+ * @param {Record<string, {perScene?: boolean}>|undefined} schema @param {object[]} layers @returns {object[]}
+ */
+function keepPerSceneParams(schema, layers) {
+  const keys = Object.keys(schema ?? {}).filter((k) => schema[k]?.perScene === true);
+  if (keys.length === 0) return [];
+  return layers.map((layer) => {
+    const kept = {};
+    if (layer && typeof layer === 'object') for (const k of keys) if (k in layer) kept[k] = layer[k];
+    return kept;
+  });
+}
+
 export function createEffectRegistry({ forceDefaults = () => false } = {}) {
   /** @type {Map<string, {manifest: object, apply: Function}>} */
   const entries = new Map();
@@ -131,8 +145,11 @@ export function createEffectRegistry({ forceDefaults = () => false } = {}) {
     // whose ladder is tier-0-only always get 0, which is exactly right: their
     // manifest says they have nothing to spend a better machine on.
     const { tier, maxTier, source } = resolveEffectTier(entry.manifest, layers);
-    // FORCE DEFAULTS (foundry/force-defaults.js): no param layers at all = the manifest's own defaults.
-    const paramLayers = forceDefaults() ? [] : (layers?.paramLayers ?? []);
+    // FORCE DEFAULTS (foundry/force-defaults.js): no param layers at all = the manifest's own defaults,
+    // EXCEPT params flagged `perScene: true` (2026-11-06) — values that describe THIS map, not a look
+    // (water flow direction), so a defaults lock must never override them.
+    const allLayers = layers?.paramLayers ?? [];
+    const paramLayers = forceDefaults() ? keepPerSceneParams(entry.manifest.params, allLayers) : allLayers;
     const { values, rejected } = resolveEffectParams(entry.manifest.params, paramLayers);
     const resolved = {
       enabled,

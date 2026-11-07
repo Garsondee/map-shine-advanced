@@ -49,8 +49,10 @@
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
 import { buildWorldSpaceOutdoorsGate } from '../../lighting/environmental-light.js';
+import { readFileSync } from 'node:fs';
 import {
   waterSunThroughWater,
+  waterSunBedFactor,
   buildWaterSurfaceMaterial,
   WATER_DEFAULT_TIER,
   WATER_PRESENCE_EDGE0,
@@ -923,6 +925,29 @@ export function run(t) {
       Math.abs(noon.causticGate - 1) < 1e-6 && at(90, 0).causticGate === 0 && at(0).causticGate < 0.05
     );
     ok('sun through water: the sun’s share is key / (key + fill)', Math.abs(noon.sunShare - 1 / 1.4) < 1e-6);
+    // mmp-k6r.1: the Fresnel loss once dimmed DRY LAND over the water's whole mesh (a hard band at its edge).
+    for (const sun of [noon, low]) {
+      const dry = waterSunBedFactor({ ...sun, opticalDepth: 0, presence: 0 });
+      const wet = waterSunBedFactor({ ...sun, opticalDepth: 0, presence: 1 });
+      ok(
+        `sun through water: dry land is untouched (factor exactly 1, transmitted ${sun.transmitted.toFixed(2)})`,
+        dry === 1
+      );
+      ok('sun through water: open water still loses the reflected share', wet < 1);
+    }
+    ok(
+      'sun through water: a low sun darkens the water bed far more than a high one',
+      waterSunBedFactor({ ...low, opticalDepth: 1, presence: 1 }) <
+        waterSunBedFactor({ ...noon, opticalDepth: 1, presence: 1 }) - 0.2
+    );
+    {
+      const src = readFileSync(new URL('../water-render.js', import.meta.url), 'utf8');
+      const block = src.slice(src.indexOf('const sunBedFactor = '), src.indexOf('const sunBedFactor = ') + 400);
+      ok(
+        'sun through water: the shader gates sunBedFactor by `inside` (mix toward 1)',
+        /mix\(\s*float\(1\)[\s\S]*inside\s*\)/.test(block)
+      );
+    }
     ok(
       'sun through water: the azimuth is the key’s horizontal direction, unit length',
       Math.abs(Math.hypot(low.azX, low.azY) - 1) < 1e-6 && low.azX > 0.99

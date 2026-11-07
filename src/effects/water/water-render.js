@@ -1039,6 +1039,19 @@ export function waterSunThroughWater(sky) {
   return { azX: az[0], azY: az[1], cosRefracted, extraPath: 1 / cosRefracted - 1, transmitted, sunShare, causticGate };
 }
 
+/**
+ * CPU twin of the shader's `sunBedFactor` — what the absorb multiply does to the bed's direct sun. `presence` is the
+ * shader's `inside` (0 on dry land, 1 in water), `opticalDepth` is `σ·depth01` for one channel. Dry land must come out
+ * exactly 1 (mmp-k6r.1: it once came out `1 − share·(1 − transmitted)`, a band over the water's whole mesh).
+ * @param {{sunShare:number, sunVis?:number, transmitted:number, extraPath:number, opticalDepth:number, presence:number}} a
+ */
+export function waterSunBedFactor({ sunShare, sunVis = 1, transmitted, extraPath, opticalDepth, presence }) {
+  const share = sunShare * sunVis;
+  const wet = 1 - share + share * transmitted * Math.exp(-opticalDepth * extraPath);
+  const p = Math.min(1, Math.max(0, presence));
+  return 1 + (wet - 1) * p;
+}
+
 export function buildWaterSurfaceMaterial({
   THREE,
   maskTexture,
@@ -2625,10 +2638,19 @@ export function buildWaterSurfaceMaterial({
   // extra path), so at golden hour the bed falls dark while the surface takes the
   // light as glint. Only the sun's share of the daylight is touched, and only
   // where the sun reaches.
+  // ⚠️ ONLY WHERE THERE IS A SURFACE (2026-11-07, mmp-k6r.1 / mmp-bh9.2 — Ingram: "dark lines / sections at the top and
+  // bottom of maps", gone with water off). The Fresnel loss `transmitted` is < 1 even at depth 0, so this factor used to
+  // dim DRY LAND across the whole water mesh — the water's padded AABB — and its edge drew a full-width step: ~2% at noon
+  // (the faint seams of mmp-k6r.4), up to ~45% at a low sun (the dusk/dawn dark south of Docklands). Mixed by `inside`,
+  // dry land is exactly 1, the multiply's identity. CPU twin: `waterSunBedFactor`.
   const sunShareHere = uSunWater.y.mul(specular.sunVis);
-  const sunBedFactor = float(1)
-    .sub(sunShareHere)
-    .add(sunShareHere.mul(uSunWater.x).mul(exp(sigma.negate().mul(depth01).mul(uSunWater.z))));
+  const sunBedFactor = mix(
+    float(1),
+    float(1)
+      .sub(sunShareHere)
+      .add(sunShareHere.mul(uSunWater.x).mul(exp(sigma.negate().mul(depth01).mul(uSunWater.z)))),
+    inside
+  );
 
   // ============================================================================
   // TIER 5 — REFRACTION (C5, Water-Testament.md §2.5) — landed 2026-08-23

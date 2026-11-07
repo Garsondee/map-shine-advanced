@@ -4,7 +4,7 @@
  *
  * Real Foundry, never the shader lab (Ingram, 2026-11-07). On 'MSA Test - Light Matrix' (one cell per
  * Foundry light setting / animation type, tools/test-world/fixture.mjs) it captures the SAME camera twice:
- *   1. NATIVE: the scene's `flags.map-shine-advanced.enabled` set to false, page reloaded, Foundry draws it.
+ *   1. NATIVE: the client setting `msaEnabled` off, page reloaded, Foundry draws it.
  *   2. MSA: enabled again, every MSA effect's GM switch Off (make-test-world neutral --effects off), clear sky.
  * Animated lights are frozen by pausing the game for both shots (Foundry animates on its own ticker, so
  * animated cells are compared on their average look, not frame by frame: noted per cell).
@@ -41,7 +41,8 @@ async function settled(page, sec = 240) {
     const ok = await page
       .evaluate(async () => {
         if (!globalThis.game?.ready || !globalThis.canvas?.ready) return false;
-        const enabled = canvas.scene?.flags?.['map-shine-advanced']?.enabled === true;
+        // MSA's real switch is the per-client `msaEnabled` setting (the scene's `enabled` flag is a V2 leftover).
+        const enabled = game.settings.get('map-shine-advanced', 'msaEnabled') !== false;
         if (!enabled) return true; // native: Foundry's canvas is ready
         const r = await globalThis.MapShine?.debug?.runReport?.('scene-settled');
         const v = typeof r === 'string' ? JSON.parse(r) : r;
@@ -127,9 +128,9 @@ async function main() {
   const setEnabled = (on) =>
     page.evaluate(
       async ({ name, on }) => {
-        const s = game.scenes.getName(name);
-        await s.update({ 'flags.map-shine-advanced.enabled': on });
-        await s.view();
+        // Per-client MSA switch (takes effect on reload); the scene's `enabled` flag is ignored by MSA.
+        await game.settings.set('map-shine-advanced', 'msaEnabled', on);
+        await game.scenes.getName(name).view();
         if (!game.paused) await game.togglePause(true, true);
       },
       { name: SCENE, on }

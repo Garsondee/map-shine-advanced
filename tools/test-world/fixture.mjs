@@ -12,7 +12,7 @@
  * are not secrets and must never be reused anywhere real.
  */
 
-export const FIXTURE_VERSION = 1;
+export const FIXTURE_VERSION = 2;
 
 /** Test users: one GM already exists in every world; these are the players. */
 export const TEST_USERS = Object.freeze([
@@ -85,6 +85,18 @@ export function lightMatrix(animationTypes) {
     { key: 'static-att1', config: { color: null, attenuation: 1, luminosity: 0.5 } },
     { key: 'static-lum-high', config: { color: null, attenuation: 0.5, luminosity: 0.9 } },
     { key: 'static-negative', config: { color: null, attenuation: 0.5, luminosity: -0.5 } },
+    // mmp-ynr.2 (2026-11-07): the light's own adjustments, which Foundry applies to the art under the light too
+    // (its per-light background layer, mmp-ynr.7), and the coloration techniques (Foundry's ids, on a warm colour).
+    { key: 'static-sat-grey', config: { color: null, attenuation: 0.5, luminosity: 0.5, saturation: -1 } },
+    { key: 'static-sat-vivid', config: { color: '#ff9b40', attenuation: 0.5, luminosity: 0.5, saturation: 1 } },
+    { key: 'static-contrast-up', config: { color: null, attenuation: 0.5, luminosity: 0.5, contrast: 1 } },
+    { key: 'static-contrast-down', config: { color: null, attenuation: 0.5, luminosity: 0.5, contrast: -1 } },
+    { key: 'static-shadows', config: { color: null, attenuation: 0.5, luminosity: 0.5, shadows: 1 } },
+    { key: 'static-alpha-full', config: { color: '#ff9b40', attenuation: 0.5, luminosity: 0.5, alpha: 1 } },
+    ...[0, 2, 3, 4, 7, 10].map((coloration) => ({
+      key: `static-coloration-${coloration}`,
+      config: { color: '#ff9b40', attenuation: 0.5, luminosity: 0.5, coloration },
+    })),
   ];
   const cells = [
     ...statics.map((s) => ({ key: s.key, label: s.key, config: s.config, animation: null })),

@@ -61,10 +61,12 @@ async function settled(page, sec = 240) {
 async function frame(page) {
   await page.evaluate(async () => {
     const d = canvas.dimensions;
+    // Fit the whole matrix (it grows with the fixture), never closer than 0.2.
+    const fit = Math.min(globalThis.innerWidth / d.sceneWidth, globalThis.innerHeight / d.sceneHeight) * 0.95;
     await canvas.animatePan({
       x: d.sceneX + d.sceneWidth / 2,
       y: d.sceneY + d.sceneHeight / 2,
-      scale: 0.2,
+      scale: Math.min(0.2, fit),
       duration: 0,
     });
   });

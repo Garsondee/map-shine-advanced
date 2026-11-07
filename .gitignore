@@ -61,3 +61,6 @@ tools/oracle-sync/oracle-sync.config.json
 *.ppk
 tools/oracle-sync/*.log
 tools/oracle-sync/*.lock
+# tools/foundry-cdp: per-client Chrome profiles and the local client registry.
+tools/foundry-cdp/.profiles/
+tools/foundry-cdp/clients.json

@@ -39,6 +39,7 @@ import { run as runTileMotionNodes } from './tile-motion-nodes.test.mjs';
 import { run as runLens } from './lens.test.mjs';
 import { run as runLensMotion } from './lens-motion.test.mjs';
 import { run as runLensRender } from './lens-render.test.mjs';
+import { run as runLensZoom } from './lens-zoom.test.mjs';
 import { run as runWindTrails } from './wind-trails.test.mjs';
 import { run as runLeafShed } from './leaf-shed.test.mjs';
 import { run as runCandleWindState } from './candle-wind-state.test.mjs';
@@ -106,6 +107,7 @@ const suites = [
   ['tile-motion-nodes', runTileMotionNodes],
   ['lens', runLens],
   ['lens-motion', runLensMotion],
+  ['lens-zoom', runLensZoom],
   ['lens-render', runLensRender],
 ];
 for (const [name, fn] of suites) {

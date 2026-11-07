@@ -627,6 +627,7 @@ import {
   computeAutoFocusShiftPx,
   computeZoomTriggerStrength,
   computeCameraMotionBlurPx,
+  lensZoomCurvature,
   computeZoomMotionBlurPx,
   computeLightBurnDecayFactor,
   computeLightBurnDarknessGate,
@@ -12735,7 +12736,10 @@ async function startVtPanViewerUnserialized({
       // ── TIER 0 — always pushed; the shader compiles these in from tier 0
       // regardless of which higher tiers are also active. ─────────────────
       u.uTimeSec.value = nowSec;
-      u.uDistortion.value = lensNum(p.distortion, -0.1);
+      // Zoom-linked (mmp-ilo.4): the card's curvature is the wide end; zoomed in it flattens.
+      const lensViewFrac =
+        view && dimensions?.sceneRect?.height > 0 ? (2 * view.halfSpanPx) / dimensions.sceneRect.height : 1;
+      u.uDistortion.value = lensZoomCurvature(lensNum(p.distortion, -0.1), lensViewFrac);
       u.uChromaticAmountPx.value = lensNum(p.chromaticAmountPx, 1.2);
       u.uChromaticEdgePower.value = lensNum(p.chromaticEdgePower, 6);
       u.uVignetteIntensity.value = lensNum(p.vignetteIntensity, 1);

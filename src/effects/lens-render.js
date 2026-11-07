@@ -118,7 +118,11 @@ export function lensWarpUv(TSL, uvNode, distortion, uvGuard = null) {
   const { vec2, float, dot } = TSL;
   const centre = vec2(LENS_DISTORTION_CENTER[0], LENS_DISTORTION_CENTER[1]);
   const p = uvNode.sub(centre);
-  const warped = centre.add(p.mul(float(1).add(distortion.mul(dot(p, p)))));
+  // FILL SCALE (mmp-ilo.4): a barrel (k > 0) samples past the frame's edge at the corners (|p|^2 = 0.5 there);
+  // dividing by (1 + k/2) brings the corner sample back onto the edge, so no border ever shows. A pincushion
+  // (k < 0) samples inward and needs none.
+  const fill = float(1).add(distortion.max(0).mul(0.5));
+  const warped = centre.add(p.mul(float(1).add(distortion.mul(dot(p, p)))).div(fill));
   return uvGuard ? uvGuard(uvNode, warped) : warped;
 }
 
@@ -576,9 +580,17 @@ export function buildLensCompositeMaterial({
   // own choice: the vignette is the LENS BARREL's own shadow, which stays
   // fixed to the frame edge regardless of what the glass does to the image
   // inside it). ──────────────────────────────────────────────────────────
+  //
+  // NATURAL FALLOFF (mmp-ilo.5, 2026-11-07): the old smoothstep ring darkened the corners by ~83% at the default
+  // settings, a hard dark border. Real lenses fall off as cos^4 of the angle off-axis: 1 / (1 + (r/f)^2)^2. The
+  // softness dial now sets the effective focal length f (softer = longer lens = gentler falloff); Vignette
+  // scales how much of that falloff is applied. Default corners: ~54% darker, fading smoothly from the centre.
   const vDist = length(uv().sub(vec2(0.5, 0.5)));
-  const vig = smoothstep(maxNode(uVignetteSoftness, float(0.01)), float(0.95), vDist);
-  sceneColor = sceneColor.mul(mix(float(1), float(1).sub(uVignetteIntensity), vig));
+  const vFocal = float(1).add(maxNode(uVignetteSoftness, float(0)).mul(2));
+  const vR = vDist.div(vFocal);
+  const vCos2 = float(1).div(float(1).add(vR.mul(vR)));
+  const vNatural = vCos2.mul(vCos2);
+  sceneColor = sceneColor.mul(mix(float(1), vNatural, uVignetteIntensity));
 
   // ── GRAIN + DIGITAL NOISE — V2's OWN exact hash (`hash12`), transcribed
   // rather than swapped for a library primitive: this is a per-pixel PRNG

@@ -300,3 +300,29 @@ function clamp01(v) {
 function clampAbs(v, max) {
   return clamp(v, -max, max);
 }
+
+/**
+ * ZOOM-LINKED CURVATURE (mmp-ilo.4, 2026-11-07, author: the curvature is 'on the dramatic side'). A real zoom
+ * lens bows the image at its wide end and is nearly flat at its long end. The Lens card's curvature is now
+ * the WIDE-END value: with the whole map in view it applies in full; zoomed in on a fight (the view a quarter
+ * of the scene's height or less) only LENS_ZOOMED_IN_CURVATURE_SHARE of it. Smoothstep in between.
+ */
+export const LENS_ZOOMED_IN_CURVATURE_SHARE = 0.25;
+/** View height / scene height at or below which the lens is at its long (flat) end. */
+export const LENS_CURVATURE_ZOOM_IN_FRAC = 0.25;
+/** View height / scene height at or above which the lens is at its wide (full curvature) end. */
+export const LENS_CURVATURE_ZOOM_OUT_FRAC = 1;
+
+/**
+ * @param {number} distortion - the card's curvature (`k`).
+ * @param {number} viewHeightFrac - the view's world height over the scene's height (1 = whole map tall).
+ * @returns {number} the curvature to draw with.
+ */
+export function lensZoomCurvature(distortion, viewHeightFrac) {
+  const k = Number.isFinite(distortion) ? distortion : 0;
+  const f = Number.isFinite(viewHeightFrac) ? viewHeightFrac : 1;
+  const span = LENS_CURVATURE_ZOOM_OUT_FRAC - LENS_CURVATURE_ZOOM_IN_FRAC;
+  const t = Math.min(1, Math.max(0, (f - LENS_CURVATURE_ZOOM_IN_FRAC) / span));
+  const s = t * t * (3 - 2 * t);
+  return k * (LENS_ZOOMED_IN_CURVATURE_SHARE + (1 - LENS_ZOOMED_IN_CURVATURE_SHARE) * s);
+}

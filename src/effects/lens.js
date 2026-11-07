@@ -159,7 +159,7 @@ export const LENS_PARAMS = Object.freeze({
     default: 0.02, // V2: 0.34
     category: 'Optics',
     label: 'Vignette softness',
-    help: 'How far in from the very corner the darkening above starts to fade in. Small values keep a hard-edged dark ring near the border; large values spread the falloff in toward the centre.',
+    help: 'How gently the corners fall off. The vignette follows a real lens (cos^4 falloff); higher softness is a longer lens with a gentler, wider falloff, lower is a stronger fall toward the corners.',
   },
 
   // ── Grain (tier 0 — film/sensor texture) ──────────────────────────────────

@@ -775,6 +775,7 @@ export {
   computeAutoFocusShiftPx,
   computeZoomTriggerStrength,
   computeCameraMotionBlurPx,
+  lensZoomCurvature,
   computeZoomMotionBlurPx,
   computeLightBurnDecayFactor,
   computeLightBurnDarknessGate,

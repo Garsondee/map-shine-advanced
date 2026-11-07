@@ -120,6 +120,14 @@ export const WINDOW_OVERCAST_CONTRAST_SOFTEN = 0.6;
 /** The floor `strength` is allowed to dim to at full overcast — 0.5 is
  * exactly the author's own "up to 50%". */
 export const WINDOW_OVERCAST_MIN_STRENGTH = 0.5;
+/**
+ * The least of a window's light a cloud shadow may leave (mmp-63o.32, 2026-11-07). The cloud factor
+ * is `1 - strength x (1 - fillShare) x thickness`, and with the window's strength (1.5) and the
+ * shared fill share (0.3) a thick cloud drove it to exactly 0: at overcast noon every window in the
+ * Big Bank went dark while the ground outside dropped only ~half a stop (measured with the light
+ * meter). A cloud hides the sun, not the sky; 0.4 keeps a soft skylight through the glass.
+ */
+export const WINDOW_CLOUD_SKYLIGHT_FLOOR = 0.4;
 /** How far full overcast drains the colour of the light a window lets in
  * (0 = untouched, 1 = grey). Added 2026-11-03 (author: under cloud the window
  * light should be more diffuse and less saturated/vibrant, not merely dimmer),
@@ -1046,7 +1054,9 @@ export function buildWindowSurfaceMaterial({
         const out = float(1).toVar('winCloudFactorGated');
         const preCloud = cookieTinted.mul(coverage);
         If(max(max(preCloud.r, preCloud.g), preCloud.b).greaterThan(float(0)), () => {
-          out.assign(cloudFactorNode);
+          // A cloud over the window takes the SUN, never the sky (mmp-63o.32): floored at the
+          // diffuse skylight an overcast sky still sends through the glass.
+          out.assign(max(cloudFactorNode, float(WINDOW_CLOUD_SKYLIGHT_FLOOR)));
         });
         return out;
       })().toVar('winCloudFactor')

@@ -37,6 +37,7 @@
 import { unionVisibleFireGrid } from './effects/index.js';
 import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
+import { buildStateDigest, compareDigests } from './diag/state-digest.js';
 import { installDebugPanel } from './diag/debug-panel.js';
 import { installFlightRecorder, downloadText } from './diag/flight-recorder.js';
 // One record per level/scene change: what happened, in order, and how long each stretch took.
@@ -94,7 +95,7 @@ import { createGpuQueueProbe } from './diag/gpu-queue-probe.js';
 // (the floor-sweep loop below), invoking the exact same public function with
 // the exact same contract `profileHarness` already satisfies.
 import { runStructuralAB, runEditCascadeStress } from './diag/perf-structural-ab.js';
-import { pickStressTestTile, pingStressTestTile, unpingStressTestTile } from './foundry/index.js';
+import { pickStressTestTile, pingStressTestTile, unpingStressTestTile, readFoundryTestState } from './foundry/index.js';
 import { installSmoothPan } from './foundry/index.js';
 import { framePacer } from './core/frame-pacer.js';
 // The benchmark route drives the EXISTING camera-path player rather than growing
@@ -399,6 +400,7 @@ import {
   setVtPanViewerWeatherSeed,
   getVtPanViewerWeatherForecast,
   getVtPanViewerWeatherState,
+  getVtPanViewerTestState,
   unpinVtPanViewerWeatherAxis,
   addVtPanViewerWeatherEvent,
   releaseVtPanViewerWeatherEvent,
@@ -1495,6 +1497,24 @@ MapShine.getWeatherForecast = getVtPanViewerWeatherForecast;
 // and the archetype table to blend between.
 MapShine.setWeatherTargets = setVtPanViewerWeatherTargets;
 MapShine.getWeatherState = getVtPanViewerWeatherState;
+// THE PARITY DIGEST (mmp-f0k.2) — `MapShine.test.digest()` returns {shared, perClient, hash} for
+// this client; run it on every client and compare the hashes (or `MapShine.test.compare({gm: d1,
+// p1: d2})` for the differing fields). diag/state-digest.js says what is shared and what may differ.
+MapShine.test = Object.freeze({
+  digest() {
+    const live = getVtPanViewerTestState();
+    const ws = getVtPanViewerWeatherState();
+    return buildStateDigest({
+      ...readFoundryTestState(),
+      viewerStarted: !!live,
+      env: live?.env ?? null,
+      darkness: live?.darkness ?? null,
+      weather: ws?.skipped ? null : { mode: ws?.mode, preset: ws?.preset, targets: ws?.targets, state: ws?.state },
+      cloudDrift: live?.cloudDrift ?? null,
+    });
+  },
+  compare: compareDigests,
+});
 MapShine.weatherArchetypes = WEATHER_ARCHETYPES;
 MapShine.unpinWeatherAxis = unpinVtPanViewerWeatherAxis;
 

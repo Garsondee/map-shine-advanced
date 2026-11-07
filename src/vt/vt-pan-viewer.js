@@ -31577,6 +31577,12 @@ async function startVtPanViewerUnserialized({
       getWeatherForecast,
       /** The weather manager's whole state (targets, eased state, settling) — read-only. */
       getWeatherState: () => weather.read(),
+      /** Raw input for MapShine.test.digest (diag/state-digest.js): the frame's env snapshot and the cloud drift. */
+      getTestState: () => ({
+        env: lastEnvSnapshot?.env ?? null,
+        darkness: lastEnvSnapshot?.darkness ?? null,
+        cloudDrift: { x: cloudDriftX, y: cloudDriftY },
+      }),
       /** Release the Almanac's hold-off on one axis — the astrolabe's pin glyph. */
       unpinWeatherAxis,
       /** Start a weather event (slice 4). docs/planning/Weather-Manager.md §6. */
@@ -34836,6 +34842,11 @@ export function getVtPanViewerWeatherForecast(hoursAhead) {
   return _active.getWeatherForecast(hoursAhead);
 }
 /** The weather manager's live state (targets + eased state). @returns {object} */
+/** Raw state for the multiplayer parity digest (mmp-f0k.2). */
+export function getVtPanViewerTestState() {
+  if (!_active?.getTestState) return null;
+  return _active.getTestState();
+}
 export function getVtPanViewerWeatherState() {
   if (!_active?.getWeatherState) return { skipped: true, reason: 'viewer not started' };
   return _active.getWeatherState();

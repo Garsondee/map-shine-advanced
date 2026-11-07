@@ -706,3 +706,4 @@ export {
   mergeCoverageMax,
   fogMemorySize,
 } from './fog-memory-persistence.js';
+export { readFoundryTestState } from './test-state.js';

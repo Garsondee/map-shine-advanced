@@ -86,6 +86,7 @@ export {
   setVtPanViewerWeatherSeed,
   getVtPanViewerWeatherForecast,
   getVtPanViewerWeatherState,
+  getVtPanViewerTestState,
   unpinVtPanViewerWeatherAxis,
   addVtPanViewerWeatherEvent,
   releaseVtPanViewerWeatherEvent,

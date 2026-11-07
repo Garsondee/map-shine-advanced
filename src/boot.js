@@ -38,6 +38,8 @@ import { unionVisibleFireGrid } from './effects/index.js';
 import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { buildStateDigest, compareDigests } from './diag/state-digest.js';
+import { lightMeterStats } from './diag/light-meter.js';
+import { paintLightMeterOverlay, removeLightMeterOverlay } from './diag/light-meter-overlay.js';
 import { installDebugPanel } from './diag/debug-panel.js';
 import { installFlightRecorder, downloadText } from './diag/flight-recorder.js';
 // One record per level/scene change: what happened, in order, and how long each stretch took.
@@ -401,6 +403,7 @@ import {
   getVtPanViewerWeatherForecast,
   getVtPanViewerWeatherState,
   getVtPanViewerTestState,
+  readVtPanViewerLightMeterGrid,
   unpinVtPanViewerWeatherAxis,
   addVtPanViewerWeatherEvent,
   releaseVtPanViewerWeatherEvent,
@@ -1500,6 +1503,42 @@ MapShine.getWeatherState = getVtPanViewerWeatherState;
 // THE PARITY DIGEST (mmp-f0k.2) — `MapShine.test.digest()` returns {shared, perClient, hash} for
 // this client; run it on every client and compare the hashes (or `MapShine.test.compare({gm: d1,
 // p1: d2})` for the differing fields). diag/state-digest.js says what is shared and what may differ.
+// THE LIGHT METER (mmp-dpw.10) — `await MapShine.meter.read()` gives the view's light in stops
+// (median/p5/p95 EV, share per band, crushed/blown/over-white shares); `MapShine.meter.show()` lays
+// a false-colour overlay on the board and refreshes it every second; `.hide()` removes it.
+{
+  let meterTimer = null;
+  const readMeter = async () => {
+    const grid = await readVtPanViewerLightMeterGrid();
+    if (!grid) return { skipped: true, reason: 'viewer not started' };
+    const stats = lightMeterStats(grid.px, grid.w, grid.h);
+    return { grid, stats };
+  };
+  MapShine.meter = Object.freeze({
+    async read() {
+      const r = await readMeter();
+      if (r.skipped) return r;
+      const { perCellEv: _cells, ...summary } = r.stats;
+      return { ...summary, gridW: r.grid.w, gridH: r.grid.h };
+    },
+    async show({ everyMs = 1000 } = {}) {
+      const paint = async () => {
+        const r = await readMeter();
+        if (!r.skipped) paintLightMeterOverlay(r.grid, r.stats);
+      };
+      await paint();
+      if (meterTimer) clearInterval(meterTimer);
+      meterTimer = setInterval(paint, everyMs);
+      return true;
+    },
+    hide() {
+      if (meterTimer) clearInterval(meterTimer);
+      meterTimer = null;
+      removeLightMeterOverlay();
+      return true;
+    },
+  });
+}
 MapShine.test = Object.freeze({
   digest() {
     const live = getVtPanViewerTestState();

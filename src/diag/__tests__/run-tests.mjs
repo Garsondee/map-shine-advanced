@@ -29,6 +29,7 @@ import { run as runRenderFallback } from './render-fallback.test.mjs';
 import { run as runShaderRebuildProbe } from './shader-rebuild-probe.test.mjs';
 import { run as runPipelineRebuildProbe } from './pipeline-rebuild-probe.test.mjs';
 import { run as runStateDigest } from './state-digest.test.mjs';
+import { run as runLightMeter } from './light-meter.test.mjs';
 import { run as runReckoningReport } from './reckoning-report.test.mjs';
 import { run as runParamReadHealth } from './param-read-health.test.mjs';
 import { run as runUiPerf } from './ui-perf.test.mjs';
@@ -81,6 +82,7 @@ const suites = [
   ['shader-rebuild-probe', runShaderRebuildProbe],
   ['pipeline-rebuild-probe', runPipelineRebuildProbe],
   ['state-digest', runStateDigest],
+  ['light-meter', runLightMeter],
   ['reckoning-report', runReckoningReport],
   ['param-read-health', runParamReadHealth],
   ['ui-perf', runUiPerf],

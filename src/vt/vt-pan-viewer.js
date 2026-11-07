@@ -13060,6 +13060,25 @@ async function startVtPanViewerUnserialized({
      * asynchronous readback. Called from runPostBloomPass BEFORE the bloom composite, so `lit` is the
      * scene's own light.
      */
+    /**
+     * THE LIGHT METER's read (mmp-dpw.10, diag/light-meter.js): draw the Dynamic Range meter grid
+     * (lit + illum luminance per screen patch) on demand, whether or not Dynamic Range is on, and read
+     * it back. Same target and quad as the DR meter; called from the console/diagnostics only.
+     */
+    async function readLightMeterGrid() {
+      renderer.setRenderTarget(drMeterTarget);
+      drMeterQuad.render(renderer);
+      renderer.setRenderTarget(null);
+      const px = await renderer.readRenderTargetPixelsAsync(
+        drMeterTarget,
+        0,
+        0,
+        DYNAMIC_RANGE_METER_W,
+        DYNAMIC_RANGE_METER_H
+      );
+      return { w: DYNAMIC_RANGE_METER_W, h: DYNAMIC_RANGE_METER_H, px };
+    }
+
     function runDynamicRangeMeter() {
       if (!dr.on || dr.inFlight) return;
       if (dr.frame++ % DR_METER_EVERY !== 0) return;
@@ -31578,6 +31597,7 @@ async function startVtPanViewerUnserialized({
       /** The weather manager's whole state (targets, eased state, settling) — read-only. */
       getWeatherState: () => weather.read(),
       /** Raw input for MapShine.test.digest (diag/state-digest.js): the frame's env snapshot and the cloud drift. */
+      readLightMeterGrid,
       getTestState: () => ({
         env: lastEnvSnapshot?.env ?? null,
         darkness: lastEnvSnapshot?.darkness ?? null,
@@ -34842,6 +34862,11 @@ export function getVtPanViewerWeatherForecast(hoursAhead) {
   return _active.getWeatherForecast(hoursAhead);
 }
 /** The weather manager's live state (targets + eased state). @returns {object} */
+/** The light meter grid (mmp-dpw.10): `{w, h, px}` or null before the viewer starts. */
+export async function readVtPanViewerLightMeterGrid() {
+  if (!_active?.readLightMeterGrid) return null;
+  return _active.readLightMeterGrid();
+}
 /** Raw state for the multiplayer parity digest (mmp-f0k.2). */
 export function getVtPanViewerTestState() {
   if (!_active?.getTestState) return null;

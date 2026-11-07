@@ -49,7 +49,14 @@ export function run(t) {
 
   // ---- the closed list ---------------------------------------------------------
   {
-    t.ok('the kind list contains auto plus six species', PRECIP_KINDS.length === 7 && PRECIP_KINDS[0] === 'auto');
+    t.ok(
+      'the kind list contains auto plus ten species (mmp-63o.7 added sand, spore, petal, mote)',
+      PRECIP_KINDS.length === 11 && PRECIP_KINDS[0] === 'auto'
+    );
+    t.ok(
+      'the Wonders kinds are selectable',
+      ['sand', 'spore', 'petal', 'mote'].every((k) => PRECIP_KINDS.includes(k))
+    );
     t.ok('sleet is IN the enum (the band needs somewhere to land)', PRECIP_KINDS.includes('sleet'));
   }
 

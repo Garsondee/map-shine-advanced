@@ -47,6 +47,7 @@ const ARCHETYPE_GROUPS = Object.freeze([
   { id: 'rain', label: 'Rain & Drizzle', ids: ['drizzle', 'steady-rain'] },
   { id: 'winter', label: 'Winter & Ash', ids: ['snow', 'sleet', 'ashfall'] },
   { id: 'severe', label: 'Severe', ids: ['hailstorm', 'gale', 'thunderstorm'] },
+  { id: 'wonders', label: 'Wonders', ids: ['sandstorm', 'pollen', 'blossom', 'motes'] },
 ]);
 
 /** Drift mode's own 10 biomes, split the same way weather-board.js's own

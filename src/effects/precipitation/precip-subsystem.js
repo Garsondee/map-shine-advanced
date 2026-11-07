@@ -68,6 +68,12 @@ const KIND_TO_SPECIES = Object.freeze({
    * honest "not built" rather than quietly summoning a bare ember population
    * that would look like orange snow with nothing burning. */
   embers: null,
+  // mmp-63o.7 (2026-11-07): the four finished rows nothing could select. Not in WARM_UP_KINDS on purpose: they
+  // are rare picks, so their first use compiles in play rather than adding to every load.
+  sand: 'sand',
+  spore: 'spore',
+  petal: 'petal',
+  mote: 'mote',
 });
 
 /**

@@ -371,7 +371,21 @@ export const WEATHER_AXIS_NAMES = Object.freeze(Object.keys(WEATHER_AXES));
  * expressed the way a blend should be: as a weight (see
  * {@link derivePrecipKind}'s `mixWeight`).
  */
-export const PRECIP_KINDS = Object.freeze(['auto', 'rain', 'snow', 'sleet', 'hail', 'ash', 'embers']);
+// 2026-11-07 (mmp-63o.7): sand, spore, petal and mote had finished species rows but no kind, so nothing could
+// select them. They are reachable now (archetypes in weather-data.js, the picker's Wonders group).
+export const PRECIP_KINDS = Object.freeze([
+  'auto',
+  'rain',
+  'snow',
+  'sleet',
+  'hail',
+  'ash',
+  'embers',
+  'sand',
+  'spore',
+  'petal',
+  'mote',
+]);
 
 /**
  * The temperature band across which `auto` yields SLEET.

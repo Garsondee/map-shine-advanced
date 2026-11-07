@@ -154,6 +154,11 @@ export const DEFAULT_DWELL_HOURS = Object.freeze({
   ashfall: Object.freeze({ min: 6, mean: 24, max: 72 }),
   gale: Object.freeze({ min: 1, mean: 3, max: 6 }),
   thunderstorm: Object.freeze({ min: 0.5, mean: 1.5, max: 3 }),
+  // mmp-63o.7 (2026-11-07): the Wonders archetypes. In no biome's walk yet; a GM picks them.
+  sandstorm: Object.freeze({ min: 1, mean: 3, max: 8 }),
+  pollen: Object.freeze({ min: 2, mean: 5, max: 10 }),
+  blossom: Object.freeze({ min: 1, mean: 3, max: 6 }),
+  motes: Object.freeze({ min: 1, mean: 2, max: 5 }),
 });
 
 /**

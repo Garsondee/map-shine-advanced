@@ -369,6 +369,8 @@ export function createWaterSurfaceSubsystem({
   let maskTexture = createMaskTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, 'linear');
   /** The hard shore points the spray is thrown from, and the rect they were extracted over (mmp-7kx.1). */
   let sprayShore = null;
+  /** This floor's births list, reused every frame (planSprayBirths `out`: no garbage per fleck). */
+  const sprayBirthsOut = [];
   let sprayData = null;
   let sprayWhyNot = 'never asked';
   let sprayRect = null;
@@ -1540,6 +1542,7 @@ export function createWaterSurfaceSubsystem({
         spray,
         view,
         maxBirths,
+        out: sprayBirthsOut,
       });
       return {
         births,

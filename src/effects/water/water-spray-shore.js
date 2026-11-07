@@ -124,6 +124,79 @@ export function extractSprayShore(data, width, height, rect) {
   return { points: kept, count, spacingPx: step * Math.max(wPerTx, hPerTx) * keepEvery };
 }
 
+/** Off-screen points this far outside the view still throw (a fleck flies in). */
+const VIEW_MARGIN_PX = 220;
+
+/**
+ * THE IN-VIEW CANDIDATES, CACHED PER SHORE (2026-11-07). Built fresh every frame they were up to 60,000 `push`es
+ * into two new arrays plus a `Math.pow` per point: ~1 MB of garbage a frame on a big harbour and a garbage-collector
+ * pause every few dozen frames (the author: performance "tanked" the day the spray became real particles). Now the
+ * weights are worked out only when the current's direction changes, and the weighted list only when the view
+ * moves, into typed arrays the shore keeps. A still camera plans in O(births).
+ * @type {WeakMap<object, {fx:number, fy:number, view:number[]|null, w:Float32Array, idx:Int32Array, cum:Float64Array, len:number, total:number}>}
+ */
+const candidateCache = new WeakMap();
+
+/**
+ * @param {{points: Float32Array, count: number}} shore @param {number} fx @param {number} fy
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}|null|undefined} v
+ * @returns {{idx: Int32Array, cum: Float64Array, len: number, total: number}}
+ */
+function candidatesFor(shore, fx, fy, v) {
+  const n = shore.count;
+  let c = candidateCache.get(shore);
+  if (!c || c.w.length !== n) {
+    c = {
+      fx: NaN,
+      fy: NaN,
+      view: null,
+      w: new Float32Array(n),
+      idx: new Int32Array(n),
+      cum: new Float64Array(n),
+      len: 0,
+      total: 0,
+    };
+    candidateCache.set(shore, c);
+  }
+  const pts = shore.points;
+  let dirty = false;
+  if (c.fx !== fx || c.fy !== fy) {
+    for (let i = 0; i < n; i++) {
+      const into = fx * pts[i * 4 + 2] + fy * pts[i * 4 + 3];
+      c.w[i] = into <= 0.05 ? 0 : Math.pow(into, 0.8);
+    }
+    c.fx = fx;
+    c.fy = fy;
+    dirty = true;
+  }
+  const same =
+    v && c.view
+      ? c.view[0] === v.minX && c.view[1] === v.minY && c.view[2] === v.maxX && c.view[3] === v.maxY
+      : !v && !c.view;
+  if (dirty || !same) {
+    const m = VIEW_MARGIN_PX;
+    let len = 0;
+    let total = 0;
+    for (let i = 0; i < n; i++) {
+      const wi = c.w[i];
+      if (wi === 0) continue;
+      if (v) {
+        const x = pts[i * 4];
+        const y = pts[i * 4 + 1];
+        if (x < v.minX - m || x > v.maxX + m || y < v.minY - m || y > v.maxY + m) continue;
+      }
+      total += wi;
+      c.idx[len] = i;
+      c.cum[len] = total;
+      len++;
+    }
+    c.len = len;
+    c.total = total;
+    c.view = v ? [v.minX, v.minY, v.maxX, v.maxY] : null;
+  }
+  return c;
+}
+
 /**
  * This frame's births.
  * @param {{points: Float32Array, count: number, spacingPx: number}} shore - from {@link extractSprayShore}.
@@ -136,33 +209,23 @@ export function extractSprayShore(data, width, height, rect) {
  *   only spend the particle budget off screen).
  * @param {number} o.maxBirths - this frame's ceiling.
  * @param {() => number} [o.random] - 0..1 (Math.random by default; a seeded one in tests).
+ * @param {Array<object>} [o.out] - a list to REUSE (2026-11-07): its birth objects are overwritten in place and its
+ *   length set, so a frame allocates nothing. The live caller passes one; its contents are valid until the next call.
  * @returns {Array<{x:number,y:number,vx:number,vy:number,airSec:number,apexPx:number,sizePx:number}>}
  */
 export function planSprayBirths(shore, o) {
-  const births = [];
+  const births = o.out ?? [];
+  const pool = o.out ? (births.pooled?.length ?? 0) : 0;
+  births.length = 0;
   const random = o.random ?? Math.random;
   if (!shore?.count || !(o.dtSec > 0) || !(o.spray > 0) || !(o.flowSpeedPx > 0) || !(o.maxBirths > 0)) return births;
   const fx = o.flowDir?.[0] ?? 0;
   const fy = o.flowDir?.[1] ?? 0;
   const speedK = Math.min(2.5, o.flowSpeedPx / SPRAY_REFERENCE_FLOW_PX);
-  const margin = 220;
-  const v = o.view;
   const pts = shore.points;
-  // candidates in view, weighted by how squarely the current drives into the face
-  const idx = [];
-  const cum = [];
-  let total = 0;
-  for (let i = 0; i < shore.count; i++) {
-    const x = pts[i * 4];
-    const y = pts[i * 4 + 1];
-    if (v && (x < v.minX - margin || x > v.maxX + margin || y < v.minY - margin || y > v.maxY + margin)) continue;
-    const into = fx * pts[i * 4 + 2] + fy * pts[i * 4 + 3];
-    if (into <= 0.05) continue;
-    total += Math.pow(into, 0.8);
-    idx.push(i);
-    cum.push(total);
-  }
-  if (total <= 0) return births;
+  // candidates in view, weighted by how squarely the current drives into the face (cached, see `candidatesFor`)
+  const { idx, cum, len, total } = candidatesFor(shore, fx, fy, o.view);
+  if (total <= 0 || len === 0) return births;
   const expected = total * shore.spacingPx * SPRAY_RATE_PER_PX_SEC * o.spray * speedK * o.dtSec;
   // Poisson-ish: the whole part plus a coin for the fraction, so a frame never carries a fixed batch
   let n = Math.floor(expected);
@@ -174,7 +237,7 @@ export function planSprayBirths(shore, o) {
     // pick a point by weight (binary search on the running total)
     const r = random() * total;
     let lo = 0;
-    let hi = cum.length - 1;
+    let hi = len - 1;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
       if (cum[mid] < r) lo = mid + 1;
@@ -197,7 +260,23 @@ export function planSprayBirths(shore, o) {
     const airSec = T.airMinSec + (T.airMaxSec - T.airMinSec) * Math.pow(random(), 0.8);
     const apexPx = T.apexMinPx + (T.apexMaxPx - T.apexMinPx) * random() * (0.5 + 0.5 * u);
     const sizePx = T.sizeMinPx + (T.sizeMaxPx - T.sizeMinPx) * Math.pow(random(), 1.6);
-    births.push({ x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, airSec, apexPx, sizePx });
+    const vx = Math.cos(a) * speed;
+    const vy = Math.sin(a) * speed;
+    if (b < pool && births.pooled?.[b]) {
+      const r = births.pooled[b];
+      r.x = x;
+      r.y = y;
+      r.vx = vx;
+      r.vy = vy;
+      r.airSec = airSec;
+      r.apexPx = apexPx;
+      r.sizePx = sizePx;
+      births.push(r);
+    } else {
+      const r = { x, y, vx, vy, airSec, apexPx, sizePx };
+      if (o.out) (births.pooled ??= [])[b] = r;
+      births.push(r);
+    }
   }
   return births;
 }

@@ -49,6 +49,13 @@ const RIDE_GRIP = 1.6;
 const RIDE_SCATTER_PX = 14;
 /** Fade at the end of a ride, seconds. */
 const FADE_OUT_SEC = 0.7;
+/**
+ * The longest a fleck can live: the longest air time (water-spray-shore.js SPRAY_THROW.airMaxSec, 1.05 s) plus the
+ * longest ride, plus slack. After this long with no births nothing is alive, so the compute and the draw stop
+ * (2026-11-07: they ran every frame for good once one fleck had been thrown — still water, a current turned away
+ * from every face, Break spray at 0).
+ */
+const MAX_FLECK_LIFE_SEC = 1.05 + RIDE_MAX_SEC + 0.75;
 
 /**
  * @param {object} o
@@ -255,13 +262,16 @@ export function createWaterSprayEngine({
   let births = 0;
   let lastBirths = 0;
   let steps = 0;
+  let skippedSteps = 0;
   let hasMask = false;
+  /** Seconds since the last birth (Infinity before the first): past MAX_FLECK_LIFE_SEC nothing is alive. */
+  let quietSec = Infinity;
 
   return {
     scene,
     capacity,
     get hasContent() {
-      return hasMask && births > 0;
+      return hasMask && births > 0 && quietSec <= MAX_FLECK_LIFE_SEC;
     },
     /**
      * This frame's births (before {@link step}).
@@ -288,10 +298,17 @@ export function createWaterSprayEngine({
       birthAttr.needsUpdate = true;
       births += slots.length;
       lastBirths = slots.length;
+      if (slots.length) quietSec = 0;
     },
-    /** One frame of flight: synchronous compute, never a readback. */
+    /** One frame of flight: synchronous compute, never a readback. Skipped once nothing can be alive. */
     step(renderer, dtSec) {
-      uDtSec.value = Math.min(MAX_DT_SEC, Math.max(0, dtSec || 0));
+      const dt = Math.min(MAX_DT_SEC, Math.max(0, dtSec || 0));
+      if (lastBirths === 0) quietSec += Math.max(0, dtSec || 0);
+      if (quietSec > MAX_FLECK_LIFE_SEC) {
+        skippedSteps++;
+        return;
+      }
+      uDtSec.value = dt;
       renderer.compute(updateKernel);
       steps++;
     },
@@ -310,7 +327,7 @@ export function createWaterSprayEngine({
       if (Number.isFinite(v.opacity)) uOpacity.value = v.opacity;
     },
     debugState() {
-      return { capacity, births, lastBirths, steps, hasMask, nextSlot: ring.nextSlot };
+      return { capacity, births, lastBirths, steps, skippedSteps, quietSec, hasMask, nextSlot: ring.nextSlot };
     },
   };
 }

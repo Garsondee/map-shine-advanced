@@ -625,26 +625,30 @@ export function fireMaskSignature(grid) {
   const spec = grid?.spec ?? null;
   const data = grid?.data ?? null;
   if (!spec || !data) return 0;
-  let hash = 2166136261 >>> 0;
-  const mix = (v) => {
-    hash ^= v | 0;
-    hash = Math.imul(hash, 16777619) >>> 0;
-  };
-  mix(spec.w);
-  mix(spec.h);
-  mix(Math.round(spec.x));
-  mix(Math.round(spec.y));
-  mix(Math.round(spec.width));
-  mix(Math.round(spec.height));
+  // FNV-1a, inline on a LOCAL (2026-11-07): it was a `mix` closure reassigning a captured `hash`, and a captured
+  // uint32 past 2^31 is a boxed heap number — ~8,000 garbage objects a frame (it runs twice a frame), the
+  // biggest single source of garbage the GC probe found. `| 0` keeps the running value a small integer; the
+  // result is the same number as before (`>>> 0` at the end).
+  let hash = 2166136261 | 0;
+  const head = [
+    spec.w,
+    spec.h,
+    Math.round(spec.x),
+    Math.round(spec.y),
+    Math.round(spec.width),
+    Math.round(spec.height),
+  ];
+  for (let k = 0; k < 6; k++) hash = Math.imul(hash ^ (head[k] | 0), 16777619);
   const stride = Math.max(1, Math.floor(data.length / 4096));
   let sum = 0;
   let count = 0;
   for (let i = 0; i < data.length; i += stride) {
-    mix(data[i]);
-    sum += data[i];
+    const v = data[i];
+    hash = Math.imul(hash ^ v, 16777619);
+    sum += v;
     count++;
   }
-  mix(sum);
-  mix(count);
-  return hash;
+  hash = Math.imul(hash ^ (sum | 0), 16777619);
+  hash = Math.imul(hash ^ (count | 0), 16777619);
+  return hash >>> 0;
 }

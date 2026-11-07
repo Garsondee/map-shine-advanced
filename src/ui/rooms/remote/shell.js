@@ -48,6 +48,7 @@ import { renderPlayPads } from './play-pads.js';
 import { renderPrepBoard } from './prep-board.js';
 import { installMoreMenu, PATREON_URL } from './more-menu.js';
 import { createReadinessCard } from './readiness-card.js';
+import { installGuide } from '../guide/guide-room.js';
 import { listRemoteSections, onRemoteSectionsChanged, buildRemoteKit } from './extension-sections.js';
 import { createLogger } from '../../../core/log.js';
 import { raiseRoom, raiseRoomOnPress } from '../room-stack.js';
@@ -199,6 +200,41 @@ export function installRemote(opts = {}) {
   heart.title = 'Map Shine is made by Mythica Machina — support it on Patreon';
   heart.innerHTML = iconMarkup('heart');
 
+  // THE HELP BUTTON (2026-11-07, Ingram: "openable from the MSA remote as a very bold
+  // and obvious help button") — opens the Map Shine Guide: Quick Fixes for right now,
+  // Learn for making maps. The guide gets the Remote's own closures, so its buttons
+  // change the weather, the clock and the Looks exactly as the Remote does.
+  const helpBtn = document.createElement('button');
+  helpBtn.type = 'button';
+  helpBtn.className = 'msa-help-btn';
+  helpBtn.innerHTML = `${iconMarkup('help')}<span>Help</span>`;
+  helpBtn.title = 'The Map Shine Guide: quick fixes for right now, and how to make your maps shine';
+  let guide = null;
+  function getGuide() {
+    if (guide) return guide;
+    guide = installGuide({
+      remote: {
+        weatherBoard: opts.weatherBoard,
+        onSweepToHour: opts.onSweepToHour,
+        getFadeOverMs: () => fadeTime.getOverMs(),
+        looks: opts.looks,
+        getRendererOverride: opts.getRendererOverride,
+        onRendererOverrideChange: opts.onRendererOverrideChange,
+      },
+      effectSetter: (name) => opts.guide?.effectSetter?.(name) ?? null,
+      getHour: () => opts.guide?.getHour?.(),
+      openTool: (target) => {
+        if (target === 'painter' && opts.guide?.openPainter) return void opts.guide.openPainter();
+        if (target === 'studio' && opts.guide?.openStudio) return void opts.guide.openStudio();
+        if (target === 'remote-mix') return void controller.showTab('mix');
+        return false;
+      },
+    });
+    guide.onOpenChange((open) => helpBtn.setAttribute('aria-pressed', String(open)));
+    return guide;
+  }
+  helpBtn.addEventListener('click', () => getGuide().toggle());
+
   const moreBtn = headerBtn('dots', 'More: renderer, camera path, size, links', () => more.toggle());
   moreBtn.setAttribute('aria-haspopup', 'menu');
   moreBtn.setAttribute('aria-expanded', 'false');
@@ -206,7 +242,7 @@ export function installRemote(opts = {}) {
   const closeBtn = headerBtn('x', 'Close Remote', () => controller.close());
   const headSpacer = document.createElement('span');
   headSpacer.className = 'msa-spacer';
-  head.append(title, headSpacer, scopeBtn, heart, moreBtn, minimizeBtn, closeBtn);
+  head.append(title, headSpacer, helpBtn, scopeBtn, heart, moreBtn, minimizeBtn, closeBtn);
 
   function paintSceneName() {
     let name = '';

@@ -27,6 +27,7 @@ import {
 } from './paint-mode.test.mjs';
 import { run as runMaskListModel } from './mask-list-model.test.mjs';
 import { run as runEffectCatalog } from './effect-catalog.test.mjs';
+import { run as runGuide } from './guide.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -82,6 +83,7 @@ const suites = [
   ['paint-mode (Masks panel)', runPaintModeMaskList],
   ['mask-list-model', runMaskListModel],
   ['effect-catalog', runEffectCatalog],
+  ['guide', runGuide],
 ];
 
 for (const [name, fn] of suites) {

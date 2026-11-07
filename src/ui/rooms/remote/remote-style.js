@@ -86,6 +86,7 @@ export const REMOTE_PRESSABLES = Object.freeze([
   '.msa-more-item', // a row of the header's more menu
   '.msa-swatch', // a colour in a Look's option palette
   '.msa-group', // a Look group chip (Day, Night, Dread...)
+  '.msa-help-btn', // the header's Help button (opens the Map Shine Guide)
 ]);
 
 /**
@@ -493,6 +494,13 @@ ${R} .msa-scope[data-scope="scene"]{border-color:var(--shine-glow); color:var(--
 ${R} .msa-scope[hidden]{display:none}
 ${R} .msa-heart{display:grid; place-items:center; color:#ff7a8a; text-decoration:none}
 ${R} .msa-heart .ico{width:15px; height:15px}
+/* THE HELP BUTTON (2026-11-07, Ingram: "a very bold and obvious help button") — the
+   only filled control in the header, in the house gold, so it is the first thing seen. */
+${R} .msa-help-btn{flex:none; display:inline-flex; align-items:center; gap:5px; padding:4px 11px 4px 8px;
+  border-radius:999px; border:1px solid var(--shine); background:var(--shine); color:#1b1406;
+  font:800 .74rem/1 var(--font); letter-spacing:.02em; box-shadow:0 0 0 3px var(--shine-soft), 0 2px 10px var(--shine-glow)}
+${R} .msa-help-btn .ico{width:15px; height:15px; stroke-width:2.2}
+${R} .msa-help-btn[aria-pressed="true"]{background:var(--bg2); color:var(--shine)}
 
 /* the tabs */
 ${R} .msa-tabs{display:grid; grid-template-columns:repeat(3, 1fr); gap:2px; margin:10px 12px 0; padding:3px;
@@ -756,6 +764,7 @@ ${wxChipHoverCss(R)}
   ${R} .msa-tab:not([aria-selected="true"]):hover{color:var(--ink0)}
   ${R} .msa-scope:hover{border-color:var(--shine-glow); color:var(--ink0)}
   ${R} .msa-heart:hover{color:#ff9aa6}
+  ${R} .msa-help-btn:hover{filter:brightness(1.1)}
   ${R} .msa-look:not([aria-pressed="true"]):hover{border-color:var(--line-strong)}
   ${R} .msa-look:hover .msa-look-more{opacity:1}
   ${R} .msa-look-add:hover{border-color:var(--shine-glow); color:var(--ink0)}

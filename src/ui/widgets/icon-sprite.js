@@ -93,6 +93,9 @@ export const ICONS = Object.freeze({
   trash: '<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l.8 12.5h9.4L17.5 7M10 11v5.5M14 11v5.5"/>',
   // Drawn 2026-11-01 for the Remote redesign's header menu, same 24px/stroke-only style.
   dots: '<circle cx="5.5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18.5" cy="12" r="1.3"/>',
+  // Drawn 2026-11-07 for the Map Shine Guide (the Remote's Help button, the Learn half).
+  help: '<circle cx="12" cy="12" r="9.2"/><path d="M9.3 9.4a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.4-2.7 4.1"/><circle cx="12" cy="17.6" r=".9"/>',
+  book: '<path d="M3.5 5.5c2.8-1.3 5.6-1.3 8.5.6 2.9-1.9 5.7-1.9 8.5-.6v13c-2.8-1.3-5.6-1.3-8.5.6-2.9-1.9-5.7-1.9-8.5-.6Z"/><path d="M12 6.1v13"/>',
 });
 
 /**

@@ -11,7 +11,7 @@
  * @module ui/rooms/room-stack
  */
 
-const ROOM_IDS = ['msa-remote', 'msa-studio', 'msa-player'];
+const ROOM_IDS = ['msa-remote', 'msa-studio', 'msa-player', 'msa-guide'];
 
 /** @param {HTMLElement} room */
 export function raiseRoom(room) {

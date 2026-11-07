@@ -14,7 +14,7 @@
 
 /** Top-level entries of the repo that make up the installed module. Everything
  * else (.git, node_modules, tools, tests, docs, perf traces) stays local. */
-export const SYNC_ROOTS = ['module.json', 'languages', 'styles', 'templates', 'assets', 'data', 'src'];
+export const SYNC_ROOTS = ['module.json', 'languages', 'styles', 'templates', 'assets', 'data', 'src', 'guide'];
 
 /** Local-only even though they sit under a sync root: `assets/torture/` is the
  * regenerable keyhole fixture (gitignored), `.webgpu-entry.js` is a build

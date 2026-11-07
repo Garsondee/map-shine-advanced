@@ -31,6 +31,7 @@ import {
   REMOTE_ROOM_ID,
 } from '../rooms/remote/remote-style.js';
 import { playerCss, PLAYER_TOOLTIP_SCOPE } from '../rooms/player-style.js';
+import { guideCss, GUIDE_PRESSABLES } from '../rooms/guide/guide-style.js';
 
 /** Every `transition` / `animation` declaration's value. */
 function motionDeclarations(css) {
@@ -197,6 +198,30 @@ export function run(t) {
     ok(
       'replayClass drops the class, FORCES A REFLOW, then adds it back (without the reflow the second add is a no-op)',
       calls.join('|') === 'remove msa-enter|reflow|add msa-enter'
+    );
+  }
+
+  // ---- the Map Shine Guide (2026-11-07) ------------------------------------------------------------------------
+  {
+    const css = guideCss();
+    checkDesignRules(t, css, 'guide');
+    ok(
+      'every Guide pressable is a SINGLE class',
+      GUIDE_PRESSABLES.every((p) => /^\.[a-z][a-z0-9-]*$/.test(p))
+    );
+    const code = stripComments(css);
+    ok(
+      'the Guide root hides with an !important [hidden] (its own display:flex would beat the browser)',
+      code.includes('#msa-guide[hidden]{display:none !important}')
+    );
+    ok(
+      'the entrance plays on the card, never the room root',
+      code.includes('.g-card-room.msa-enter{animation:msaRoomIn') && !/#msa-guide\.msa-enter/.test(code)
+    );
+    ok(
+      "the Remote's Help button is one of its pressables (bold, gold, filled)",
+      REMOTE_PRESSABLES.includes('.msa-help-btn') &&
+        /\.msa-help-btn\{[^}]*background:var\(--shine\)/.test(stripComments(remoteCss()))
     );
   }
 

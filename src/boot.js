@@ -2247,6 +2247,19 @@ function install() {
         if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
       },
       onSnapFades: () => snapFadesToEnd(),
+      // THE MAP SHINE GUIDE (2026-11-07, mmp-0mv) — opened from the Remote's Help button.
+      // Its Quick Fix buttons change a scene through the effects' own public setters
+      // (`setBloom`, `setGrade`…), handed over here by name so the UI never reaches into
+      // MapShine itself; read lazily, since the setters are attached further down.
+      guide: {
+        effectSetter: (name) =>
+          /^set[A-Z]\w*$/.test(String(name)) && typeof MapShine[name] === 'function'
+            ? (patch) => MapShine[name](patch)
+            : null,
+        getHour: () => getVtPanViewerTodHour(),
+        openPainter: () => MapShine.__painter?.enter?.({ kind: 'outdoors' }),
+        openStudio: () => MapShine.__studio?.open?.(),
+      },
       // THE LOOKS (core/looks-schema.js, the LOOKS block further down this
       // install()) — the Play tab's grid and GO, Prep's library. Closure
       // references, safe for the same reason weatherBoard's are.

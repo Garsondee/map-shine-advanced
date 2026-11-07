@@ -1,0 +1,309 @@
+{
+  "version": 1,
+  "halves": [
+    {
+      "id": "fixes",
+      "title": "Quick Fixes",
+      "blurb": "Something looks wrong right now",
+      "icon": "bolt",
+      "home": "fixes",
+      "lead": "Pick what's wrong. Every button changes this scene at once, and every change can be undone."
+    },
+    {
+      "id": "learn",
+      "title": "Learn",
+      "blurb": "Make your own maps shine",
+      "icon": "book",
+      "home": "learn",
+      "lead": "How Map Shine reads a map, how to make each mask, and how to get the best results."
+    }
+  ],
+  "pages": [
+    { "id": "fixes", "half": "fixes", "title": "Quick Fixes", "icon": "bolt", "summary": "Fix the look mid-session." },
+
+    {
+      "id": "fix-too-dark",
+      "half": "fixes",
+      "section": "The look",
+      "title": "It's too dark",
+      "icon": "moon",
+      "summary": "Players can't see. Brighten the view, the rooms or the lamps."
+    },
+    {
+      "id": "fix-too-bright",
+      "half": "fixes",
+      "section": "The look",
+      "title": "Too bright or too glowy",
+      "icon": "sun",
+      "summary": "Washed out, blown out, or a haze of glow round every light."
+    },
+    {
+      "id": "fix-shadows",
+      "half": "fixes",
+      "section": "The look",
+      "title": "Shadows look wrong",
+      "icon": "layers",
+      "summary": "Too dark, too long, or falling where they shouldn't."
+    },
+    {
+      "id": "fix-mood",
+      "half": "fixes",
+      "section": "The look",
+      "title": "Change the mood, right now",
+      "icon": "candle",
+      "summary": "Dawn, dusk or night. Fog or storm. Warmer, colder, more drama."
+    },
+
+    {
+      "id": "fix-weather-indoors",
+      "half": "fixes",
+      "section": "Weather and effects",
+      "title": "Rain or snow is falling indoors",
+      "icon": "rain",
+      "summary": "Weather inside a building means the map's _Outdoors mask needs work."
+    },
+    {
+      "id": "fix-fire",
+      "half": "fixes",
+      "section": "Weather and effects",
+      "title": "Fire or smoke is too much",
+      "icon": "fire",
+      "summary": "Smaller flames, less smoke, or fire off."
+    },
+    {
+      "id": "fix-blurry",
+      "half": "fixes",
+      "section": "Weather and effects",
+      "title": "The picture looks blurry or grainy",
+      "icon": "eye",
+      "summary": "Depth blur, film grain and lens effects, and how to turn them down."
+    },
+
+    {
+      "id": "fix-missing",
+      "half": "fixes",
+      "section": "Something's not working",
+      "title": "Effects are missing on this scene",
+      "icon": "warn",
+      "summary": "No water, no window light, no weather? Here is why, and the fix."
+    },
+    {
+      "id": "fix-wrong-floor",
+      "half": "fixes",
+      "section": "Something's not working",
+      "title": "The wrong floor is showing",
+      "icon": "layers",
+      "summary": "A floor above covers the one you're on."
+    },
+    {
+      "id": "fix-slow",
+      "half": "fixes",
+      "section": "Something's not working",
+      "title": "It's slow or stuttering",
+      "icon": "gauge",
+      "summary": "Quicker settings for you and for each player."
+    },
+    {
+      "id": "fix-emergency",
+      "half": "fixes",
+      "section": "Something's not working",
+      "title": "Turn it all off, right now",
+      "icon": "shield",
+      "summary": "Hand the map back to Foundry in one click, and get it back after."
+    },
+
+    { "id": "learn", "half": "learn", "title": "Learn", "icon": "book", "summary": "Make your own maps shine." },
+
+    {
+      "id": "learn-how",
+      "half": "learn",
+      "section": "Start here",
+      "title": "How Map Shine reads your map",
+      "navTitle": "How it reads your map",
+      "icon": "eye",
+      "summary": "Your art, plus simple black-and-white pictures that tell MSA what's where.",
+      "thumb": "big-bank-compare-msa.webp"
+    },
+    {
+      "id": "learn-first-scene",
+      "half": "learn",
+      "section": "Start here",
+      "title": "Your first scene, step by step",
+      "navTitle": "Your first scene",
+      "icon": "play",
+      "summary": "From a finished map to a working Map Shine scene."
+    },
+    {
+      "id": "learn-naming",
+      "half": "learn",
+      "section": "Start here",
+      "title": "Naming files and where to put them",
+      "navTitle": "Naming and folders",
+      "icon": "pin",
+      "summary": "The one naming rule, and how MSA finds your files."
+    },
+    {
+      "id": "learn-cheatsheet",
+      "half": "learn",
+      "section": "Start here",
+      "title": "Every mask at a glance",
+      "navTitle": "Mask cheat sheet",
+      "icon": "grid",
+      "summary": "One table: every file ending MSA reads."
+    },
+
+    {
+      "id": "mask-outdoors",
+      "half": "learn",
+      "section": "The masks",
+      "title": "_Outdoors: inside and outside",
+      "navTitle": "_Outdoors",
+      "icon": "home",
+      "summary": "The one mask every map needs. It decides where the sky reaches.",
+      "thumb": "docklands-outdoors-mask.webp"
+    },
+    {
+      "id": "mask-window",
+      "half": "learn",
+      "section": "The masks",
+      "title": "_Window: light through windows",
+      "navTitle": "_Window",
+      "icon": "frame",
+      "summary": "Paint the pool of daylight a window throws onto the floor.",
+      "thumb": "docklands-window-msa.webp"
+    },
+    {
+      "id": "mask-specular",
+      "half": "learn",
+      "section": "The masks",
+      "title": "_Specular: metal and shine",
+      "navTitle": "_Specular",
+      "icon": "gem",
+      "summary": "Gold, brass, wet stone and polished wood that catch the light.",
+      "thumb": "big-bank-specular-msa.webp"
+    },
+    {
+      "id": "mask-water",
+      "half": "learn",
+      "section": "The masks",
+      "title": "_Water: rivers, pools and the sea",
+      "navTitle": "_Water",
+      "icon": "water",
+      "summary": "Moving water, shore foam and depth from one greyscale picture.",
+      "thumb": "river-water-msa.webp"
+    },
+    {
+      "id": "mask-fire",
+      "half": "learn",
+      "section": "The masks",
+      "title": "_Fire: flames and smoke",
+      "navTitle": "_Fire",
+      "icon": "fire",
+      "summary": "Paint where it burns. The shape decides the size of each fire.",
+      "thumb": "forge-fire-msa.webp"
+    },
+    {
+      "id": "mask-fluid",
+      "half": "learn",
+      "section": "The masks",
+      "title": "_Fluid: liquid in tubes and flasks",
+      "navTitle": "_Fluid",
+      "icon": "water",
+      "summary": "Glowing potions flowing through glass.",
+      "thumb": "lair-fluid-msa.webp"
+    },
+    {
+      "id": "mask-trees",
+      "half": "learn",
+      "section": "The masks",
+      "title": "_Tree and _Bush: plants that move",
+      "navTitle": "_Tree and _Bush",
+      "icon": "wind",
+      "summary": "Canopies that sway in the wind and cast soft shadows.",
+      "thumb": "bank-trees-msa.webp"
+    },
+    {
+      "id": "mask-air",
+      "half": "learn",
+      "section": "The masks",
+      "title": "Dust, drips, ash and critters",
+      "navTitle": "Dust, drips, critters",
+      "icon": "dust",
+      "summary": "_Dust, _Drip, _Ash, _Flies, _Maggots and _Fireflies."
+    },
+    {
+      "id": "mask-glints",
+      "half": "learn",
+      "section": "The masks",
+      "title": "_Prism and _Iridescence: glints",
+      "navTitle": "_Prism, _Iridescence",
+      "icon": "gem",
+      "summary": "Rainbow sparkle on crystal, oil-slick shimmer on metal."
+    },
+
+    {
+      "id": "learn-editors",
+      "half": "learn",
+      "section": "Making masks",
+      "title": "Making masks in an image editor",
+      "navTitle": "In an image editor",
+      "icon": "layers",
+      "summary": "Photoshop, Krita, GIMP or Affinity: the settings that matter."
+    },
+    {
+      "id": "learn-painter",
+      "half": "learn",
+      "section": "Making masks",
+      "title": "Painting masks inside Map Shine",
+      "navTitle": "In Map Shine's painter",
+      "icon": "pin",
+      "summary": "Shapes, walls, clean view, and saving full-size files."
+    },
+
+    {
+      "id": "learn-light",
+      "half": "learn",
+      "section": "Best results",
+      "title": "Light, shadow and time of day",
+      "navTitle": "Light and shadow",
+      "icon": "sun",
+      "summary": "How the sun, lamps and window light work together."
+    },
+    {
+      "id": "learn-weather",
+      "half": "learn",
+      "section": "Best results",
+      "title": "Weather and the sky",
+      "navTitle": "Weather",
+      "icon": "cloud",
+      "summary": "Moods, faders, fades and what each scene shares."
+    },
+    {
+      "id": "learn-looks",
+      "half": "learn",
+      "section": "Best results",
+      "title": "Looks: one-button moods",
+      "navTitle": "Looks",
+      "icon": "candle",
+      "summary": "Save a mood once, play it with one press."
+    },
+    {
+      "id": "learn-floors",
+      "half": "learn",
+      "section": "Best results",
+      "title": "Floors and levels",
+      "navTitle": "Floors and levels",
+      "icon": "layers",
+      "summary": "Multi-floor maps: what each floor needs."
+    },
+    {
+      "id": "learn-performance",
+      "half": "learn",
+      "section": "Best results",
+      "title": "Keeping it fast",
+      "navTitle": "Keeping it fast",
+      "icon": "gauge",
+      "summary": "What costs the most, and the settings that help."
+    }
+  ]
+}

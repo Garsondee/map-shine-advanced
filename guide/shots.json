@@ -1,0 +1,493 @@
+{
+  "viewport": [1600, 900],
+  "quality": 80,
+  "shots": [
+    {
+      "id": "big-bank-compare",
+      "scene": "Mythica Machina - Big Bank (MSA)",
+      "level": "Ground Level",
+      "center": [0.5, 0.5],
+      "span": 0.8,
+      "hour": 16.5,
+      "weather": {
+        "cloudCover01": 0.15,
+        "precip01": 0
+      },
+      "effects": {
+        "setGrid": {
+          "enabled": false
+        }
+      },
+      "out": {
+        "msa": "big-bank-compare-msa.webp",
+        "art": "big-bank-compare-art.webp"
+      },
+      "notes": [
+        {
+          "on": "msa",
+          "text": "Sun shadows from the roof",
+          "at": [0.66, 0.9],
+          "to": [0.36, 0.62]
+        },
+        {
+          "on": "msa",
+          "text": "Gold catches the light",
+          "at": [0.66, 0.08],
+          "to": [0.6, 0.38]
+        },
+        {
+          "on": "msa",
+          "text": "Daylight through the windows",
+          "at": [0.8, 0.72],
+          "to": [0.55, 0.5]
+        }
+      ]
+    },
+    {
+      "id": "big-bank-specular",
+      "scene": "Mythica Machina - Big Bank (MSA)",
+      "level": "Ground Level",
+      "center": [0.5, 0.58],
+      "span": 0.42,
+      "hour": 17.5,
+      "weather": {
+        "cloudCover01": 0.1,
+        "precip01": 0
+      },
+      "out": {
+        "msa": "big-bank-specular-msa.webp",
+        "art": "big-bank-specular-art.webp",
+        "masks": [
+          {
+            "file": "modules/mythica-machina-big-bank/assets/mythica-machina-big-bank-ground_Specular.webp",
+            "name": "big-bank-specular-mask.webp"
+          }
+        ]
+      },
+      "notes": [
+        {
+          "on": "msa",
+          "text": "Gold inlay catches the low sun",
+          "at": [0.74, 0.93],
+          "to": [0.73, 0.73]
+        },
+        {
+          "on": "msa",
+          "text": "Window light on the floor",
+          "at": [0.78, 0.08],
+          "to": [0.6, 0.2]
+        },
+        {
+          "on": "big-bank-specular-mask.webp",
+          "text": "Gold stays gold",
+          "at": [0.3, 0.92],
+          "to": [0.45, 0.73]
+        },
+        {
+          "on": "big-bank-specular-mask.webp",
+          "text": "Black: not shiny",
+          "at": [0.2, 0.25]
+        }
+      ]
+    },
+    {
+      "id": "big-bank-noon",
+      "scene": "Mythica Machina - Big Bank (MSA)",
+      "level": "Ground Level",
+      "center": [0.42, 0.5],
+      "span": 0.55,
+      "hour": 12,
+      "weather": {
+        "cloudCover01": 0.05,
+        "precip01": 0
+      },
+      "out": {
+        "msa": "big-bank-noon.webp"
+      },
+      "notes": [
+        {
+          "on": "msa",
+          "text": "Noon: short, crisp shadows",
+          "at": [0.5, 0.07]
+        }
+      ]
+    },
+    {
+      "id": "big-bank-golden",
+      "scene": "Mythica Machina - Big Bank (MSA)",
+      "level": "Ground Level",
+      "center": [0.42, 0.5],
+      "span": 0.55,
+      "hour": 18.4,
+      "weather": {
+        "cloudCover01": 0.05,
+        "precip01": 0
+      },
+      "out": {
+        "msa": "big-bank-golden.webp"
+      },
+      "notes": [
+        {
+          "on": "msa",
+          "text": "Golden hour: long warm shadows, rosy window light",
+          "at": [0.5, 0.07]
+        }
+      ]
+    },
+    {
+      "id": "big-bank-trees",
+      "scene": "Mythica Machina - Big Bank (MSA)",
+      "level": "Ground Level",
+      "center": [0.2, 0.62],
+      "span": 0.34,
+      "hour": 15,
+      "weather": {
+        "cloudCover01": 0.1,
+        "precip01": 0
+      },
+      "out": {
+        "msa": "bank-trees-msa.webp",
+        "masks": [
+          {
+            "file": "modules/mythica-machina-big-bank/assets/mythica-machina-big-bank-ground_Tree.webp",
+            "name": "bank-trees-mask.webp",
+            "bg": "checker"
+          }
+        ]
+      },
+      "notes": [
+        {
+          "on": "bank-trees-mask.webp",
+          "text": "Only the canopies. The rest is transparent.",
+          "at": [0.55, 0.5]
+        }
+      ]
+    },
+    {
+      "id": "docklands-wide",
+      "scene": "Mythica Machina - Docklands Warehouse",
+      "center": [0.5, 0.5],
+      "span": 1.0,
+      "hour": 15.5,
+      "weather": {
+        "cloudCover01": 0.1,
+        "precip01": 0
+      },
+      "out": {
+        "msa": "docklands-outdoors-msa.webp",
+        "art": "docklands-outdoors-art.webp",
+        "masks": [
+          {
+            "file": "modules/mythica-machina-docklands-warehouse/assets/mythica-machina-docklands-warehouse-Ground_Outdoors.webp",
+            "name": "docklands-outdoors-mask.webp",
+            "bg": "checker"
+          }
+        ]
+      },
+      "notes": [
+        {
+          "on": "docklands-outdoors-mask.webp",
+          "text": "Black: under a roof",
+          "at": [0.5, 0.5]
+        },
+        {
+          "on": "docklands-outdoors-mask.webp",
+          "text": "White: open sky",
+          "at": [0.2, 0.85],
+          "to": [0.02, 0.85]
+        }
+      ]
+    },
+    {
+      "id": "docklands-window",
+      "scene": "Mythica Machina - Docklands Warehouse",
+      "center": [0.3, 0.6],
+      "span": 0.36,
+      "hour": 16.5,
+      "weather": {
+        "cloudCover01": 0.05,
+        "precip01": 0
+      },
+      "out": {
+        "msa": "docklands-window-msa.webp",
+        "art": "docklands-window-art.webp",
+        "masks": [
+          {
+            "file": "modules/mythica-machina-docklands-warehouse/assets/mythica-machina-docklands-warehouse-Ground_Window.webp",
+            "name": "docklands-window-mask.webp"
+          }
+        ]
+      },
+      "notes": [
+        {
+          "on": "docklands-window-mask.webp",
+          "text": "Light from one window",
+          "at": [0.52, 0.5],
+          "to": [0.36, 0.3]
+        },
+        {
+          "on": "docklands-window-mask.webp",
+          "text": "Frame bars stay dark",
+          "at": [0.5, 0.92],
+          "to": [0.72, 0.8]
+        }
+      ]
+    },
+    {
+      "id": "river-water",
+      "scene": "Mythica Machina - Town River Bridge MSA",
+      "level": "Ground Floor",
+      "center": [0.42, 0.5],
+      "span": 0.5,
+      "hour": 11.5,
+      "weather": {
+        "cloudCover01": 0.05,
+        "precip01": 0
+      },
+      "out": {
+        "msa": "river-water-msa.webp",
+        "art": "river-water-art.webp",
+        "masks": [
+          {
+            "file": "modules/mythica-machina-town-river-bridge/assets/Tower_Bridge_Underground_Water.webp",
+            "name": "river-water-mask.webp"
+          }
+        ]
+      },
+      "notes": [
+        {
+          "on": "river-water-mask.webp",
+          "text": "White: deep water",
+          "at": [0.82, 0.5]
+        },
+        {
+          "on": "river-water-mask.webp",
+          "text": "Soft grey edge: the shallows",
+          "at": [0.25, 0.9],
+          "to": [0.09, 0.7]
+        },
+        {
+          "on": "river-water-mask.webp",
+          "text": "Piers stay black",
+          "at": [0.5, 0.08],
+          "to": [0.33, 0.3]
+        },
+        {
+          "on": "msa",
+          "text": "Foam where water meets the piers",
+          "at": [0.3, 0.92],
+          "to": [0.47, 0.78]
+        }
+      ]
+    },
+    {
+      "id": "forge-fire",
+      "scene": "Mythica Machina - Foundry / Forge",
+      "center": [0.46, 0.63],
+      "span": 0.3,
+      "hour": 20,
+      "weather": {
+        "cloudCover01": 0.2,
+        "precip01": 0
+      },
+      "settleMs": 7000,
+      "out": {
+        "msa": "forge-fire-msa.webp",
+        "art": "forge-fire-art.webp",
+        "masks": [
+          {
+            "file": "modules/mythica-machina-foundry-forge/assets/mythica-machina-foundry--forge_Ground_Fire.webp",
+            "name": "forge-fire-mask.webp"
+          }
+        ]
+      },
+      "notes": [
+        {
+          "on": "msa",
+          "text": "Each white dot became a fire",
+          "at": [0.5, 0.1],
+          "to": [0.25, 0.45]
+        },
+        {
+          "on": "forge-fire-mask.webp",
+          "text": "One dot in each furnace",
+          "at": [0.5, 0.85],
+          "to": [0.19, 0.53]
+        }
+      ]
+    },
+    {
+      "id": "forge-ash",
+      "scene": "Mythica Machina - Foundry / Forge",
+      "center": [0.5, 0.5],
+      "span": 0.9,
+      "hour": 13,
+      "weather": {
+        "cloudCover01": 0.3,
+        "precip01": 0
+      },
+      "out": {
+        "masks": [
+          {
+            "file": "modules/mythica-machina-foundry-forge/assets/mythica-machina-foundry--forge_Ground_Ash.webp",
+            "name": "forge-ash-mask.webp"
+          }
+        ]
+      },
+      "notes": [
+        {
+          "on": "forge-ash-mask.webp",
+          "text": "Soft drifts: where ash already lies",
+          "at": [0.5, 0.5]
+        }
+      ]
+    },
+    {
+      "id": "lair-fluid",
+      "scene": "Mythica Machina - Wizards Lair / Laboratory",
+      "center": [0.7, 0.72],
+      "span": 0.34,
+      "hour": 22,
+      "weather": {
+        "cloudCover01": 0.2,
+        "precip01": 0
+      },
+      "settleMs": 7000,
+      "artLayers": [
+        "modules/mythica-machina-wizards-lair-laboratory/assets/mythica-machina-wizards-lair-laboratory_Glassware.webp"
+      ],
+      "out": {
+        "msa": "lair-fluid-msa.webp",
+        "art": "lair-fluid-art.webp",
+        "masks": [
+          {
+            "file": "modules/mythica-machina-wizards-lair-laboratory/assets/mythica-machina-wizards-lair-laboratory_Glassware_Fluid.png",
+            "name": "lair-fluid-mask.webp"
+          }
+        ]
+      },
+      "notes": [
+        {
+          "on": "lair-fluid-mask.webp",
+          "text": "Tubes: thin filled lines",
+          "at": [0.17, 0.12],
+          "to": [0.31, 0.35]
+        },
+        {
+          "on": "lair-fluid-mask.webp",
+          "text": "Flasks: a flat fill",
+          "at": [0.85, 0.88],
+          "to": [0.74, 0.66]
+        }
+      ]
+    },
+    {
+      "id": "goblin-dust",
+      "scene": "Mythica Machina - Goblin Alchemist",
+      "center": [0.45, 0.45],
+      "span": 0.42,
+      "hour": 12.5,
+      "weather": {
+        "cloudCover01": 0.05,
+        "precip01": 0
+      },
+      "settleMs": 9000,
+      "out": {
+        "masks": [
+          {
+            "file": "modules/mythica-machina-goblin-alchemist/assets/mythica-machina-goblin-alchemist-ground_Dust.webp",
+            "name": "goblin-dust-mask.webp"
+          }
+        ]
+      },
+      "notes": [
+        {
+          "on": "goblin-dust-mask.webp",
+          "text": "Thickest where the window light falls",
+          "at": [0.62, 0.9],
+          "to": [0.3, 0.55]
+        }
+      ]
+    },
+    {
+      "id": "goblin-iridescence",
+      "scene": "Mythica Machina - Goblin Alchemist",
+      "center": [0.16, 0.56],
+      "span": 0.3,
+      "hour": 14,
+      "weather": {
+        "cloudCover01": 0.1,
+        "precip01": 0
+      },
+      "out": {
+        "masks": [
+          {
+            "file": "modules/mythica-machina-goblin-alchemist/assets/mythica-machina-goblin-alchemist-ground_Iridescence.webp",
+            "name": "goblin-iridescence-mask.webp"
+          }
+        ]
+      },
+      "effects": {
+        "setIridescence": {
+          "enabled": true
+        }
+      },
+      "notes": [
+        {
+          "on": "goblin-iridescence-mask.webp",
+          "text": "The brew in the cauldron",
+          "at": [0.78, 0.2],
+          "to": [0.5, 0.45]
+        }
+      ]
+    },
+    {
+      "id": "goblin-prism",
+      "scene": "Mythica Machina - Goblin Alchemist",
+      "center": [0.74, 0.86],
+      "span": 0.26,
+      "hour": 14,
+      "weather": {
+        "cloudCover01": 0.1,
+        "precip01": 0
+      },
+      "out": {
+        "masks": [
+          {
+            "file": "modules/mythica-machina-goblin-alchemist/assets/mythica-machina-goblin-alchemist-ground_Prism.webp",
+            "name": "goblin-prism-mask.webp"
+          }
+        ]
+      },
+      "effects": {
+        "setPrism": {
+          "enabled": true
+        }
+      },
+      "notes": [
+        {
+          "on": "goblin-prism-mask.webp",
+          "text": "Each glass jar",
+          "at": [0.62, 0.45],
+          "to": [0.28, 0.55]
+        }
+      ]
+    },
+    {
+      "id": "docklands-storm",
+      "scene": "Mythica Machina - Docklands Warehouse",
+      "center": [0.5, 0.5],
+      "span": 1.0,
+      "hour": 15.5,
+      "weather": {
+        "cloudCover01": 0.95,
+        "precip01": 0.85
+      },
+      "settleMs": 15000,
+      "out": {
+        "msa": "docklands-storm.webp"
+      },
+      "archetype": "thunderstorm"
+    }
+  ]
+}

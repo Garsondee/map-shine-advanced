@@ -507,7 +507,7 @@
         "cloudCover01": 0.95,
         "precip01": 0.85
       },
-      "settleMs": 15000,
+      "settleMs": 25000,
       "out": {
         "msa": "docklands-storm.webp"
       },

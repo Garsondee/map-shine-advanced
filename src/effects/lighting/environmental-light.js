@@ -64,6 +64,12 @@ import { FLUID_PRESENCE_EDGE0, FLUID_PRESENCE_EDGE1 } from '../fluid/fluid-rende
 import { buildLightLookNodes, IDENTITY_LIGHT_LOOK } from '../grade/grade-ops.js';
 import { buildSunAndCloudVisNode } from './light-visibility.js';
 import { GATE_SHARPEN_LOW, GATE_SHARPEN_HIGH } from './sun-occlusion.js';
+import {
+  buildAmbienceNode,
+  createAmbienceUniforms,
+  deriveAmbienceUniforms,
+  setAmbienceUniforms,
+} from './ambience-filter.js';
 
 /**
  * Linear-interpolate two rgb triples, clamping t to [0,1].
@@ -1025,7 +1031,11 @@ export function buildEnvironmentalLightMaterials({
   const albedoTexNode = texture(albedoTexture);
   const illumTexNode = texture(illumTexture);
   const colorationTexNode = texture(colorationTexture);
-  const mapSrgb = sRGBTransferOETF(albedoTexNode.rgb);
+  // FOUNDRY'S ENVIRONMENT FILTER on the art, before light meets it (2026-11-07, mmp-ynr.4): the scene's base/dark
+  // hue, intensity, luminosity, saturation and shadows (ambience-filter.js). Off (exactly the art) for a scene with
+  // none set; v14's default dark luminosity -0.25 is ×0.8 at full darkness, as in Foundry.
+  const uAmbience = createAmbienceUniforms(THREE.TSL);
+  const mapSrgb = buildAmbienceNode(THREE.TSL, sRGBTransferOETF(albedoTexNode.rgb), uAmbience);
   const illumWithUiShadow = uiShadowVisNode
     ? illumTexNode.rgb.mul(mix(uUiShadowTint, vec3(1, 1, 1), uiShadowVisNode))
     : illumTexNode.rgb;
@@ -1059,6 +1069,24 @@ export function buildEnvironmentalLightMaterials({
   compositeMaterial.depthTest = false;
   compositeMaterial.depthWrite = false;
   compositeMaterial.fragmentNode = vec4(litLinear, albedoTexNode.a);
+
+  /** The scene environment last derived, and the key it was derived from (re-derived only when it changes). */
+  let ambienceKey = null;
+  let ambienceDerived = deriveAmbienceUniforms(null);
+  /**
+   * Push this frame's environment filter: the scene's `environment` ({cycle, base, dark}) at MSA's darkness.
+   * @param {*} environment - `canvas.scene.environment`, or null (filter off). @param {number} darkness01
+   */
+  function setAmbience(environment, darkness01) {
+    const key = environment
+      ? JSON.stringify([environment.cycle, environment.base ?? null, environment.dark ?? null])
+      : 'none';
+    if (key !== ambienceKey) {
+      ambienceKey = key;
+      ambienceDerived = deriveAmbienceUniforms(environment);
+    }
+    setAmbienceUniforms(uAmbience, ambienceDerived, darkness01);
+  }
 
   /** Push this frame's ambient background into the illum uniform (no per-frame
    * allocation — mutate the existing Vector3, like the occlusion pass's own
@@ -1242,6 +1270,7 @@ export function buildEnvironmentalLightMaterials({
     illumTexNode,
     colorationTexNode,
     setAmbient,
+    setAmbience,
     setSky,
     setMoon,
     setUiShadowTint,

@@ -10702,6 +10702,8 @@ async function startVtPanViewerUnserialized({
       const raisedBackground = maxRgb(background, lastGlobalLightFloor);
 
       envLight.setAmbient(raisedBackground);
+      // Foundry's Environment filter (base/dark) on the art, at MSA's darkness (ambience-filter.js, mmp-ynr.4).
+      envLight.setAmbience?.(globalThis.canvas?.scene?.environment ?? null, darkness01);
       lastRaisedBackground = raisedBackground;
       uVisionMemoryLight.value.set(raisedBackground[0], raisedBackground[1], raisedBackground[2]);
       profiler?.end(Z.lightAmbient);

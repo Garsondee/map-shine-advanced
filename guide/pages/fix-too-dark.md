@@ -1,5 +1,5 @@
 ---
-sources: src/effects/grade/grade.js (exposure, exposureInside, exposureOutside, lightLevel), Remote Mix tab Night fader (boot.js weatherBoard.onNightDarknessCommit)
+sources: src/effects/grade/grade.js (exposure, exposureInside, exposureOutside, lightLevel), Remote Mix tab Night fader (boot.js weatherBoard.onNightDarknessCommit), src/effects/lighting/ambience-filter.js (scene Environment base/dark)
 ---
 Players can't make out the room. Start with the first button, and press it again if you need more.
 
@@ -24,6 +24,8 @@ If the room is dark because the lamps feel weak, raise the lamps instead of the 
 ### At night
 
 Night darkness is its own fader. Lift it a little and the moon does more of the work.
+
+Is the art itself dim at night, not just the light? Foundry's scene settings have **Environment → Darkness → Luminosity**, which darkens the map as night falls (Foundry's default is -0.25). Map Shine follows it, as Foundry does. Raise it towards 0.
 
 [[do: night-lighter, night-darker]]
 

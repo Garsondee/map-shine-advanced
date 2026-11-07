@@ -342,7 +342,10 @@ export function run(t) {
 
   // ---- the round-2 starter set (author 2026-11-01: four rows, the full spectrum) -----
   {
-    t.ok('thirty-one starters (round 3 catalogue + the blank Clear and still, 2026-11-06)', STARTER_LOOKS.length === 31);
+    t.ok(
+      'thirty-one starters (round 3 catalogue + the blank Clear and still, 2026-11-06)',
+      STARTER_LOOKS.length === 31
+    );
     t.ok(
       'every starter sits in a real group, never Mine',
       STARTER_LOOKS.every((l) => lookGroup(l) === l.group && l.group !== 'mine')

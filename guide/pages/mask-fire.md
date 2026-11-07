@@ -32,3 +32,5 @@ So paint the fire the size you want it. One wide shape gives one big fire, and a
 Flame size, smoke, embers and colour are in **Studio → Effects → Fire**. The **Fuel** setting (wood, coal, oil or magical) changes the colour and behaviour in one go.
 
 > [!try] On a scene with fire, try **Quick Fixes → Fire or smoke is too much** to see the main settings change live.
+
+[[settings: fire]]

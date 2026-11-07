@@ -2,7 +2,7 @@
   "overrides": [
     {
       "files": ["shoot.mjs"],
-      "globals": { "window": "readonly", "canvas": "readonly", "game": "readonly", "MapShine": "readonly" }
+      "globals": { "window": "readonly", "canvas": "readonly", "game": "readonly", "MapShine": "readonly", "location": "readonly" }
     }
   ]
 }

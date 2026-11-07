@@ -32,3 +32,5 @@ sources: src/scene/mask-catalog.js (fluid: rgba, red read), src/effects/fluid/fl
 - Colours, glow and bubble speed are in **Studio → Effects → Fluid**.
 
 The glassware in this example sits on a tile above the floor, with its own `_Fluid` mask named after the tile's image. That works for any mask. [Naming](page:learn-naming).
+
+[[settings: fluid]]

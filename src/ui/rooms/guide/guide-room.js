@@ -28,10 +28,29 @@ import { GUIDE_ROOM_ID, GUIDE_TOOLTIP_SCOPE, guideCss } from './guide-style.js';
 import { renderGuideMarkdown, guideSearchText, escapeHtml } from './guide-markdown.js';
 import { GUIDE_ACTIONS, runGuideAction } from './guide-actions.js';
 import { maskCheatTableHtml } from './guide-masks.js';
+import { settingsTableHtml } from './guide-settings.js';
 
 const STYLE_ID = 'msa-guide-style';
 const STORE_PAGE = 'msa-guide-page';
 const STORE_WIDE = 'msa-guide-wide';
+
+/** The Remote's closures, set once at Remote install (`configureGuide`), so the guide can be
+ * opened from anywhere — the painter's Masks list, a Studio effect card — with working buttons. */
+let defaultCtx = {};
+
+/** @param {object} ctx - the same shape `installGuide` takes. */
+export function configureGuide(ctx) {
+  defaultCtx = ctx ?? {};
+}
+
+/**
+ * Open the guide on a page from anywhere in the UI (`'fixes'`, `'learn'`, a page id, `id#anchor`).
+ * Builds the room on first use with the context the Remote configured.
+ * @param {string} [target]
+ */
+export function openGuide(target) {
+  return installGuide(defaultCtx).open(target);
+}
 
 /** The module-root `guide/` folder, wherever the module is served from. */
 export const GUIDE_BASE_URL = new URL('../../../../guide/', import.meta.url).href;
@@ -147,6 +166,12 @@ export function installGuide(ctx = {}) {
   room.append(card);
   document.body.append(room);
   raiseRoomOnPress(room);
+  // One step above a normally raised room (101): the guide is often opened FROM another
+  // tool — the painter's toolbar sits at 101 and would otherwise cover its header.
+  const lift = () => {
+    room.style.zIndex = '102';
+  };
+  room.addEventListener('pointerdown', lift, true);
   installTooltips({ scope: GUIDE_TOOLTIP_SCOPE });
 
   // ---- data --------------------------------------------------------------------------
@@ -433,6 +458,10 @@ export function installGuide(ctx = {}) {
   }
 
   function fillLive(box) {
+    if (box.dataset.live === 'settings') {
+      box.innerHTML = settingsTableHtml(box.dataset.effect);
+      return;
+    }
     if (box.dataset.live === 'masks-table') {
       box.innerHTML = maskCheatTableHtml();
       hydrate(box);
@@ -573,6 +602,7 @@ export function installGuide(ctx = {}) {
       state.open = true;
       room.hidden = false;
       raiseRoom(room);
+      lift();
       if (!wasOpen) replayClass(card, 'msa-enter');
       for (const fn of openListeners) fn(true);
       try {

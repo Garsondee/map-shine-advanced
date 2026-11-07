@@ -23,6 +23,8 @@ import { iconMarkup } from '../../widgets/icon-sprite.js';
 import { tierChip, scopeGlyph, healthBadge } from '../../widgets/badges.js';
 import { buildArmButton, buildNameComposer } from '../../widgets/inline-actions.js';
 import { DIAL_DRIVE_TYPES } from '../../../core/dials-schema.js';
+import { openGuide } from '../guide/guide-room.js';
+import { EFFECT_GUIDE_PAGES } from '../guide/guide-links.js';
 import { groupOf, groupEffects } from './effect-catalog.js';
 
 /*
@@ -435,6 +437,19 @@ function buildStudioEffectCard(model, nav) {
     prev.addEventListener('click', nav.onPrev);
     next.addEventListener('click', nav.onNext);
     headTop.append(prev, next);
+  }
+
+  // ? — the Map Shine Guide's page about this effect (2026-11-07, mmp-0mv).
+  const guidePage = EFFECT_GUIDE_PAGES[model.id];
+  if (guidePage) {
+    const help = iconButton(
+      'help',
+      `Open the Map Shine Guide on ${model.title ?? 'this effect'}`,
+      'msa-guide-link',
+      'Guide'
+    );
+    help.addEventListener('click', () => void openGuide(guidePage));
+    headTop.append(help);
   }
 
   if (typeof model.onToggleEnabled === 'function') {

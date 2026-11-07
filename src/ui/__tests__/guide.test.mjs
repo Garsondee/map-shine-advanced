@@ -27,6 +27,8 @@ import { GUIDE_ACTIONS, GUIDE_EFFECTS, GUIDE_ACTION_IDS, runGuideAction, fmt } f
 import { MASK_GUIDE, maskCheatRows, maskCheatTableHtml } from '../rooms/guide/guide-masks.js';
 import { MASK_KINDS } from '../../scene/mask-catalog.js';
 import { WEATHER_ARCHETYPES } from '../../world/weather-data.js';
+import { EFFECT_GUIDE_PAGES } from '../rooms/guide/guide-links.js';
+import { GUIDE_SETTINGS, settingsGroups, settingsTableHtml } from '../rooms/guide/guide-settings.js';
 
 const GUIDE_DIR = fileURLToPath(new URL('../../../guide/', import.meta.url));
 /** Hand-written words per page, tables and generated blocks included. Hubs are mostly tiles. */
@@ -263,6 +265,29 @@ async function runActions({ ok }) {
   }
 }
 
+function runSettings({ ok }) {
+  for (const [id, spec] of Object.entries(GUIDE_SETTINGS)) {
+    const groups = settingsGroups(id);
+    const rows = groups.flatMap((g) => g.rows);
+    ok(
+      `settings table ${id}: has rows, all labelled and explained`,
+      rows.length > 0 && rows.every((r) => r.label && r.help)
+    );
+    const planned = Object.entries(spec.params)
+      .filter(([, d]) => d.status === 'planned')
+      .map(([k]) => k);
+    ok(
+      `settings table ${id}: never lists a planned setting`,
+      rows.every((r) => !planned.includes(r.key))
+    );
+  }
+  ok(
+    'a settings table is a folded <details> naming the Studio place',
+    /<details class="g-settings">[\s\S]*Studio → Effects → Water/.test(settingsTableHtml('water'))
+  );
+  ok('an unknown table says so instead of throwing', settingsTableHtml('nope').includes('g-bad'));
+}
+
 function runMasks({ ok }) {
   const ids = MASK_KINDS.map((k) => k.id);
   const missing = ids.filter((id) => !MASK_GUIDE[id]);
@@ -301,6 +326,21 @@ function runDrift({ ok }) {
     manifest.pages.every((p) => manifest.halves.some((h) => h.id === p.half))
   );
 
+  // Every Studio effect card's ? points at a real page, and names a card boot.js really registers.
+  const boot = readFileSync(fileURLToPath(new URL('../../boot.js', import.meta.url)), 'utf8');
+  const cards = new Set(
+    [...boot.matchAll(/register(?:Simple)?EffectCard(?:Safe)?\('([A-Za-z0-9_]+)'/g)].map((m) => m[1])
+  );
+  for (const [effectId, page] of Object.entries(EFFECT_GUIDE_PAGES)) {
+    ok(
+      `effect card "${effectId}" exists and its guide page "${page}" exists`,
+      cards.has(effectId) && pageIds.includes(page)
+    );
+  }
+  for (const [maskId, g] of Object.entries(MASK_GUIDE)) {
+    ok(`mask "${maskId}": its guide page "${g.page}" exists (the painter's ? opens it)`, pageIds.includes(g.page));
+  }
+
   const files = readdirSync(`${GUIDE_DIR}pages`).filter((f) => f.endsWith('.md'));
   const orphan = files.map((f) => f.slice(0, -3)).filter((id) => !pageIds.includes(id));
   const absent = pageIds.filter((id) => !files.includes(`${id}.md`));
@@ -325,6 +365,11 @@ function runDrift({ ok }) {
     );
     const badActs = r.actions.filter((id) => !GUIDE_ACTION_IDS.includes(id));
     ok(`${p.id}: every button is a real guide button (bad: ${badActs.join(', ') || 'none'})`, badActs.length === 0);
+    const badSettings = r.settings.filter((id) => !GUIDE_SETTINGS[id]);
+    ok(
+      `${p.id}: every settings table names a known effect (bad: ${badSettings.join(', ') || 'none'})`,
+      badSettings.length === 0
+    );
     const badImgs = r.images.filter((i) => !images.includes(i));
     ok(`${p.id}: every image exists (missing: ${badImgs.join(', ') || 'none'})`, badImgs.length === 0);
     for (const i of r.images) usedImages.add(i);
@@ -362,5 +407,6 @@ export async function run(t) {
   runRenderer(t);
   await runActions(t);
   runMasks(t);
+  runSettings(t);
   runDrift(t);
 }

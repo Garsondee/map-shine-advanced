@@ -15,6 +15,8 @@
 
 import { buildMaskList } from './mask-list-model.js';
 import { createLogger } from '../core/log.js';
+import { openGuide } from './rooms/guide/guide-room.js';
+import { MASK_GUIDE } from './rooms/guide/guide-masks.js';
 
 const log = createLogger('paint-mode');
 
@@ -114,7 +116,7 @@ export function createMaskList(state, { paintableKinds, getMaskFacts, paintInfoF
       borderTop: '1px solid rgba(143,214,255,0.14)',
       opacity: '0.7',
     });
-    foot.textContent = 'Click a mask to paint it. Hover a row for details.';
+    foot.textContent = 'Click a mask to paint it. ? opens its page in the guide.';
 
     panel.append(head, list, foot);
 
@@ -145,7 +147,7 @@ export function createMaskList(state, { paintableKinds, getMaskFacts, paintInfoF
     row.title = r.detail;
     Object.assign(row.style, {
       display: 'grid',
-      gridTemplateColumns: '10px 1fr auto',
+      gridTemplateColumns: '10px 1fr auto auto',
       alignItems: 'center',
       columnGap: '8px',
       padding: '5px 6px',
@@ -202,7 +204,32 @@ export function createMaskList(state, { paintableKinds, getMaskFacts, paintInfoF
       pick(r.id);
     });
 
-    row.append(dot, text, go);
+    // ? — the Map Shine Guide's page for this mask: what it does and how to paint it well.
+    const page = MASK_GUIDE[r.id]?.page;
+    const help = document.createElement('button');
+    help.textContent = '?';
+    help.title = page
+      ? `How to make ${r.suffix}: open its page in the Map Shine Guide`
+      : 'No guide page for this mask yet';
+    help.disabled = !page;
+    Object.assign(help.style, {
+      width: '22px',
+      height: '22px',
+      borderRadius: '50%',
+      border: '1px solid rgba(231,195,104,0.6)',
+      background: 'rgba(231,195,104,0.14)',
+      color: '#f3d98f',
+      font: 'bold 11px Signika, sans-serif',
+      padding: '0',
+      cursor: page ? 'pointer' : 'default',
+      opacity: page ? '1' : '0.35',
+    });
+    help.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (page) void openGuide(page);
+    });
+
+    row.append(dot, text, help, go);
     return row;
   }
 

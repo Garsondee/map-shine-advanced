@@ -30,3 +30,5 @@ Don't paint the window itself. Paint where its light **lands**: a soft-edged pat
 Map Shine slides and stretches each patch with the time of day and keeps it inside its room. You don't need one mask for morning and another for evening: paint it for midday and let the sun do the rest.
 
 > [!tip] Add a `_Dust` mask to the same rooms and specks of dust float in the window light. [Dust and critters](page:mask-air).
+
+[[settings: window]]

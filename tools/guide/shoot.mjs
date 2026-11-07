@@ -77,6 +77,15 @@ async function frameInPage(shot) {
   if (shot.effects) {
     for (const [setter, patch] of Object.entries(shot.effects)) MapShine[setter]?.(patch);
   }
+  // `force`: switch an effect on for this picture only (never written to a setting) — for
+  // opt-in effects such as Prism and Iridescence, which are off until a GM turns them on.
+  for (const [id, on] of Object.entries(shot.force ?? {})) MapShine.forceEffect?.(id, on);
+  // `waterPreset`: render the water with one of its built-in presets (named in the caption).
+  if (shot.waterPreset) {
+    const fx = await import(new URL('modules/map-shine-advanced/src/effects/index.js', `${location.origin}/`).href);
+    const preset = fx.waterPreset?.(shot.waterPreset);
+    if (preset) MapShine.setWater?.(preset);
+  }
   const r = canvas.dimensions.sceneRect;
   const cx = r.x + shot.center[0] * r.width;
   const cy = r.y + shot.center[1] * r.height;
@@ -125,9 +134,10 @@ for (const shot of manifest.shots) {
   await sleep(400);
   const png = path.join(rawDir, `${shot.id}-msa.png`);
   await page.screenshot({ path: png });
-  await page.evaluate(() => {
+  await page.evaluate((force) => {
     if (canvas.controls) canvas.controls.visible = true;
-  });
+    for (const id of Object.keys(force ?? {})) MapShine.forceEffect?.(id, null);
+  }, shot.force ?? null);
   await style.evaluate((el) => el.remove());
   const uv = {
     u0: (info.view.x - info.rect.x) / info.rect.w,

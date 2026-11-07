@@ -28,3 +28,5 @@ Use `_Tree` for tall canopies, which stand higher and throw longer shadows, and 
 - Plants under a roof (black on `_Outdoors`) are sheltered from the wind.
 - Map Shine's painter can't create these. Import them as files.
 - Height, sway and shadow are in **Studio → Effects → Vegetation (trees & bushes)**.
+
+[[settings: vegetation]]

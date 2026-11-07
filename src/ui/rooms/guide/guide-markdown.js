@@ -18,7 +18,7 @@
  *   compare         `::: compare "caption"` then two image lines then `:::` — a drag slider
  *   gallery         `::: gallery` then image lines then `:::` — a grid of figures
  *   action buttons  `[[do: id, id]]` on its own line — the room fills them in (guide-actions.js)
- *   live blocks     `[[looks]]`, `[[masks-table]]` — filled in by the room from live data
+ *   live blocks     `[[looks]]`, `[[masks-table]]`, `[[settings: effectId]]` — filled in by the room from live data
  *   page cards      `[[cards: page-id, page-id]]` — big link tiles to other pages
  *
  * Link targets: `page:<id>` (another guide page), `page:<id>#anchor`, `#anchor`
@@ -119,6 +119,7 @@ const IMAGE_LINE = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)\s*$/;
 const ACTIONS_LINE = /^\[\[do:\s*([a-z0-9-]+(?:\s*,\s*[a-z0-9-]+)*)\s*\]\]\s*$/;
 const CARDS_LINE = /^\[\[cards:\s*([a-z0-9-]+(?:\s*,\s*[a-z0-9-]+)*)\s*\]\]\s*$/;
 const LIVE_LINE = /^\[\[(looks|masks-table)\]\]\s*$/;
+const SETTINGS_LINE = /^\[\[settings:\s*([a-zA-Z]+)\s*\]\]\s*$/;
 const CALLOUT_KINDS = new Set(['tip', 'warn', 'note', 'try']);
 const CALLOUT_TITLES = { tip: 'Tip', warn: 'Watch out', note: 'Good to know', try: 'Try it' };
 
@@ -191,6 +192,7 @@ export function renderGuideMarkdown(md, opts = {}) {
   const actions = [];
   const cards = [];
   const live = [];
+  const settings = [];
   const usedIds = new Set();
   let words = 0;
   const lines = body.split('\n');
@@ -251,6 +253,12 @@ export function renderGuideMarkdown(md, opts = {}) {
       const ids = m[1].split(',').map((s) => s.trim());
       cards.push(...ids);
       out.push(`<div class="g-cards" data-cards="${escapeHtml(ids.join(','))}"></div>`);
+      continue;
+    }
+    if ((m = trimmed.match(SETTINGS_LINE))) {
+      flush();
+      settings.push(m[1]);
+      out.push(`<div class="g-live" data-live="settings" data-effect="${escapeHtml(m[1])}"></div>`);
       continue;
     }
     if ((m = trimmed.match(LIVE_LINE))) {
@@ -333,6 +341,7 @@ export function renderGuideMarkdown(md, opts = {}) {
     pageLinks: ctx.pageLinks,
     images: ctx.images,
     live,
+    settings,
     words,
   };
 }

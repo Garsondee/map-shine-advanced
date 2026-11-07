@@ -32,3 +32,11 @@ The chip at the top of the Remote says **This scene** or **All scenes**. With **
 - Open ground, streets and courtyards show weather best. A map that is all roof will show very little.
 - Add `_Water`. Rain rings and wind ripples on water are some of the best weather moments.
 - Add `_Drip` along roof edges. Drips after rain sell the weather inside.
+
+### Every setting
+
+[[settings: precipitation]]
+
+[[settings: clouds]]
+
+[[settings: cloudTops]]

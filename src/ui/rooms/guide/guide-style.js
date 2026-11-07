@@ -157,6 +157,18 @@ ${R} .g-table th{text-align:left; padding:8px 12px; background:var(--bg3); color
 ${R} .g-table td{padding:8px 12px; border-top:1px solid var(--line); color:var(--ink1); vertical-align:top}
 ${R} .g-table td:first-child{white-space:nowrap; color:var(--ink0)}
 
+/* every-setting tables: folded away under a summary line, opened on demand */
+${R} .g-settings{margin:18px 0; border:1px solid var(--line); border-radius:10px; background:var(--bg2)}
+${R} .g-settings > summary{display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; padding:11px 14px; cursor:pointer;
+  font:700 14px var(--font); color:var(--ink0); list-style-position:inside}
+${R} .g-settings > summary small{font:500 12px var(--font); color:var(--ink2)}
+${R} .g-settings[open] > summary{border-bottom:1px solid var(--line)}
+${R} .g-settings h5{margin:14px 14px 6px; font:800 11px var(--font); letter-spacing:.08em; text-transform:uppercase; color:var(--shine)}
+${R} .g-settings .g-table-wrap{margin:0 14px 10px}
+${R} .g-settings-table td:nth-child(2){min-width:240px}
+${R} .g-settings-table td:nth-child(3), ${R} .g-settings-table td:nth-child(4){white-space:nowrap; font-variant-numeric:tabular-nums}
+${R} .g-swatch{display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:6px; vertical-align:-1px; border:1px solid var(--line-strong)}
+
 /* ---- hub tiles ------------------------------------------------------------------ */
 ${R} .g-cards{display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px; margin:14px 0 22px}
 ${R} .g-card{display:flex; flex-direction:column; align-items:stretch; text-align:left; padding:0; overflow:hidden; cursor:pointer;

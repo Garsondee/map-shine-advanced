@@ -28,3 +28,5 @@ Paint where ash or soot already lies, around a forge or a burned-out house. It s
 Paint flies over the rubbish heap, maggots in the corpse pit, fireflies over the pond. Fireflies are at their best around dusk. Creatures scatter when a token walks through them.
 
 > [!tip] Keep blobs **separate**. Two blobs that touch become one big swarm.
+
+[[settings: dust]]

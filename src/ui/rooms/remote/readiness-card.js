@@ -39,7 +39,7 @@ function btn(label, className, onClick, title) {
 /**
  * @param {HTMLElement} host - the empty slot above the tabs.
  * @returns {{render: (readiness: object|null, actions: object) => void}}
- *   `actions`: { onPaint(floorIndex), onImport(floorIndex), onSnooze(), onRecheck(),
+ *   `actions`: { onPaint(floorIndex), onImport(floorIndex), onSnooze(), onRecheck(), onGuide(pageId),
  *   requiredSuffix: string }
  */
 export function createReadinessCard(host) {
@@ -97,6 +97,17 @@ export function createReadinessCard(host) {
     host.append(list);
 
     const foot = el('div', 'msa-ready-foot');
+    // The Map Shine Guide (2026-11-07): how to make the mask, with pictures.
+    if (actions.onGuide) {
+      foot.append(
+        btn(
+          'How do I make this?',
+          'msa-btn msa-btn--sm msa-btn--gold',
+          () => actions.onGuide('mask-outdoors'),
+          `Open the Map Shine Guide on the ${actions.requiredSuffix ?? 'mask'} page: what it is, how to paint it, with examples.`
+        )
+      );
+    }
     foot.append(
       btn(
         'Check again',

@@ -48,7 +48,7 @@ import { renderPlayPads } from './play-pads.js';
 import { renderPrepBoard } from './prep-board.js';
 import { installMoreMenu, PATREON_URL } from './more-menu.js';
 import { createReadinessCard } from './readiness-card.js';
-import { installGuide } from '../guide/guide-room.js';
+import { installGuide, configureGuide } from '../guide/guide-room.js';
 import { listRemoteSections, onRemoteSectionsChanged, buildRemoteKit } from './extension-sections.js';
 import { createLogger } from '../../../core/log.js';
 import { raiseRoom, raiseRoomOnPress } from '../room-stack.js';
@@ -210,26 +210,30 @@ export function installRemote(opts = {}) {
   helpBtn.innerHTML = `${iconMarkup('help')}<span>Help</span>`;
   helpBtn.title = 'The Map Shine Guide: quick fixes for right now, and how to make your maps shine';
   let guide = null;
+  // Set now (the room itself is built on first open), so the painter's Masks list and the
+  // Studio's effect cards can open the guide with working buttons too (openGuide).
+  const guideCtx = {
+    remote: {
+      weatherBoard: opts.weatherBoard,
+      onSweepToHour: opts.onSweepToHour,
+      getFadeOverMs: () => fadeTime.getOverMs(),
+      looks: opts.looks,
+      getRendererOverride: opts.getRendererOverride,
+      onRendererOverrideChange: opts.onRendererOverrideChange,
+    },
+    effectSetter: (name) => opts.guide?.effectSetter?.(name) ?? null,
+    getHour: () => opts.guide?.getHour?.(),
+    openTool: (target) => {
+      if (target === 'painter' && opts.guide?.openPainter) return void opts.guide.openPainter();
+      if (target === 'studio' && opts.guide?.openStudio) return void opts.guide.openStudio();
+      if (target === 'remote-mix') return void controller.showTab('mix');
+      return false;
+    },
+  };
+  configureGuide(guideCtx);
   function getGuide() {
     if (guide) return guide;
-    guide = installGuide({
-      remote: {
-        weatherBoard: opts.weatherBoard,
-        onSweepToHour: opts.onSweepToHour,
-        getFadeOverMs: () => fadeTime.getOverMs(),
-        looks: opts.looks,
-        getRendererOverride: opts.getRendererOverride,
-        onRendererOverrideChange: opts.onRendererOverrideChange,
-      },
-      effectSetter: (name) => opts.guide?.effectSetter?.(name) ?? null,
-      getHour: () => opts.guide?.getHour?.(),
-      openTool: (target) => {
-        if (target === 'painter' && opts.guide?.openPainter) return void opts.guide.openPainter();
-        if (target === 'studio' && opts.guide?.openStudio) return void opts.guide.openStudio();
-        if (target === 'remote-mix') return void controller.showTab('mix');
-        return false;
-      },
-    });
+    guide = installGuide(guideCtx);
     guide.onOpenChange((open) => helpBtn.setAttribute('aria-pressed', String(open)));
     return guide;
   }
@@ -686,12 +690,12 @@ export function installRemote(opts = {}) {
     setReadiness(model, actions) {
       lastReadiness = model ?? null;
       if (actions) lastReadinessActions = actions;
-      readiness.render(lastReadiness, lastReadinessActions);
+      readiness.render(lastReadiness, { ...lastReadinessActions, onGuide: (page) => getGuide().open(page) });
     },
     /** Repaint the card with the last model (e.g. the painter opened or closed). */
     refreshReadiness(patch = {}) {
       lastReadinessActions = { ...lastReadinessActions, ...patch };
-      readiness.render(lastReadiness, lastReadinessActions);
+      readiness.render(lastReadiness, { ...lastReadinessActions, onGuide: (page) => getGuide().open(page) });
     },
   };
   room._msaRemoteController = controller;

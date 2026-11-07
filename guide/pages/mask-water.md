@@ -3,12 +3,12 @@ sources: src/scene/mask-catalog.js (water: rgba, red read), src/effects/water/ (
 ---
 `_Water` says **where the water is and how deep**. Map Shine adds moving waves, shore foam, reflections of the sky, the sun shining through the shallows, and rain rings when it rains.
 
-::: compare "**Town River Bridge**, the lower floor. Drag to compare: the river comes alive, with foam along the banks and piers."
-![Plain art](river-water-art.webp)
-![Map Shine](river-water-msa.webp)
+::: compare "**Docklands Warehouse**, the waterfront. Drag to compare: the painted riverbed becomes moving water, with foam around the boat and the jetty."
+![Plain art](docklands-water-art.webp)
+![Map Shine](docklands-water-msa.webp)
 :::
 
-![The _Water mask](river-water-mask.webp "Its `_Water` mask. White is deep water. The soft grey band along the banks is the shallows.")
+![The _Water mask](docklands-water-mask.webp "Its `_Water` mask. White is water. The boat, the jetty and the quay are left black, so the foam wraps around them.")
 
 ### How to read it
 
@@ -29,3 +29,5 @@ sources: src/scene/mask-catalog.js (water: rgba, red read), src/effects/water/ (
 - Water lies under everything else, so you can paint it under bridges and docks.
 
 > [!tip] How fast the water flows, how rough it is and its colour are all in **Studio → Effects → Water**, with ready-made presets from garden ponds and mountain streams to rivers, tropical shallows, open ocean and hot springs.
+
+[[settings: water]]

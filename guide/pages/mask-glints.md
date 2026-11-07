@@ -26,3 +26,7 @@ Light split into little rainbows, like through cut crystal, potion bottles or ic
 Open **Studio → Effects → Prism** or **Iridescence** and turn the effect on for the scene.
 
 > [!tip] Use them sparingly: a few jars, one magic sword, the crystal on the altar. A whole floor of glints is tiring to look at.
+
+[[settings: iridescence]]
+
+[[settings: prism]]

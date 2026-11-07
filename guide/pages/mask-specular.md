@@ -32,3 +32,5 @@ sources: src/scene/mask-catalog.js (specular: color), src/effects/specular/specu
 > [!warn] **Keep transparent areas black.** Map Shine reads a pixel's colour even when it is fully transparent, so stray colour hidden under transparency will shine. Fill the background black before you export.
 
 > [!note] Map Shine's painter can't edit a colour mask like this one. Make it in an image editor.
+
+[[settings: specular]]

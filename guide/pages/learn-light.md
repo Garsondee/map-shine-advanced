@@ -35,3 +35,19 @@ Rooms get daylight through the patches you paint on `_Window`. It follows the su
 [[do: lamps-up, brighten-inside, more-drama]]
 
 Changed too much? Every button above has **Undo**.
+
+### Every setting
+
+The full lists, straight from the Studio:
+
+[[settings: sunShadows]]
+
+[[settings: dynamicRange]]
+
+[[settings: bloom]]
+
+[[settings: grade]]
+
+[[settings: lens]]
+
+[[settings: depthOfField]]

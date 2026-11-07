@@ -1064,6 +1064,7 @@ export {
   // decks" model. Pure CPU math plus one TSL sample remap; see cloud-shade.js's
   // own header for why these sit beside the shading rather than in a new file.
   cloudTopsGate,
+  cloudTopsZoomOutThin,
   // THE SHARED EYE (2026-10-28): where the deck hangs, from scene/scene-eye.js.
   cloudTopsEyeMagnification,
   buildCloudTopsParallaxWorldXY,

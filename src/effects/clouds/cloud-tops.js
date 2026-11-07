@@ -68,7 +68,9 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     step: 0.01,
     // 2026-10-16 — author's live-tuned "new defaults" dump (was 1): the tops
     // now wait for a wider view before appearing.
-    default: 0.79,
+    // 2026-11-07 (mmp-63o.30, author: clouds "get in the way too much" zoomed out): 0.79 -> 0.45,
+    // the tops wait for about twice as wide a view; cloudTopsZoomOutThin thins them further out.
+    default: 0.45,
     category: 'Look',
     label: 'Zoom sensitivity',
     help: "How readily the tops appear as the camera zooms out — a multiplier on the camera's own virtual eye height. 1 is this feature's own derived starting point (tied to the old V2 cloud effect's shipped zoom thresholds); above 1 makes the tops appear sooner (at a less zoomed-out view); below 1 makes them wait for a wider view before appearing. Never affects the ground shadow, which draws at every zoom.",

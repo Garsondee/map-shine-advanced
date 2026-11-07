@@ -664,6 +664,7 @@ import {
   WATER_PRESENCE_EDGE0,
   WATER_PRESENCE_EDGE1,
   cloudTopsGate,
+  cloudTopsZoomOutThin,
   cloudTopsEyeMagnification,
   buildCloudTopsParallaxWorldXY,
   // STORYBOOK CLOUDS (2026-11-03) — the default cloud style (effects/clouds/storybook-clouds.js): the tops and
@@ -14210,7 +14211,11 @@ async function startVtPanViewerUnserialized({
             uTopsViewCentre.value.set(view.centerXPx, view.centerYPx);
             uTopsMagnification.value = topsGate.magnification;
           }
-          uTopsOpacity.value = topsOpacityDial * topsGate.fade;
+          // Thinned as the view rises far above the deck (mmp-63o.30, cloudTopsZoomOutThin).
+          uTopsOpacity.value =
+            topsOpacityDial *
+            topsGate.fade *
+            cloudTopsZoomOutThin(topsGate.eyeHeightPx / Math.max(1, env.weather.cloudAltitudePx));
           // INTERIOR CUT: whole at close and medium zoom, mostly gone once the view takes in the whole map.
           const cutDial = Number.isFinite(tp.interiorCut) ? tp.interiorCut : 0.92;
           const cutKeep = Number.isFinite(tp.interiorCutZoomedOut) ? tp.interiorCutZoomedOut : 0.12;

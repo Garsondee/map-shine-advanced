@@ -10,6 +10,7 @@
  */
 import { run as runCloudTops } from './cloud-tops.test.mjs';
 import { run as runStorybook } from './storybook-clouds.test.mjs';
+import { run as runTopsThin } from './cloud-tops-thin.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -28,6 +29,7 @@ const t = {
 const suites = [
   ['cloud-tops', runCloudTops],
   ['storybook-clouds', runStorybook],
+  ['cloud-tops-thin', runTopsThin],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

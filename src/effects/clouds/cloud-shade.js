@@ -658,6 +658,30 @@ export const CLOUD_TOPS_DECK_THICKNESS_FRACTION = 0.35;
  *   `magnification`: doc 02 §4.1's `M = 1/(1-parallax)`, for
  *   {@link buildCloudTopsParallaxWorldXY}.
  */
+/**
+ * ZOOMED-OUT THINNING (mmp-63o.30, 2026-11-07, author: "clouds need to be a lot further up when I
+ * zoom out, they currently get in the way too much visually"). Once the tops have faded in, they used
+ * to stay at full opacity however far out the view went, so a whole-map overview sat under a solid
+ * deck. Past {@link CLOUD_TOPS_THIN_START} x the deck's altitude in eye height, the tops ease down to
+ * {@link CLOUD_TOPS_ZOOMED_OUT_OPACITY_FLOOR} by {@link CLOUD_TOPS_THIN_END} x: the sky stays readable
+ * as sky, high above the map, and the map shows through it.
+ */
+export const CLOUD_TOPS_THIN_START = 1.5;
+export const CLOUD_TOPS_THIN_END = 3;
+export const CLOUD_TOPS_ZOOMED_OUT_OPACITY_FLOOR = 0.45;
+
+/**
+ * Opacity multiplier for the tops from how far above the deck the eye is (`eyeHeightPx / altitude`).
+ * 1 up to THIN_START, smoothstep down to the floor by THIN_END, the floor beyond. Pure.
+ * @param {number} eyeOverAltitude @returns {number}
+ */
+export function cloudTopsZoomOutThin(eyeOverAltitude) {
+  const r = Number.isFinite(eyeOverAltitude) ? eyeOverAltitude : 0;
+  const t = Math.min(1, Math.max(0, (r - CLOUD_TOPS_THIN_START) / (CLOUD_TOPS_THIN_END - CLOUD_TOPS_THIN_START)));
+  const s = t * t * (3 - 2 * t);
+  return 1 - (1 - CLOUD_TOPS_ZOOMED_OUT_OPACITY_FLOOR) * s;
+}
+
 export function cloudTopsGate({ viewWidthWorldPx, deckAltitudePx, zoomSensitivity = 1 }) {
   const width = Number.isFinite(viewWidthWorldPx) ? viewWidthWorldPx : 0;
   const altitude = Number.isFinite(deckAltitudePx) ? deckAltitudePx : 0;

@@ -435,9 +435,17 @@ export function buildGradePresentMaterial({
    *
    * A shape that has compiled before (a warmed variant, or one shown earlier) is swapped in AT ONCE from
    * `variants`, with no build and no compile.
+   *
+   * `settled() => Promise` (optional) is how an IN-PLACE build learns it has compiled. Without it, `prepare` is
+   * run on the material that is already drawing, which is a SECOND compile of the same shape: `compileAsync` on
+   * its own quad is a separate render object, so three builds the nodes again (the helper order comes out
+   * different) and the GPU compiles the ~60k-character shader twice, side by side (~27 s each on Big Bank,
+   * measured 2026-11-07, mmp-a5e.14). The viewer passes "the governor has no compile in flight", which the
+   * draw's own compile satisfies. Late is harmless (the next rebuild is built in place); never early.
    * @param {((m: *) => Promise<unknown>)|null} [prepare]
+   * @param {(() => Promise<unknown>)|null} [settled]
    */
-  function flushRebuild(prepare = null) {
+  function flushRebuild(prepare = null, settled = null) {
     if (pendingRebuild.length === 0) return false;
     const reason = [...new Set(pendingRebuild)].join('+');
     pendingRebuild = [];
@@ -466,7 +474,8 @@ export function buildGradePresentMaterial({
       if (prepare) {
         const m = material;
         const v = shownVersion;
-        runPrepare(prepare, m).then((ok) => {
+        const ready = settled ? runSettled(settled) : runPrepare(prepare, m);
+        ready.then((ok) => {
           if (ok && m === material && v === shownVersion) shownReady = true;
         });
       }
@@ -495,6 +504,17 @@ export function buildGradePresentMaterial({
       holdStats.swapped++;
     });
     return true;
+  }
+  /** `settled` as a `runPrepare`-shaped promise: true when it resolved, false when it threw. Never rejects. */
+  function runSettled(settled) {
+    try {
+      return Promise.resolve(settled()).then(
+        () => true,
+        () => false
+      );
+    } catch {
+      return Promise.resolve(false);
+    }
   }
   /** A newer build replaces the one compiling: that one is disposed once its own compile settles (above). */
   function supersedePending() {

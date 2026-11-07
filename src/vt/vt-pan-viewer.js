@@ -697,6 +697,7 @@ import {
 } from '../core/frame-clock.js';
 import { framePacer } from '../core/frame-pacer.js';
 import { createPipelineGovernor } from './pipeline-governor.js';
+import { installSinglePassDoubleSide } from './single-pass-double-side.js';
 import { createRendererKeeper, hdrOutputRequested } from './kept-renderer.js';
 import { planWeatherWarmUp, formatWeatherWarmDetail } from './weather-warm-plan.js';
 import { markCompileDeferrable } from '../core/compile-policy.js';
@@ -2591,6 +2592,10 @@ async function startVtPanViewerUnserialized({
     // exists; three itself is untouched but for that one function.
     const pipelineGovernor = createPipelineGovernor({ renderer, guard: crashGuard });
     pipelineGovernor.install();
+    // ONE PASS PER TRANSPARENT DOUBLESIDE MATERIAL (2026-11-07, mmp-a5e.14): three otherwise draws — and compiles —
+    // every one of them twice, Back then Front (the light pass and four surface passes were each ~13 s, twice).
+    // Installed with the governor, before any pipeline exists. See vt/single-pass-double-side.js.
+    const singlePassGate = installSinglePassDoubleSide(renderer);
     /**
      * Wait for every pipeline to finish compiling, but never forever: a compile that never resolves (a driver
      * bug, a device that died without saying so) must not hold a load open. The curtain's own readiness
@@ -9530,9 +9535,17 @@ async function startVtPanViewerUnserialized({
       presentCompileQuad.material = material;
       return renderer.compileAsync(presentCompileQuad, presentCompileQuad.camera);
     }
+    /**
+     * HAS THE PRESENT THAT IS DRAWING COMPILED? (2026-11-07, mmp-a5e.14) — for an in-place build, which compiles
+     * through its own draw this frame. A task later (the draw has asked for its pipeline by then), wait until the
+     * governor has no compile in flight. Replaces a second `compileAsync` of the same shape (see flushRebuild).
+     */
+    function presentSettled() {
+      return new Promise((resolve) => setTimeout(resolve, 0)).then(() => pipelineGovernor.idle());
+    }
     /** Apply the present's pending rebuilds and point its quad at the material that draws this frame. */
     function flushPresent(prepare) {
-      gradePresent.flushRebuild(prepare);
+      gradePresent.flushRebuild(prepare, prepare ? presentSettled : null);
       presentQuad.material = gradePresent.material;
     }
 
@@ -30325,6 +30338,7 @@ async function startVtPanViewerUnserialized({
        */
       uninstallRendererHooks() {
         pipelineGovernor.uninstall();
+        singlePassGate.uninstall();
         shaderRebuildProbe?.uninstall?.();
         pipelineRebuildProbe?.uninstall?.();
       },
@@ -33517,6 +33531,7 @@ async function startVtPanViewerUnserialized({
           // What the rebuild hold did (grade-present.js `material`): a rebuild keeps the old shape on screen.
           presentHold: gradePresent.holdInfo?.() ? { ...gradePresent.holdInfo(), warm: presentWarmReport } : null,
           pipelineGovernor,
+          singlePassGate,
           warmUpError,
           warmUpSimError,
           prefetchSkippedPacks,

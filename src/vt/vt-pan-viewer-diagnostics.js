@@ -543,6 +543,8 @@ export function describeParallelShaderCompile({ isWebGPUBackend, isWebGLBackend,
  * @param {string} args.displayLayerName @param {any} args.currentCoarseBudget @param {any} args.gpuProbe
  * @param {{report: () => object}|null} [args.pipelineGovernor] - vt/pipeline-governor.js; its compile census
  *   is reported under `shaders.governor`.
+ * @param {{report: () => object}|null} [args.singlePassGate] - vt/single-pass-double-side.js; how many transparent
+ *   DoubleSide materials it kept to one pass, under `shaders.singlePassDoubleSide`.
  * @param {number[]} args.frameGapTimes @param {number} args.HITCH_THRESHOLD_MS @param {any[]} args.hitchLog
  * @param {any} args.lastError @param {Set<string>} args.heldPanKeys @param {{x:number,y:number}} args.panVelocity
  * @param {number|null} args.targetHalfSpanPx @param {any} args.view
@@ -567,6 +569,7 @@ export function buildViewerDiagnostics({
   presentRebuilds = null,
   presentHold = null,
   pipelineGovernor = null,
+  singlePassGate = null,
   warmUpError = null,
   warmUpSimError = null,
   prefetchSkippedPacks,
@@ -766,6 +769,7 @@ export function buildViewerDiagnostics({
       // it is on the road to Chrome's 15 s watchdog, which is what takes every WebGL/WebGPU context on the
       // page down together.
       governor: pipelineGovernor?.report?.() ?? null,
+      singlePassDoubleSide: singlePassGate?.report?.() ?? null,
       warmUpError,
       warmUpSimError,
       // Program COUNT is the thing that explodes as effects land (N effects x

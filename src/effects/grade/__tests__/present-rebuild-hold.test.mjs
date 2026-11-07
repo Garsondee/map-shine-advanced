@@ -171,4 +171,37 @@ export async function run(t) {
     gp.flushRebuild();
     ok('without prepare a rebuild is in place', gp.material === failing);
   }
+
+  // ---- 3. an in-place build is never compiled a second time (2026-11-07, mmp-a5e.14) ----
+  // On a load the present compiles through its own draw; `prepare` on its own quad compiled the SAME shape again,
+  // as a separate render object (~27 s twice on Big Bank). With `settled`, readiness comes from that instead.
+  {
+    const gp = buildPresent();
+    const { prepare, calls } = manualPrepare();
+    let release = null;
+    let asked = 0;
+    const settled = () => {
+      asked++;
+      return new Promise((r) => (release = r));
+    };
+    gp.setStylize('sepia', 1);
+    const first = gp.material;
+    gp.flushRebuild(prepare, settled);
+    ok('an in-place build with settled does not call prepare', calls.length === 0 && asked === 1);
+    ok('...and goes into the drawn material', gp.material === first);
+    await settle();
+    ok('...not ready while the compile is in flight', gp.holdInfo?.().shownReady === false);
+    release();
+    await settle();
+    ok('...ready once settled resolves', gp.holdInfo?.().shownReady === true);
+    gp.setStylize('invert', 1);
+    gp.flushRebuild(prepare, settled);
+    ok('a later rebuild still holds through prepare', calls.length === 1 && gp.holdInfo?.().pending === true);
+
+    const gp2 = buildPresent();
+    gp2.setStylize('sepia', 1);
+    gp2.flushRebuild(prepare, () => Promise.reject(new Error('lost')));
+    await settle();
+    ok('a settled that fails leaves the shape not ready', gp2.holdInfo?.().shownReady === false);
+  }
 }

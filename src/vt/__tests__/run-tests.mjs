@@ -41,6 +41,7 @@ import { run as runPanCompileProbe } from './pan-compile-probe.test.mjs';
 import { run as runWindGridTextures } from './wind-grid-textures.test.mjs';
 import { run as runUiShadowScan } from './ui-shadow-scan.test.mjs';
 import { run as runPipelineGovernor } from './pipeline-governor.test.mjs';
+import { run as runSinglePassDoubleSide } from './single-pass-double-side.test.mjs';
 import { run as runWeatherWarmPlan } from './weather-warm-plan.test.mjs';
 import { run as runVegetationProxyPose } from './vegetation-proxy-pose.test.mjs';
 
@@ -112,6 +113,7 @@ const suites = [
   ['wind-grid-textures', runWindGridTextures],
   ['ui-shadow-scan', runUiShadowScan],
   ['pipeline-governor', runPipelineGovernor],
+  ['single-pass-double-side', runSinglePassDoubleSide],
   ['weather-warm-plan', runWeatherWarmPlan],
   ['vegetation-proxy-pose', runVegetationProxyPose],
 ];

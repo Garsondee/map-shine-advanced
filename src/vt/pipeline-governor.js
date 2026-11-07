@@ -122,8 +122,9 @@ export function repeatShare(code) {
 export const REPEAT_SCAN_MIN_CHARS = 20_000;
 export const REPEAT_SHARE_WARN = 0.85;
 
-/** Frames that are never the answer to "who drew this": three itself, this file, the diag probes that wrap three. */
-const SITE_SKIP = /three\.webgpu|pipeline-governor|pipeline-rebuild-probe|shader-rebuild-probe|run-frame\.js/;
+/** Frames that are never the answer to "who drew this": three itself, this file, the diag probes and the single-pass gate that wrap three. */
+const SITE_SKIP =
+  /three\.webgpu|pipeline-governor|single-pass-double-side|pipeline-rebuild-probe|shader-rebuild-probe|run-frame\.js/;
 
 /**
  * THE MSA FUNCTION THAT ASKED FOR A PIPELINE, from a stack (2026-11-02, the author: "improving our recording
@@ -154,7 +155,7 @@ function policyName(material) {
 /**
  * What to call a pipeline in a log, and how big it is: the material's own name, else the name its compile
  * policy was given, else the MSA function that drew it (`site`, see {@link callerSite}), else its type.
- * @param {any} renderObject @param {string|null} [site] @returns {{label: string, chars: number}}
+ * @param {any} renderObject @param {string|null} [site] @returns {{label: string, chars: number, object: string|null, mirrored: boolean|null, state: string|null}}
  */
 export function describePipeline(renderObject, site = null) {
   const pipeline = renderObject?.pipeline;
@@ -165,7 +166,24 @@ export function describePipeline(renderObject, site = null) {
   const material = renderObject?.material;
   const name =
     material?.name || policyName(material) || site || renderObject?.object?.name || material?.type || 'pipeline';
-  return { label: `${name}#${fingerprint(vertex + fragment)}`, chars: vertex.length + fragment.length };
+  // WHICH OBJECT, IS IT MIRRORED, AND UNDER WHAT STATE (2026-11-07, mmp-a5e.14): three caches a pipeline by its shader
+  // text PLUS a state key (blending, depth, winding from a mirrored transform, target format, samples...), so one
+  // shader drawn under two states is TWO pipelines and two full compiles. `state` is that key without the two
+  // shader ids, so the load report can show what differs between the halves of such a pair.
+  const obj = renderObject?.object;
+  let mirrored = null;
+  try {
+    mirrored = obj?.isMesh ? obj.matrixWorld.determinantAffine() < 0 : null;
+  } catch {
+    mirrored = null;
+  }
+  return {
+    label: `${name}#${fingerprint(vertex + fragment)}`,
+    chars: vertex.length + fragment.length,
+    object: obj?.name || obj?.type || null,
+    mirrored,
+    state: typeof pipeline?.cacheKey === 'string' ? pipeline.cacheKey.split(',').slice(2).join(',') : null,
+  };
 }
 
 /**
@@ -250,6 +268,9 @@ export function createInFlightTracker({ now = perfNowMs } = {}) {
         chars: entry.chars,
         mode: entry.mode,
         reason: entry.reason,
+        object: entry.object ?? null,
+        mirrored: entry.mirrored ?? null,
+        state: entry.state ?? null,
         ms,
         failed: !!error,
         // WHEN, not just how long — `compileBusy` needs the intervals (2026-11-02).
@@ -626,7 +647,15 @@ export function createPipelineGovernor({ renderer, guard = null, now = perfNowMs
         /** Characters of WGSL compiled, in all — the number that tracks both JS build time and GPU compile time. */
         chars: records.reduce((a, r) => a + (r.chars || 0), 0),
         /** The ACTIONABLE list: the biggest shaders, by name (see `callerSite`). */
-        largest: bySize.slice(0, 10).map((r) => ({ label: r.label, chars: r.chars, ms: r.ms, mode: r.mode })),
+        largest: bySize.slice(0, 10).map((r) => ({
+          label: r.label,
+          chars: r.chars,
+          ms: r.ms,
+          mode: r.mode,
+          object: r.object ?? null,
+          mirrored: r.mirrored ?? null,
+          state: r.state ?? null,
+        })),
         /** How long at least one compile was running (the union of the intervals), and the worst overlap. */
         ...compileBusy(records),
         compute: stats.compute,

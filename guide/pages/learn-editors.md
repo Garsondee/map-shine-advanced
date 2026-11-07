@@ -1,5 +1,5 @@
 ---
-sources: src/scene/mask-catalog.js (gray reads red, transparent = unpainted), src/vt/mask-image.js (MASK_CONTENT_EMPTY_BYTE, size cap), src/effects/specular/specular-material.js (decodeSpecularMask: alpha 0 reads RGB at full strength), tools/guide/editor-tests (Photoshop 2026 round trips, 2026-11-07)
+sources: src/scene/mask-catalog.js (gray reads red, transparent = unpainted), src/vt/mask-image.js (MASK_CONTENT_EMPTY_BYTE, size cap), src/effects/specular/specular-material.js (decodeSpecularMask: alpha 0 reads RGB at full strength), tools/guide/editor-tests (Photoshop 2026, Krita 5.3, GIMP 3.2 round trips, 2026-11-07)
 ---
 Any image editor that supports layers works: Photoshop, Krita, GIMP, Affinity Photo, Procreate. The steps are the same everywhere.
 
@@ -31,21 +31,24 @@ Greyscale masks read only the **red channel**, so paint in pure greys. A coloure
 
 > [!tip] In GIMP's PNG export, untick **Save color values from transparent pixels**. In any editor, filling a black layer under the mask and merging it down is the safest way.
 
-### Tested in Photoshop
+### Tested in Photoshop, Krita and GIMP
 
-We exported test images from Photoshop 2026 and read them back the way Map Shine does:
+We exported test images from Photoshop 2026, Krita 5.3 and GIMP 3.2 and read them back the way Map Shine does. The trap is what each one stores under a transparent pixel:
 
-| What we did | What the file held |
+| Saved with a transparent background | What the empty pixels held |
 |---|---|
-| PNG (Save As or Save for Web) with a transparent background | Transparent pixels stored as **white**: a `_Specular` saved this way shines everywhere it is empty |
-| Lossless WebP with a transparent background | Transparent pixels stored as black: safe |
-| 50% grey painted in RGB, saved as PNG | 128: exact |
-| The same grey after **Image → Mode → Grayscale** | 105: every grey came out darker |
-| A one-pixel white line, PNG or lossless WebP | Kept exactly |
+| Photoshop PNG (Save As or Save for Web) | **White**: shines or lights up everywhere it is empty |
+| Photoshop lossless WebP | Black: safe |
+| Krita PNG | **The colour you erased**: still shines |
+| Krita WebP | Black: safe |
+| GIMP PNG (default export) | Black: safe |
+| GIMP WebP | **The colour you erased**: still shines |
 
-So in Photoshop: **stay in RGB mode**, and before saving a colour mask add a black layer underneath and merge down.
+The other tests passed in all three: a 50% grey painted in RGB came back as exactly 128, and a one-pixel white line survived PNG and lossless WebP. One trap is Photoshop's own: after **Image → Mode → Grayscale** the same grey came back as 105, so every grey got darker.
 
-Krita, GIMP and Affinity have not been tested yet. Follow the same rules, and check a mask in Map Shine before painting a whole map.
+So in any editor: **stay in RGB mode**, and before saving a colour mask add a black layer underneath and merge down. Then nothing can hide under the transparency, whatever the format.
+
+Affinity Photo has not been tested. Follow the same rules, and check a mask in Map Shine before painting a whole map.
 
 ### Lossy files
 

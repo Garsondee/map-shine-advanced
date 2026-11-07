@@ -1,4 +1,4 @@
-"""Read the Photoshop test exports the way Map Shine reads masks (red channel, alpha)."""
+"""Read the editor test exports (Photoshop, Krita, GIMP) the way Map Shine reads masks (red channel, alpha)."""
 import sys
 from pathlib import Path
 from PIL import Image

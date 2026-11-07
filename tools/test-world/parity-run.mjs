@@ -56,6 +56,23 @@ export const SCENARIOS = {
       gm: "MapShine.fadeWeatherToArchetype('clear', 0); await MapShine.setWind({ speed01: 0 });",
     },
   ],
+  /** The release regime's run (mmp-463.2): Looks, scene switch, time, late join. */
+  release: [
+    { name: '01-as-loaded', gm: '' },
+    { name: '02-look-golden-hour', gm: "await MapShine.looks.play('look-golden-hour', 0);" },
+    { name: '03-look-thunderstorm', gm: "await MapShine.looks.play('look-thunderstorm', 0);" },
+    { name: '04-late-join-p2', reload: 'p2' },
+    {
+      name: '05-scene-switch',
+      gm: "await game.scenes.getName('Mythica Machina - Docklands Warehouse').activate();",
+    },
+    { name: '06-time-plus-3h', gm: 'await game.time.advance(3 * 3600);' },
+    { name: '07-look-clear-still', gm: "await MapShine.looks.play('look-clear-still', 0);" },
+    {
+      name: '08-scene-back',
+      gm: "await game.scenes.getName('Mythica Machina - Big Bank (MSA)').activate();",
+    },
+  ],
 };
 
 function readRegistry() {
@@ -117,6 +134,14 @@ async function main() {
   const report = { startedAt: new Date().toISOString(), clients: names, steps: [] };
   try {
     for (const step of scenario) {
+      if (step.reload) {
+        // A late joiner: reload that client and let it come back into the running world.
+        const late = clients.find((c) => c.name === step.reload);
+        if (late) {
+          await late.page.reload({ waitUntil: 'domcontentloaded' });
+          await late.page.waitForFunction(() => globalThis.game?.ready === true, null, { timeout: 300000 });
+        }
+      }
       if (step.gm) {
         await gm.page.evaluate(
           // eslint-disable-next-line no-new-func

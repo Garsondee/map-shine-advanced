@@ -143,9 +143,6 @@ export function buildStateDigest(raw = {}) {
       speed01: unit(wind.speed01),
       gustiness01: unit(wind.gustiness01),
     },
-    cloudDrift: raw.cloudDrift
-      ? { x: roundTo(raw.cloudDrift.x, DIGEST_GRAIN.driftPx), y: roundTo(raw.cloudDrift.y, DIGEST_GRAIN.driftPx) }
-      : null,
     lights,
     effectsEnabled: effects,
     look: raw.look ?? null,
@@ -156,6 +153,11 @@ export function buildStateDigest(raw = {}) {
     profile: raw.profile ?? null,
     renderScale: raw.renderScale ?? null,
     camera: raw.camera ?? null,
+    // Per client BY DESIGN (Ingram, 2026-09-06: clouds are only an effect; each client drifts its own deck,
+    // world/cloud-field.js header). Measured 2026-11-07: GM and players' decks sit at different offsets.
+    cloudDrift: raw.cloudDrift
+      ? { x: roundTo(raw.cloudDrift.x, DIGEST_GRAIN.driftPx), y: roundTo(raw.cloudDrift.y, DIGEST_GRAIN.driftPx) }
+      : null,
   };
   return { shared, perClient, hash: fnv1a(canonicalJson(shared)) };
 }

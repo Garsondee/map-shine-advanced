@@ -58,7 +58,9 @@ export const SCENARIOS = {
   ],
   /** The release regime's run (mmp-463.2): Looks, scene switch, time, late join. */
   release: [
-    { name: '01-as-loaded', gm: '' },
+    // Unpause for EVERYONE: game.togglePause(false) without push=true only unpauses the GM's own client,
+    // which made the first run report paused/cloud-drift mismatches that were the harness's own doing.
+    { name: '01-as-loaded', gm: 'if (game.paused) await game.togglePause(false, true);' },
     { name: '02-look-golden-hour', gm: "await MapShine.looks.play('look-golden-hour', 0);" },
     { name: '03-look-thunderstorm', gm: "await MapShine.looks.play('look-thunderstorm', 0);" },
     { name: '04-late-join-p2', reload: 'p2' },

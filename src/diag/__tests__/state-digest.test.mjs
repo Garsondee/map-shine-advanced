@@ -80,7 +80,7 @@ export function run(t) {
 
   const noisy = raw();
   noisy.darkness = 0.1236;
-  noisy.cloudDrift = { x: 102, y: -2 };
+  noisy.cloudDrift = { x: 5000, y: -2 }; // per client by design: never changes the hash
   ok('digest: float noise inside the grain does not change the hash', buildStateDigest(noisy).hash === d.hash);
 
   const wrong = raw();

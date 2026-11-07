@@ -15,7 +15,6 @@ digest at all. Written 2026-11-07; change it when a new kind of state is added.
 | Scene darkness | `darkness` | Foundry's own darkness, folded once in `world/environment.js`. |
 | Weather mode, preset, targets and eased state | `weather.*` | The GM's sky. Eased values may lag on a late joiner for up to the ease time (tau ~20 s): the harness waits a grace period. |
 | Wind direction, speed, gustiness | `wind.*` | Saved to scene flags by `MapShine.setWind`. |
-| Cloud drift | `cloudDrift` (8 px grain) | The GM owns the drift; a few px of per-client integration noise is allowed. |
 | Light documents | `lights[]` | Positions, radii, colours, animation types. |
 | Effects the GM switched on or off | `effectsEnabled` | World settings (`<effect>.gmEnable`). |
 | Look | `look` | When Looks expose a current id. |
@@ -30,6 +29,7 @@ digest at all. Written 2026-11-07; change it when a new kind of state is added.
 | Performance profile and render scale | `perClient.profile`, `perClient.renderScale` | Hardware differs; effects may run at a lower tier. |
 | Photosensitive and other accessibility locks | not in the digest | A player's own safety settings (lightning flashes, strobing lights). |
 | A player's own effect override (`<effect>.playerEnable`) | not in the digest | A client setting, by design. |
+| Cloud positions (drift) | `perClient.cloudDrift` | Ingram's ruling 2026-09-06: clouds are only an effect; each client drifts its own deck, so cloud shadows can sit in different places for different players (measured 2026-11-07). Decision bead to revisit. |
 | Particle positions, grain, per-frame noise | not in the digest | Random per client; the look is the same, the dots are not. |
 | UI panels (Remote, Studio, sidebars) | not in the digest | GM-only UI. |
 

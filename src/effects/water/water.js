@@ -82,7 +82,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 0.11,
     category: 'Look',
     label: 'Opacity',
-    help: 'How much of the riverbed painted underneath still reads through. Below 1 on purpose: the map art beneath is doing the work a proper volume/absorption rung will do later.',
+    help: 'How solid the water looks over the painted riverbed. Lower lets more of the art beneath show through; it stays below 1 on purpose so your painted bed still does part of the work.',
   },
   absorption: {
     type: 'float',
@@ -185,7 +185,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 0.75,
     category: 'Motion',
     label: 'Foam',
-    help: 'White broken water where the surface crests, concentrated near the bank because that is where real water shoals and breaks. This is the strongest "that is a liquid, not a tinted sheet" cue available before the lighting rung lands — turn it to 0 for a glassy pond.',
+    help: 'White broken water where the surface crests, gathered near the banks where real water shoals and breaks. The strongest cue that this is liquid, not a tinted sheet. 0 gives a glassy pond.',
   },
   windRipple: {
     type: 'float',
@@ -464,7 +464,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 6,
     category: 'Light',
     label: 'Caustic wave warp',
-    help: "How strongly the water's own real wave slope distorts the caustic net — this is what ties the net to the surface's actual motion rather than letting it read as a decal. 0 removes the link entirely (net ignores the waves). The shipped default (6) is the author's own live-tuned value, well past round 3's original shader-lab-checked 0.6 — at this strength Caustic wave warp cap is doing most of the real limiting, since the raw warp now saturates that ceiling almost everywhere.",
+    help: 'How strongly the moving waves bend the caustic pattern, which ties it to the surface instead of looking like a sticker. 0 removes the link.',
   },
   causticWaveWarpCap: {
     type: 'float',
@@ -486,7 +486,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 0.3,
     category: 'Light',
     label: 'Caustic growth',
-    help: 'How strongly caustic cells breathe — expanding at one point and visibly pulling territory from their neighbours as they do, the way real biological or foam cells compete for space. 0 is a static net that never breathes. This is NOT shader-lab verified at any value above the shipped default — it is a reasoned first pass, so treat pushing it hard as genuine exploration, not a known-safe range.',
+    help: 'How strongly caustic cells swell and shrink, each pushing into its neighbours. 0 is a still net. Values well above the default are untested: push them as an experiment.',
   },
   causticGrowthCap: {
     type: 'float',
@@ -660,7 +660,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 200,
     category: 'Motion',
     label: 'Flow solve iterations',
-    help: 'How many correction passes the pressure solve runs per level before the flow field is considered final. More iterations let the solve reach further around obstacles and settle more precisely, at the cost of a longer rebake. Fewer iterations bake faster but may leave the flow looking under-solved right at obstacle edges. Triggers a one-time rebake on release.',
+    help: 'How carefully Map Shine works out how the current flows around obstacles. More reaches further round rocks and piers but takes longer to recalculate; fewer is quicker but can look rough right at obstacle edges. Recalculates once when you let go.',
   },
   // ── Foam tuning (2026-08-19) — buildFoamCellularStructure's own knobs,
   // shared by shore foam and the sim-driven wake. Live uniforms, no rebake. ──
@@ -766,7 +766,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 1.3,
     category: 'Motion',
     label: 'Sim foam lifetime',
-    help: "How long a patch of the flowing, current-carried foam survives before fading to nothing, in seconds. Short values make foam vanish almost as fast as it's born — a clean, sparse look. Long values let foam pile up and drift far downstream before it fades, at the cost of a busier, foam-heavy river. This is the memory buffer's own decay — separate from the older, always-on shore swash/break foam, which does not use this buffer.",
+    help: 'How long, in seconds, foam carried by the current lasts before it fades. Short values give clean, sparse foam; long values let foam pile up and drift far downstream. Separate from the shore foam, which is always on.',
   },
   simDiffuse: {
     type: 'float',
@@ -806,7 +806,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 0,
     category: 'Shape',
     label: 'Sim foam appears at',
-    help: "The accumulated foam level (from the memory buffer above) below which nothing is visible yet — the floor of the reveal band. Lower this if foam feels like it takes too long to show up after being emitted; raise it if faint, barely-there foam is showing where you'd rather see clean water. Must stay below 'Sim foam solid at' or the band inverts.",
+    help: "How much carried foam must gather before any of it shows. Lower it if foam takes too long to appear; raise it to hide faint foam where you want clean water. Keep it below 'Sim foam solid at'.",
   },
   simClumpHi: {
     type: 'float',
@@ -836,7 +836,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 1.5,
     category: 'Shape',
     label: 'Sim foam smoothing',
-    help: "How softly the foam memory buffer is gathered before it is drawn, measured in cells of the buffer's own grid (roughly 7 map pixels each on a large map). That grid treats a bank or rock as a hard on/off edge, so unsmoothed foam piles up against a staircase of cells — the hard, lumpy, pixelated white line along a shoreline, however smooth the painted water edge is. Raise this to melt the staircase into a soft, wide band that also thins to a translucent film over dry ground; 0 draws the raw grid (hard-edged, though still translucent over dry ground). Past about 3 the foam starts to lose its fine shape.",
+    help: 'How softly carried foam is blended before it is drawn. Raise it to melt a hard, stepped white line along a shoreline into a soft, wide band. 0 shows it unsmoothed; past about 3 the foam loses its fine shape.',
   },
   // ── SHORELINE FOAM FROM THE MASK + THE ONE FOAM TEXTURE (2026-10-17, tier 4+) —
   // `water-shore-mask.js`. Defaults pinned equal to that module's constants by a test.

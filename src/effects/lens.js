@@ -119,7 +119,7 @@ export const LENS_PARAMS = Object.freeze({
     default: -0.1, // V2: -0.08
     category: 'Optics',
     label: 'Lens curvature',
-    help: "How much the image bows away from a flat plane, like looking through real camera glass. Negative pulls the edges in (a gentle pincushion, V2's own default); positive pushes them out (barrel). 0 is a perfectly flat, distortion-free image.",
+    help: 'How much the image bows, like looking through real camera glass. Negative pulls the edges in (a gentle pincushion, the default); positive pushes them out (barrel). 0 is perfectly flat.',
   },
   chromaticAmountPx: {
     type: 'float',
@@ -149,7 +149,7 @@ export const LENS_PARAMS = Object.freeze({
     default: 1,
     category: 'Optics',
     label: 'Vignette',
-    help: "How dark the corners of the frame read compared to the centre — the natural light falloff of a lens. 0 is perfectly even; 1 is V2's own full default darkening.",
+    help: 'How dark the corners are compared to the centre, like the natural light falloff of a lens. 0 is perfectly even; 1 is full darkening.',
   },
   vignetteSoftness: {
     type: 'float',
@@ -230,7 +230,7 @@ export const LENS_PARAMS = Object.freeze({
     default: false,
     category: 'Grain',
     label: 'Digital sensor noise',
-    help: "A second, sharper kind of noise on top of film grain — coloured single-pixel speckle that reads as a cheap digital sensor or a night-vision camera rather than real film, biased toward low light. Off by default, matching V2's own shipped state.",
+    help: 'A second, sharper kind of noise on top of film grain: coloured single-pixel speckle, like a cheap digital sensor or a night-vision camera, strongest in low light. Off by default.',
   },
   digitalNoiseAmount: {
     type: 'float',
@@ -280,7 +280,7 @@ export const LENS_PARAMS = Object.freeze({
     default: false, // V2: false
     category: 'Autofocus',
     label: 'Autofocus pulses',
-    help: "Every so often, the whole image briefly softens and re-sharpens — a camera hunting for focus, the same beat a real autofocus lens has when the shot changes. Off by default, matching V2's own shipped state.",
+    help: 'Every so often the whole image briefly softens and re-sharpens, like a camera hunting for focus when the shot changes. Off by default.',
   },
   autoFocusMinIntervalSeconds: {
     type: 'float',
@@ -377,7 +377,7 @@ export const LENS_PARAMS = Object.freeze({
     default: false, // V2: false
     category: 'Motion',
     label: 'Camera motion blur',
-    help: "A brief directional smear whenever the camera pans or zooms quickly — the same motion blur a real camera picks up when it moves faster than its shutter can freeze. Off by default, matching V2's own shipped state.",
+    help: 'A brief directional smear when the camera pans or zooms quickly, like a real camera moving faster than its shutter can freeze. Off by default.',
   },
   motionBlurStrength: {
     type: 'float',
@@ -426,7 +426,7 @@ export const LENS_PARAMS = Object.freeze({
     default: false,
     category: 'Light burn',
     label: 'Light burn',
-    help: 'The brightest points on screen leave a faint, fading afterimage, the way a real camera sensor briefly "burns in" a very bright light. Off by default, matching V2\'s own shipped state.',
+    help: 'The brightest points on screen leave a faint, fading afterimage, the way a real camera sensor briefly burns in a very bright light. Off by default.',
   },
   lightBurnThreshold: {
     type: 'float',
@@ -466,7 +466,7 @@ export const LENS_PARAMS = Object.freeze({
     default: 1.15,
     category: 'Light burn',
     label: 'Burn response',
-    help: 'How strongly a source above the threshold writes into the burn buffer each frame it stays lit — higher makes the afterimage build up faster and read stronger overall.',
+    help: 'How quickly a very bright light burns in while it stays lit. Higher builds the afterimage faster and stronger.',
   },
   lightBurnPersistenceSeconds: {
     type: 'float',
@@ -476,7 +476,7 @@ export const LENS_PARAMS = Object.freeze({
     default: 0.05,
     category: 'Light burn',
     label: 'Burn persistence',
-    help: "How many seconds a burn takes to fade back out once its source dims or moves away. V2's own shipped default is short and subtle; raise it for a lingering, more dramatic afterimage.",
+    help: 'How many seconds a burn takes to fade once its light dims or moves away. The default is short and subtle; raise it for a lingering, dramatic afterimage.',
   },
   lightBurnBlurPx: {
     type: 'float',
@@ -535,7 +535,7 @@ export const LENS_PARAMS = Object.freeze({
     default: false,
     category: 'Overlay',
     label: 'Grime overlay',
-    help: "Dust, scratches and light-leak marks drifting slowly across the glass, cycling through this module's own image library over time — the lived-in imperfection of a real camera lens rather than a perfectly clean render. Off by default, matching V2's own shipped state.",
+    help: 'Dust, scratches and light-leak marks drifting slowly across the glass, cycling through a set of images over time: the lived-in look of a real lens. Off by default.',
   },
   overlayIntensity: {
     type: 'float',

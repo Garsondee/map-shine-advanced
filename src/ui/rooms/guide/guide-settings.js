@@ -55,6 +55,15 @@ export const GUIDE_SETTINGS = Object.freeze({
   cloudTops: { title: 'Cloud Tops', params: CLOUD_TOPS_PARAMS },
 });
 
+/**
+ * Words that mark a help sentence as a note for developers rather than for a GM or map maker.
+ * The guide shows every help string to users, so the drift test fails when one of these
+ * appears in a setting the guide displays (mmp-0mv.8). Say what the setting does to the
+ * picture instead; keep engineering notes in code comments.
+ */
+export const DEV_WORDING =
+  /\b(rungs?|V2|TODO|shaders?|bake[ds]?|buffers?|texels?|TSL|legacy|framebuffers?|render targets?|mip(?:map)?s?|NDC|lerp|epsilon|fbm|deprecated|ping-?pong|GPU|CPU|pipelines?|instanced|draw calls?|readback|mythica-machina-press)\b|#\d{2,}|\bwill do later\b/i;
+
 const SHOWN_TYPES = new Set(['float', 'int', 'bool', 'enum', 'color', 'angle']);
 
 function num(v) {

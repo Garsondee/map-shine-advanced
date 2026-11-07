@@ -1,5 +1,5 @@
 ---
-sources: src/scene/mask-catalog.js (gray reads red, transparent = unpainted), src/vt/mask-image.js (MASK_CONTENT_EMPTY_BYTE, size cap), src/effects/specular/specular-material.js (RGB under alpha)
+sources: src/scene/mask-catalog.js (gray reads red, transparent = unpainted), src/vt/mask-image.js (MASK_CONTENT_EMPTY_BYTE, size cap), src/effects/specular/specular-material.js (decodeSpecularMask: alpha 0 reads RGB at full strength), tools/guide/editor-tests (Photoshop 2026 round trips, 2026-11-07)
 ---
 Any image editor that supports layers works: Photoshop, Krita, GIMP, Affinity Photo, Procreate. The steps are the same everywhere.
 
@@ -16,7 +16,7 @@ Any image editor that supports layers works: Photoshop, Krita, GIMP, Affinity Ph
 |---|---|
 | Canvas size | Same as the map, or exactly half or a quarter. Never a different shape. |
 | File type | `.webp` or `.png`. Use **lossless** WebP for masks with thin lines. |
-| Colour | Ordinary RGB. A greyscale document is fine. |
+| Colour mode | **RGB.** Paint greys in an RGB document. |
 | Background | **Solid black**, not transparent, except for `_Tree` and `_Bush`. |
 | Edges | Soft edges are fine and often look better. |
 
@@ -27,9 +27,25 @@ Greyscale masks read only the **red channel**, so paint in pure greys. A coloure
 ### Transparency traps
 
 - On `_Outdoors` and the other greyscale masks, transparent means "not painted", **not** black. Flatten onto a black or white background before export.
-- On colour masks (`_Specular`, `_Window`, `_Prism`), Map Shine reads the colour **even under fully transparent pixels**. Some editors keep hidden colour there. Flatten onto black so nothing is hiding.
+- On colour masks (`_Specular`, `_Window`, `_Prism`), Map Shine reads a fully transparent pixel's colour **at full strength**. Whatever colour the file stores there shows up as shine or light. Flatten onto black so nothing is hiding.
 
 > [!tip] In GIMP's PNG export, untick **Save color values from transparent pixels**. In any editor, filling a black layer under the mask and merging it down is the safest way.
+
+### Tested in Photoshop
+
+We exported test images from Photoshop 2026 and read them back the way Map Shine does:
+
+| What we did | What the file held |
+|---|---|
+| PNG (Save As or Save for Web) with a transparent background | Transparent pixels stored as **white**: a `_Specular` saved this way shines everywhere it is empty |
+| Lossless WebP with a transparent background | Transparent pixels stored as black: safe |
+| 50% grey painted in RGB, saved as PNG | 128: exact |
+| The same grey after **Image → Mode → Grayscale** | 105: every grey came out darker |
+| A one-pixel white line, PNG or lossless WebP | Kept exactly |
+
+So in Photoshop: **stay in RGB mode**, and before saving a colour mask add a black layer underneath and merge down.
+
+Krita, GIMP and Affinity have not been tested yet. Follow the same rules, and check a mask in Map Shine before painting a whole map.
 
 ### Lossy files
 

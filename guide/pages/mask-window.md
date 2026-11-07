@@ -23,6 +23,7 @@ Don't paint the window itself. Paint where its light **lands**: a soft-edged pat
 - Keep patches **inside** the building, on the black of `_Outdoors`. Window light out on the street is wasted.
 - A **soft, blurred edge** looks like real daylight. A hard edge looks like a spotlight.
 - Leave the bars of the window frame dark. That's what makes it read as a window.
+- **Fill the background black, never transparent.** Like `_Specular`, a transparent pixel is read by its stored colour, and a Photoshop PNG stores white there: light everywhere.
 - `_Window`, `_Windows` and `_Structural` are all accepted.
 
 ### It moves with the sun

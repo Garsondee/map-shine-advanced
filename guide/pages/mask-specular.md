@@ -29,7 +29,7 @@ sources: src/scene/mask-catalog.js (specular: color), src/effects/specular/specu
 - **Thin trim is worth it.** One-pixel gold edges on a frame or a table make a map sparkle.
 - How metallic it all looks is a setting: **Studio → Effects → Metal & shine**. You don't paint that.
 
-> [!warn] **Keep transparent areas black.** Map Shine reads a pixel's colour even when it is fully transparent, so stray colour hidden under transparency will shine. Fill the background black before you export.
+> [!warn] **Never leave the background transparent.** Map Shine reads a fully transparent pixel's colour at full strength, and Photoshop's PNG export stores transparent pixels as white, so the whole background would shine. Fill it black before you export. [Tested exports](page:learn-editors).
 
 > [!note] Map Shine's painter can't edit a colour mask like this one. Make it in an image editor.
 

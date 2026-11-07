@@ -17,6 +17,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fingerprint, readLock } from './stale.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -146,6 +147,14 @@ for (const shot of manifest.shots) {
     v1: (info.view.y + info.view.h - info.rect.y) / info.rect.h,
   };
   fs.writeFileSync(path.join(rawDir, `${shot.id}.json`), JSON.stringify({ ...info, uv }, null, 2));
+  // Record the code this picture was rendered with (tools/guide/stale.mjs reports when it changes).
+  const fp = fingerprint(shot.sources, REPO);
+  if (fp) {
+    const lockFile = path.join(REPO, 'guide', 'shots.lock.json');
+    const lock = readLock(lockFile);
+    lock[shot.id] = { fingerprint: fp, accepted: new Date().toISOString().slice(0, 10) };
+    fs.writeFileSync(lockFile, `${JSON.stringify(lock, null, 2)}\n`);
+  }
   process.stderr.write(`[guide-shoot] ${shot.id} ok  art=${info.art}  uv=${JSON.stringify(uv)}\n`);
 }
 await page.setViewportSize(null).catch(() => {});

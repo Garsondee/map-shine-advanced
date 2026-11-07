@@ -552,7 +552,7 @@ export const SPECULAR_PARAMS = Object.freeze({
     default: 0.28,
     category: 'Motion',
     label: 'Breathing',
-    help: 'A gentle rise and fall in overall brightness over several seconds. Keep it small: a visible pulse reads as a shader effect, an almost imperceptible one reads as a living surface.',
+    help: 'A gentle rise and fall in overall shine over several seconds. Keep it small: a visible pulse looks artificial, an almost unnoticeable one looks alive.',
   },
   // ── Outdoor ─────────────────────────────────────────────────────────────
   sunBias: {

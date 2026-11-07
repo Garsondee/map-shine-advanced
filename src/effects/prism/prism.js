@@ -113,7 +113,7 @@ export const PRISM_PARAMS = Object.freeze({
     default: 0.25,
     category: 'Glass',
     label: 'Opacity',
-    help: "How strongly the refracted result replaces the plain surface beneath it. Low values read as a subtle sheen of glass over the art; high values read as if the surface itself were replaced by crystal. V2's own default keeps this subtle.",
+    help: 'How strongly the crystal effect replaces the surface beneath. Low reads as a subtle sheen of glass; high as if the surface itself were crystal. The default keeps it subtle.',
   },
   brightness: {
     type: 'float',
@@ -140,7 +140,7 @@ export const PRISM_PARAMS = Object.freeze({
     // (a green gem, a rose-quartz pane) whose refraction picks up that hue,
     // entirely opt-in — default 0 means an ordinary black-and-white mask
     // behaves exactly like V2's glass, tinting nothing.
-    help: "How much the mask's own painted colour tints the light bending through it — 0 (default) is clear glass regardless of the mask's hue, matching V2's own greyscale-only reading; 1 fully tints the refraction toward whatever colour you painted (green mask, green-tinted crystal). Has no visible effect on an ordinary black-and-white mask.",
+    help: 'How much the colour painted on the mask tints the light bending through it. 0 (the default) is clear glass whatever the colour; 1 tints it fully, so a green mask gives green crystal. No effect on a black-and-white mask.',
   },
 
   // ── Facets (tier 1 — procedural crystal shading) ──────────────────────────
@@ -159,7 +159,7 @@ export const PRISM_PARAMS = Object.freeze({
     default: true,
     category: 'Facets',
     label: 'Animate facets',
-    help: "Lets the facet pattern itself slowly reshape over time, like light catching a slowly turning gem, rather than a perfectly still crystal. Off freezes the pattern at whatever shape it lands on — useful for a large, still architectural pane where V2's own live shimmer would read as busy.",
+    help: 'Lets the facets slowly reshape, like light on a turning gem. Off freezes the pattern, which suits large, still panes of glass where moving shimmer would look busy.',
   },
   facetSpeed: {
     type: 'float',

@@ -41,6 +41,17 @@
           "at": [0.8, 0.72],
           "to": [0.55, 0.5]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/specular",
+        "src/effects/window",
+        "src/effects/vegetation.js",
+        "src/effects/vegetation-render.js"
       ]
     },
     {
@@ -88,6 +99,15 @@
           "text": "Black: not shiny",
           "at": [0.2, 0.25]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/specular",
+        "src/effects/window"
       ]
     },
     {
@@ -110,6 +130,15 @@
           "text": "Noon: short, crisp shadows",
           "at": [0.5, 0.07]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/window",
+        "src/effects/specular"
       ]
     },
     {
@@ -132,6 +161,15 @@
           "text": "Golden hour: long warm shadows, rosy window light",
           "at": [0.5, 0.07]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/window",
+        "src/effects/specular"
       ]
     },
     {
@@ -161,6 +199,15 @@
           "text": "Only the canopies. The rest is transparent.",
           "at": [0.55, 0.5]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/vegetation.js",
+        "src/effects/vegetation-render.js"
       ]
     },
     {
@@ -196,6 +243,14 @@
           "at": [0.2, 0.85],
           "to": [0.02, 0.85]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/window"
       ]
     },
     {
@@ -231,6 +286,14 @@
           "at": [0.5, 0.92],
           "to": [0.72, 0.8]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/window"
       ]
     },
     {
@@ -267,6 +330,14 @@
           "at": [0.5, 0.85],
           "to": [0.19, 0.53]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/fire"
       ]
     },
     {
@@ -332,6 +403,14 @@
           "at": [0.85, 0.88],
           "to": [0.74, 0.66]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/fluid"
       ]
     },
     {
@@ -432,7 +511,17 @@
       "out": {
         "msa": "docklands-storm.webp"
       },
-      "archetype": "thunderstorm"
+      "archetype": "thunderstorm",
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/precipitation",
+        "src/effects/clouds",
+        "src/effects/window"
+      ]
     },
     {
       "id": "docklands-water",
@@ -473,6 +562,14 @@
           "text": "White: water",
           "at": [0.78, 0.93]
         }
+      ],
+      "sources": [
+        "src/effects/lighting",
+        "src/effects/sun-shadows.js",
+        "src/effects/dynamic-range.js",
+        "src/effects/bloom.js",
+        "src/effects/grade",
+        "src/effects/water"
       ]
     }
   ]

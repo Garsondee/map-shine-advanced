@@ -52,7 +52,7 @@ export const DOF_PARAMS = Object.freeze({
     default: 0.0625, // HALVED 0.125 → 0.0625 (2026-10-17) — direct author ask: half the current blur strength
     category: 'Look',
     label: 'Strength',
-    help: "Overall amount of blur applied to floors below the one you're viewing — scales the blur radius, not its opacity. 0 = no extra blur (floors below sample the least-blurred mip); 1 = the full ramp set by Blur per floor and Maximum blur. A below-floor pixel is always a full replace, never a sharp/blurred cross-fade.",
+    help: "Overall amount of blur on floors below the one you're viewing. 0 adds no extra blur; 1 uses the full amount set by Blur per floor and Maximum blur.",
   },
 
   // ── Extent (reach / spread) ───────────────────────────────────────────────

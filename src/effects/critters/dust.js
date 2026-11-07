@@ -105,7 +105,7 @@ export const DUST_PARAMS = freezeParams({
     default: 0.7,
     category: 'Look',
     label: 'Glints',
-    help: 'How much of a mote’s light is a flat flake turning over: it flares as its face catches the light and dims edge-on. 0 is a steady haze of specks. Needs the "glints" quality rung (1) or above.',
+    help: "How much a mote flashes as it turns: flat flakes flare when their face catches the light and dim edge-on. 0 is a steady haze. Needs the dust's 'glints' quality level or above.",
   },
   sparkleSharpness: {
     type: 'float',
@@ -125,7 +125,7 @@ export const DUST_PARAMS = freezeParams({
     default: 0,
     category: 'Look',
     label: 'Depth softness',
-    help: 'Depth of field: a mote far above or below the focal height blurs into a larger, fainter disc. 0 keeps every mote a crisp point. Needs the "depth" quality rung (2) or above.',
+    help: "Motes far above or below the focal height blur into larger, fainter discs, like depth of field in a camera. 0 keeps every mote a sharp point. Needs the 'depth' quality level or above.",
   },
   focusHeight: {
     type: 'float',
@@ -186,7 +186,7 @@ export const DUST_PARAMS = freezeParams({
     default: 0.5,
     category: 'Look',
     label: 'Halo',
-    help: 'The soft glow around every lit mote. Needs the "sparkle" quality rung (3).',
+    help: "The soft glow around every lit mote. Needs the 'sparkle' quality level.",
   },
   starAmount: {
     type: 'float',
@@ -196,7 +196,7 @@ export const DUST_PARAMS = freezeParams({
     default: 3.5,
     category: 'Look',
     label: 'Star strength',
-    help: 'How bright the four-point star on the brightest glints is. Needs the "sparkle" quality rung (3) and Glints above 0.',
+    help: "How bright the four-point star is on the brightest glints. Needs the 'sparkle' quality level and Glints above 0.",
   },
   glintFloor: {
     type: 'float',
@@ -318,7 +318,7 @@ export const DUST_PARAMS = freezeParams({
     default: 0.1,
     category: 'Light',
     label: 'Visible out of the beam',
-    help: 'How much the motes show by the room’s own light (torches, lamps, daylight) away from the window light. Low keeps the dust a secret the sunbeam reveals. Needs the "depth" quality rung (2) or above.',
+    help: "How much the motes show by the room's own light (torches, lamps, daylight) away from the window light. Low keeps the dust a secret only the sunbeam reveals. Needs the 'depth' quality level or above.",
   },
 
   roomCutoff: {

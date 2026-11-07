@@ -166,7 +166,7 @@ export function weatherParams({ noun, defaults: d }) {
       default: d.floor,
       category: 'Weather',
       label: 'The brave few',
-      help: `The fraction of ${noun} that stays out whatever the weather does. V2 kept a tenth out in a gale and a downpour.`,
+      help: `The share of ${noun} that stays out whatever the weather does, even in a gale or a downpour.`,
     },
     fadeTime: {
       type: 'float',

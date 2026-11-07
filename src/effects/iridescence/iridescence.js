@@ -128,7 +128,7 @@ export const IRIDESCENCE_PARAMS = Object.freeze({
     default: 0.13,
     category: 'Flow',
     label: 'Distortion strength',
-    help: 'How strongly the mask`s own painted strength warps the phase field — a higher value makes brighter-painted regions cycle through the rainbow measurably faster than dim ones, rather than every painted texel sharing one phase.',
+    help: 'How much brighter paint on the mask speeds up the rainbow. Higher makes brightly painted areas cycle through the colours faster than dim ones.',
   },
   noiseScale: {
     type: 'float',
@@ -190,7 +190,7 @@ export const IRIDESCENCE_PARAMS = Object.freeze({
     default: 0,
     category: 'Flow',
     label: 'Angle',
-    help: 'The screen-space direction the diagonal sweep term runs across — V2`s own authoring convention (degrees), kept here as a compass heading rather than a plain float.',
+    help: 'The direction, in degrees, that the rainbow bands sweep across the screen.',
   },
   parallaxStrength: {
     type: 'float',
@@ -212,7 +212,7 @@ export const IRIDESCENCE_PARAMS = Object.freeze({
     default: 0.6,
     category: 'Light',
     label: 'Ignore darkness',
-    help: "How much the shimmer resists the scene's own darkness/night tint (read off `buf:scene.illum`, the same buffer Specular's own lamp-direction trick reads) — 0 fully obeys it (dark in an unlit room), 1 ignores it entirely (always full brightness, as if self-illuminating).",
+    help: 'How much the shimmer ignores darkness and night. 0 obeys it (dark in an unlit room); 1 ignores it completely, as if the surface made its own light.',
   },
 });
 

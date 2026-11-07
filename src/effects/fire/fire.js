@@ -253,7 +253,7 @@ export const FIRE_PARAMS = Object.freeze({
     default: 1, // 2026-10-20 new defaults (was 3)
     category: 'Ember',
     label: 'Ember count',
-    help: 'Sparks per fire. V2 ran about 95 for a whole floor.',
+    help: 'How many sparks each fire throws up.',
   },
   emberSizeScale: {
     type: 'float',
@@ -263,7 +263,7 @@ export const FIRE_PARAMS = Object.freeze({
     default: 4.78, // 2026-10-17 author's live-tuned defaults (was 1.8)
     category: 'Ember',
     label: 'Ember size ×',
-    help: 'Base is 2.3-8.7 world px — already a third of V2’s own, at the author’s request.',
+    help: 'How big the sparks are, as a multiple of a small base speck. Raise it for chunkier embers.',
   },
   // ⚠️ LIFE/CHAOS/RISE ARE ALL WIND0/WIND1 PAIRS, 2026-09-04 — author: *"embers need investigating... chaotic rising
   // embers at wind 0 and wind driven embers at high wind values that move sideways and not upwards."* The shipped
@@ -336,7 +336,7 @@ export const FIRE_PARAMS = Object.freeze({
     default: 1.9, // 2026-10-20 new defaults (was 200)
     category: 'Ember',
     label: 'Ember wind push ×',
-    help: "How hard wind physically shoves embers sideways, on top of the engine's own baked-in guarantee that full wind moves an ember many times its own (tiny) size. 1 = exactly that guarantee; higher throws sparks further, lower keeps them closer even in a gale. A spark is launched from the fuel and the wind takes hold as it ages. Only affects embers actually exposed to wind (see the Response category).",
+    help: 'How hard wind shoves embers sideways. At 1 a full wind carries a spark many times its own size; higher throws sparks further, lower keeps them close even in a gale. Only embers exposed to the wind are affected (see Response).',
   },
   emberStreak: {
     type: 'float',
@@ -495,7 +495,7 @@ export const FIRE_PARAMS = Object.freeze({
     default: 1,
     category: 'Depth',
     label: 'Height parallax',
-    help: 'How strongly height moves a flame toward or away from the middle of the screen — what V2’s perspective camera did. It is why a tall flame leans away from the view centre when you pan. 0 is perfectly flat.',
+    help: "How much a flame's height makes it lean away from the middle of the screen as you pan, as a real camera would see it. 0 is perfectly flat.",
   },
   heightTilt: {
     type: 'float',

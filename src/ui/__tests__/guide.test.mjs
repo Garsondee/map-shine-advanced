@@ -28,7 +28,7 @@ import { MASK_GUIDE, maskCheatRows, maskCheatTableHtml } from '../rooms/guide/gu
 import { MASK_KINDS } from '../../scene/mask-catalog.js';
 import { WEATHER_ARCHETYPES } from '../../world/weather-data.js';
 import { EFFECT_GUIDE_PAGES } from '../rooms/guide/guide-links.js';
-import { GUIDE_SETTINGS, settingsGroups, settingsTableHtml } from '../rooms/guide/guide-settings.js';
+import { GUIDE_SETTINGS, settingsGroups, settingsTableHtml, DEV_WORDING } from '../rooms/guide/guide-settings.js';
 
 const GUIDE_DIR = fileURLToPath(new URL('../../../guide/', import.meta.url));
 /** Hand-written words per page, tables and generated blocks included. Hubs are mostly tiles. */
@@ -273,6 +273,11 @@ function runSettings({ ok }) {
       `settings table ${id}: has rows, all labelled and explained`,
       rows.length > 0 && rows.every((r) => r.label && r.help)
     );
+    const devWorded = rows.filter((r) => DEV_WORDING.test(r.help)).map((r) => r.key);
+    ok(
+      `settings table ${id}: help reads for map makers, not developers (fix: ${devWorded.join(', ') || 'none'})`,
+      devWorded.length === 0
+    );
     const planned = Object.entries(spec.params)
       .filter(([, d]) => d.status === 'planned')
       .map(([k]) => k);
@@ -312,7 +317,7 @@ function runMasks({ ok }) {
   ok('the table renders a row per mask', (maskCheatTableHtml().match(/<tr>/g) || []).length === MASK_KINDS.length + 1);
 }
 
-function runDrift({ ok }) {
+async function runDrift({ ok }) {
   ok('the guide folder exists at the module root', existsSync(GUIDE_DIR));
   const manifest = JSON.parse(readFileSync(`${GUIDE_DIR}guide.json`, 'utf8'));
   const pageIds = manifest.pages.map((p) => p.id);
@@ -386,6 +391,25 @@ function runDrift({ ok }) {
       typeof r.meta.sources === 'string' && r.meta.sources.length > 3
     );
   }
+  // Pictures vs the code they show (tools/guide/stale.mjs): every rendered picture names its
+  // sources and has a recorded fingerprint. A changed fingerprint is a WARNING, not a failure.
+  const shots = JSON.parse(readFileSync(`${GUIDE_DIR}shots.json`, 'utf8')).shots;
+  const lock = JSON.parse(readFileSync(`${GUIDE_DIR}shots.lock.json`, 'utf8'));
+  for (const s of shots.filter((x) => x.out?.msa)) {
+    ok(`shot ${s.id}: names the code its look depends on`, Array.isArray(s.sources) && s.sources.length > 0);
+    ok(
+      `shot ${s.id}: has a recorded fingerprint (node tools/guide/stale.mjs --accept ${s.id})`,
+      !!lock[s.id]?.fingerprint
+    );
+  }
+  const { staleReport } = await import('../../../tools/guide/stale.mjs');
+  const stale = staleReport(shots, lock).filter((r) => r.status === 'stale');
+  if (stale.length) {
+    console.warn(
+      `  guide: ${stale.length} picture(s) may be out of date (${stale.map((r) => r.id).join(', ')}) — run node tools/guide/stale.mjs`
+    );
+  }
+
   const unused = images.filter((i) => !usedImages.has(i));
   ok(`every image in guide/images is used by a page (unused: ${unused.join(', ') || 'none'})`, unused.length === 0);
   let total = 0;
@@ -408,5 +432,5 @@ export async function run(t) {
   await runActions(t);
   runMasks(t);
   runSettings(t);
-  runDrift(t);
+  await runDrift(t);
 }

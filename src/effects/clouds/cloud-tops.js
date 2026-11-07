@@ -73,7 +73,7 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     default: 0.45,
     category: 'Look',
     label: 'Zoom sensitivity',
-    help: "How readily the tops appear as the camera zooms out — a multiplier on the camera's own virtual eye height. 1 is this feature's own derived starting point (tied to the old V2 cloud effect's shipped zoom thresholds); above 1 makes the tops appear sooner (at a less zoomed-out view); below 1 makes them wait for a wider view before appearing. Never affects the ground shadow, which draws at every zoom.",
+    help: 'How readily the cloud tops appear as you zoom out. Above 1 they appear sooner; below 1 they wait for a wider view. Cloud shadows on the ground are drawn at every zoom.',
   },
   interiorCut: {
     type: 'float',

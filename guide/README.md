@@ -36,6 +36,15 @@ links `page:<id>` or `page:<id>#anchor`.
    1600 px wide. Re-shoot with `node tools/guide/shoot.mjs --name <client> --only <id>` then
    `python tools/guide/crop.py --data <rig Data dir> --only <id>`. Never on the live server.
 
+**Out-of-date pictures:** each shot lists the code its look depends on (`sources`);
+`node tools/guide/stale.mjs` lists pictures whose code changed since they were shot (the test prints
+a warning). Re-shoot them, or `--accept` after checking they still look right. Shooting records the
+fingerprint automatically (`guide/shots.lock.json`).
+
+**Export tests:** `tools/guide/editor-tests/` has Photoshop scripts (run with File → Scripts →
+Browse, or COM `DoJavaScriptFile`) and `read.py`, which reads the results the way Map Shine does.
+The learn-editors page quotes their results; re-run them when an editor or the mask decoding changes.
+
 `src/ui/__tests__/guide.test.mjs` fails the build when a page links to a missing page,
 names a missing button, image or mask ending, loses its `sources:` line, runs over its word
 budget, or when the images grow past their size budget.

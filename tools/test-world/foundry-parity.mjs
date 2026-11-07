@@ -10,7 +10,10 @@
  * animated cells are compared on their average look, not frame by frame: noted per cell).
  * Then each cell (pitch 800 px) is compared: mean luminance and mean RGB in a circle around the light.
  *
- *   node tools/test-world/foundry-parity.mjs --client gm [--out <dir>]
+ *   node tools/test-world/foundry-parity.mjs --client gm [--out <dir>] [--msa-hour <0-24>]
+ *
+ * --msa-hour sets MSA's own clock for the MSA shot (MapShine.setTimeOfDay). MSA does not read the scene's darkness
+ * yet (mmp-ynr.3), so a darkness-1 scene drawn by Foundry is compared against MSA at that hour (e.g. 0 = midnight).
  *
  * Writes native.png, msa.png, side-by-side.jpg (via python if present) and report.json with per-cell numbers.
  * Restores the effect switches and the scene flag at the end.
@@ -116,6 +119,7 @@ function cellStats(png, c) {
 
 async function main() {
   const client = String(opt('client', 'gm'));
+  const msaHour = opt('msa-hour', null) === null ? null : Number(opt('msa-hour'));
   const reg = JSON.parse(fs.readFileSync(path.join(REPO, 'tools', 'foundry-cdp', 'clients.json'), 'utf8'));
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const out = opt('out', path.join(REPO, 'tests', 'playwright-artifacts', 'foundry-parity', stamp));
@@ -163,9 +167,10 @@ async function main() {
     await settled(page);
     await page.evaluate((name) => game.scenes.getName(name).view(), SCENE);
     await settled(page);
-    await page.evaluate(() => {
+    await page.evaluate(async (hour) => {
       MapShine.fadeWeatherToArchetype?.('clear', 0);
-    });
+      if (hour !== null) await MapShine.setTimeOfDay?.(hour, 0);
+    }, msaHour);
     await frame(page);
     await shot(page, path.join(out, 'msa.png'));
     const nat = PNG.sync.read(fs.readFileSync(path.join(out, 'native.png')));
@@ -177,6 +182,7 @@ async function main() {
     });
     const report = {
       scene: SCENE,
+      msaHour,
       note: 'Mean over a circle of r=300 world px around each light; 0-255 sRGB screen values. Animated lights compared on a paused frame.',
       rows,
     };

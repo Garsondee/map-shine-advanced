@@ -69,7 +69,7 @@
  * @module effects/vegetation-shadow-subsystem
  */
 
-import { BASE_SOFTNESS_PX, DEFAULT_SHADOW_LOOK, shadowMaxThrowPerPx, colourStageDarkness } from './shadow-access.js';
+import { BASE_SOFTNESS_PX, DEFAULT_SHADOW_LOOK, shadowMaxThrowPerPx } from './shadow-access.js';
 import { shadowPenumbraPx } from './lighting/light-visibility.js';
 import { edgeRamp01 } from './lighting/sun-occlusion.js';
 
@@ -585,8 +585,9 @@ export function createVegetationShadowSubsystem({
     const lengthMul = cast.offsetPx > 0 ? Math.min(throwPx, reachPx) / cast.offsetPx : 1;
     const offX = cast.offsetX * lengthMul * ramp;
     const offY = cast.offsetY * lengthMul * ramp;
-    // Drawn on the ground colour, read like a building's shadow on the light (shadow-access.js#colourStageDarkness).
-    const strength01 = colourStageDarkness(cast.strength01);
+    // Drawn on the LIGHT now (mmp-dpw.20: buf:scene.illum, before the point lights), the same stage as a
+    // building's shadow, so the strength is used as it is: the colour-stage correction is no longer needed.
+    const strength01 = cast.strength01;
 
     // THE SWEEP VECTOR, in this tile's UV space: the full throw. The fragment
     // sweeps art-UV from 0 to this, so t=0 is the plant's own footprint (the

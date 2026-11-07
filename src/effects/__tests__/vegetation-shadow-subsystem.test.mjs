@@ -81,8 +81,8 @@ export function run(t) {
       sub.syncUniforms(uni, TREE, PLACEMENT, PARAMS) === true
     );
     ok(
-      '...and it wrote the strength through (re-expressed for the colour stage)',
-      uni.uShadowStrength.value === colourStageDarkness(0.45)
+      '...and it wrote the strength straight through (drawn on the light now, mmp-dpw.20)',
+      uni.uShadowStrength.value === 0.45
     );
   }
   {
@@ -172,15 +172,15 @@ export function run(t) {
     makeSubsystem({ castStrength: 0.45, golden01: 1 }).syncUniforms(gold, TREE, PLACEMENT, PARAMS);
     ok(
       'golden hour is NOT re-applied to the strength (it is already in the cast)',
-      gold.uShadowStrength.value === colourStageDarkness(0.45)
+      gold.uShadowStrength.value === 0.45
     );
     ok(
       'golden hour is NOT re-applied to the sweep',
       Math.abs(gold.uShadowSmearUv.value.x - day.uShadowSmearUv.value.x) < 1e-12
     );
     ok(
-      'the strength is the cast strength, on the colour stage',
-      day.uShadowStrength.value === colourStageDarkness(0.45)
+      'the strength is the cast strength, unchanged (drawn on the light, mmp-dpw.20)',
+      day.uShadowStrength.value === 0.45
     );
     // A canopy covering the whole scene (the usual _Tree/_Bush overlay) holds every on-scene shadow pixel
     // on its own quad: no shift (2026-11-01, round 6 — the shift and its pad cap cut tree throws short).

@@ -11186,6 +11186,8 @@ async function startVtPanViewerUnserialized({
       profiler?.begin(Z.lightDrawRegions);
       if (regionField.plan) renderer.render(regionOverlayScene, camera);
       profiler?.end(Z.lightDrawRegions);
+      // TREE AND BUSH SHADOWS take the sun/sky light here, before any lamp (mmp-dpw.20, `vegShadowIllumScene`).
+      if (vegShadowIllumScene.children.length > 0) renderer.render(vegShadowIllumScene, camera);
       // THE ROOM'S OWN LIGHT, before any lamp — what the window pulls from (buf:scene.roomLight's own note).
       renderer.setRenderTarget(sceneRoomLight);
       roomLightCopyQuad.render(renderer);
@@ -18243,9 +18245,19 @@ async function startVtPanViewerUnserialized({
     function longestShadowPxNow() {
       return longestShadowPx(getSunShadowRenderState().params ?? {}, dimensions?.size);
     }
+    /**
+     * THE TREE AND BUSH SHADOWS LIVE IN THE LIGHT, NOT ON THE FLOOR'S COLOUR (mmp-dpw.20, 2026-11-07). They used to
+     * be black quads in the main `scene`, drawn into `buf:scene.color` before lighting, so every light multiplied
+     * an already-darkened floor: a torch under a tree by day was dimmed, and a tree inside a building's shadow
+     * darkened twice. Now they draw into `buf:scene.illum` right after the ambient fill and the region overlay and
+     * BEFORE the point lights MAX in (`runLightAccumulatePass`), so they take only the sun/sky light, as every
+     * other shadow does (lighting-pass.js: a shadow is the absence of a specific light). The material's depth
+     * reject (`maskNode`, isAtOrBelow the host ground) still keeps a shadow off its own canopy and off roofs.
+     */
+    const vegShadowIllumScene = new THREE.Scene();
     const vegShadows = createVegetationShadowSubsystem({
       THREE,
-      scene,
+      scene: vegShadowIllumScene,
       dimensions,
       getShadowHandle: () => shadowHandle,
       getPxPerFt: vegetationPxPerFt,
@@ -23089,7 +23101,8 @@ async function startVtPanViewerUnserialized({
                   );
                 }
               }
-              scene.add(shadowMesh);
+              // Into the light, not the floor colour (mmp-dpw.20, `vegShadowIllumScene`).
+              vegShadowIllumScene.add(shadowMesh);
             }
 
             const {

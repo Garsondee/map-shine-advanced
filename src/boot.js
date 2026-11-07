@@ -15408,6 +15408,10 @@ function install() {
   }
 
   // LOOKS' CONSOLE DOOR — every lever the Remote uses, callable by hand too.
+  // The Remote's own mood-chip path, for scripts and the parity harness (mmp-f0k.3): fades cover and
+  // rain through the shared fade state and lands the archetype in the scene's sky flags, so EVERY
+  // client follows. `MapShine.setWeatherArchetype` is the local-only console lever and does not sync.
+  MapShine.fadeWeatherToArchetype = (archetypeId, overMs = 0) => fadeWeatherToArchetype(archetypeId, overMs);
   MapShine.looks = {
     list: () => looksLibrary.slice(),
     play: (id, overMs = 0) => playLookById(id, overMs),

@@ -53,6 +53,14 @@ export function run(t) {
   const w = chromeArgs({ port: 1, profile: 'p', width: 1, height: 1, headless: false, url: 'u' });
   ok('chromeArgs: windowed has no headless flag', !w.some((x) => x.startsWith('--headless')));
 
+  ok(
+    'wrapScript: --code IIFE with return inside is still returned',
+    wrapScript('(()=>{const a=1; return a})()', { expression: true }).includes('return ((()=>')
+  );
+  ok(
+    'wrapScript: expression flag wraps a semicolon one-liner',
+    wrapScript('a(); b()', { expression: true }).includes('return (')
+  );
   ok('parseReport: JSON string', parseReport('{"settled":true}')?.settled === true);
   ok('parseReport: object passes through', parseReport({ settled: false })?.settled === false);
   ok('parseReport: value wrapper', parseReport({ value: '{"a":1}' })?.a === 1);

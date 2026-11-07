@@ -31,6 +31,9 @@ export const DIGEST_GRAIN = Object.freeze({
   degrees: 0.5,
   px: 1,
   driftPx: 8,
+  // Pixel-sized weather axes (cloud altitude/scale) ease over tens of seconds per client; a
+  // client a frame behind is a few px off mid-ease, which is not a desync.
+  weatherPx: 25,
   seconds: 1,
 });
 
@@ -97,7 +100,7 @@ function digestAxes(a) {
   const out = {};
   for (const [k, v] of Object.entries(a)) {
     if (typeof v !== 'number') continue;
-    out[k] = k.endsWith('Px') ? roundTo(v, DIGEST_GRAIN.px) : unit(v);
+    out[k] = k.endsWith('Px') ? roundTo(v, DIGEST_GRAIN.weatherPx) : unit(v);
   }
   return out;
 }

@@ -96,9 +96,14 @@ export function resolvePort(opts, registry) {
  * so `--code "game.user.name"` just works.
  * @param {string} body @returns {string}
  */
-export function wrapScript(body) {
+export function wrapScript(body, { expression = false } = {}) {
   const trimmed = body.trim();
-  const isExpression = !/\breturn\b/.test(trimmed) && !trimmed.includes(';') && !trimmed.includes('\n');
+  // `--code` is ONE expression (an IIFE with `;` and `return` inside included) unless it starts
+  // with `return`; a file/stdin body is a function body unless it is a bare one-liner.
+  const startsWithReturn = /^return\b/.test(trimmed);
+  const isExpression = expression
+    ? !startsWithReturn
+    : !/\breturn\b/.test(trimmed) && !trimmed.includes(';') && !trimmed.includes('\n');
   const inner = isExpression ? `return (${trimmed});` : trimmed;
   return `async (args) => { ${inner} }`;
 }
@@ -178,7 +183,7 @@ async function withPage(opts, fn) {
   }
 }
 
-async function runInPage(page, body, args) {
+async function runInPage(page, body, args, { expression = false } = {}) {
   return page.evaluate(
     async ({ src, a }) => {
       // eslint-disable-next-line no-new-func
@@ -190,7 +195,7 @@ async function runInPage(page, body, args) {
         return { ok: true, value: String(value) };
       }
     },
-    { src: wrapScript(body), a: args }
+    { src: wrapScript(body, { expression }), a: args }
   );
 }
 
@@ -300,7 +305,9 @@ async function evalCmd(opts) {
   if (!body.trim()) throw new Error('give --code "<js>" or --file script.js');
   const args = typeof opts.args === 'string' ? JSON.parse(opts.args) : {};
   await withPage(opts, async (page) => {
-    const res = await runInPage(page, body, args);
+    const res = await runInPage(page, body, args, {
+      expression: typeof opts.code === 'string' && opts.file === undefined,
+    });
     out(res.value);
   });
 }

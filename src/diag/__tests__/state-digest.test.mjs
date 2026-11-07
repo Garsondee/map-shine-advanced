@@ -59,7 +59,15 @@ export function run(t) {
   ok('digest: lights sorted by id', d.shared.lights[0].id === 'a' && d.shared.lights[1].id === 'b');
   ok('digest: animation type kept', d.shared.lights[0].animation === 'torch');
   ok('digest: darkness rounded', d.shared.darkness === 0.12);
-  ok('digest: px axes rounded to px', d.shared.weather.targets.cloudAltitudePx === 1400);
+  ok('digest: px weather axes rounded to the weather grain', d.shared.weather.targets.cloudAltitudePx === 1400);
+  const easing = raw();
+  easing.weather.state.cloudScalePx = 4473;
+  const easing2 = raw();
+  easing2.weather.state.cloudScalePx = 4472;
+  ok(
+    'digest: 1 px of mid-ease difference does not change the hash',
+    buildStateDigest(easing).hash === buildStateDigest(easing2).hash
+  );
   ok('digest: per-client fields kept out of shared', d.shared.user === undefined && d.perClient.user === 'Gamemaster');
   ok('digest: hash is 8 hex chars', /^[0-9a-f]{8}$/.test(d.hash));
 

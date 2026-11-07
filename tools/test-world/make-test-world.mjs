@@ -201,7 +201,7 @@ async function neutral() {
           for (const k of keys) await game.settings.set(...k.split(/\.(.+)/).slice(0, 2), 'off');
         }
         if (weather === 'clear') {
-          await MapShine.setWeatherArchetype?.('clear', { immediate: true });
+          MapShine.fadeWeatherToArchetype?.('clear', 0);
           await MapShine.setWeatherTargets?.({ precip01: 0 });
           await MapShine.setWind?.({ speed01: 0 });
         }

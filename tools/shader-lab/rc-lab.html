@@ -1,0 +1,274 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Radiance cascades lab (mmp-ku9.5)</title>
+<style>body{margin:0;background:#111;color:#ddd;font:12px monospace}canvas{display:block;image-rendering:pixelated}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<pre id="log"></pre>
+<script type="module">
+/*
+ * RADIANCE CASCADES LAB (mmp-ku9.5, 2026-11-07) — a standalone measurement prototype, NOT module code.
+ *
+ * Question it answers: is 2D radiance cascades a reasonable fit for MSA's real-light mode, used for
+ * what it is good at (indirect light, sky/sun flooding in through doors and windows), and at what cost?
+ *
+ * Scene (world-space grid, N x N px): a room with walls (occluders), an open DOOR on the west wall and a
+ * WINDOW gap on the south wall; outside is sunlit ground (an emitter: the sky's light already landed on the
+ * ground); inside, a warm torch. Floor albedo is grey inside, sandy outside. Two thin test walls (1 px and
+ * 3 px) sit near the torch to measure leaks.
+ *
+ * Method: vanilla 2D radiance cascades (Sannikov). Cascade i: probe spacing 2^i px, 4 * 4^i ray directions,
+ * ray interval [4*(4^i - 1)/3, 4*(4^(i+1) - 1)/3) px, marched in steps of max(1, 2^(i-1)) px through the
+ * occluder/emitter texture. Cascades are merged top-down (nearest-probe merge, the simple variant with known
+ * ringing), cascade 0 gives fluence per pixel. ONE BOUNCE: the first pass's fluence x albedo becomes extra
+ * emission for a second pass (what 'bounce light' means here).
+ *
+ * Reports (window.rcReport): ms per full solve at N=512 and N=1024 (GPU time via onSubmittedWorkDone over
+ * many frames), leak ratios behind the 1 px and 3 px walls, how far the door's sky light reaches into the
+ * room, and PNGs of direct / bounce / total via window.rcPng.
+ */
+const log = (...a) => (document.getElementById('log').textContent += a.join(' ') + '\n');
+
+const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+if (!adapter) { window.rcReport = { error: 'no WebGPU adapter' }; throw new Error('no WebGPU'); }
+const device = await adapter.requestDevice();
+const info = adapter.info ?? {};
+
+function makeScene(N) {
+  // RGBA float: rgb = emission (linear), a = 1 if occluder. Separate albedo array.
+  const em = new Float32Array(N * N * 4);
+  const albedo = new Float32Array(N * N * 4);
+  const s = N / 512; // scale features with N
+  const room = { x0: 140 * s, y0: 120 * s, x1: 400 * s, y1: 380 * s, t: Math.max(2, 4 * s) };
+  const doorY0 = 220 * s, doorY1 = 280 * s;          // west wall door
+  const winX0 = 240 * s, winX1 = 300 * s;            // south wall window (open gap)
+  const torch = { x: 330 * s, y: 180 * s, r: 5 * s };
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const i = (y * N + x) * 4;
+    const inside = x > room.x0 && x < room.x1 && y > room.y0 && y < room.y1;
+    const onWall =
+      (x >= room.x0 - room.t && x <= room.x0 && y >= room.y0 - room.t && y <= room.y1 + room.t && !(y > doorY0 && y < doorY1)) ||
+      (x >= room.x1 && x <= room.x1 + room.t && y >= room.y0 - room.t && y <= room.y1 + room.t) ||
+      (y >= room.y0 - room.t && y <= room.y0 && x >= room.x0 - room.t && x <= room.x1 + room.t) ||
+      (y >= room.y1 && y <= room.y1 + room.t && x >= room.x0 - room.t && x <= room.x1 + room.t && !(x > winX0 && x < winX1));
+    // test walls: 1 px and 3 px vertical walls between the torch and the east side
+    const thin1 = Math.abs(x - 360 * s) < 0.5 * Math.max(1, s) && y > 140 * s && y < 220 * s;
+    const thin3 = Math.abs(x - 300 * s) < 1.5 * Math.max(1, s) && y > 140 * s && y < 220 * s && x < 330 * s;
+    const occ = onWall || thin1 || thin3;
+    em[i + 3] = occ ? 1 : 0;
+    if (occ) { albedo[i] = albedo[i + 1] = albedo[i + 2] = 0.5; continue; }
+    if (!inside) { // sunlit outdoor ground: it emits the sky+sun light it received (direct already landed)
+      em[i] = 1.0; em[i + 1] = 0.95; em[i + 2] = 0.85; em[i + 3] = 0.5;
+      albedo[i] = 0.75; albedo[i + 1] = 0.65; albedo[i + 2] = 0.45;
+    } else {
+      albedo[i] = albedo[i + 1] = albedo[i + 2] = 0.55;
+    }
+    const dt = Math.hypot(x - torch.x, y - torch.y);
+    if (dt < torch.r) { em[i] = 6; em[i + 1] = 3.2; em[i + 2] = 1.2; em[i + 3] = 0.5; }
+  }
+  return { em, albedo, room, torch, doorY0, doorY1, winX0, winX1, s };
+}
+
+const WGSL = /* wgsl */ `
+struct P { N: u32, cascade: u32, numCascades: u32, pad: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var sceneTex: texture_2d<f32>;          // rgb emission, a occluder
+@group(0) @binding(2) var upper: texture_storage_2d<rgba16float, read>; // merged cascade i+1 (or empty)
+@group(0) @binding(3) var outTex: texture_storage_2d<rgba16float, write>;
+
+fn sceneAt(q: vec2<f32>) -> vec4<f32> {
+  let n = f32(p.N);
+  if (q.x < 0.0 || q.y < 0.0 || q.x >= n || q.y >= n) { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }
+  return textureLoad(sceneTex, vec2<i32>(q), 0);
+}
+
+// Layout of a cascade texture: N x N texels; cascade i has (N/2^i)^2 probes, each with 4*4^i rays packed in a
+// (2*2^i) x (2*2^i) tile => total N x N texels for every cascade (the standard 'direction-first' tiling).
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let N = p.N;
+  if (gid.x >= N || gid.y >= N) { return; }
+  let i = p.cascade;
+  let spacing = 1u << i;                 // probe spacing px
+  let tile = 2u * spacing;               // ray tile side: (2*2^i)^2 = 4*4^i rays
+  let probesPerSide = N / tile;          // probes laid out in tiles of rays... keep N x N texels
+  let probe = gid.xy / tile;             // which probe
+  let rayXY = gid.xy % tile;
+  let rayIndex = rayXY.y * tile + rayXY.x;
+  let numRays = tile * tile;
+  let angle = (f32(rayIndex) + 0.5) / f32(numRays) * 6.2831853;
+  let dir = vec2<f32>(cos(angle), sin(angle));
+  // probe centre in world px: probes cover the grid at spacing 'tile' (probes per side = N/tile)
+  let centre = (vec2<f32>(probe) + 0.5) * f32(tile);
+  let fi = f32(i);
+  let start = 4.0 * (pow(4.0, fi) - 1.0) / 3.0;
+  let end = 4.0 * (pow(4.0, fi + 1.0) - 1.0) / 3.0;
+  let step = max(1.0, pow(2.0, fi - 1.0));
+  var radiance = vec3<f32>(0.0);
+  var transmit = 1.0;
+  var t = start;
+  loop {
+    if (t >= end || transmit <= 0.0) { break; }
+    let s = sceneAt(centre + dir * t);
+    if (s.a > 0.75) { transmit = 0.0; break; }                                   // wall
+    if (s.a > 0.25) { radiance = radiance + s.rgb * transmit; transmit = 0.0; break; } // solid emitter
+    // free floor: bounce light ADDS along the ray (a thin glowing medium), never blocks
+    radiance = radiance + s.rgb * transmit * (step * 0.004);
+    t = t + step;
+  }
+  // MERGE: if the ray was not stopped, add the upper cascade's radiance in the same direction family.
+  if (transmit > 0.0 && i + 1u < p.numCascades) {
+    let upTile = tile * 2u;
+    let upProbe = gid.xy / upTile;      // nearest upper probe (vanilla merge)
+    // the 4 upper rays that subdivide this ray: indices 4*rayIndex .. +3
+    var acc = vec3<f32>(0.0);
+    for (var k = 0u; k < 4u; k = k + 1u) {
+      let ur = rayIndex * 4u + k;
+      let uxy = upProbe * upTile + vec2<u32>(ur % upTile, ur / upTile);
+      acc = acc + textureLoad(upper, vec2<i32>(uxy)).rgb;
+    }
+    radiance = radiance + acc * 0.25 * transmit;
+  }
+  textureStore(outTex, vec2<i32>(gid.xy), vec4<f32>(radiance, 1.0));
+}
+`;
+
+const FLUENCE_WGSL = /* wgsl */ `
+struct P { N: u32, cascade: u32, numCascades: u32, pad: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var c0: texture_storage_2d<rgba16float, read>;
+@group(0) @binding(2) var outTex: texture_storage_2d<rgba16float, write>;
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= p.N || gid.y >= p.N) { return; }
+  // cascade 0: probe spacing 1, tile 2 => 4 rays per 2x2 tile; average the 4 rays of the tile containing gid
+  let base = (gid.xy / 2u) * 2u;
+  var acc = vec3<f32>(0.0);
+  for (var k = 0u; k < 4u; k = k + 1u) {
+    acc = acc + textureLoad(c0, vec2<i32>(base + vec2<u32>(k % 2u, k / 2u))).rgb;
+  }
+  textureStore(outTex, vec2<i32>(gid.xy), vec4<f32>(acc * 0.25, 1.0));
+}
+`;
+
+function tex(N, usage, format = 'rgba16float') {
+  return device.createTexture({ size: [N, N], format, usage });
+}
+
+function buildSolver(N) {
+  const numCascades = Math.min(6, Math.floor(Math.log2(N)) - 2);
+  const scene = device.createTexture({ size: [N, N], format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  const casc = [...Array(numCascades + 1)].map(() => tex(N, GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC));
+  const fluence = tex(N, GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC);
+  const pipe = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: WGSL }), entryPoint: 'main' } });
+  const fpipe = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: FLUENCE_WGSL }), entryPoint: 'main' } });
+  const ubufs = [...Array(numCascades)].map((_, i) => {
+    const b = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(b, 0, new Uint32Array([N, i, numCascades, 0]));
+    return b;
+  });
+  const fub = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(fub, 0, new Uint32Array([N, 0, numCascades, 0]));
+  // cascade i writes casc[i], reads casc[i+1] (casc[numCascades] stays empty = sky beyond the top)
+  const groups = [...Array(numCascades)].map((_, i) => device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: { buffer: ubufs[i] } },
+    { binding: 1, resource: scene.createView() },
+    { binding: 2, resource: casc[i + 1].createView() },
+    { binding: 3, resource: casc[i].createView() },
+  ] }));
+  const fgroup = device.createBindGroup({ layout: fpipe.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: { buffer: fub } },
+    { binding: 1, resource: casc[0].createView() },
+    { binding: 2, resource: fluence.createView() },
+  ] });
+  const wg = Math.ceil(N / 8);
+  function solve(enc) {
+    for (let i = numCascades - 1; i >= 0; i--) {
+      const pass = enc.beginComputePass(); pass.setPipeline(pipe); pass.setBindGroup(0, groups[i]); pass.dispatchWorkgroups(wg, wg); pass.end();
+    }
+    const fp = enc.beginComputePass(); fp.setPipeline(fpipe); fp.setBindGroup(0, fgroup); fp.dispatchWorkgroups(wg, wg); fp.end();
+  }
+  function upload(em) { device.queue.writeTexture({ texture: scene }, em, { bytesPerRow: N * 16 }, [N, N]); }
+  return { N, numCascades, solve, upload, fluence };
+}
+
+async function readTex(t, N) {
+  const bpr = Math.ceil((N * 8) / 256) * 256;
+  const buf = device.createBuffer({ size: bpr * N, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = device.createCommandEncoder();
+  enc.copyTextureToBuffer({ texture: t }, { buffer: buf, bytesPerRow: bpr }, [N, N]);
+  device.queue.submit([enc.finish()]);
+  await buf.mapAsync(GPUMapMode.READ);
+  const u16 = new Uint16Array(buf.getMappedRange().slice(0));
+  buf.unmap();
+  const out = new Float32Array(N * N * 4);
+  const h2f = (h) => { const s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, f = h & 1023; return e === 0 ? s * 6.103515625e-5 * (f / 1024) : e === 31 ? (f ? NaN : s * Infinity) : s * Math.pow(2, e - 15) * (1 + f / 1024); };
+  for (let y = 0; y < N; y++) for (let x = 0; x < N * 4; x++) out[y * N * 4 + x] = h2f(u16[(y * bpr) / 2 + x]);
+  return out;
+}
+
+function toPng(f, N, exposure = 1) {
+  const cv = document.createElement('canvas'); cv.width = N; cv.height = N;
+  const ctx = cv.getContext('2d'); const img = ctx.createImageData(N, N);
+  for (let i = 0; i < N * N; i++) for (let c = 0; c < 3; c++) {
+    const v = 1 - Math.exp(-f[i * 4 + c] * exposure); // simple tonemap
+    img.data[i * 4 + c] = Math.round(255 * Math.pow(Math.max(0, v), 1 / 2.2));
+  }
+  for (let i = 0; i < N * N; i++) img.data[i * 4 + 3] = 255;
+  ctx.putImageData(img, 0, 0); return cv.toDataURL('image/png');
+}
+
+async function timeSolve(solver, frames = 30) {
+  for (let w = 0; w < 3; w++) { const e = device.createCommandEncoder(); solver.solve(e); device.queue.submit([e.finish()]); }
+  await device.queue.onSubmittedWorkDone();
+  const t0 = performance.now();
+  for (let k = 0; k < frames; k++) { const e = device.createCommandEncoder(); solver.solve(e); device.queue.submit([e.finish()]); }
+  await device.queue.onSubmittedWorkDone();
+  return (performance.now() - t0) / frames;
+}
+
+const report = { adapter: { vendor: info.vendor, architecture: info.architecture, description: info.description }, runs: [] };
+window.rcPng = {};
+for (const N of [512, 1024]) {
+  const sc = makeScene(N);
+  const solver = buildSolver(N);
+  // PASS 0: torch only (no sky), for the leak probes
+  const emT = new Float32Array(sc.em);
+  for (let i = 0; i < N * N; i++) if (emT[i * 4 + 3] > 0.25 && emT[i * 4 + 3] < 0.75 && emT[i * 4] < 2) { emT[i * 4] = emT[i * 4 + 1] = emT[i * 4 + 2] = 0; emT[i * 4 + 3] = 0; }
+  solver.upload(emT);
+  let e0 = device.createCommandEncoder(); solver.solve(e0); device.queue.submit([e0.finish()]);
+  const torchOnly = await readTex(solver.fluence, N);
+  // PASS 1: direct (emitters = sunlit ground + torch)
+  solver.upload(sc.em);
+  let e = device.createCommandEncoder(); solver.solve(e); device.queue.submit([e.finish()]);
+  const direct = await readTex(solver.fluence, N);
+  // PASS 2: one bounce. Emission' = emission + fluence x albedo (non-occluders only).
+  const em2 = new Float32Array(sc.em);
+  for (let i = 0; i < N * N; i++) if (sc.em[i * 4 + 3] < 0.25) for (let c = 0; c < 3; c++) em2[i * 4 + c] += direct[i * 4 + c] * sc.albedo[i * 4 + c];
+  solver.upload(em2);
+  e = device.createCommandEncoder(); solver.solve(e); device.queue.submit([e.finish()]);
+  const total = await readTex(solver.fluence, N);
+  const ms = await timeSolve(solver);
+  const lum = (f, x, y) => { const i = (Math.round(y) * N + Math.round(x)) * 4; return 0.2126 * f[i] + 0.7152 * f[i + 1] + 0.0722 * f[i + 2]; };
+  const s = sc.s;
+  // Leak probes: just in front of each test wall (torch side) vs just behind it.
+  const leak1 = lum(torchOnly, 368 * s, 180 * s) / Math.max(1e-6, lum(torchOnly, 352 * s, 180 * s));
+  const leak3 = lum(torchOnly, 292 * s, 180 * s) / Math.max(1e-6, lum(torchOnly, 308 * s, 180 * s));
+  // Door flood: light inside the room along the door's axis, at distances into the room.
+  const doorY = (sc.doorY0 + sc.doorY1) / 2;
+  const flood = [10, 40, 80, 160].map((d) => ({ intoRoomPx: Math.round(d * s), direct: +lum(direct, sc.room.x0 + d * s, doorY).toFixed(4), total: +lum(total, sc.room.x0 + d * s, doorY).toFixed(4) }));
+  // A spot far from the door and window, out of direct view: bounce lift.
+  const corner = { direct: +lum(direct, 380 * s, 360 * s).toFixed(4), total: +lum(total, 380 * s, 360 * s).toFixed(4) };
+  report.runs.push({ N, cascades: solver.numCascades, msPerSolve: +ms.toFixed(3), leakBehind1pxWall: +leak1.toFixed(3), leakBehind3pxWall: +leak3.toFixed(3), doorFlood: flood, farCornerBounce: corner });
+  window.rcPng[`torch-only-${N}`] = toPng(torchOnly, N, 3);
+  window.rcPng[`direct-${N}`] = toPng(direct, N, 1.5);
+  window.rcPng[`total-${N}`] = toPng(total, N, 1.5);
+  log(JSON.stringify(report.runs.at(-1)));
+}
+window.rcReport = report;
+</script>
+</body>
+</html>

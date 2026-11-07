@@ -5,7 +5,14 @@ export function run(t) {
   const { ok } = t;
   const types = ['torch', 'pulse', 'reactivepulse'];
   const m = lightMatrix(types);
-  ok('matrix: one light per static variant + animation', m.lights.length === 6 + types.length);
+  // v2 (2026-11-07): 6 basic statics + 6 adjustment cells + 6 coloration techniques.
+  ok('matrix: one light per static variant + animation', m.lights.length === 18 + types.length);
+  ok(
+    'matrix v2 carries the adjustment and technique cells',
+    ['static-shadows', 'static-contrast-up', 'static-coloration-3'].every((k) =>
+      m.lights.some((l) => l.flags['map-shine-advanced'].testFixtureId === k)
+    )
+  );
   ok('matrix: one label per light', m.labels.length === m.lights.length);
   ok(
     'matrix: every light carries a unique fixture id',

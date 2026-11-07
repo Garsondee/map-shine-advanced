@@ -89,6 +89,18 @@ export const LENS_MAX_TIER = 3;
  * of how large the uploaded texture ends up). */
 const LENS_OVERLAY_SOURCE_ASPECT = 3840 / 2160;
 
+/**
+ * The overlay's centred "cover" crop for a target of `width` × `height` (CSS `background-size: cover`): screen
+ * wider than the 16:9 source crops top/bottom, narrower crops the sides.
+ * @param {number} width @param {number} height @returns {[number, number]} uv scale about the centre.
+ */
+export function lensOverlayCoverScale(width, height) {
+  const aspect = Math.max(1, width || 1) / Math.max(1, height || 1);
+  return aspect > LENS_OVERLAY_SOURCE_ASPECT
+    ? [1, LENS_OVERLAY_SOURCE_ASPECT / aspect]
+    : [aspect / LENS_OVERLAY_SOURCE_ASPECT, 1];
+}
+
 /** Fixed UV-space half-amplitude of the overlay drift wobble — see
  * `buildLensCompositeMaterial`'s own overlay block for why this is a
  * bounded oscillation rather than V2's own unbounded linear drift. */
@@ -326,8 +338,15 @@ export function buildLensCompositeMaterial({
   const uOverlayDriftSpeed = uniform(float(0.2));
   const uOverlayCrossfade = uniform(float(0));
 
-  const resolution = vec2(Math.max(1, resolutionWidth || 1), Math.max(1, resolutionHeight || 1));
-  const texelSize = vec2(1, 1).div(resolution);
+  // THE RESOLUTION IS LIVE (2026-11-07). It was a constant baked at build, and the viewer rebuilds this material
+  // only on a tier change, never on resize: a lens built while the canvas was still small (early in a load) kept
+  // that size for good. Grain is one hash per `resolution` pixel, so it came out as 4-5 px BLOCKS on a 1920 px
+  // screen ("far too coarse", 2026-10-08, which the cell-size halving below only masked), and every texel-sized
+  // step (CA, blur, focus shift, light burn) was 4x too long. `setResolution` (below) keeps it current.
+  const uResolution = uniform(vec2(Math.max(1, resolutionWidth || 1), Math.max(1, resolutionHeight || 1)));
+  const resolution = uResolution;
+  const texelSize = vec2(1, 1).div(uResolution);
+  const uOverlayCover = uniform(vec2(...lensOverlayCoverScale(resolutionWidth, resolutionHeight)));
   // ⚠️ THE ONE REAL TEXTURE READ — every OTHER sample below (the luma grid,
   // every chromatic-aberration channel tap, the Kawase blur, motion blur)
   // derives from THIS node via `.sample(uv)`, never a fresh `texture(
@@ -501,17 +520,8 @@ export function buildLensCompositeMaterial({
     // keeps it reading as a photographed overlay at any aspect, at the cost
     // of a few edge pixels of the source never being seen — never a
     // problem for a texture with no single feature that must stay visible.
-    // Computed here in plain JS from the same resolutionWidth/Height the
-    // caller already re-supplies on every resize (this builder is rebuilt
-    // on resize regardless — `resolution`/`texelSize` above are baked the
-    // identical way), not as shader ALU: it is a per-BUILD constant, never
-    // a per-frame one.
-    const screenAspect = Math.max(1, resolutionWidth || 1) / Math.max(1, resolutionHeight || 1);
-    const overlayCoverScale =
-      screenAspect > LENS_OVERLAY_SOURCE_ASPECT
-        ? { x: 1, y: LENS_OVERLAY_SOURCE_ASPECT / screenAspect } // screen wider than the source: crop top/bottom
-        : { x: screenAspect / LENS_OVERLAY_SOURCE_ASPECT, y: 1 }; // screen narrower/taller: crop the sides
-
+    // A live uniform (`uOverlayCover`, set by `setResolution` with the resolution): this builder is NOT rebuilt on
+    // resize (only on a tier change), so a per-build constant went stale (2026-11-07).
     // DRIFT — a small, BOUNDED wobble (two slow, out-of-phase sine waves),
     // deliberately not V2's own unbounded linear drift (`lens.js`'s own
     // header: a texture sampled ClampToEdge should never have to reason
@@ -525,7 +535,7 @@ export function buildLensCompositeMaterial({
     const driftUv = vec2(sin(driftPhaseX), sin(driftPhaseY)).mul(LENS_OVERLAY_DRIFT_AMPLITUDE);
 
     const overlayUv = clamp(
-      uv().sub(vec2(0.5, 0.5)).mul(vec2(overlayCoverScale.x, overlayCoverScale.y)).add(vec2(0.5, 0.5)).add(driftUv),
+      uv().sub(vec2(0.5, 0.5)).mul(uOverlayCover).add(vec2(0.5, 0.5)).add(driftUv),
       vec2(0, 0),
       vec2(1, 1)
     ).toVar();
@@ -653,6 +663,14 @@ export function buildLensCompositeMaterial({
   return {
     material,
     tier: plan.tier,
+    /** Keep the shader's idea of the target size current (call on build and on every resize; no recompile). */
+    setResolution(width, height) {
+      const w = Math.max(1, width || 1);
+      const h = Math.max(1, height || 1);
+      uResolution.value.set(w, h);
+      const [cx, cy] = lensOverlayCoverScale(w, h);
+      uOverlayCover.value.set(cx, cy);
+    },
     // THE RE-POINTABLE INPUT NODES — see `sceneTexNode`'s own declaration
     // comment for why there are only these two SCENE nodes, not dozens. The
     // caller (`runPostLensPass`) re-points every frame:

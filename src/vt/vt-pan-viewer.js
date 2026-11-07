@@ -13019,6 +13019,8 @@ async function startVtPanViewerUnserialized({
       const prevAutoClear = renderer.autoClearColor;
       renderer.autoClearColor = true;
       renderer.setRenderTarget(writeTarget);
+      // The lens shader's target size, every frame: it is not rebuilt on resize (lens-render.js uResolution).
+      lensBuilt.setResolution?.(internalW, internalH);
       profiler?.begin(Z.lensComposite);
       lensQuad.render(renderer);
       profiler?.end(Z.lensComposite);

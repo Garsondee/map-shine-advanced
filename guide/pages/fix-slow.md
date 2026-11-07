@@ -9,7 +9,7 @@ These are the effects that cost the most for the least:
 
 [[do: cloudtops-off, dof-off, lens-off]]
 
-They change this computer only, so try them on the computer that is slow.
+These change only your own screen. If a player is the one stuttering, ask them to lower **Graphics quality** (below).
 
 ### Each player's own settings
 
@@ -20,10 +20,10 @@ Every player can open **Performance & Graphics** from the scene controls on the 
 
 ### The first load is the slowest
 
-The first time a scene opens on a computer, Map Shine builds its shaders. That can take a while. The next load of the same scene is much quicker.
+The first time a scene opens on a computer, Map Shine has to prepare its effects. That can take a while. The next load of the same scene is much quicker.
 
 > [!tip] Open your session's scenes once before the players arrive. The work is done, and their first load is quicker too.
 
 ### Still slow?
 
-Turn Map Shine off for one player while you sort it out: the **⋯** menu on the Remote has **Stop Map Shine until reload** for this computer. [Turn it all off](page:fix-emergency) covers the whole table.
+To check whether Map Shine is the cause, the **⋯** menu on the Remote has **Stop Map Shine until reload**. It stops Map Shine on your own computer only. [Turn it all off](page:fix-emergency) covers the whole table.

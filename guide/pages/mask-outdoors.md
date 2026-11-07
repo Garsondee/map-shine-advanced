@@ -34,6 +34,6 @@ A cellar or a dungeon has no sky at all. Fill its `_Outdoors` mask **solid black
 
 ### `_Shadow`
 
-Map Shine also recognises a `_Shadow` mask for hand-painted shadows, but doesn't draw it yet. Sun shadows come from `_Outdoors`.
+A file named `_Shadow` is recognised but has no effect. Sun shadows come from `_Outdoors`.
 
 > [!tip] Short on time? The painter's **Start from walls** builds a first `_Outdoors` mask from the scene's walls. Tidy it up rather than starting blank. [The painter](page:learn-painter).

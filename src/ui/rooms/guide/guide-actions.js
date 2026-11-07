@@ -113,14 +113,14 @@ export const GUIDE_ACTIONS = Object.freeze({
     changes: { exposureOutside: add(0.5) },
   },
   'lamps-up': {
-    label: 'Stronger lamps',
+    label: 'Stronger light',
     icon: 'candle',
     kind: 'param',
     effect: 'grade',
     changes: { lightLevel: mul(1.3) },
   },
   'lamps-down': {
-    label: 'Softer lamps',
+    label: 'Softer light',
     icon: 'candle',
     kind: 'param',
     effect: 'grade',

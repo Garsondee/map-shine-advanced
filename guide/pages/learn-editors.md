@@ -14,10 +14,10 @@ Any image editor that supports layers works: Photoshop, Krita, GIMP, Affinity Ph
 
 | Setting | Use |
 |---|---|
-| Canvas size | Same as the map, or exactly half or a quarter. Never a different shape. |
+| Canvas size | Same as the map, or smaller in the same shape (half size is common). Never a different shape. |
 | File type | `.webp` or `.png`. Use **lossless** WebP for masks with thin lines. |
 | Colour mode | **RGB.** Paint greys in an RGB document. |
-| Background | **Solid black**, not transparent, except for `_Tree` and `_Bush`. |
+| Background | **Solid, never transparent**, except for `_Tree` and `_Bush`. `_Outdoors` starts white; most other masks start black. |
 | Edges | Soft edges are fine and often look better. |
 
 ### Black, white and grey
@@ -27,7 +27,7 @@ Greyscale masks read only the **red channel**, so paint in pure greys. A coloure
 ### Transparency traps
 
 - On `_Outdoors` and the other greyscale masks, transparent means "not painted", **not** black. Flatten onto a black or white background before export.
-- On colour masks (`_Specular`, `_Window`, `_Prism`), Map Shine reads a fully transparent pixel's colour **at full strength**. Whatever colour the file stores there shows up as shine or light. Flatten onto black so nothing is hiding.
+- On colour masks (`_Specular`, `_Window`, `_Prism`), a transparent pixel still stores a hidden colour, and Map Shine uses it **at full strength**. Some editors store white there, or the colour you erased, and it shows up as shine or light. Flatten onto black so nothing is hiding.
 
 > [!tip] In GIMP's PNG export, untick **Save color values from transparent pixels**. In any editor, filling a black layer under the mask and merging it down is the safest way.
 
@@ -44,7 +44,7 @@ We exported test images from Photoshop 2026, Krita 5.3 and GIMP 3.2 and read the
 | GIMP PNG (default export) | Black: safe |
 | GIMP WebP | **The colour you erased**: still shines |
 
-The other tests passed in all three: a 50% grey painted in RGB came back as exactly 128, and a one-pixel white line survived PNG and lossless WebP. One trap is Photoshop's own: after **Image → Mode → Grayscale** the same grey came back as 105, so every grey got darker.
+Greys and one-pixel lines came through unchanged in all three. One trap is Photoshop's own: **Image → Mode → Grayscale** makes every grey darker.
 
 So in any editor: **stay in RGB mode**, and before saving a colour mask add a black layer underneath and merge down. Then nothing can hide under the transparency, whatever the format.
 

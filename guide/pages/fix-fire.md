@@ -3,7 +3,7 @@ sources: src/effects/fire/fire.js (flameSize, smokeDensity, enable), src/effects
 ---
 Fire and smoke grow from the map's `_Fire` mask. Each painted shape becomes one fire, sized by how wide the paint is.
 
-### Turn it down
+### Bigger or smaller
 
 [[do: fire-smaller, smoke-less, fire-bigger]]
 

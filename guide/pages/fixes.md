@@ -3,7 +3,7 @@ sources: guide/guide.json (page list), src/ui/rooms/guide/guide-actions.js (ever
 ---
 Pick the problem. Each page has buttons that change this scene straight away. Every change says what it did, where to find that control later, and has an **Undo**.
 
-> [!tip] Weather and time buttons ease in over the Remote's **Fade Time**. Set it to **Now** on the Play tab if you want them instant.
+> [!tip] Weather and time buttons ease in over the Remote's **Fade Time**. Set it to **Cut** on the Play tab if you want them instant.
 
 ### The look
 
@@ -17,4 +17,4 @@ Pick the problem. Each page has buttons that change this scene straight away. Ev
 
 [[cards: fix-missing, fix-wrong-floor, fix-slow, fix-emergency]]
 
-Changes made here are saved with the scene, like any change in the Studio. Buttons marked "on this computer" only change what you see.
+Changes made here are saved with the scene, like any change in the Studio. Buttons that switch an effect on or off are the exception: they change only your own screen, and the page says so beside them.

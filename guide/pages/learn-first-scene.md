@@ -9,9 +9,9 @@ Export the finished map as `.webp` (smallest) or `.png`. Give it a plain name yo
 
 ### 2. Make the `_Outdoors` mask
 
-Make a new layer over the map. Fill it white, then paint every roofed area black: rooms, halls, covered porches. Leave courtyards, streets and open ground white.
+Make a new layer over the map and fill it white. Lower the layer's opacity to about 50% so you can see the map through it, then paint every roofed area black: rooms, halls, covered porches. Leave courtyards, streets and open ground white.
 
-Export only that layer, at the same size as the map, as `old-mill-ground_Outdoors.webp`.
+Set the opacity back to 100% and export only that layer, at the same size as the map, as `old-mill-ground_Outdoors.webp`. [In an image editor](page:learn-editors) has the details.
 
 ![Docklands Warehouse with its _Outdoors mask](docklands-outdoors-mask.webp "The `_Outdoors` mask of **Docklands Warehouse**. Black: under a roof. White: open sky.")
 
@@ -27,10 +27,10 @@ Create the scene in Foundry as usual and set the map as the floor's background. 
 
 ### 5. Check the Remote
 
-Open the Map Shine Remote. If something is missing, a **Scene readiness** card sits above the tabs and says what. When the card is gone, the scene is ready.
+Open the Map Shine Remote: its button (a satellite dish) is in the scene controls on the left. If something is missing, a **Scene readiness** card sits above the tabs and says what. When the card is gone, the scene is ready.
 
 ### 6. Add more, one at a time
 
-Add `_Windows`, `_Specular`, `_Water` and the rest as your map needs them. Reload the scene after each one and look at what changed. Going one mask at a time makes problems easy to spot.
+Add `_Window`, `_Specular`, `_Water` and the rest as your map needs them. Press **F5** after each one and look at what changed. Going one mask at a time makes problems easy to spot.
 
 > [!note] Changed a mask that was already loaded? Press **F5** to reload. Map Shine remembers what it found for a few minutes.

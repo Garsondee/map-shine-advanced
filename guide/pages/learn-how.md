@@ -23,7 +23,7 @@ By name. A mask has the map's file name with an ending added:
 | `big-bank.webp` | the map art |
 | `big-bank_Outdoors.webp` | where the open sky is |
 | `big-bank_Specular.webp` | what shines |
-| `big-bank_Windows.webp` | the light from windows |
+| `big-bank_Window.webp` | the light from windows |
 
 Put them in the same folder as the map and Map Shine finds them when the scene opens.
 

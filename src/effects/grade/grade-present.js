@@ -46,8 +46,8 @@ import { STYLIZE_LOOK_NAMES } from '../stylize.js';
 // the full "why here, not vision-mask-render.js/environmental-light.js"
 // reasoning — the short version: this is the LAST fullscreen pass before the
 // canvas, so it sees the fog gate and bloom's own work already done, and its
-// `buildStylizeNode`/`currentStyle` pattern just below is the EXACT
-// structural precedent this hook copies.
+// compile-time mode choice (`currentPlayerVisionMode`, below) is the
+// structural pattern this hook uses.
 import {
   buildPlayerVisionGradeNode,
   PLAYER_VISION_GRADE_MODE_KEYS,
@@ -212,6 +212,10 @@ export function buildGradePresentMaterial({
   // (dynamic-range-render.js#createDynamicRangeUniforms). Either missing = no transform compiled.
   illumTexture = null,
   dynamicRangeUniforms = null,
+  // BLOOM AFTER THE CURVE (2026-11-07): bloom-render.js#buildBloomMaterials' `glareAt(uv)`. While Dynamic Range is
+  // on the viewer skips bloom's composite into scene.lit and this pass adds the glow after the curve instead
+  // (`setBloomInPresent`). Omitted = bloom always composites into scene.lit, as before.
+  bloomGlareAt = null,
 }) {
   const TSL = THREE.TSL;
   // THE LAMP GLOW (2026-11-01) — the coloration buffer (lamps' coloured light, 0 where
@@ -266,22 +270,27 @@ export function buildGradePresentMaterial({
    * Ships `false`: neutral until the governor ever actually renders below
    * native, matching this whole file's "ships neutral" header promise. */
   let sharpenActive = false;
-  /** The Stylize effect's `style` currently BAKED into the fragment
-   * (mythica-machina-press#36) — a different Fn per choice, so a
-   * compile-time rebuild, not a uniform switch. `amount` (how much to blend the style
-   * in) is a live uniform, `uStylizeAmount` below — it doesn't need a
-   * rebuild, only the CHOICE of transform does. */
+  /** The Stylize effect's `style` (mythica-machina-press#36) — a LIVE uniform switch since 2026-11-07, not a
+   * rebuild. Every style is a few multiply-adds, so all of them are compiled in and `uStylizeIndex` picks one
+   * (0 none, 1 sepia, 2 invert); `uStylizeAmount` blends it. As a rebuild, a pick waited for the whole
+   * ~60k-character present to compile in the background (10-27 s) with the old picture still showing, so the
+   * author's Sepia pick looked ignored until she toggled the effect off and on. `currentStyle` is kept for
+   * the readout only. */
   let currentStyle = 'none';
   const uStylizeAmount = uniform(float(0));
+  const uStylizeIndex = uniform(float(0));
   /** DYNAMIC RANGE (2026-11-04, effects/dynamic-range.js) — the HDR camera, applied to the
    * scene-referred image BEFORE the artistic grade. Live uniforms only (shared with bloom's bright pass),
    * so no dial ever recompiles this shader; `on` 0 returns the input exactly. */
   const drIllumTexNode = illumTexture && dynamicRangeUniforms ? texture(illumTexture) : null;
+  /** 1 while the viewer has bloom's glow added here, after the Dynamic Range curve (`setBloomInPresent`); 0 = bloom
+   * is in scene.lit already. Only meaningful with the curve compiled (the glow joins inside it). */
+  const uBloomInPresent = uniform(float(0));
 
   /** The player vision-mode grade currently BAKED into the fragment
-   * (mythica-machina-press#77 Stage 2b) — same "different Fn per choice, so
-   * a compile-time rebuild" reasoning as `currentStyle` right above, and
-   * `'none'` is the identity exactly like `currentStyle`'s own default. This
+   * (mythica-machina-press#77 Stage 2b) — a different Fn per choice, so a
+   * compile-time rebuild (Stylize's `currentStyle` above was one too, until 2026-11-07), and
+   * `'none'` is the identity. This
    * one is PER-VIEWING-CLIENT, never GM-authored, so nothing here reads a
    * cascade/registry value — `setPlayerVisionMode` below is called directly
    * from a live per-frame closure (`grade-present.js`'s own header, and
@@ -291,8 +300,7 @@ export function buildGradePresentMaterial({
   let visionPowerTransition = { startMs: 0, from: 0, to: 0, durationMs: 0, flickerOnStart: false };
   /** Milliseconds, pushed every frame — drives grain/scan animation in the
    * active modes. A plain uniform, not a rebuild trigger: only the MODE
-   * choice rebuilds the fragment, matching `uStylizeAmount`'s own split
-   * between "structural choice" (rebuild) and "live value" (uniform only). */
+   * choice rebuilds the fragment ("structural choice" = rebuild, "live value" = uniform only). */
   const uPlayerVisionTimeMs = uniform(float(0));
   /** The scene's darkness 0..1, pushed every frame: Night Vision and Low-light fade in as it rises
    * (V2's darkness gate), so a lit daytime map is left alone. Starts fully dark (always on). */
@@ -382,28 +390,26 @@ export function buildGradePresentMaterial({
    * The Stylize effect's per-style colour transform, applied to the fully
    * graded/tone-mapped/LUT'd colour (i.e. strictly AFTER Colour Grade's own
    * tail) — matching V2's own `post.grade absorbs SepiaEffectV2` placement.
-   * `null` for 'none' (and any future not-yet-built style) so the caller can
-   * skip the mix entirely rather than blending toward a no-op.
+   * Every style is compiled in and `uStylizeIndex` picks one at run time (see `currentStyle`); 'none' leaves
+   * `rgb` itself, and `uStylizeAmount` is 0 then, so the mix returns its input exactly.
    * @param {*} rgb - the graded colour node to transform.
-   * @param {string} style
-   * @returns {*|null}
+   * @returns {*}
    */
-  function buildStylizeNode(rgb, style) {
-    if (style === 'sepia') {
-      // The standard sepia matrix (W3C Filter Effects' own `feColorMatrix`
-      // sepia values) — a real, published formula, not a from-scratch guess.
-      // Clamped: the matrix's row sums exceed 1, so a bright input can
-      // overshoot before this.
-      const r = dot(rgb, vec3(0.393, 0.769, 0.189));
-      const g = dot(rgb, vec3(0.349, 0.686, 0.168));
-      const b = dot(rgb, vec3(0.272, 0.534, 0.131));
-      return vec3(r, g, b).clamp(0, 1);
-    }
-    if (style === 'invert') {
-      return vec3(1, 1, 1).sub(rgb);
-    }
-    return null;
+  function buildStylizeNode(rgb) {
+    // The standard sepia matrix (W3C Filter Effects' own `feColorMatrix`
+    // sepia values) — a real, published formula, not a from-scratch guess.
+    // Clamped: the matrix's row sums exceed 1, so a bright input can
+    // overshoot before this.
+    const sepia = vec3(
+      dot(rgb, vec3(0.393, 0.769, 0.189)),
+      dot(rgb, vec3(0.349, 0.686, 0.168)),
+      dot(rgb, vec3(0.272, 0.534, 0.131))
+    ).clamp(0, 1);
+    const invert = vec3(1, 1, 1).sub(rgb);
+    return TSL.select(uStylizeIndex.lessThan(1.5), sepia, invert);
   }
+  /** `setStylize`'s style name → `uStylizeIndex` (0 = none). */
+  const STYLE_INDEX = Object.freeze({ none: 0, sepia: 1, invert: 2 });
 
   /** (Re)build the fragment node for the current tone-map selection AND the
    * current post-upscale-sharpen active state. The env grade and the LUT are
@@ -532,7 +538,6 @@ export function buildGradePresentMaterial({
     const v = (k, cur) => (k in o ? o[k] : cur);
     return [
       v('sharpen', sharpenActive) ? 's' : '-',
-      v('style', currentStyle),
       v('vision', currentPlayerVisionMode),
       v('frost', frostCompiled) ? 'f' : '-',
       v('heat', heatRippleCompiled) ? 'h' : '-',
@@ -599,7 +604,7 @@ export function buildGradePresentMaterial({
       if ('sharpen' in o) sharpenActive = !!o.sharpen && !!buildPostUpscaleSharpenNode;
       if ('frost' in o) frostCompiled = !!o.frost && !!tempNoiseNode;
       if ('heat' in o) heatRippleCompiled = !!o.heat && !!tempNoiseNode;
-      if ('style' in o) currentStyle = o.style;
+      if ('vision' in o) currentPlayerVisionMode = o.vision;
       const realKey = structKey();
       const m = makeMaterial();
       try {
@@ -722,7 +727,9 @@ export function buildGradePresentMaterial({
               afterEnv,
               drIllumTexNode.sample(maskUv).rgb,
               dynamicRangeUniforms,
-              lampGlowTexNode ? lampGlowTexNode.sample(maskUv).rgb : null
+              lampGlowTexNode ? lampGlowTexNode.sample(maskUv).rgb : null,
+              // Bloom's pyramid describes the unwarped frame, like the light: read at `maskUv` too.
+              bloomGlareAt ? bloomGlareAt(maskUv).mul(uBloomInPresent) : null
             )
           : afterEnv;
         const gradedLook = buildGradeNode(TSL, exposedEnv, uArt, {
@@ -744,8 +751,7 @@ export function buildGradePresentMaterial({
         const vigK = float(1).sub(uArt.vignette.mul(TSL.smoothstep(float(0.45), float(1.05), vigD)));
         const gradedArt = zonedLook.mul(vigK);
         // STYLIZE remains before the personal viewing-device optics.
-        const styled = buildStylizeNode(gradedArt, currentStyle);
-        return styled ? mix(gradedArt, styled, uStylizeAmount) : gradedArt;
+        return mix(gradedArt, buildStylizeNode(gradedArt), uStylizeAmount);
       };
       const shot = artShot(lampGlowTexNode ? lampGlowTexNode.sample(maskUv).rgb : null);
       if (!fogHoldActive) return shot;
@@ -1024,17 +1030,27 @@ export function buildGradePresentMaterial({
     setEnvGrade: (params) => writeGradeUniforms(uEnv, params),
     /**
      * Push the Stylize effect's resolved params (mythica-machina-press#36).
-     * Rebuilds ONLY if `style` actually changed (compile-time, same posture
-     * as `setArtGrade`'s tone-map handling) — `amount` alone never rebuilds.
+     * Never rebuilds (2026-11-07): the style and the amount are both live uniforms (see `currentStyle`).
      * @param {string} style @param {number} amount
      */
+    /**
+     * Is bloom's glow added HERE, after the Dynamic Range curve, this frame (2026-11-07)? The viewer sets it on
+     * the frames it skips bloom's composite into scene.lit. A live uniform; false (and a no-op) when this
+     * material was built without `bloomGlareAt` or without the curve.
+     * @param {boolean} on
+     * @returns {boolean} whether the glow really joins here (so the viewer may skip its composite)
+     */
+    setBloomInPresent: (on, gain = 1) => {
+      const really = !!on && !!bloomGlareAt && !!drIllumTexNode;
+      uBloomInPresent.value = really ? (Number.isFinite(gain) ? Math.max(0, gain) : 1) : 0;
+      return really;
+    },
     setStylize: (style, amount) => {
       const next = STYLE_NAMES_SAFE.has(style) ? style : 'none';
-      if (next !== currentStyle) {
-        currentStyle = next;
-        rebuildFragment('stylize');
-      }
-      uStylizeAmount.value = Number.isFinite(Number(amount)) ? Math.min(1, Math.max(0, Number(amount))) : 0;
+      currentStyle = next;
+      uStylizeIndex.value = STYLE_INDEX[next] ?? 0;
+      const a = Number.isFinite(Number(amount)) ? Math.min(1, Math.max(0, Number(amount))) : 0;
+      uStylizeAmount.value = next === 'none' ? 0 : a;
     },
     /**
      * Push this frame's active player vision-mode grade (mythica-machina-

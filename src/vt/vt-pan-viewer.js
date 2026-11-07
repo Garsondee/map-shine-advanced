@@ -5673,6 +5673,8 @@ async function startVtPanViewerUnserialized({
       logIllum: 0, // the metered light (log2 of median illum), adapted — the one eased state
       ev: 0,
       curve: null, // what the present pass runs now (dynamic-range.js#curveFor)
+      bloomGain: 1, // the scale on bloom's strength as drawn (Glow amount while the glow joins in the present)
+      glowAmount: 0.35, // "Glow amount": the share of bloom's glow the present adds after the curve
       glowFrom: null, // "Glow from": the bright pass's threshold while on (display units)
       bloomThresholdUsed: null, // what the bright pass used last (for the fire's inverse-bloom)
       stats: null,
@@ -5685,7 +5687,27 @@ async function startVtPanViewerUnserialized({
       lastRealDtSec: 0,
       /** The in-flight meter readback (a Promise), or null — video capture awaits it. */
       pending: null,
+      /**
+       * SNAP ONLY UNTIL THE VIEW FIRST SETTLES (2026-11-07). True from the viewer's start and again at every floor
+       * change; cleared the first frame the view reads settled. Snapping on every unsettled frame (it used to
+       * snap whenever `renderScaleHeld`) made a PAN flicker: tiles streaming in, a shader compiling or one frame
+       * over 50 ms all read "unsettled", and each 4-frame meter reading then landed at once (the author: "flickering
+       * of light levels when moving across the map, it's not a smooth adaptation"). After a load or a floor
+       * change, unsettled means "still arriving" (snap); after it, it means "busy" (ease).
+       */
+      snapUntilSettled: true,
     };
+    /** Revert switches (read once): localStorage `msa.drSnapWhileBusy` = '1' snaps on every unsettled frame again;
+     * `msa.bloomAfterCurve` = '0' composites bloom into scene.lit before the curve again. */
+    const readMsaFlag = (key) => {
+      try {
+        return globalThis.localStorage?.getItem(key) ?? null;
+      } catch (_) {
+        return null;
+      }
+    };
+    const drSnapWhileBusy = readMsaFlag('msa.drSnapWhileBusy') === '1';
+    const bloomAfterCurve = readMsaFlag('msa.bloomAfterCurve') !== '0';
 
     // ========================================================================
     // DEPTH OF FIELD (docs/planning/Depth-of-Field.md) — the SECOND `post`
@@ -9503,6 +9525,9 @@ async function startVtPanViewerUnserialized({
       // DYNAMIC RANGE (2026-11-04) — the HDR camera before the Look grade (effects/dynamic-range-render.js).
       illumTexture: sceneIllum.texture,
       dynamicRangeUniforms: drUniforms,
+      // BLOOM AFTER THE CURVE (2026-11-07): while Dynamic Range is on, the glow joins the picture inside the present,
+      // after the camera's curve (runPostBloomPass skips its composite into scene.lit then).
+      bloomGlareAt: bloom.glareAt,
       // The lens's own Table guard, so the present's lens-warped mask reads match the lens to the pixel.
       lensUvGuard: tableSubsystem.lensGuard,
       directSrgb: presentDirectSrgb,
@@ -13046,8 +13071,9 @@ async function startVtPanViewerUnserialized({
     /**
      * DYNAMIC RANGE — one frame of the controller (effects/dynamic-range.js). The metered light eases
      * on the REAL frame delta (presentation pacing — a slowed world must not stretch an eye's
-     * adaptation) and SNAPS while the view settles (scene load, floor change: `renderScaleHeld`), so
-     * the curtain never lifts on a sliding picture. Every dial is read every frame, so a drag shows at
+     * adaptation) and SNAPS only until the view first settles after a scene load or floor change
+     * (`dr.snapUntilSettled`), so the curtain never lifts on a sliding picture and a pan never flickers.
+     * Every dial is read every frame, so a drag shows at
      * once. Off ⇒ the shared uniforms off, once (bloom and present both back to their plain selves).
      */
     function stepDynamicRange() {
@@ -13064,7 +13090,9 @@ async function startVtPanViewerUnserialized({
       const p = st.params ?? {};
       // `captureSnapExposure`: video capture priming a shot (captureSettle) —
       // a cut starts fully adapted, like a scene load does.
-      const snap = renderScaleHeld || !dr.curve || captureSnapExposure;
+      // `dr.snapUntilSettled`: a load or floor change snaps until the view first settles, never a pan later.
+      if (!renderScaleHeld && !drSnapWhileBusy) dr.snapUntilSettled = false;
+      const snap = (dr.snapUntilSettled && renderScaleHeld) || !dr.curve || captureSnapExposure;
       if (snap) dr.snaps++;
       const target = Math.log2(Math.max(1e-6, dr.stats.illumP50));
       dr.logIllum = snap ? target : dynamicRangeAdapt(dr.logIllum, target, dr.lastRealDtSec, p.adaptSeconds);
@@ -13079,6 +13107,7 @@ async function startVtPanViewerUnserialized({
         lightRange: p.lightRange,
       });
       dr.glowFrom = Number.isFinite(Number(p.glowFrom)) ? Number(p.glowFrom) : 1.15;
+      dr.glowAmount = Number.isFinite(Number(p.glowAmount)) ? Number(p.glowAmount) : 0.35;
       writeDynamicRangeUniforms(drUniforms, dr.curve);
     }
 
@@ -13145,7 +13174,8 @@ async function startVtPanViewerUnserialized({
       return {
         ...st,
         params: {
-          strength: p.strength,
+          // the glow the present adds after the curve is scaled by "Glow amount"; the fire predicts what lands
+          strength: Number.isFinite(p.strength) ? p.strength * (dr.bloomGain ?? 1) : p.strength,
           coreStrength: p.coreStrength,
           coreTint: p.coreTint,
           atmoStrength: p.atmoStrength,
@@ -13170,6 +13200,7 @@ async function startVtPanViewerUnserialized({
       stepDynamicRange();
       const st = getBloomRenderState();
       if (!st.enabled) {
+        gradePresent.setBloomInPresent(false);
         runDynamicRangeMeter();
         return;
       }
@@ -13203,6 +13234,12 @@ async function startVtPanViewerUnserialized({
       // Scene units for the fire's predictor: "Glow from" back through the exposure (the per-pixel curve is
       // not undone — an approximation the inverse-bloom tolerates).
       dr.bloomThresholdUsed = drGlowing ? dr.glowFrom / 2 ** dr.curve.ev : u.threshold.value;
+      // BLOOM AFTER THE CURVE (2026-11-07): while the Dynamic Range camera is on, the present adds the glow after its
+      // curve (exposure only) and the composite into scene.lit below is skipped. In scene.lit the curve read every
+      // halo as a bright material and punched it (the author: "huge fat chunky bloom around metallics").
+      // Revert: localStorage `msa.bloomAfterCurve` = '0'.
+      const bloomInPresent = gradePresent.setBloomInPresent(drGlowing && bloomAfterCurve, dr.glowAmount);
+      dr.bloomGain = bloomInPresent ? dr.glowAmount : 1;
       u.knee.value = bloomNum(p.knee, 0.5);
       u.strength.value = bloomNum(p.strength, 1.0);
       u.coreStrength.value = bloomNum(p.coreStrength, 1.0);
@@ -13280,10 +13317,12 @@ async function startVtPanViewerUnserialized({
       // 4) COMPOSITE — core (mip0) + atmosphere (mip3) additively into scene.lit.
       //    autoClearColor is still false here — an unguarded clear would wipe the
       //    whole composited scene, so it MUST stay off until after this draw.
-      profiler?.begin(Z.bloomComposite);
-      renderer.setRenderTarget(sceneLit);
-      bloomCompositeQuad.render(renderer);
-      profiler?.end(Z.bloomComposite);
+      if (!bloomInPresent) {
+        profiler?.begin(Z.bloomComposite);
+        renderer.setRenderTarget(sceneLit);
+        bloomCompositeQuad.render(renderer);
+        profiler?.end(Z.bloomComposite);
+      }
 
       renderer.autoClearColor = prevAutoClear;
       renderer.setRenderTarget(null);
@@ -24242,6 +24281,7 @@ async function startVtPanViewerUnserialized({
       simsRopeChain: profiler?.indexOf('sims.ropeChain') ?? -1,
       simsDust: profiler?.indexOf('sims.particlesDust') ?? -1,
       simsGusts: profiler?.indexOf('sims.particlesGusts') ?? -1,
+      simsWaterSpray: profiler?.indexOf('sims.waterSpray') ?? -1,
       masksSync: profiler?.indexOf('masks.occlusionSync') ?? -1,
       masksDraw: profiler?.indexOf('masks.occlusionDraw') ?? -1,
       geomWorld: profiler?.indexOf('geometry.worldDraw') ?? -1,
@@ -24794,6 +24834,7 @@ async function startVtPanViewerUnserialized({
         // WATER SPRAY — births planned by the viewed floor's water surface, then one compute step. REAL seconds
         // (presentation pacing, like the rain): a slowed world clock must not slow the spray.
         {
+          profiler?.begin(Z.simsWaterSpray);
           const sprayFloor = view?.floorIndex ?? 0;
           const sprayDt = lastEnvSnapshot?.env?.time?.realDtSec ?? 0;
           const plan = waterSurfacesByFloor.get(sprayFloor)?.planSpray?.({
@@ -24818,6 +24859,7 @@ async function startVtPanViewerUnserialized({
           } else {
             waterSprayLive = false;
           }
+          profiler?.end(Z.simsWaterSpray);
         }
         leafShed.sync(renderer, {
           dtSec: lastEnvSnapshot?.env?.time?.dtSec ?? 0,
@@ -28268,6 +28310,8 @@ async function startVtPanViewerUnserialized({
       // still loading (live-caught: quiet duration reused verbatim across a
       // floor switch in a pixel-diff run against the bench world).
       settleTracker.reset();
+      // Dynamic Range snaps to the new floor's light until it settles (see `dr.snapUntilSettled`).
+      dr.snapUntilSettled = true;
       view = { ...view, floorIndex };
       // WIND REBAKE ON FLOOR SWITCH (2026-07-23, live author report: on a
       // real two-floor map, the floor BELOW kept reading the floor ABOVE's

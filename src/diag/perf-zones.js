@@ -283,6 +283,19 @@ export const ZONES = Object.freeze(
       false,
       'smellyFliesSubsystem.sync'
     ),
+    // WATER SPRAY (2026-11-07): the viewed floor's spray plan (births from the hard shore) and the particles'
+    // compute step, a real renderer.compute() dispatch, so 'both'. Was unzoned: its per-frame cost was invisible.
+    z(
+      'sims.waterSpray',
+      'Water spray (births + particle step)',
+      'sims',
+      null,
+      'water',
+      'both',
+      'conditional',
+      false,
+      'waterSpray.step'
+    ),
     z(
       'light.maggotsSync',
       'Maggots sync (zone, population, maggot step)',

@@ -93,19 +93,27 @@ export function createWindowRegistration({
    * from the mask the author painted, not a picker; only the two new
    * daylight keyframes are pickers.
    */
+  /** The derived params, memoised on the readout's params object (2026-11-07): rebuilt only when that object
+   * changes, not every frame (a spread + two decoded colour arrays per call showed in the GC probe). */
+  let derivedFor = null;
+  let derived = null;
   function getRenderState() {
     const p = readout.params ?? {};
+    if (p !== derivedFor) {
+      derivedFor = p;
+      derived = {
+        ...p,
+        dawnDuskTint: typeof p.dawnDuskTint === 'string' ? hexToRgb01(p.dawnDuskTint) : undefined,
+        nightTint: typeof p.nightTint === 'string' ? hexToRgb01(p.nightTint) : undefined,
+      };
+    }
     // perfTier ADDED 2026-08-29 — closing the gap `readout`'s own comment
     // above already named (the same fix as fluid/specular's own readouts):
     // the tier was resolved and reported, but never reached the render seam.
     // See window.js's tier-1 ('glass') rung and window-render.js#windowTierPlan.
     return {
       enabled: readout.enabled,
-      params: {
-        ...p,
-        dawnDuskTint: typeof p.dawnDuskTint === 'string' ? hexToRgb01(p.dawnDuskTint) : undefined,
-        nightTint: typeof p.nightTint === 'string' ? hexToRgb01(p.nightTint) : undefined,
-      },
+      params: derived,
       debugChannel,
       perfTier: readout.perfTier,
     };

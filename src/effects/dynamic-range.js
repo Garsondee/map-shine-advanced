@@ -185,6 +185,16 @@ export const DYNAMIC_RANGE_PARAMS = Object.freeze({
     label: 'Glow from',
     help: 'Bloom starts where this camera makes the picture read this bright (1 = white), so only light too bright for the picture glows — flames, glints, noon snow — never a lamp pool. Lower lets more glow. Replaces the Bloom card’s thresholds while this card is on.',
   },
+  glowAmount: {
+    type: 'float',
+    min: 0,
+    max: 1.5,
+    step: 0.01,
+    default: 0.35,
+    category: 'Light',
+    label: 'Glow amount',
+    help: 'How much of the Bloom card’s glow reaches the picture while this camera is on. The glow is added after the camera’s curve, so it is a soft halo on lamps, flames and glints, never a fat wash over bright surfaces. 1 is the Bloom card’s full strength; 0 turns the glow off.',
+  },
 });
 
 export const DYNAMIC_RANGE_DEFAULTS = Object.freeze(
@@ -301,17 +311,23 @@ export function drGain(rgb, illumRgb, curve, colorationRgb = null) {
 /**
  * The full per-pixel transform (CPU mirror of the shader): scene-referred linear RGB → display-ready
  * linear RGB (≤ ~1 after the shoulder).
+ * GLARE (2026-11-07) — `glareRgb`, bloom's glow, joins AFTER the curve, scaled by the exposure only, and goes through
+ * the shoulder with the picture. Added into `rgb` instead (as it was), the curve read a halo as a bright material and
+ * punched it: a halo lifting a dark floor 1.25 stops over its grey card took the punch's extra stops on top.
  * @param {readonly number[]} rgb @param {readonly number[]} illumRgb @param {ReturnType<typeof curveFor>} curve
+ * @param {readonly number[]|null} [colorationRgb] @param {readonly number[]|null} [glareRgb] bloom, scene-referred
  * @returns {[number,number,number]}
  */
-export function drTransform(rgb, illumRgb, curve, colorationRgb = null) {
+export function drTransform(rgb, illumRgb, curve, colorationRgb = null, glareRgb = null) {
   const { g, k, L } = drGain(rgb, illumRgb, curve, colorationRgb);
   const graded = rgb.map((v) => Math.max(0, v) * g * k);
   const L2 = L * k;
   // Colour in light: full above the pivot + 2 stops, none below a stop under it.
   const w = clamp((Math.log2(L2 / curve.mid) + 1) / 3, 0, 1);
   const sat = 1 + (curve.colour - 1) * w;
-  const coloured = graded.map((v) => Math.max(0, L2 + (v - L2) * sat));
+  const coloured = graded.map(
+    (v, i) => Math.max(0, L2 + (v - L2) * sat) + (glareRgb ? Math.max(0, glareRgb[i]) * g : 0)
+  );
   return highlightRolloff(coloured, undefined, DR_WHITEN);
 }
 

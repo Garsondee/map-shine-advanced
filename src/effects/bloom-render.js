@@ -239,17 +239,20 @@ export function buildBloomMaterials({
   const uCoreTint = uniform(new THREE.Vector3(1, 1, 1));
   const uWideTint = uniform(new THREE.Vector3(1, 1, 1));
 
+  /** The glow at screen `at` (the two bands, tinted and weighted): the composite's colour, and what the present adds
+   * AFTER the Dynamic Range curve while that camera is on (see `glareAt` in the return literal). */
+  const glareAt = (at) => {
+    const core = coreTexNode.sample(at).rgb.mul(uCoreTint).mul(uCoreStrength);
+    const atmo = atmoTexNode.sample(at).rgb.mul(uWideTint).mul(uWideStrength);
+    return core.add(atmo).mul(uStrength);
+  };
+
   const compositeMaterial = new THREE.NodeMaterial();
   compositeMaterial.depthTest = false;
   compositeMaterial.depthWrite = false;
   compositeMaterial.transparent = true;
   compositeMaterial.blending = THREE.AdditiveBlending;
-  compositeMaterial.fragmentNode = Fn(() => {
-    const core = coreTexNode.sample(uv()).rgb.mul(uCoreTint).mul(uCoreStrength);
-    const atmo = atmoTexNode.sample(uv()).rgb.mul(uWideTint).mul(uWideStrength);
-    const bloom = core.add(atmo).mul(uStrength);
-    return vec4(bloom, 1.0);
-  })();
+  compositeMaterial.fragmentNode = Fn(() => vec4(glareAt(uv()), 1.0))();
   compositeMaterial.name = 'Bloom_composite';
 
   return {
@@ -270,6 +273,14 @@ export function buildBloomMaterials({
     // `.value`, never a material rebuild. See vt-pan-viewer.js's own
     // live bloom-tier handling for the caller side of this.
     atmoTexNode,
+    /**
+     * THE GLOW AS A NODE FOR ANOTHER PASS (2026-11-07): `glareAt(uvNode)` = the composite's colour at `uvNode`, on
+     * the same texture nodes and uniforms (a tier re-point and every dial reach it). The present adds it AFTER the
+     * Dynamic Range curve while that camera is on, instead of this pass adding it into scene.lit first: in scene.lit
+     * the curve read a halo as a bright MATERIAL and punched it up to ~2 stops (the author: "huge fat chunky bloom
+     * around metallics").
+     */
+    glareAt,
     // Uniform handles the viewer writes each frame from the resolved params.
     uniforms: {
       threshold: uThreshold,

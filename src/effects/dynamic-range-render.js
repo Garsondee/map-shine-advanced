@@ -125,9 +125,11 @@ export function buildDynamicRangeGainNode(TSL, rgb, illumRgb, U, colorationRgb =
 
 /**
  * dynamic-range.js#drTransform — scene.lit → display-ready linear RGB, mixed by `on` (0 = the input).
+ * `glareRgb` (bloom's glow, scene-referred) joins after the curve at the exposure only, before the shoulder.
  * @param {*} TSL @param {*} rgb @param {*} illumRgb @param {ReturnType<typeof createDynamicRangeUniforms>} U
+ * @param {*} [colorationRgb] @param {*} [glareRgb]
  */
-export function buildDynamicRangeNode(TSL, rgb, illumRgb, U, colorationRgb = null) {
+export function buildDynamicRangeNode(TSL, rgb, illumRgb, U, colorationRgb = null, glareRgb = null) {
   const { vec3, float, max, clamp, log2, mix } = TSL;
   const { g, k, L } = buildDynamicRangeGainNode(TSL, rgb, illumRgb, U, colorationRgb);
   const graded = max(rgb, vec3(0)).mul(g.mul(k));
@@ -141,7 +143,8 @@ export function buildDynamicRangeNode(TSL, rgb, illumRgb, U, colorationRgb = nul
   );
   const sat = float(1).add(U.b.w.sub(1).mul(w));
   const coloured = max(vec3(L2).add(graded.sub(vec3(L2)).mul(sat)), vec3(0));
-  return mix(rgb, buildHighlightRolloffNode(TSL, coloured, undefined, DR_WHITEN), U.a.x);
+  const withGlare = glareRgb ? coloured.add(max(glareRgb, vec3(0)).mul(g)) : coloured;
+  return mix(rgb, buildHighlightRolloffNode(TSL, withGlare, undefined, DR_WHITEN), U.a.x);
 }
 
 /**

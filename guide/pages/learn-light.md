@@ -29,7 +29,7 @@ Rooms get daylight through the patches you paint on `_Window`. It follows the su
 ### The camera
 
 - **Dynamic Range** lets bright windows and dark corners sit in one picture without either washing out. **Drama** sets how hard they push apart.
-- **Bloom** is the soft glow around the brightest lights. A little goes a long way.
+- **Bloom** is the soft glow around the brightest lights. A little goes a long way. With Dynamic Range on, its **Glow amount** sets how much glow reaches the picture.
 - **Exposure** brightens or darkens the whole picture.
 
 > [!tip] Interiors look best a little darker than you expect. Dark rooms make lamps and window light the stars. If players can't see, raise the **lamps** before the exposure.

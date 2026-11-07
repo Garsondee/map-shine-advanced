@@ -1,5 +1,5 @@
 ---
-sources: src/effects/grade/grade.js (exposure), src/effects/bloom.js (strength, enable), src/effects/window/window.js (strength), src/effects/dynamic-range.js (drama)
+sources: src/effects/grade/grade.js (exposure), src/effects/bloom.js (strength, enable), src/effects/window/window.js (strength), src/effects/dynamic-range.js (drama, glowAmount)
 ---
 The picture looks washed out, white areas have lost their detail, or every light wears a foggy halo.
 
@@ -12,6 +12,8 @@ The picture looks washed out, white areas have lost their detail, or every light
 That haze is **Bloom**. A little makes lamps feel hot. Too much turns the picture to mush.
 
 [[do: bloom-softer, bloom-off, bloom-on]]
+
+With **Dynamic Range** on, its **Glow amount** sets how much of the glow reaches the picture. Lower it for a tighter, quieter halo.
 
 > [!tip] Turning Bloom off is on this computer only. Use **Less glow** if the whole table should see the change.
 

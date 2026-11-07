@@ -1,46 +1,46 @@
 {
   "big-bank-compare": {
-    "fingerprint": "798e53f21bb725c4",
+    "fingerprint": "a0063738767f31ad",
     "accepted": "2026-11-07"
   },
   "big-bank-specular": {
-    "fingerprint": "164a2c9688af996d",
+    "fingerprint": "778f3593a445e5a5",
     "accepted": "2026-11-07"
   },
   "big-bank-noon": {
-    "fingerprint": "30da4174c33336ea",
+    "fingerprint": "298a04fc9d39d366",
     "accepted": "2026-11-07"
   },
   "big-bank-golden": {
-    "fingerprint": "30da4174c33336ea",
+    "fingerprint": "298a04fc9d39d366",
     "accepted": "2026-11-07"
   },
   "big-bank-trees": {
-    "fingerprint": "80d2e006c64bb0b5",
+    "fingerprint": "45ea25712f5b84a3",
     "accepted": "2026-11-07"
   },
   "docklands-wide": {
-    "fingerprint": "20a38e08992561dd",
+    "fingerprint": "32cff71949413fcf",
     "accepted": "2026-11-07"
   },
   "docklands-window": {
-    "fingerprint": "20a38e08992561dd",
+    "fingerprint": "32cff71949413fcf",
     "accepted": "2026-11-07"
   },
   "forge-fire": {
-    "fingerprint": "0c8d5ed6672f77ba",
+    "fingerprint": "e2f6ea6168e61dd1",
     "accepted": "2026-11-07"
   },
   "lair-fluid": {
-    "fingerprint": "d0fddd1d70bfd550",
+    "fingerprint": "cb389aa8326511f0",
     "accepted": "2026-11-07"
   },
   "docklands-storm": {
-    "fingerprint": "2db3d0b19bb59619",
+    "fingerprint": "9ef5cfce127e45df",
     "accepted": "2026-11-07"
   },
   "docklands-water": {
-    "fingerprint": "8e10af254ace4531",
+    "fingerprint": "0cfc2b6fa4f8141e",
     "accepted": "2026-11-07"
   }
 }

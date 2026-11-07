@@ -70,6 +70,7 @@ import { run as runReachability } from './reachability.test.mjs';
 import { run as runTraceAnalyze } from './trace-analyze.test.mjs';
 import { run as runOracleSync } from './oracle-sync/oracle-sync-core.test.mjs';
 import { run as runFoundryCdp } from './foundry-cdp/cdp.test.mjs';
+import { run as runTestWorld } from './test-world/fixture.test.mjs';
 
 // fileURLToPath, not URL.pathname — the repo path contains spaces, which
 // pathname percent-encodes into %20 and fs then cannot find.
@@ -144,6 +145,7 @@ function main() {
     runInProcess('tools/trace-analyze.test.mjs', runTraceAnalyze),
     runInProcess('tools/oracle-sync/oracle-sync-core.test.mjs', runOracleSync),
     runInProcess('tools/foundry-cdp/cdp.test.mjs', runFoundryCdp),
+    runInProcess('tools/test-world/fixture.test.mjs', runTestWorld),
   ];
 
   const suites = discoverSuites();

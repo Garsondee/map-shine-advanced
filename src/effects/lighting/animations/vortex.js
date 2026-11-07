@@ -13,8 +13,7 @@
  * leaves it `null`, because that's what real, unanimated Foundry parity
  * actually looks like for this one.
  *
- * NOISE SUBSTITUTION: uses `fbmFloat` (this project's `mx_fractal_noise_
- * float` wrapper) in place of Foundry's own bespoke value-noise FBM.
+ * NOISE: Foundry's own FBM(4, 1.0), exactly (`foundryFbm`, mmp-ynr.4).
  *
  * Two DEAD LOCAL ASSIGNMENTS in Foundry's own coloration source, NOT
  * ported here (confirmed by re-reading, not guessed): `vortex()`'s own
@@ -27,7 +26,10 @@
  * @module effects/lighting/animations/vortex
  */
 
-import { fbmFloat, rotate2d } from './tsl-noise-toolkit.js';
+import { foundryFbm, rotate2d } from './tsl-noise-toolkit.js';
+
+/** Foundry's `FBM(4, 1.0)` for this animation (mmp-ynr.4, see tsl-noise-toolkit.js#foundryFbm). */
+const fbm = (TSL, uv) => foundryFbm(TSL, uv, { octaves: 4 });
 
 /**
  * The vortex-twist pre-warp: inside `dist < 1`, rotate `uv-0.5` by an
@@ -53,7 +55,7 @@ function vortexTwist(TSL, uv, dist, uIntensityRaw) {
 
 /**
  * The domain-warp-palette swirl — Foundry's own `spice()`, using this
- * project's fbmFloat. `rotAngle` (`t = time*0.5`) drives ONLY the rotation
+ * project's foundryFbm. `rotAngle` (`t = time*0.5`) drives ONLY the rotation
  * matrix; `q`/`r`'s own time terms use the raw `time`, exactly as
  * Foundry's source keeps them separate.
  */
@@ -64,9 +66,9 @@ function spice(TSL, iuv, rotAngle, time, c1, c2, c3, c4, c5, c6) {
   const rotated = rotate2d(TSL, iuv.sub(half), rotAngle).mul(float(2));
   const p = rotated.mul(float(6));
 
-  const q = fbmFloat(TSL, p.add(time));
+  const q = fbm(TSL, p.add(time));
   const r = vec2(
-    fbmFloat(
+    fbm(
       TSL,
       p
         .add(q)
@@ -74,9 +76,9 @@ function spice(TSL, iuv, rotAngle, time, c1, c2, c3, c4, c5, c6) {
         .sub(p.x)
         .sub(p.y)
     ),
-    fbmFloat(TSL, p.add(q).add(time.mul(float(0.6))))
+    fbm(TSL, p.add(q).add(time.mul(float(0.6))))
   );
-  return mix(c1, c2, fbmFloat(TSL, p.add(r)))
+  return mix(c1, c2, fbm(TSL, p.add(r)))
     .add(mix(c3, c4, r.x))
     .sub(mix(c5, c6, r.y));
 }

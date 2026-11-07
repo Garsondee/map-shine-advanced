@@ -15,9 +15,10 @@
  * @module effects/lighting/animations/starlight
  */
 
-import { fbmFloat } from './tsl-noise-toolkit.js';
+import { foundryFbm } from './tsl-noise-toolkit.js';
 
-const FBM2 = { octaves: 2 };
+/** Foundry's `FBM(2, 1.0)` for this animation (mmp-ynr.4, see tsl-noise-toolkit.js#foundryFbm). */
+const fbm = (TSL, uv) => foundryFbm(TSL, uv, { octaves: 2 });
 
 /**
  * @param {object} args
@@ -48,8 +49,8 @@ export function buildStarlightColorationSeed({
   const rayT = time.mul(float(0.5));
   const uvn = normalize(uv.mul(uv.add(rayT))).mul(float(5).add(uIntensityRaw));
   const rays = max(
-    clamp(tan(fbmFloat(THREE.TSL, uvn.sub(rayT), FBM2)).mul(float(0.5)), float(0), float(2.25)),
-    clamp(float(3).sub(tan(fbmFloat(THREE.TSL, uvn.add(rayT.mul(float(2))), FBM2))), float(0), float(2.25))
+    clamp(tan(fbm(THREE.TSL, uvn.sub(rayT))).mul(float(0.5)), float(0), float(2.25)),
+    clamp(float(3).sub(tan(fbm(THREE.TSL, uvn.add(rayT.mul(float(2)))))), float(0), float(2.25))
   );
 
   const starlightVal = pow(float(1).sub(dist), rays).mul(pow(float(1).sub(dist), float(0.25)));

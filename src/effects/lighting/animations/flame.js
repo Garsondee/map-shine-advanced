@@ -10,9 +10,9 @@
  *
  * NOISE SUBSTITUTION (documented, not silent — tsl-noise-toolkit.js's own
  * header): Foundry's `fbm(vec2, seed)` is its own bespoke value-noise FBM
- * (`PRNG`+`NOISE`, base-shader-mixin.mjs). This port uses
- * `THREE.TSL.mx_fractal_noise_float` (this project's `fbmFloat` wrapper)
- * instead — a different noise algorithm, same FBM *character*.
+ * (`PRNG`+`NOISE`, base-shader-mixin.mjs). Since 2026-11-07 (mmp-ynr.4) this
+ * port uses that exact noise (`foundryFbm`); it used MaterialX Perlin, whose
+ * signed range is not Foundry's (tsl-noise-toolkit.js#foundryFbm).
  *
  * GPU-ONLY REWRITE (2026-07-20): `time`/`uIntensityRaw`/`uRatio` are now
  * the scaffold-supplied params (no longer self-created uniforms) — see
@@ -21,7 +21,7 @@
  * @module effects/lighting/animations/flame
  */
 
-import { fbmFloat } from './tsl-noise-toolkit.js';
+import { foundryFbm } from './tsl-noise-toolkit.js';
 import { buildFlickerNode } from './light-animation-clock.js';
 
 /**
@@ -100,8 +100,15 @@ export function buildFlameColorationSeed({
   const intensityScaled = uIntensityRaw.mul(float(0.1));
   const intens = pow(intensityScaled, float(2));
 
-  const noiseInner = fbmFloat(THREE.TSL, vec2(uv.x.add(time.mul(float(8.01))), uv.y.add(time.mul(float(10.72)))));
-  const noiseOuter = fbmFloat(THREE.TSL, vec2(uv.x.add(time.mul(float(7.04))), uv.y.add(time.mul(float(9.51)))));
+  // Foundry FBMHQ(3): fbm(..., 1.0) inner, fbm(..., 2.0) outer (mmp-ynr.4).
+  const noiseInner = foundryFbm(THREE.TSL, vec2(uv.x.add(time.mul(float(8.01))), uv.y.add(time.mul(float(10.72)))), {
+    octaves: 3,
+    smoothness: 1,
+  });
+  const noiseOuter = foundryFbm(THREE.TSL, vec2(uv.x.add(time.mul(float(7.04))), uv.y.add(time.mul(float(9.51)))), {
+    octaves: 3,
+    smoothness: 2,
+  });
 
   const fratioInner = uRatio.mul(intens.mul(float(0.5))).sub(noiseInner.mul(float(0.005)));
   const fratioOuter = uRatio.sub(noiseOuter.mul(float(0.007)));

@@ -14,7 +14,10 @@
  * @module effects/lighting/animations/fairy
  */
 
-import { fbmFloat, hsb2rgb } from './tsl-noise-toolkit.js';
+import { foundryFbm, hsb2rgb } from './tsl-noise-toolkit.js';
+
+/** Foundry's `FBM(3, 1.0)` for this animation (mmp-ynr.4, see tsl-noise-toolkit.js#foundryFbm). */
+const fbm = (TSL, uv) => foundryFbm(TSL, uv, { octaves: 3 });
 
 const INV_THREE = 1 / 3;
 const INV_TWO_PI = 1 / (2 * Math.PI);
@@ -42,11 +45,11 @@ export function buildFairyIlluminationSeed({ THREE, defaultSeed, time, localPosi
   // is the shading core's own injected local-space vec2.
   const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const one = vec2(1, 1);
-  const distortion1 = fbmFloat(
+  const distortion1 = fbm(
     THREE.TSL,
     vec2(
-      fbmFloat(THREE.TSL, vUvs.mul(float(3)).sub(time.mul(float(0.5)))),
-      fbmFloat(
+      fbm(THREE.TSL, vUvs.mul(float(3)).sub(time.mul(float(0.5)))),
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
@@ -56,17 +59,17 @@ export function buildFairyIlluminationSeed({ THREE, defaultSeed, time, localPosi
       )
     )
   );
-  const distortion2 = fbmFloat(
+  const distortion2 = fbm(
     THREE.TSL,
     vec2(
-      fbmFloat(
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
           .mul(float(3))
           .sub(time.mul(float(0.5)))
       ),
-      fbmFloat(
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
@@ -103,11 +106,11 @@ export function buildFairyColorationSeed({
   // NEVER `positionLocal` directly — see the illumination twin's own comment.
   const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const one = vec2(1, 1);
-  const distortion1 = fbmFloat(
+  const distortion1 = fbm(
     THREE.TSL,
     vec2(
-      fbmFloat(THREE.TSL, vUvs.mul(float(3)).add(time.mul(float(0.5)))),
-      fbmFloat(
+      fbm(THREE.TSL, vUvs.mul(float(3)).add(time.mul(float(0.5)))),
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
@@ -117,17 +120,17 @@ export function buildFairyColorationSeed({
       )
     )
   );
-  const distortion2 = fbmFloat(
+  const distortion2 = fbm(
     THREE.TSL,
     vec2(
-      fbmFloat(
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
           .mul(float(3))
           .add(time.mul(float(0.5)))
       ),
-      fbmFloat(
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
@@ -148,7 +151,7 @@ export function buildFairyColorationSeed({
   let uv = vUvs.sub(half);
   uv = uv.mul(tcos.mul(distortion1));
   uv = uv.mul(tsin.mul(distortion2));
-  uv = uv.mul(fbmFloat(THREE.TSL, vec2(time.add(distortion1), time.add(distortion2))));
+  uv = uv.mul(fbm(THREE.TSL, vec2(time.add(distortion1), time.add(distortion2))));
   uv = uv.add(half);
 
   const intens = uIntensityRaw.mul(float(0.1));

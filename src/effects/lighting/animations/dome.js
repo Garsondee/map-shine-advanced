@@ -13,9 +13,10 @@
  * @module effects/lighting/animations/dome
  */
 
-import { fbmFloat, hspherize, rotate2d } from './tsl-noise-toolkit.js';
+import { foundryFbm, hspherize, rotate2d } from './tsl-noise-toolkit.js';
 
-const FBM2 = { octaves: 2 };
+/** Foundry's `FBM(2)` for this animation (mmp-ynr.4, see tsl-noise-toolkit.js#foundryFbm). */
+const fbm = (TSL, uv) => foundryFbm(TSL, uv, { octaves: 2 });
 
 /**
  * @param {object} args
@@ -53,13 +54,10 @@ export function buildDomeColorationSeed({
   const c6 = uLightColor.mul(float(0.2));
 
   const p = uv.add(vec2(5, 5));
-  const q = fbmFloat(THREE.TSL, p.add(time.mul(float(0.2))), FBM2).mul(float(2));
-  const r = vec2(
-    fbmFloat(THREE.TSL, p.add(q).add(time).sub(p.x).sub(p.y), FBM2),
-    fbmFloat(THREE.TSL, p.mul(float(2)).add(time), FBM2)
-  );
+  const q = fbm(THREE.TSL, p.add(time.mul(float(0.2)))).mul(float(2));
+  const r = vec2(fbm(THREE.TSL, p.add(q).add(time).sub(p.x).sub(p.y)), fbm(THREE.TSL, p.mul(float(2)).add(time)));
   const ripples = clamp(
-    mix(c1, c2, abs(fbmFloat(THREE.TSL, p.add(r), FBM2)))
+    mix(c1, c2, abs(fbm(THREE.TSL, p.add(r))))
       .add(mix(c3, c4, abs(r.x.mul(r.x).mul(r.x))))
       .sub(mix(c5, c6, abs(r.y.mul(r.y)))),
     vec3(0, 0, 0),

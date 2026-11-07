@@ -37,6 +37,8 @@
  * @module effects/lighting/animations/tsl-noise-toolkit
  */
 
+import { sharedFn } from '../../../core/tsl-fn.js';
+
 /**
  * Fractal Brownian Motion (Foundry's `FBM`/`FBMHQ` analog) — a scalar noise
  * field built from several summed octaves of Perlin noise.
@@ -80,6 +82,85 @@ export function fbmFloat(TSL, p, { octaves = 4, lacunarity = 2, diminish = 0.5, 
  */
 export function fbmVec3(TSL, p, { octaves = 4, lacunarity = 2, diminish = 0.5, amplitude = 1 } = {}) {
   return TSL.mx_fractal_noise_vec3(p, octaves, lacunarity, diminish, amplitude);
+}
+
+/**
+ * FOUNDRY'S OWN NOISE, EXACTLY (2026-11-07, mmp-ynr.4) — `PRNG`, `NOISE`, `FBM(octaves, amp)` and
+ * `FBMHQ(octaves)` from Foundry v14's base-shader-mixin.mjs, ported line for line.
+ *
+ * WHY NOT `fbmFloat` (MaterialX Perlin) FOR THE LIGHT ANIMATIONS: the header above calls it a same-family
+ * substitute, which holds for the PATTERN but not the RANGE. Foundry's value noise is 0..1, so its fbm is all
+ * positive (3 octaves: 0..1.75, mean ~0.9); Perlin is signed and centred on 0. Animations that multiply or
+ * square fbm collapse towards 0: on the light matrix at midnight, Fairy measured 26 against Foundry's 101 and
+ * Ghost 28 against 54 (tools/test-world/foundry-parity.mjs). Smoke Patch also passed Foundry's `smoothness`
+ * as an amplitude. Light animations use THESE; MSA's own effects (fire, windows) keep `fbmFloat`.
+ *
+ * Each is ONE WGSL function (core/tsl-fn.js `sharedFn`), so Fairy's six nested fbm calls are six calls, not
+ * six pasted copies of three octaves of four hashes.
+ */
+
+/** Foundry `random(vec2)` (PRNG): a hash in [0, 1). GLSL `mod` and three's TSL `mod` are both floor-based. */
+function foundryRandomFn(TSL) {
+  return sharedFn(TSL, 'msaFoundryRandom', { uv: 'vec2' }, 'float', ({ uv }) => {
+    const { mod, fract, dot, vec2, float } = TSL;
+    const u = mod(uv, vec2(1000, 1000));
+    const k = fract(
+      u.x
+        .mul(float(2.41))
+        .add(u.y.mul(float(2.27)))
+        .mul(float(251.19))
+    );
+    return fract(dot(u, vec2(5.23, 2.89).mul(k)).mul(float(551.83)));
+  });
+}
+
+/** Foundry `noise(vec2)` (NOISE): smoothstepped value noise over `random`, in [0, 1]. */
+function foundryNoiseFn(TSL) {
+  const random = foundryRandomFn(TSL);
+  return sharedFn(TSL, 'msaFoundryNoise', { uv: 'vec2' }, 'float', ({ uv }) => {
+    const { floor, fract, smoothstep, mix, vec2 } = TSL;
+    const b = floor(uv);
+    const f = smoothstep(vec2(0, 0), vec2(1, 1), fract(uv));
+    return mix(
+      mix(random(b), random(b.add(vec2(1, 0))), f.x),
+      mix(random(b.add(vec2(0, 1))), random(b.add(vec2(1, 1))), f.x),
+      f.y
+    );
+  });
+}
+
+/** One fbm function per octave count: `total += amp * noise(uv); uv *= 2; amp *= decay`. */
+function foundryFbmFn(TSL, octaves) {
+  const noise = foundryNoiseFn(TSL);
+  return sharedFn(TSL, `msaFoundryFbm${octaves}`, { uv: 'vec2', amp: 'float', decay: 'float' }, 'float', (a) => {
+    let total = null;
+    let p = a.uv;
+    let w = a.amp;
+    for (let i = 0; i < octaves; i++) {
+      const term = noise(p).mul(w);
+      total = total ? total.add(term) : term;
+      p = p.mul(2);
+      w = w.mul(a.decay);
+    }
+    return total;
+  });
+}
+
+/**
+ * Foundry's `fbm`, as the light animation that is being ported declares it:
+ *   - `FBM(octaves, amp)`: `{ octaves, amp }` (each octave half the last);
+ *   - `FBMHQ(octaves)` called as `fbm(uv, smoothness)`: `{ octaves, smoothness }` (each octave
+ *     `exp2(-smoothness)` of the last; smoothness 1 is the same as FBM's halving).
+ * @param {*} TSL - THREE.TSL.
+ * @param {*} uv - a vec2 node.
+ * @param {{octaves?: number, amp?: number|*, smoothness?: number|*}} [opts] - `amp`/`smoothness` may be nodes.
+ * @returns {*} a float node, >= 0 (at most amp × (1 + d + d² + …)).
+ */
+export function foundryFbm(TSL, uv, { octaves = 4, amp = 1, smoothness = 1 } = {}) {
+  const { float, exp2 } = TSL;
+  const ampNode = typeof amp === 'number' ? float(amp) : amp;
+  const decay = typeof smoothness === 'number' ? float(2 ** -smoothness) : exp2(smoothness.negate());
+  return foundryFbmFn(TSL, octaves)(uv, ampNode, decay);
 }
 
 /**

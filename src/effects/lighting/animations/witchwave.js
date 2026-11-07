@@ -12,7 +12,10 @@
  * @module effects/lighting/animations/witchwave
  */
 
-import { fbmFloat, rotate2d } from './tsl-noise-toolkit.js';
+import { foundryFbm, rotate2d } from './tsl-noise-toolkit.js';
+
+/** Foundry's `FBM(4, 1.0)` for this animation (mmp-ynr.4, see tsl-noise-toolkit.js#foundryFbm). */
+const fbm = (TSL, uv) => foundryFbm(TSL, uv, { octaves: 4 });
 
 /**
  * `bwave(dist, coeff)` — shared shape, channel-specific coefficient.
@@ -26,7 +29,7 @@ function bwave(TSL, dist, time, uIntensityRaw, coeff, localPosition) {
   const rotated = rotate2d(TSL, localPosition.mul(float(0.5)).add(float(0.5)).sub(half), t);
   const uv = rotated.mul(float(2.5)).add(half);
 
-  const motion = fbmFloat(TSL, uv.add(time.mul(float(0.25))));
+  const motion = fbm(TSL, uv.add(time.mul(float(0.25))));
   const distortion = mix(float(1), motion, clamp(float(1).sub(dist), float(0), float(1)));
   const sinWave = float(0.5).mul(
     sin(time.mul(float(-6)).add(dist.mul(float(10)).mul(uIntensityRaw).mul(distortion))).add(float(1))

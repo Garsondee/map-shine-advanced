@@ -5,8 +5,7 @@
  * — the first of several "domain-warp palette" animations in this set
  * (compare `dome`, `vortex` — same structural idea, different constants).
  *
- * NOISE SUBSTITUTION: uses `fbmFloat` in place of Foundry's own bespoke
- * FBM — see flame.js's own header for the reasoning.
+ * NOISE: Foundry's own FBM(4, 1.0), exactly (`foundryFbm`, mmp-ynr.4).
  *
  * GPU-ONLY REWRITE (2026-07-20): `time`/`uIntensityRaw` are now the
  * scaffold-supplied params (no longer self-created uniforms).
@@ -14,7 +13,10 @@
  * @module effects/lighting/animations/fog
  */
 
-import { fbmFloat } from './tsl-noise-toolkit.js';
+import { foundryFbm } from './tsl-noise-toolkit.js';
+
+/** Foundry's `FBM(4, 1.0)` for this animation (mmp-ynr.4, see tsl-noise-toolkit.js#foundryFbm). */
+const fbm = (TSL, uv) => foundryFbm(TSL, uv, { octaves: 4 });
 
 /**
  * @param {object} args
@@ -35,9 +37,9 @@ export function buildFogColorationSeed({ THREE, uLightColor, uColorationAlpha, t
   const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const p = vUvs.mul(float(8));
 
-  const q = fbmFloat(THREE.TSL, p.sub(time.mul(float(0.1))));
+  const q = fbm(THREE.TSL, p.sub(time.mul(float(0.1))));
   const r = vec2(
-    fbmFloat(
+    fbm(
       THREE.TSL,
       p
         .add(q)
@@ -45,10 +47,10 @@ export function buildFogColorationSeed({ THREE, uLightColor, uColorationAlpha, t
         .sub(p.x)
         .sub(p.y)
     ),
-    fbmFloat(THREE.TSL, p.add(q).sub(time.mul(float(0.3))))
+    fbm(THREE.TSL, p.add(q).sub(time.mul(float(0.3))))
   );
   const c = clamp(
-    mix(c1, c2, fbmFloat(THREE.TSL, p.add(r)))
+    mix(c1, c2, fbm(THREE.TSL, p.add(r)))
       .add(mix(c3, c4, r.x))
       .sub(mix(c5, c6, r.y)),
     vec3(0, 0, 0),

@@ -4,7 +4,8 @@
  * `animateTime`. Both channels. A wandering, fbm-distorted glow — no fixed
  * shape (unlike the angular/hex/dome animations, this one just warps a
  * soft blob). One of the more call-count-heavy animations (7 fbm calls per
- * pixel for coloration, 6 for illumination) — uses `fbmFloat` throughout.
+ * pixel for coloration, 6 for illumination) — Foundry's own FBM(3, 1.0)
+ * throughout (`foundryFbm`, mmp-ynr.4).
  *
  * GPU-ONLY REWRITE (2026-07-20): `time`/`uIntensityRaw` are now the
  * scaffold-supplied params (no longer self-created uniforms).
@@ -12,7 +13,10 @@
  * @module effects/lighting/animations/ghost
  */
 
-import { fbmFloat } from './tsl-noise-toolkit.js';
+import { foundryFbm } from './tsl-noise-toolkit.js';
+
+/** Foundry's `FBM(3, 1.0)` for this animation (mmp-ynr.4, see tsl-noise-toolkit.js#foundryFbm). */
+const fbm = (TSL, uv) => foundryFbm(TSL, uv, { octaves: 3 });
 
 const INV_THREE = 1 / 3;
 
@@ -34,11 +38,11 @@ export function buildGhostIlluminationSeed({ THREE, defaultSeed, time, uIntensit
 
   // NEVER `positionLocal` directly — see candle-flicker.js's own header.
   const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
-  const distortion1 = fbmFloat(
+  const distortion1 = fbm(
     THREE.TSL,
     vec2(
-      fbmFloat(THREE.TSL, vUvs.mul(float(5)).sub(time.mul(float(0.5)))),
-      fbmFloat(
+      fbm(THREE.TSL, vUvs.mul(float(5)).sub(time.mul(float(0.5)))),
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
@@ -48,17 +52,17 @@ export function buildGhostIlluminationSeed({ THREE, defaultSeed, time, uIntensit
       )
     )
   );
-  const distortion2 = fbmFloat(
+  const distortion2 = fbm(
     THREE.TSL,
     vec2(
-      fbmFloat(
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
           .mul(float(5))
           .sub(time.mul(float(0.5)))
       ),
-      fbmFloat(
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
@@ -96,11 +100,11 @@ export function buildGhostColorationSeed({
   // NEVER `positionLocal` directly — see candle-flicker.js's own header.
   const vUvs = localPosition.mul(float(0.5)).add(float(0.5));
   const one = vec2(1, 1);
-  const distortion1 = fbmFloat(
+  const distortion1 = fbm(
     THREE.TSL,
     vec2(
-      fbmFloat(THREE.TSL, vUvs.mul(float(3)).add(time.mul(float(0.5)))),
-      fbmFloat(
+      fbm(THREE.TSL, vUvs.mul(float(3)).add(time.mul(float(0.5)))),
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
@@ -110,17 +114,17 @@ export function buildGhostColorationSeed({
       )
     )
   );
-  const distortion2 = fbmFloat(
+  const distortion2 = fbm(
     THREE.TSL,
     vec2(
-      fbmFloat(
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
           .mul(float(3))
           .add(time.mul(float(0.5)))
       ),
-      fbmFloat(
+      fbm(
         THREE.TSL,
         vUvs
           .negate()
@@ -141,7 +145,7 @@ export function buildGhostColorationSeed({
   let uv = vUvs.sub(half);
   uv = uv.mul(tcos.mul(distortion1));
   uv = uv.mul(tsin.mul(distortion2));
-  uv = uv.mul(fbmFloat(THREE.TSL, vec2(time.add(distortion1), time.add(distortion2))));
+  uv = uv.mul(fbm(THREE.TSL, vec2(time.add(distortion1), time.add(distortion2))));
   uv = uv.add(half);
 
   const intensAmp = uIntensityRaw.mul(float(0.2));

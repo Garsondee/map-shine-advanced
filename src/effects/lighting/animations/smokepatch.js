@@ -20,7 +20,7 @@
  * @module effects/lighting/animations/smokepatch
  */
 
-import { fbmFloat } from './tsl-noise-toolkit.js';
+import { foundryFbm } from './tsl-noise-toolkit.js';
 
 /** `transform(uv)` — rotate(t) then a uv-position-coupled shear+scale, about the 0.5 pivot. */
 function transform(TSL, uv, time) {
@@ -52,8 +52,9 @@ function smokefading(TSL, dist, time, uIntensityRaw, localPosition) {
   const uv = transform(TSL, vUvs, time);
   const t = time.mul(float(0.4));
 
-  const base = fbmFloat(TSL, uv, { amplitude: float(1).add(uIntensityRaw.mul(float(0.4))) });
-  const drift = max(fbmFloat(TSL, uv.add(t)), fbmFloat(TSL, uv.sub(t)));
+  // Foundry FBMHQ(3): fbm(uv, 1.0 + intensity * 0.4) — a SMOOTHNESS (octave falloff), not an amplitude (mmp-ynr.4).
+  const base = foundryFbm(TSL, uv, { octaves: 3, smoothness: float(1).add(uIntensityRaw.mul(float(0.4))) });
+  const drift = max(foundryFbm(TSL, uv.add(t), { octaves: 3 }), foundryFbm(TSL, uv.sub(t), { octaves: 3 }));
   const blend = pow(dist, uIntensityRaw.mul(float(0.5)));
   return pow(float(1).sub(dist), mix(base, drift, blend));
 }

@@ -291,7 +291,7 @@ export function describeEffectSettings(manifests = []) {
       key: GLOBAL_SETTING_KEYS.studioPinnedEffects,
       scope: 'client',
       kind: 'json',
-      default: '[]',
+      default: '{}', // an object {open, recent} (was '[]': the stored value was never an array)
       config: false,
       name: 'Map Shine Studio — effects library memory (internal)',
       hint: 'Internal UI state — which effect is open in the Studio, and the ones opened recently.',

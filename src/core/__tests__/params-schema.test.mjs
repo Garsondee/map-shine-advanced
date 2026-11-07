@@ -387,4 +387,42 @@ export function run(t) {
       !rs.errors.some((e) => /renderer\/view state|not part of the contract/i.test(e))
     );
   }
+
+  // ── renamedFrom (mmp-a5e.1): a renamed param keeps the value saved under its old name ──
+  {
+    const schema = {
+      strength: {
+        type: 'float',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        default: 0.5,
+        label: 'Strength',
+        renamedFrom: ['amount', 'power'],
+      },
+      other: { type: 'float', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Other' },
+    };
+    t.ok('renamedFrom: schema with renamedFrom validates', validateParamsSchema(schema).ok);
+    const h = hydrateParams(schema, { amount: 0.8 });
+    t.ok('renamedFrom: old saved name carries into the new param', h.values.strength === 0.8);
+    t.ok('renamedFrom: old name is not reported as unknown', !h.rejected.some((r) => r.key === 'amount'));
+    const both = hydrateParams(schema, { amount: 0.8, strength: 0.3 });
+    t.ok('renamedFrom: the current name wins when both are stored', both.values.strength === 0.3);
+    const second = hydrateParams(schema, { power: 0.6 });
+    t.ok('renamedFrom: any listed old name works', second.values.strength === 0.6);
+    const bad = hydrateParams(schema, { amount: 'not a number' });
+    t.ok(
+      'renamedFrom: an invalid old value falls back to the default and is reported',
+      bad.values.strength === 0.5 && bad.rejected.some((r) => r.key === 'amount')
+    );
+    const clash = validateParamsSchema({
+      a: { type: 'float', min: 0, max: 1, step: 0.1, default: 0, renamedFrom: ['b'] },
+      b: { type: 'float', min: 0, max: 1, step: 0.1, default: 0 },
+    });
+    t.ok('renamedFrom: an old name that is still declared is a schema error', !clash.ok);
+    const shape = validateParamsSchema({
+      a: { type: 'float', min: 0, max: 1, step: 0.1, default: 0, renamedFrom: 'b' },
+    });
+    t.ok('renamedFrom: must be an array of names', !shape.ok);
+  }
 }

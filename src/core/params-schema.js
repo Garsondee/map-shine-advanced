@@ -204,6 +204,16 @@ export function validateParamsSchema(schema) {
       continue;
     }
 
+    // `renamedFrom` (mmp-a5e.1): old names whose saved values this param inherits (hydrateParams).
+    if ('renamedFrom' in d) {
+      const olds = d.renamedFrom;
+      if (!Array.isArray(olds) || !olds.every((o) => typeof o === 'string' && o.length > 0)) {
+        fail(`${key}: renamedFrom must be an array of old param names`);
+      } else {
+        for (const o of olds) if (o in schema) fail(`${key}: renamedFrom '${o}' is still a declared param`);
+      }
+    }
+
     // The four-concerns split, enforced at the only moment it is cheap:
     // authoring time. V2 put `throttle` on 333 PARAMETERS.
     for (const f of FORBIDDEN_IN_CONTRACT) {
@@ -452,16 +462,28 @@ export function serializeParams(schema, values) {
 export function hydrateParams(schema, stored) {
   const values = {};
   const rejected = [];
+  /** Old names a declaration claims via `renamedFrom` (mmp-a5e.1): read, never reported as unknown. */
+  const claimed = new Set();
   for (const [key, d] of Object.entries(schema ?? {})) {
     if (d?.type === 'action') continue;
     values[key] = d.default;
-    if (!(key in (stored ?? {}))) continue;
-    const r = validateParamValue(d, stored[key]);
+    // A RENAMED param (mmp-a5e.1, 2026-11-07): `renamedFrom: ['oldName', ...]` on the declaration carries a
+    // value saved under an old name into the new one, so renaming a param never silently drops a GM's tuning.
+    // The current name wins when both are stored.
+    const olds = Array.isArray(d?.renamedFrom) ? d.renamedFrom : [];
+    for (const old of olds) claimed.add(old);
+    let sourceKey = key;
+    if (!(key in (stored ?? {}))) {
+      sourceKey = olds.find((old) => old in (stored ?? {})) ?? null;
+      if (sourceKey === null) continue;
+    }
+    const r = validateParamValue(d, stored[sourceKey]);
     if (r.ok) values[key] = r.value;
-    else rejected.push({ key, reason: r.error });
+    else rejected.push({ key: sourceKey, reason: r.error });
   }
   for (const key of Object.keys(stored ?? {})) {
-    if (!(key in (schema ?? {}))) rejected.push({ key, reason: 'no such param in this schema (renamed or removed?)' });
+    if (!(key in (schema ?? {})) && !claimed.has(key))
+      rejected.push({ key, reason: 'no such param in this schema (renamed or removed?)' });
   }
   return { values, rejected };
 }

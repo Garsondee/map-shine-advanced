@@ -312,6 +312,8 @@ export {
   cloudRecipeFor,
   coverThreshold,
   cloudDriftStep,
+  easeCloudDriftSpeed,
+  CLOUD_DRIFT_MAX_STEP_SEC,
   cloudDriftBudget01,
   fbmAmplitudeSum,
   createCloudUniforms,

@@ -36,6 +36,7 @@ import { run as runAlmanac } from './almanac.test.mjs';
 import { run as runFadeEngine } from './fade-engine.test.mjs';
 import { run as runFadeRegistry } from './fade-registry.test.mjs';
 import { run as runAxisConsumerRegistry } from './axis-consumer-registry.test.mjs';
+import { run as runCloudDrift } from './cloud-drift.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -92,6 +93,7 @@ const suites = [
   ['fade-engine', runFadeEngine],
   ['fade-registry', runFadeRegistry],
   ['axis-consumer-registry', runAxisConsumerRegistry],
+  ['cloud-drift', runCloudDrift],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

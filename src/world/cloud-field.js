@@ -653,8 +653,36 @@ export const CLOUD_COVER_VISUAL_MAX = 0.45;
  * @param {{driftMul: number, turnover: number}} args.recipe
  * @returns {{dx: number, dy: number, dBoil: number}}
  */
+/**
+ * The longest stretch of time ONE frame may advance the drift (mmp-63o.31). A frame that arrives
+ * late (a shader compile after a Looks change, a GC pause, a hidden tab) used to advance the deck by
+ * up to half a second of travel at once: at storm wind that was a 500-1000 px leap, which is what
+ * read as clouds racing after a Look was applied. Capped, a stall simply pauses the clouds.
+ */
+export const CLOUD_DRIFT_MAX_STEP_SEC = 0.1;
+
+/** How long the drift speed takes to follow a change of wind (exponential time constant, s). A Look
+ * that switches the wind from calm to a gale now ramps the deck up over a few seconds instead of
+ * snapping it to full speed in one frame. */
+export const CLOUD_DRIFT_SPEED_TAU_SEC = 4;
+
+/**
+ * Ease the drift speed toward its target. `current` null/NaN starts AT the target (a fresh scene
+ * does not ramp up from zero). The frame time is capped like the drift step, so one late frame
+ * cannot complete the whole ease either.
+ * @param {number|null} current @param {number} target @param {number} dtSec
+ * @param {number} [tauSec] @returns {number}
+ */
+export function easeCloudDriftSpeed(current, target, dtSec, tauSec = CLOUD_DRIFT_SPEED_TAU_SEC) {
+  const goal = Number.isFinite(target) ? target : 0;
+  if (!Number.isFinite(current)) return goal;
+  const dt = Number.isFinite(dtSec) && dtSec > 0 ? Math.min(dtSec, CLOUD_DRIFT_MAX_STEP_SEC) : 0;
+  if (!(tauSec > 0)) return goal;
+  return current + (goal - current) * (1 - Math.exp(-dt / tauSec));
+}
+
 export function cloudDriftStep({ dtSec, windDirX, windDirY, windSpeedPxPerSec, scalePx, recipe }) {
-  const dt = Number.isFinite(dtSec) && dtSec > 0 ? Math.min(dtSec, 0.5) : 0;
+  const dt = Number.isFinite(dtSec) && dtSec > 0 ? Math.min(dtSec, CLOUD_DRIFT_MAX_STEP_SEC) : 0;
   const speed = (Number.isFinite(windSpeedPxPerSec) ? windSpeedPxPerSec : 0) * recipe.driftMul;
   const dx = windDirX * speed * dt;
   const dy = windDirY * speed * dt;

@@ -762,6 +762,7 @@ import {
 import {
   cloudRecipeFor,
   cloudDriftStep,
+  easeCloudDriftSpeed,
   createCloudUniforms,
   pushCloudUniforms,
   buildCloudFieldNode,
@@ -4724,6 +4725,8 @@ async function startVtPanViewerUnserialized({
     /** The storybook deck and the cloud drift velocity, stashed by the per-frame cloud block. */
     let lastStorybookDeck = null;
     let cloudDriftVelPxS = { x: 0, y: 0 };
+    /** The deck's drift speed easing toward the wind's (mmp-63o.31, easeCloudDriftSpeed); null until the first frame. */
+    let cloudDriftSpeedPxS = null;
     /**
      * Per frame, before `precipitationSubsystem.sync`: render the rain field (storybook clouds, raining) and hand
      * the subsystem its deck. Realistic style or a clear sky: a flat virtual deck and no field (rain everywhere,
@@ -14003,11 +14006,12 @@ async function startVtPanViewerUnserialized({
         // by the author, and were never part of the ground-level rescale.
         const windSpeedPxPerSec =
           cloudDriftMetresPerSecond(uWindSpeed01.value) * sceneScale.pixelsPerMetre * cloudSpeedMul;
+        cloudDriftSpeedPxS = easeCloudDriftSpeed(cloudDriftSpeedPxS, windSpeedPxPerSec, time.dtSec);
         const step = cloudDriftStep({
           dtSec: time.dtSec,
           windDirX: flow.x,
           windDirY: flow.y,
-          windSpeedPxPerSec,
+          windSpeedPxPerSec: cloudDriftSpeedPxS,
           scalePx: env.weather.cloudScalePx * cloudScaleMul,
           recipe,
         });

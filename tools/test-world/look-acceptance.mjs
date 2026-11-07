@@ -3,7 +3,7 @@
  * tools/test-world/look-acceptance.mjs — the default-look acceptance suite (mmp-ilo.3, mmp-63o.3).
  *
  * "One reliable default look on every map" needs a number, not a screenshot argument. For each test
- * map x time of day x weather, this sets the sky through the SYNCED paths (MapShine.setSunHour,
+ * map x time of day x weather, this sets the sky through the SYNCED paths (MapShine.setTimeOfDay,
  * MapShine.fadeWeatherToArchetype), waits for the scene to settle, reads the light meter
  * (MapShine.meter.read: median/p5/p95 EV, crushed/blown/over-white shares) and saves a clean
  * screenshot, then checks each case against the targets below and writes report.json + a summary.
@@ -132,7 +132,7 @@ async function main() {
         for (const weather of weathers) {
           await page.evaluate(
             async ({ hour, weather }) => {
-              MapShine.setSunHour(hour);
+              MapShine.setTimeOfDay(hour, 0);
               MapShine.fadeWeatherToArchetype(weather, 0);
             },
             { hour: TIMES[time], weather }

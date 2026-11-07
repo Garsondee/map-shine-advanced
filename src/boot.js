@@ -15425,6 +15425,15 @@ function install() {
   // rain through the shared fade state and lands the archetype in the scene's sky flags, so EVERY
   // client follows. `MapShine.setWeatherArchetype` is the local-only console lever and does not sync.
   MapShine.fadeWeatherToArchetype = (archetypeId, overMs = 0) => fadeWeatherToArchetype(archetypeId, overMs);
+  // The Remote's own time-of-day path (the dial's Jump), for scripts and the test suites (2026-11-07):
+  // sweeps the clock AND saves the hour into the scene's sky, so it reaches every client and survives the
+  // next sky restore. `MapShine.setSunHour` is the local console lever: a later weather change re-applies the
+  // saved sky and snaps the hour back (measured: 23.5 -> 12.01 on the next fadeWeatherToArchetype).
+  MapShine.setTimeOfDay = (hour, overMs = 0) => {
+    sweepVtPanViewerTimeOfDay(hour, overMs);
+    if (skyScope.sky?.mode === 'aesthetic') void editSky({ todHour: hour });
+    return { hour, mode: skyScope.sky?.mode ?? null };
+  };
   MapShine.looks = {
     list: () => looksLibrary.slice(),
     play: (id, overMs = 0) => playLookById(id, overMs),

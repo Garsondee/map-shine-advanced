@@ -329,13 +329,13 @@ export const STORYBOOK_DECK_DEFAULTS = Object.freeze({
   storybookLowSize: 0.6,
   storybookLowPace: 0.75,
   storybookLowAmount: 0.6,
-  storybookLowOpacity: 0.9,
+  storybookLowOpacity: 1,
   storybookLowShear: -10,
   storybookHighHeight: 1.45,
   storybookHighSize: 0.75,
   storybookHighPace: 1.6,
   storybookHighAmount: 0.6,
-  storybookHighOpacity: 0.8,
+  storybookHighOpacity: 1,
   storybookHighShear: 18,
 });
 
@@ -1006,9 +1006,11 @@ export function buildStorybookShadowNode(TSL, { worldXY, u, wind, offset, blur, 
       const lay = layerOf(TSL, u, wind, float(li));
       const p = worldXY.sub(offset.mul(lay.hMul));
       const c = coreAt(TSL, u, lay, p, li === 1 ? { octaves: 2 } : { billows: false, octaves: 1 });
-      const soft = max(blur.mul(0.5), float(0.04));
+      // 2026-11-08 author: shadows softer / more blurred. Was soft = blur*0.5 over [-soft/2, soft]; now twice the
+      // reach on both edges, so the penumbra is ~2.7x wider.
+      const soft = max(blur.mul(1.0), float(0.06));
       const on = li === 1 ? float(1) : step(float(1.5), u.layOn.x);
-      const cov = smoothstep(soft.negate().mul(0.5), soft, c.core.sub(lay.thr)).mul(lay.opacity).mul(on);
+      const cov = smoothstep(soft.negate().mul(0.8), soft, c.core.sub(lay.thr)).mul(lay.opacity).mul(on);
       trans.assign(trans.mul(float(1).sub(cov.mul(0.85))));
     }
     const cov = float(1)

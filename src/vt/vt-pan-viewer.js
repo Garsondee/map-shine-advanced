@@ -14280,7 +14280,7 @@ async function startVtPanViewerUnserialized({
             cloudTopsZoomOutThin(topsGate.eyeHeightPx / Math.max(1, env.weather.cloudAltitudePx));
           // INTERIOR CUT: whole at close and medium zoom, mostly gone once the view takes in the whole map.
           const cutDial = Number.isFinite(tp.interiorCut) ? tp.interiorCut : 0.92;
-          const cutKeep = Number.isFinite(tp.interiorCutZoomedOut) ? tp.interiorCutZoomedOut : 0.12;
+          const cutKeep = Number.isFinite(tp.interiorCutZoomedOut) ? tp.interiorCutZoomedOut : 1;
           uTopsInteriorCut.value =
             cutDial *
             interiorCutZoomFactor({

@@ -668,7 +668,7 @@ export const CLOUD_TOPS_DECK_THICKNESS_FRACTION = 0.35;
  */
 export const CLOUD_TOPS_THIN_START = 1.5;
 export const CLOUD_TOPS_THIN_END = 3;
-export const CLOUD_TOPS_ZOOMED_OUT_OPACITY_FLOOR = 0.45;
+export const CLOUD_TOPS_ZOOMED_OUT_OPACITY_FLOOR = 0.9; // was 0.45; 2026-11-08 author: semi-transparent clouds look bad
 
 /**
  * Opacity multiplier for the tops from how far above the deck the eye is (`eyeHeightPx / altitude`).

@@ -19,7 +19,7 @@
 /** The coarse grid's texel size in world px (the blur is meant to be wide; fine detail is wasted). */
 export const INTERIOR_CUT_MIN_TEXEL_PX = 24;
 /** Blur radius in world px (per box pass, three passes): "very blurred". */
-export const INTERIOR_CUT_BLUR_PX = 110;
+export const INTERIOR_CUT_BLUR_PX = 260;
 /** Hard ceiling on the coarse grid's longest side, so a huge scene never costs a slow bake. */
 export const INTERIOR_CUT_MAX_SIDE = 512;
 /**
@@ -122,9 +122,9 @@ export function interiorCutZoomFactor({
   viewHeightWorldPx,
   sceneWidthPx,
   sceneHeightPx,
-  zoomedOutKeep = 0.12,
+  zoomedOutKeep = 1,
 }) {
-  const keep = Number.isFinite(zoomedOutKeep) ? Math.min(1, Math.max(0, zoomedOutKeep)) : 0.12;
+  const keep = Number.isFinite(zoomedOutKeep) ? Math.min(1, Math.max(0, zoomedOutKeep)) : 1;
   if (!(sceneWidthPx > 0 && sceneHeightPx > 0 && viewWidthWorldPx > 0)) return 1;
   const fitW = viewWidthWorldPx / sceneWidthPx;
   const fitH = viewHeightWorldPx > 0 ? viewHeightWorldPx / sceneHeightPx : fitW;

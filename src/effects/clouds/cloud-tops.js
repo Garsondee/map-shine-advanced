@@ -56,7 +56,8 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     max: 2,
     step: 0.01,
     // 2026-10-16 — author's live-tuned "new defaults" dump (was 1).
-    default: 0.8,
+    // 2026-11-08 — author: clouds "are always semi-transparent which looks kinda bad" (was 0.8).
+    default: 1,
     category: 'Look',
     label: 'Tops opacity',
     help: 'Master strength for the lit cloud shapes themselves, once the zoom gate has let them appear. 0 hides them entirely without touching the ground shadow/window mood, which are a separate effect (Clouds). Past 1 pushes them more opaque than their own natural Beer-law alpha.',
@@ -90,7 +91,8 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.12,
+    // 2026-11-08 — author: clouds must never go over inside areas (was 0.12, which let them cover the whole building zoomed out).
+    default: 1,
     category: 'Look',
     label: 'Interior clearing when zoomed out',
     help: 'How much of that clearing is left when the view takes in the whole map. The clearing is full strength up close and at medium zoom and fades away as you zoom out, so the sky can cover everything evenly. 0 = gone when fully zoomed out; 1 = never fades.',
@@ -473,7 +475,7 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.9,
+    default: 1,
     category: 'Storybook · Layers',
     label: 'Low deck opacity',
     help: 'How solid the low deck reads. 0 = off.',
@@ -533,7 +535,7 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.8,
+    default: 1,
     category: 'Storybook · Layers',
     label: 'High deck opacity',
     help: 'How solid the high deck reads — lower lets the decks below show through it. 0 = off.',

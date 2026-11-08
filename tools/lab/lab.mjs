@@ -17,7 +17,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { LAB_VERSION, labManifest, labPaintJob } from './lab-spec.mjs';
+import { LAB_VERSION } from './lab-spec.mjs';
+import { labManifestAll as labManifest, labPaintJobAll as labPaintJob } from './lab-index.mjs';
 import { look } from './lab-look.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));

@@ -103,6 +103,8 @@ const rect = (r, rgba, feather = 0) => ({ op: 'rect', x: r.x, y: r.y, w: r.w, h:
 const clear = (r) => ({ op: 'clear', x: r.x, y: r.y, w: r.w, h: r.h });
 const text = (x, y, s, size = 64, rgba = [INK, INK, INK]) => ({ op: 'text', x, y, text: s, size, rgba });
 const checker = (r, cell, a, b) => ({ op: 'checker', x: r.x, y: r.y, w: r.w, h: r.h, cell, a, b });
+/** Paint-op helpers, shared with the other scene specs (walls-spec.mjs). */
+export const paintOps = Object.freeze({ sq, rect, clear, text, checker });
 
 /**
  * An "indoors" Region exactly as the author's modern maps make one (Docklands, 2026-11-08):

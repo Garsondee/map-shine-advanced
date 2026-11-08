@@ -20,6 +20,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { EFFECTS_FLOORS, IDS, cellRect, effectsPlots, plotProbes } from './lab-spec.mjs';
+import { WALLS_IDS, WALL_TYPES, LIGHT_KINDS, wallsCell, wallsProbes } from './walls-spec.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -49,11 +50,40 @@ export async function look({
   keep = false,
 }) {
   const { chromium } = require('playwright');
-  const plot = effectsPlots().find((p) => p.code === code);
-  if (!plot) throw new Error(`no plot ${code}`);
-  const floor = EFFECTS_FLOORS.find((f) => f.key === (level ?? plot.floor));
-  const c = cellRect(plot.col, plot.row);
-  const probes = plotProbes(plot);
+  // Two address forms: an Effects plot code ("C3"), or a Walls cell "W:<wallType>/<lightKind>"
+  // (e.g. "W:pattern/lampNear") — any wall type x light kind of Lab · Walls & Windows.
+  let target;
+  if (String(code).startsWith('W:')) {
+    const [wt, lk] = String(code).slice(2).split('/');
+    const col = WALL_TYPES.findIndex((t) => t.key === wt);
+    const row = LIGHT_KINDS.findIndex((k) => k.key === lk);
+    if (col < 0 || row < 0) throw new Error(`no walls cell ${code}`);
+    const c = wallsCell(col, row);
+    target = {
+      sceneId: WALLS_IDS.scene,
+      levelId: WALLS_IDS.level,
+      letter: 'W',
+      cx: c.x + c.s / 2,
+      cy: c.y + c.s / 2,
+      probes: wallsProbes(col, row),
+      tag: `${wt}-${lk}`,
+    };
+  } else {
+    const plot = effectsPlots().find((p) => p.code === code);
+    if (!plot) throw new Error(`no plot ${code}`);
+    const floor = EFFECTS_FLOORS.find((f) => f.key === (level ?? plot.floor));
+    const c = cellRect(plot.col, plot.row);
+    target = {
+      sceneId: IDS.effectsScene,
+      levelId: floor.id,
+      letter: floor.letter,
+      cx: c.x + c.w / 2,
+      cy: c.y + c.h / 2,
+      probes: plotProbes(plot),
+      tag: code,
+    };
+  }
+  const probes = target.probes;
 
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort(name)}`);
   try {
@@ -79,10 +109,10 @@ export async function look({
         return { level: canvas.level?.name, view: [globalThis.innerWidth, globalThis.innerHeight] };
       },
       {
-        sceneId: IDS.effectsScene,
-        levelId: floor.id,
-        cx: c.x + c.w / 2,
-        cy: c.y + c.h / 2,
+        sceneId: target.sceneId,
+        levelId: target.levelId,
+        cx: target.cx,
+        cy: target.cy,
         scale,
         off: view === 'measure' ? MEASURE_OFF : [],
       }
@@ -93,12 +123,19 @@ export async function look({
     await page.waitForTimeout(500);
     await page.setViewportSize(vp);
     await page.waitForTimeout(waitMs);
+    // Wait for MSA's own ready signal (new masks trigger a warm-up screen; FRICTION #20), max 2 min.
+    await page.evaluate(async () => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < 120000 && !globalThis.MapShine?.getSceneReady?.()?.ready) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    });
 
     const style = await page.addStyleTag({
       content:
         '#interface, #pause, #notifications, #tooltip, #msa-remote, [id^=msa-studio], .app, .application, .window-app, [data-msa-probe-overlay] { visibility: hidden !important; }',
     });
-    const file = out ?? path.join(HERE, 'out', 'shots', `look-${floor.letter}-${code}-${view}.png`);
+    const file = out ?? path.join(HERE, 'out', 'shots', `look-${target.letter}-${target.tag}-${view}.png`);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     await page.screenshot({ path: file });
     await style.evaluate((el) => el.remove());

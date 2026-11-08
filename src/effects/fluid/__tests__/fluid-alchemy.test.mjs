@@ -1,5 +1,5 @@
 /**
- * THE ALCHEMY (`fluid-alchemy.js`) — reactions, palette, host gate, light anchors and light descriptors. Pure,
+ * THE ALCHEMY (`fluid-alchemy.js`) — reactions, palette, host gate and the light twin. Pure,
  * so every claim the module's header makes is checked here rather than by looking at a screenshot.
  */
 import {
@@ -11,10 +11,6 @@ import {
   forceFluidReaction,
   writeFluidTubeTick,
   computeFluidHostGate,
-  fluidLightAnchors,
-  createFluidLightTwin,
-  stepFluidLightTwin,
-  buildFluidLightSources,
   FLUID_REACTION_KINDS,
   FLUID_TUBE_TEXELS,
   FLUID_TRICKLE,
@@ -25,13 +21,6 @@ import {
   fluidReagentJump,
   fluidDroughtAt,
 } from '../fluid-alchemy.js';
-import { extractTubeNet } from '../fluid-net.js';
-
-function grid(w, h, fill) {
-  const data = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (fill(x, y)) data[y * w + x] = 200;
-  return { spec: { x: 0, y: 0, width: w * 10, height: h * 10, w, h, texelW: 10, texelH: 10 }, data };
-}
 
 export function run(t) {
   const { ok } = t;
@@ -361,50 +350,5 @@ export function run(t) {
     ok(`ink hides it (${g[7]})`, g[7] < 20);
     ok(`brass hides it (${g[8]})`, g[8] < 40);
     ok(`the open area is eroded one texel next to the ink (${g[6]})`, g[6] < 20);
-  }
-
-  // ── LIGHT ANCHORS + LIGHTS ─────────────────────────────────────────────
-  {
-    const net = extractTubeNet({
-      grid: grid(200, 20, (x, y) => x >= 5 && x < 195 && y >= 8 && y < 12),
-      samplesPerTube: 64,
-    });
-    const corners = [
-      { x: 0, y: 0 },
-      { x: 2000, y: 0 },
-      { x: 2000, y: 200 },
-      { x: 0, y: 200 },
-    ];
-    const anchors = fluidLightAnchors(net, corners, 6);
-    ok(`anchors exist and respect the cap (${anchors.length})`, anchors.length > 0 && anchors.length <= 6);
-    ok(
-      'anchors sit on the tube, inside the quad',
-      anchors.every((a) => a.x > 0 && a.x < 2000 && Math.abs(a.y - 100) < 30)
-    );
-    const twin = createFluidLightTwin(net);
-    const pal = fluidPalette([0.1, 0.9, 0.7], [0.6, 0.3, 1], 0.5);
-    ok(
-      'no light while the tube is empty',
-      buildFluidLightSources({ itemId: 'i', anchors, twin, palette: pal, strength: 1 }).length === 0
-    );
-    const pump = new Float32Array([5000, 1, net.tubes[0].lengthPx, 1]);
-    const tube = new Float32Array([0, 1, 0.5, 1, 0, net.tubes[0].lengthPx, 0, 1]);
-    for (let i = 0; i < 600; i++) stepFluidLightTwin(twin, pump, tube, 1 / 30);
-    const lights = buildFluidLightSources({ itemId: 'i', anchors, twin, palette: pal, strength: 1 });
-    ok(`a full tube lights every anchor (${lights.length})`, lights.length === anchors.length);
-    ok(
-      'luminosity stays under 0.5 (tints, never whitens)',
-      lights.every((l) => l.luminosity01 < 0.5)
-    );
-    ok(
-      'every light is finite and fluid-owned',
-      lights.every(
-        (l) => l.ownerEffectId === 'fluid' && [l.x, l.y, l.radius, l.alpha01, ...l.color].every(Number.isFinite)
-      )
-    );
-    ok(
-      'strength 0 → no lights',
-      buildFluidLightSources({ itemId: 'i', anchors, twin, palette: pal, strength: 0 }).length === 0
-    );
   }
 }

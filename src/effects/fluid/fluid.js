@@ -183,7 +183,7 @@ export const FLUID_PARAMS = Object.freeze({
     default: 0.6,
     category: 'Light',
     label: 'Light on the map',
-    help: 'How strongly the goo lights the floor and walls around the pipes, in its own colour. It follows the goo: an empty stretch goes dark, a reaction front lights the room as it passes. 0 = no light.',
+    help: 'How strongly the goo lights the floor around the pipes, in its own colour. The glow follows the shape of the pipes and flasks and adds to the room’s light; it shows most in dim rooms and at night, hardly at all on a sunlit floor. It follows the goo: an empty stretch goes dark, a reaction front lights the room as it passes. 0 = no light.',
   },
   lightRadius: {
     type: 'float',
@@ -193,7 +193,7 @@ export const FLUID_PARAMS = Object.freeze({
     default: 1,
     category: 'Light',
     label: 'Light reach',
-    help: 'How far that light spreads. 1 suits pipes about a grid square apart; the flasks reach further on their own.',
+    help: 'How far that glow spreads from the goo. 1 reaches about four grid squares, fading smoothly to nothing; the flasks glow a little brighter because they hold more goo.',
   },
 });
 
@@ -394,16 +394,17 @@ export const FLUID = Object.freeze({
       n: 7,
       name: 'light',
       // 2026-11-04 — the former `emission` deferred rung, built: the author asked for the goo to "illuminate the
-      // map around it with a subtle light". Up to 14 lights per masked item through the point-light pool (the
-      // fire's own path: wall-clipped, darkness-aware, coloured), each reading the goo beside it from a CPU twin
-      // of the sim. C6: every light is an extra draw in the shared light passes.
+      // map around it with a subtle light". 2026-11-08 (mmp-0t3.2, her "perfect circles of light"): no longer
+      // point lights — many small emitters on the goo, summed into one soft field shaped like the liquid and ADDED
+      // into scene.illum (`fluid-light-field.js`). C6: one extra draw per item in the light pass.
       fromProfile: 'standard',
       cost: Object.freeze({ class: 'C6', estMsPerMp: 0.1 }),
       adds:
-        'THE GOO LIGHTS THE ROOM (`fluid-alchemy.js#buildFluidLightSources`): light anchors baked along the tube ' +
-        'net, each a point light in the reagent`s colour, brightness following the fill and energy of the goo ' +
-        'beside it — an empty stretch goes dark, a reaction front lights the floor as it passes. Through the ' +
-        'point-light pool (`getFireLightSources`), so walls clip it and darkness Regions govern it.',
+        'THE GOO LIGHTS THE ROOM (`fluid-light-field.js`): emitters baked on the goo (one per ~140 px cell per ' +
+        'tube), each in the reagent`s colour with brightness following the fill and energy of the goo it stands ' +
+        'for, spread by a smooth kernel and ADDED into scene.illum — the glow follows the pipes, has no rim, and ' +
+        'sums with lamps and window light. Each emitter`s footprint is Foundry`s wall sweep (a window lets it ' +
+        'through, a wall does not); the add is dimmed by the room`s own daylight (scene.roomLight).',
     }),
   ]),
   /**

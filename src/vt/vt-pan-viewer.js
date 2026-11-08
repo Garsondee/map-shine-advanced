@@ -343,6 +343,8 @@ import {
   // (critter-subsystem.js). Read here, never inside either effects/ module —
   // see token-activity.js's own header.
   collectActiveTokenPoints,
+  // The goo's light on the map clips each emitter's footprint with Foundry's own wall sweep (fluid-light-field.js).
+  computeCandleWallClippedShape,
 } from '../foundry/index.js';
 // FOG MEMORY (2026-11-02): which tokens remember, and their token-flag records (through the foundry
 // zone's door); the codec turns the explored coverage into a small WebP and back.
@@ -6132,8 +6134,10 @@ async function startVtPanViewerUnserialized({
      * itself, so the getter still catches every rebake — it just also
      * survives being constructed before `windHandle`'s first assignment.
      */
-    /** The goo's light descriptors — rebound to the fluid subsystem once it is built (see its construction). */
-    let fluidLightSources = () => [];
+    /** The goo's light on the map (`fluid-light-field.js`) — set once the fluid subsystem is built (declared later in
+     * this closure), and the floor its wall sweeps were made for (read in `runLightAccumulatePass`). */
+    let fluidLightScene = null;
+    let fluidLightLevelId = null;
     const fireSubsystem = createFireSubsystem({
       THREE,
       getFireRenderState,
@@ -6684,15 +6688,9 @@ async function startVtPanViewerUnserialized({
       getLightningActiveStrands: () => lightningSubsystem.activeStrands(),
       // Fire's lights, built during `fireSubsystem.sync()` just above in the
       // frame loop — so they are THIS frame's, on the same puff clock the
-      // flame is drawing with.
-      // ... and the goo's (2026-11-04, `fluid-alchemy.js#buildFluidLightSources`): same descriptor shape, same
-      // wall-clipped path. `fluidLightSources` is assigned once the fluid subsystem exists (declared later in
-      // this closure), so a call before then simply has no fluid lights.
-      getFireLightSources: () => {
-        const fire = fireSubsystem.lightSources();
-        const goo = fluidLightSources();
-        return goo.length ? [...(fire ?? []), ...goo] : fire;
-      },
+      // flame is drawing with. (The goo's light left this pool 2026-11-08: MAX-blended discs drew hard pale
+      // circles at dusk — it is ADDED as its own field now, `runLightAccumulatePass`, mmp-0t3.2.)
+      getFireLightSources: () => fireSubsystem.lightSources(),
       // PLAYER-CARRIED LIGHTS (mythica-machina-press#77) — see this
       // function's own destructured param doc above. `undefined` (an
       // un-wired caller) reaches `createPointLightPool`'s own `= null`
@@ -11129,6 +11127,7 @@ async function startVtPanViewerUnserialized({
         });
       }
       lastGridSizePixels = pointLights.update(darkness01, activeRegions, env, darknessRealism01, currentFloor);
+      fluidLightLevelId = currentFloor?.id ?? null;
       profiler?.end(Z.lightPointUpdate);
       // Reconcile the flame billboard from the same candle render state the
       // light merge above just read (drawn below, into scene.lit).
@@ -11353,6 +11352,14 @@ async function startVtPanViewerUnserialized({
           renderer.autoClearColor = prevAuto;
         }
         casterShadowDrewLastFrame = casterCount > 0;
+      }
+      // THE GOO'S LIGHT ON THE MAP (2026-11-08, mmp-0t3.2 — `fluid-light-field.js`): a soft field shaped like the
+      // liquid, ADDED here — after the lamps and the moving tiles' shadows, before the window — so the goo, the
+      // lamps and the window light sum and never replace one another (it used to be MAX'd discs in the lamp pool).
+      if (fluidLightScene && fluidLightScene.children.length > 0) {
+        profiler?.begin(Z.lightDrawFluid);
+        renderer.render(fluidLightScene, camera);
+        profiler?.end(Z.lightDrawFluid);
       }
       profiler?.begin(Z.lightDrawWindow);
       // EVERY FLOOR, NOT JUST THE VIEWED ONE (2026-08-09) — mirrors the
@@ -17639,9 +17646,14 @@ async function startVtPanViewerUnserialized({
       // (light.fluidNetBake) — see this subsystem's own doc for why that
       // can't be bracketed from outside the way water's bake is.
       profiler,
+      // THE GOO'S LIGHT ON THE MAP (`fluid-light-field.js`): dimmed by the room's own light (daylight), clipped
+      // per emitter by Foundry's wall sweep on the shown floor, re-swept when a wall changes.
+      roomLightTexture: sceneRoomLight.texture,
+      computeLightShape: computeCandleWallClippedShape,
+      getLightClipContext: () => ({ levelId: fluidLightLevelId, wallVersion: getWallStructureVersion() }),
     });
 
-    fluidLightSources = () => fluidSurface.lightSources();
+    fluidLightScene = fluidSurface.lightScene;
 
     // THE ITEM → WORLD QUAD resolver, handed back to boot's per-item seams.
     //
@@ -24359,6 +24371,7 @@ async function startVtPanViewerUnserialized({
       lightDrawPointsMerged: profiler?.indexOf('light.drawPointLightsMerged') ?? -1,
       lightDrawApertureShadow: profiler?.indexOf('light.drawApertureShadow') ?? -1,
       lightDrawWindow: profiler?.indexOf('light.drawWindowLight') ?? -1,
+      lightDrawFluid: profiler?.indexOf('light.drawFluidLight') ?? -1,
       // Pillar 11's own cost, measured from the first frame it exists rather
       // than from the day it becomes player-visible — a pass whose price is
       // only discovered after it ships is the reason the Reckoning exists.

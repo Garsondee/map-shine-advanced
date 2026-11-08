@@ -20,9 +20,9 @@
  *   TRAVEL      each tube's distance flowed so far (`x`, world px), integrated from the pump's REAL drive, so the
  *               streaks/bubbles the shader draws stop when the flow stalls and rush when it surges. Spatially
  *               constant per tube — the safe half of `water-field.js`'s per-pixel-time trap.
- *   LIGHT       light anchors along the tubes (baked once), and a CPU twin of the sim (`advectTubeStep` — the
- *               module that is already the sim's source of truth) so each light knows the colour, fill and energy
- *               of the goo beside it: a reaction front lights the floor as it passes.
+ *   LIGHT       a CPU twin of the sim (`advectTubeStep` — the module that is already the sim's source of truth)
+ *               so the goo's light on the map (`fluid-light-field.js`) knows the colour, fill and energy of the goo
+ *               it stands for: a reaction front lights the floor as it passes.
  *   HOST GATE   which pixels of the host tile's painted glass HIDE the goo (dark ink lines, brass fittings,
  *               white highlights) and which only depict glass (the pale paint the goo should glow through).
  *
@@ -34,7 +34,6 @@
  */
 
 import { advectTubeStep, FLUID_SIM_MIN_CROSS_SECTION_PX } from './fluid-sim.js';
-import { FLUID_PUMP_BASE_Q } from './fluid-pump.js';
 
 /** The kinds of reaction, in the order the debug buttons list them. */
 export const FLUID_REACTION_KINDS = Object.freeze(['transmute', 'catalyst', 'surge', 'stall', 'pulse', 'fizz', 'boil']);
@@ -637,133 +636,6 @@ export function computeFluidHostGate(rgba, w, h) {
 
 // ── LIGHT ─────────────────────────────────────────────────────────────────────
 
-/** How long a stretch of tube one light stands for (world px), and how far apart two clusters on the same
- * stretch must be to stay separate lights (two branches at the same arc length). */
-const LIGHT_SEGMENT_PX = 420;
-const LIGHT_CLUSTER_PX = 300;
-/** Cap per masked item: lights are the expensive half of a glow (the point-light pool draws each one). */
-export const FLUID_MAX_LIGHTS_PER_ITEM = 14;
-
-/** Bilinear map of a quad's corners (TL, TR, BR, BL) at (u, v). */
-function quadPoint(corners, u, v) {
-  const [tl, tr, br, bl] = corners;
-  const topX = tl.x + (tr.x - tl.x) * u;
-  const topY = tl.y + (tr.y - tl.y) * u;
-  const botX = bl.x + (br.x - bl.x) * u;
-  const botY = bl.y + (br.y - bl.y) * u;
-  return { x: topX + (botX - topX) * v, y: topY + (botY - topY) * v };
-}
-
-/**
- * Light anchors along the tube net: one per ~420 px of tube, split where two branches share an arc length, then
- * merged nearest-first down to the cap. Baked once per mask version.
- *
- * @param {object} net - `extractTubeNet`'s output.
- * @param {Array<{x:number,y:number}>} corners - the host quad's world corners (TL, TR, BR, BL).
- * @param {number} [maxLights]
- * @returns {Array<{x:number, y:number, row:number, s:number, sSpan:number, areaPx:number}>}
- */
-export function fluidLightAnchors(net, corners, maxLights = FLUID_MAX_LIGHTS_PER_ITEM) {
-  if (!net?.spec || !Array.isArray(corners) || corners.length !== 4) return [];
-  const { w, h, texelW, texelH } = net.spec;
-  const texelArea = texelW * texelH;
-  const clusters = [];
-  for (const tube of net.tubes) {
-    const segs = Math.max(1, Math.round(tube.lengthPx / LIGHT_SEGMENT_PX));
-    const bySeg = Array.from({ length: segs }, () => []);
-    clusters.push(bySeg);
-    tube._segs = segs;
-  }
-  // Walk every tube texel once; greedy spatial clustering inside each arc-length segment.
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y * w + x;
-      const id = net.tubeIdByTexel[i];
-      if (!id) continue;
-      const row = id - 1;
-      const tube = net.tubes[row];
-      if (!tube) continue;
-      const seg = Math.min(tube._segs - 1, Math.floor(net.sByTexel[i] * tube._segs));
-      const wx = (x + 0.5) * texelW;
-      const wy = (y + 0.5) * texelH;
-      const list = clusters[row][seg];
-      let best = null;
-      for (const c of list) {
-        const dx = c.sx / c.n - wx;
-        const dy = c.sy / c.n - wy;
-        if (dx * dx + dy * dy < LIGHT_CLUSTER_PX * LIGHT_CLUSTER_PX) {
-          best = c;
-          break;
-        }
-      }
-      if (!best) {
-        best = { sx: 0, sy: 0, ss: 0, n: 0, row, seg };
-        list.push(best);
-      }
-      best.sx += wx;
-      best.sy += wy;
-      best.ss += net.sByTexel[i];
-      best.n++;
-    }
-  }
-  let anchors = [];
-  for (let row = 0; row < clusters.length; row++) {
-    const tube = net.tubes[row];
-    for (const list of clusters[row]) {
-      for (const c of list) {
-        if (c.n < 3) continue;
-        anchors.push({
-          lx: c.sx / c.n,
-          ly: c.sy / c.n,
-          row,
-          s: c.ss / c.n,
-          sSpan: 1 / tube._segs,
-          areaPx: c.n * texelArea,
-        });
-      }
-    }
-    delete tube._segs;
-  }
-  // Merge nearest pairs (same tube preferred) until under the cap. Area-weighted.
-  while (anchors.length > maxLights) {
-    let bi = 0;
-    let bj = 1;
-    let bd = Infinity;
-    for (let i = 0; i < anchors.length; i++) {
-      for (let j = i + 1; j < anchors.length; j++) {
-        const a = anchors[i];
-        const b = anchors[j];
-        const d = Math.hypot(a.lx - b.lx, a.ly - b.ly) * (a.row === b.row ? 1 : 1.6);
-        if (d < bd) {
-          bd = d;
-          bi = i;
-          bj = j;
-        }
-      }
-    }
-    const a = anchors[bi];
-    const b = anchors[bj];
-    const wa = a.areaPx;
-    const wb = b.areaPx;
-    const m = {
-      lx: (a.lx * wa + b.lx * wb) / (wa + wb),
-      ly: (a.ly * wa + b.ly * wb) / (wa + wb),
-      row: wa >= wb ? a.row : b.row,
-      s: wa >= wb ? a.s : b.s,
-      sSpan: Math.max(a.sSpan, b.sSpan) + Math.abs(a.s - b.s),
-      areaPx: wa + wb,
-    };
-    anchors = anchors.filter((_, k) => k !== bi && k !== bj);
-    anchors.push(m);
-  }
-  const spanW = net.spec.width ?? w * texelW;
-  const spanH = net.spec.height ?? h * texelH;
-  return anchors.map((a) => {
-    const p = quadPoint(corners, a.lx / spanW, a.ly / spanH);
-    return { x: p.x, y: p.y, row: a.row, s: a.s, sSpan: a.sSpan, areaPx: a.areaPx };
-  });
-}
-
 /**
  * The CPU twin of the GPU sim, for the lights only: φ, reagent and energy per bin, advanced by the SAME
  * `advectTubeStep` (the sim's own source of truth) with the same Q and root values the GPU gets this tick.
@@ -811,7 +683,8 @@ export function stepFluidLightTwin(twin, pumpData, tubeData, dtSec) {
   });
 }
 
-function sampleArr(arr, s) {
+/** Linear read of a twin array at arc position `s` (0..1). */
+export function sampleFluidTwin(arr, s) {
   const n = arr.length;
   const x = clamp01(s) * (n - 1);
   const i = Math.floor(x);
@@ -829,102 +702,3 @@ export function fluidReagentColor(palette, reagent) {
   const b = palette.colors[i1];
   return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
 }
-
-/** A polygon circle for a light's naive shape (the pool replaces it with Foundry's wall-clipped sweep). */
-function circlePolygon(x, y, r, n = 24) {
-  const pts = [];
-  for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2;
-    pts.push(x + Math.cos(a) * r, y + Math.sin(a) * r);
-  }
-  return pts;
-}
-
-/**
- * This tick's light descriptors for one item, in the point-light pool's own shape (`fire-geometry.js#
- * buildFireLightSources` is the template: luminosity stays under 0.5 so the light tints instead of whitening).
- *
- * @param {object} args
- * @param {string} args.itemId
- * @param {Array<object>} args.anchors - {@link fluidLightAnchors}.
- * @param {ReturnType<typeof createFluidLightTwin>} args.twin
- * @param {{colors:number[][], count:number}} args.palette
- * @param {number} args.strength - the `light` param, 0..1+.
- * @param {number} args.radiusScale - the `lightRadius` param.
- * @param {number} [args.fade] - the host's own occlusion fade, 0..1.
- * @param {number} [args.elevation]
- * @param {Map<string, number>} [args.smooth] - per-light smoothing memory (mutated).
- * @param {number} [args.dtSec]
- * @returns {Array<object>}
- */
-export function buildFluidLightSources({
-  itemId,
-  anchors,
-  twin,
-  palette,
-  strength,
-  radiusScale = 1,
-  fade = 1,
-  elevation = 0,
-  smooth = null,
-  dtSec = 1 / 60,
-}) {
-  const out = [];
-  if (!(strength > 0) || !anchors?.length || !twin) return out;
-  const k = 1 - Math.exp(-Math.max(0, dtSec) / 0.12);
-  anchors.forEach((a, idx) => {
-    const t = twin.tubes[a.row];
-    if (!t) return;
-    // Average three taps across the stretch this light stands for.
-    let phi = 0;
-    let en = 0;
-    let rg = 0;
-    for (const o of [-0.35, 0, 0.35]) {
-      const s = a.s + o * a.sSpan;
-      phi += sampleArr(t.phi, s) / 3;
-      en += sampleArr(t.energy, s) / 3;
-      rg += sampleArr(t.reagent, s) / 3;
-    }
-    const id = `fluid:${itemId}:${idx}`;
-    let level = Math.min(1.6, phi * (0.45 + 0.75 * en));
-    if (smooth) {
-      const prev = smooth.get(id);
-      level = prev === undefined ? level : prev + (level - prev) * k;
-      smooth.set(id, level);
-    }
-    level *= fade;
-    if (level < 0.02) return;
-    const base = fluidReagentColor(palette, rg);
-    const hot = Math.min(1, en * 0.18);
-    const color = base.map((c) => Math.min(1, c + (1 - c) * hot));
-    // Radius from how much goo the anchor stands for: a flask throws further than a capillary.
-    const radius = Math.max(
-      180,
-      Math.min(900, (230 + Math.sqrt(a.areaPx) * 0.9) * Math.max(0.25, Math.min(3, radiusScale)))
-    );
-    const luminosity01 = Math.max(0.05, Math.min(0.46, 0.2 * strength * level));
-    const alpha01 = Math.max(0.05, Math.min(1, 0.55 * strength * level));
-    if (![a.x, a.y, radius, luminosity01, alpha01, ...color].every(Number.isFinite)) return;
-    out.push({
-      sourceId: id,
-      ownerEffectId: 'fluid',
-      x: a.x,
-      y: a.y,
-      elevation,
-      radius,
-      shapePoints: circlePolygon(a.x, a.y, radius),
-      ratio: 0.18,
-      attenuation01: 0.75,
-      luminosity01,
-      hasColor: true,
-      alpha01,
-      color,
-      falloffModel: 'inverseSquareWide',
-      animation: null,
-    });
-  });
-  return out;
-}
-
-/** Re-exported so a caller can size a light against the pump's own scale without importing two modules. */
-export { FLUID_PUMP_BASE_Q };

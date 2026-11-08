@@ -1,5 +1,5 @@
 ---
-sources: src/scene/mask-catalog.js (fluid: rgba, red read), src/effects/fluid/fluid-net.js (flow from brightest, never ramp to black), src/effects/fluid/fluid.js
+sources: src/scene/mask-catalog.js (fluid: rgba, red read), src/effects/fluid/fluid-net.js (flow from brightest, never ramp to black), src/effects/fluid/fluid.js, src/effects/fluid/fluid-light-field.js (light on the map)
 ---
 `_Fluid` fills **tubes, flasks and vats with glowing liquid** that flows, bubbles and lights the glass around it.
 
@@ -30,6 +30,7 @@ sources: src/scene/mask-catalog.js (fluid: rgba, red read), src/effects/fluid/fl
 - Keep tubes **connected** on the mask. A gap of one pixel splits them into two separate tubes.
 - The art underneath shows through. Glass art with clear centres looks best.
 - Colours, glow and bubble speed are in **Studio → Effects → Fluid**.
+- The liquid also lights the floor around it in its own colour. The glow follows the pipes and flasks and adds to the room's light, so it shows best in dim rooms and at night. **Light on the map** and **Light reach** set it.
 
 The glassware in this example sits on a tile above the floor, with its own `_Fluid` mask named after the tile's image. That works for any mask. [Naming](page:learn-naming).
 

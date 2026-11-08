@@ -94,13 +94,21 @@ import {
   FLUID_REACTION_KINDS,
   FLUID_TUBE_TEXELS,
   computeFluidHostGate,
-  fluidLightAnchors,
   createFluidLightTwin,
   stepFluidLightTwin,
-  buildFluidLightSources,
   FLUID_ENERGY_DECAY_S,
   FLUID_FROTH_DECAY_S,
 } from './fluid-alchemy.js';
+import {
+  fluidLightEmitters,
+  fluidLightWeights,
+  writeFluidLightEmitters,
+  fluidLightCircle,
+  buildFluidLightFieldGeometry,
+  buildFluidLightFieldMaterial,
+  FLUID_LIGHT_REACH_PX,
+  FLUID_LIGHT_PEAK,
+} from './fluid-light-field.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
 /** The host art is decoded at most this big for the gate (a 6,750 px tile → 4,096: ink lines stay ≥ 2 px). */
@@ -181,6 +189,14 @@ export function createFluidSurfaceSubsystem({
   // optional: without them the goo glows over the host's whole quad, ink and brass included.
   loadHostImage = null,
   createGateTexture = null,
+  // THE GOO'S LIGHT ON THE MAP (2026-11-08, `fluid-light-field.js`), all optional:
+  //   roomLightTexture     `buf:scene.roomLight` — the glow is dimmed by daylight (absent: never dimmed);
+  //   computeLightShape    `({x, y, radius, levelId}) => {points}` — Foundry's wall sweep for one emitter
+  //                        (absent: plain circles, nothing clips the glow);
+  //   getLightClipContext  `() => ({levelId, wallVersion})` — when either changes, the sweeps are redone.
+  roomLightTexture = null,
+  computeLightShape = null,
+  getLightClipContext = null,
   // The tube-net + pack bake (extractTubeNet/buildFluidPack — a geodesic pass
   // + two-pass chamfer distance transform + connected-component flood fill)
   // runs inside loadAndBake's own async continuation, never a synchronous
@@ -227,10 +243,16 @@ export function createFluidSurfaceSubsystem({
    * header has the measurement). `scene` (the main one) is no longer drawn into.
    */
   const emitScene = new THREE.Scene();
-  /** This frame's light descriptors across every presented item (the point-light pool reads them). */
-  let currentLights = [];
-  /** Per-light smoothing memory for the brightness (keys = light source ids). */
-  const lightSmooth = new Map();
+  /**
+   * THE GOO'S LIGHT ON THE MAP (2026-11-08, mmp-0t3.2 — `fluid-light-field.js` has the why). One mesh per item; the
+   * viewer ADDS this scene into `buf:scene.illum` after the lamps and before the window light, so the goo's glow,
+   * the lamps and the window light sum and never replace one another.
+   */
+  const lightScene = new THREE.Scene();
+  /** Wall sweeps per tick while an item's footprints are (re)built — a load never stalls on all of them at once. */
+  const LIGHT_SWEEPS_PER_TICK = 24;
+  /** The last tick's light, for the report. */
+  let lightStats = { emitters: 0, lit: 0, sum: 0, sweeps: 0, strength: 0 };
   /** The sim clock as of the last tick — a forced reaction is stamped on THIS clock, not the caller's. */
   let lastTickMs = 0;
   let enabled = true;
@@ -251,7 +273,95 @@ export function createFluidSurfaceSubsystem({
       const visible = enabled && (e.presented === true || warmUpAll) && !!e.net && e.net.tubeCount > 0;
       if (e.absorbMesh) e.absorbMesh.visible = visible;
       if (e.emitMesh) e.emitMesh.visible = visible;
+      if (e.light?.mesh) e.light.mesh.visible = visible && e.light.ready && lightStats.strength > 0;
     }
+  }
+
+  /** Tear down one item's light (mesh, geometry, material, emitter texture). */
+  function disposeLight(entry) {
+    const L = entry.light;
+    if (!L) return;
+    lightScene.remove(L.mesh);
+    L.mesh.geometry?.dispose?.();
+    L.built.material?.dispose?.();
+    L.texture?.dispose?.();
+    entry.light = null;
+  }
+
+  /**
+   * The item's light, built on first use: the emitter texture, the material, an empty mesh (filled once every
+   * footprint is swept). Weights follow the reach, so a `lightRadius` change re-weights and re-sweeps.
+   * @returns {object|null}
+   */
+  function ensureLight(entry, reachPx) {
+    const em = entry.lightEmitters;
+    if (!em?.length) return null;
+    let L = entry.light;
+    if (!L) {
+      const data = new Float32Array(em.length * 4);
+      const texture = createPackTexture(data, em.length, 1);
+      const built = buildFluidLightFieldMaterial({ THREE, emitTexture: texture, roomLightTexture });
+      built.uCount.value = em.length;
+      const mesh = new THREE.Mesh(new THREE.BufferGeometry(), built.material);
+      mesh.frustumCulled = false;
+      mesh.visible = false;
+      lightScene.add(mesh);
+      L = entry.light = {
+        data,
+        texture,
+        built,
+        mesh,
+        smooth: new Float32Array(em.length).fill(NaN),
+        weights: null,
+        reachPx: -1,
+        polyKey: null,
+        pending: null,
+        ready: false,
+      };
+    }
+    if (L.reachPx !== reachPx) {
+      L.reachPx = reachPx;
+      L.weights = fluidLightWeights(em, reachPx);
+      L.built.uReachPx.value = reachPx;
+    }
+    return L;
+  }
+
+  /**
+   * Sweep a few more emitter footprints (Foundry's own wall sweep, so a window lets the glow through and a wall does
+   * not); when the set is complete, swap it in. The old footprints keep drawing until the new set is whole, so a
+   * wall edit never blinks the glow out.
+   */
+  function advanceLightClip(entry, L) {
+    const ctx = typeof getLightClipContext === 'function' ? getLightClipContext() : null;
+    const levelId = ctx?.levelId ?? null;
+    const key = `${levelId ?? ''}|${ctx?.wallVersion ?? 0}|${Math.round(L.reachPx)}`;
+    if (key === L.polyKey) return;
+    const em = entry.lightEmitters;
+    if (!L.pending || L.pending.key !== key) L.pending = { key, polys: new Array(em.length).fill(null), next: 0 };
+    const P = L.pending;
+    let budget = LIGHT_SWEEPS_PER_TICK;
+    while (P.next < em.length && budget-- > 0) {
+      const e = em[P.next];
+      let pts = null;
+      if (typeof computeLightShape === 'function') {
+        try {
+          pts = computeLightShape({ x: e.x, y: e.y, radius: L.reachPx, levelId })?.points ?? null;
+        } catch {
+          pts = null;
+        }
+        lightStats.sweeps++;
+      }
+      P.polys[P.next] = pts && pts.length >= 6 ? pts : fluidLightCircle(e.x, e.y, L.reachPx);
+      P.next++;
+    }
+    if (P.next < em.length) return;
+    const geometry = buildFluidLightFieldGeometry(THREE, em, P.polys);
+    L.mesh.geometry?.dispose?.();
+    L.mesh.geometry = geometry;
+    L.polyKey = key;
+    L.pending = null;
+    L.ready = true;
   }
 
   /**
@@ -320,7 +430,8 @@ export function createFluidSurfaceSubsystem({
       entry.packTexture = createPackTexture(entry.pack.data, entry.pack.width, entry.pack.height);
       entry.pipeRadiusPx = typicalPipeRadius(entry.net);
       entry.itemSizePx = quadSize(item.corners);
-      entry.lightAnchors = fluidLightAnchors(entry.net, item.corners);
+      entry.lightEmitters = fluidLightEmitters(entry.net, item.corners);
+      disposeLight(entry);
       // THE HOST GATE — the host's own art, decoded small, says where its ink and brass hide the goo.
       if (typeof loadHostImage === 'function' && typeof createGateTexture === 'function' && item.hostUrl) {
         try {
@@ -439,7 +550,6 @@ export function createFluidSurfaceSubsystem({
     entry.simTubeTexture = null;
     entry.reactions = null;
     entry.lightTwin = null;
-    entry.lights = [];
     entry.simAdvect = null;
     entry.simPersonalities = null;
     entry.simQScales = null;
@@ -577,6 +687,7 @@ export function createFluidSurfaceSubsystem({
   function disposeEntry(entry) {
     disposeSim(entry);
     disposeMesh(entry);
+    disposeLight(entry);
     entry.hostGateTexture?.dispose?.();
     entry.hostGateTexture = null;
   }
@@ -640,6 +751,9 @@ export function createFluidSurfaceSubsystem({
         simQScales: null,
         simAdvect: null,
         simTubeCount: 0,
+        // THE LIGHT ON THE MAP — emitters baked with the net, the mesh/texture built on first use (`ensureLight`).
+        lightEmitters: null,
+        light: null,
         presented: false,
         lastSeenSync: syncs,
       };
@@ -668,7 +782,10 @@ export function createFluidSurfaceSubsystem({
       // The tile was dragged, rotated or resized: move the quad rather than
       // rebaking — the mask and its tube net are unchanged, only where they sit.
       entry.corners = item.corners;
-      if (entry.net) entry.lightAnchors = fluidLightAnchors(entry.net, item.corners);
+      if (entry.net) {
+        entry.lightEmitters = fluidLightEmitters(entry.net, item.corners);
+        disposeLight(entry);
+      }
       const pos = entry.geometry.getAttribute('position');
       const buf = buildQuadPositions(item.corners);
       for (let i = 0; i < buf.length; i++) pos.array[i] = buf[i];
@@ -825,7 +942,6 @@ export function createFluidSurfaceSubsystem({
   function prepareSimTick(nowMs, dtSec) {
     const clears = [];
     const advects = [];
-    currentLights = [];
     lastTickMs = nowMs;
     if (!enabled) return { clears, advects };
 
@@ -846,6 +962,9 @@ export function createFluidSurfaceSubsystem({
     const chaos = Number.isFinite(params.chaos) ? params.chaos : 0.5;
     const plan = fluidTierPlan(resolveTier());
     const lightStrength = plan.lightEnabled && Number.isFinite(params.light) ? Math.max(0, params.light) : 0;
+    const lightReachPx =
+      FLUID_LIGHT_REACH_PX * Math.max(0.25, Math.min(3, Number.isFinite(params.lightRadius) ? params.lightRadius : 1));
+    lightStats = { emitters: 0, lit: 0, sum: 0, sweeps: lightStats.sweeps, strength: lightStrength };
     // Always built: the reaction schedule needs the live palette size (how far a colour change may jump).
     const palette = fluidPalette(params.tint, params.accent, params.variety);
     const energyKeep = Math.exp(-Math.max(0, dtSec) / FLUID_ENERGY_DECAY_S);
@@ -910,22 +1029,28 @@ export function createFluidSurfaceSubsystem({
       entry.simTubeTexture.needsUpdate = true;
       entry.simAdvect.uEnergyKeep.value = energyKeep;
       entry.simAdvect.uFrothKeep.value = frothKeep;
-      // THE LIGHT: the CPU twin follows the same Q and root values, and each anchor reads the goo beside it.
-      if (lightStrength > 0 && entry.lightTwin && entry.lightAnchors?.length) {
+      // THE LIGHT: the CPU twin follows the same Q and root values, and each emitter reads the goo it stands for.
+      if (lightStrength > 0 && entry.lightTwin && entry.lightEmitters?.length) {
         stepFluidLightTwin(entry.lightTwin, entry.simPumpTexture.image.data, entry.simTubeTexture.image.data, dtSec);
-        const lights = buildFluidLightSources({
-          itemId: entry.id,
-          anchors: entry.lightAnchors,
-          twin: entry.lightTwin,
-          palette,
-          strength: lightStrength,
-          radiusScale: Number.isFinite(params.lightRadius) ? params.lightRadius : 1,
-          fade: entry.built?.uniforms?.uFadeMul?.value ?? 1,
-          elevation: Number.isFinite(entry.elevation) ? entry.elevation : 0,
-          smooth: lightSmooth,
-          dtSec,
-        });
-        for (const l of lights) currentLights.push(l);
+        const L = ensureLight(entry, lightReachPx);
+        if (L) {
+          advanceLightClip(entry, L);
+          const fade = entry.built?.uniforms?.uFadeMul?.value ?? 1;
+          const r = writeFluidLightEmitters({
+            emitters: entry.lightEmitters,
+            weights: L.weights,
+            twin: entry.lightTwin,
+            palette,
+            gain: lightStrength * fade * FLUID_LIGHT_PEAK,
+            smooth: L.smooth,
+            dtSec,
+            out: L.data,
+          });
+          L.texture.needsUpdate = true;
+          lightStats.emitters += entry.lightEmitters.length;
+          lightStats.lit += r.lit;
+          lightStats.sum += r.sum;
+        }
       }
 
       if (entry.simNeedsClear) {
@@ -956,6 +1081,7 @@ export function createFluidSurfaceSubsystem({
         for (const n of entry.built.stateTexNodes) n.value = nextCurrentRT.texture;
       }
     }
+    refreshVisibility();
     return { clears, advects };
   }
 
@@ -969,7 +1095,9 @@ export function createFluidSurfaceSubsystem({
       enabled,
       syncs,
       bakes,
-      lights: currentLights.length,
+      // The goo's light on the map: emitters drawn, how many are lit, the total added, sweeps run so far.
+      lights: lightStats.lit,
+      lightField: { ...lightStats, sum: Number(lightStats.sum.toFixed(3)) },
       // Zero masked items with tubes painted on the map means the LOOKUP is
       // wrong, not the shader. That distinction cost two rounds.
       maskedItemCount: [...entries.values()].filter((e) => e.presented).length,
@@ -1004,7 +1132,8 @@ export function createFluidSurfaceSubsystem({
         // THE ALCHEMY's own links: is the host gate in, how many light anchors, what each tube is doing now.
         hostGate: !!e.hostGateTexture,
         pipeRadiusPx: e.pipeRadiusPx ?? null,
-        lightAnchors: e.lightAnchors?.length ?? 0,
+        lightEmitters: e.lightEmitters?.length ?? 0,
+        lightReady: !!e.light?.ready,
         reactions: (e.lastReactions ?? []).map((r) => ({
           kind: r.kind,
           env: Number(r.env.toFixed(2)),
@@ -1166,8 +1295,8 @@ export function createFluidSurfaceSubsystem({
         entry.reactions = createFluidReactionState(entry.net.tubeCount);
         entry.lightTwin = createFluidLightTwin(entry.net);
       }
+      entry.light?.smooth.fill(NaN);
     }
-    lightSmooth.clear();
   }
 
   /**
@@ -1197,8 +1326,8 @@ export function createFluidSurfaceSubsystem({
     dispose,
     /** The goo's own scene — draw it onto `scene.lit` AFTER the light composite (see its declaration). */
     emitScene,
-    /** This frame's light descriptors (point-light pool shape), built by `prepareSimTick`. */
-    lightSources: () => currentLights,
+    /** The goo's light on the map — ADD it into `scene.illum` after the lamps, before the window (see its declaration). */
+    lightScene,
     resetSim,
     triggerReaction,
     reactionKinds: () => [...FLUID_REACTION_KINDS],

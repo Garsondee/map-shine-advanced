@@ -887,6 +887,19 @@ export const ZONES = Object.freeze(
       false,
       'pointLights.apertureShadowScene'
     ),
+    // 2026-11-08 (mmp-0t3.2): the goo's light left the point-light pool; its soft field is ADDED into scene.illum
+    // in its own render call, before the window.
+    z(
+      'light.drawFluidLight',
+      'Fluid light on the map (added)',
+      'lighting',
+      'light.accumulate',
+      'fluid',
+      'gpu',
+      'conditional',
+      false,
+      'runLightAccumulatePass'
+    ),
     z(
       'light.drawWindowLight',
       'Window light draw',
@@ -1928,7 +1941,7 @@ export const EFFECT_ZONING = Object.freeze({
   }),
   fluid: Object.freeze({
     coverage: 'full',
-    why: "Its sim tick (sims.fluid), per-frame sync (light.fluidSurfaceSync), tube-net/pack bake (light.fluidNetBake, added 2026-08-06) and — since 2026-11-04, when the goo moved after the light composite as a light source — its own surface draw (surface.fluidDraw) are all zoned. Its map light rides the point-light pool, inside the shared light.drawPointLights/light.drawColoration zones, like fire's.",
+    why: "Its sim tick (sims.fluid), per-frame sync (light.fluidSurfaceSync), tube-net/pack bake (light.fluidNetBake, added 2026-08-06) and — since 2026-11-04, when the goo moved after the light composite as a light source — its own surface draw (surface.fluidDraw) are all zoned. Its map light (since 2026-11-08 its own additive field, no longer point lights) is light.drawFluidLight; the field's per-tick CPU write and wall sweeps run inside sims.fluid.",
   }),
   apertureGobo: Object.freeze({
     coverage: 'partial',

@@ -18,6 +18,7 @@ import { run as runFluidPump } from './fluid-pump.test.mjs';
 import { run as runFluidSim } from './fluid-sim.test.mjs';
 import { run as runFluidSimRender } from './fluid-sim-render.test.mjs';
 import { run as runFluidAlchemy } from './fluid-alchemy.test.mjs';
+import { run as runFluidLightField } from './fluid-light-field.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -55,6 +56,7 @@ const suites = [
   ['fluid-sim', runFluidSim],
   ['fluid-sim-render', runFluidSimRender],
   ['fluid-alchemy', runFluidAlchemy],
+  ['fluid-light-field', runFluidLightField],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

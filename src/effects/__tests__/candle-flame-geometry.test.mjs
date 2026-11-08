@@ -407,7 +407,10 @@ export function run(t) {
     // The reference used to sit at exposure 0 (factor 1). Candle lights are now
     // +33% (author, 2026-10-08): factor 1.33 ⇒ exposure 0.66 ⇒ luminosity 0.83.
     ok('≈4 candles land 33% above the old neutral reference', approx(four.luminosity01, 0.83, 1e-9));
-    ok('the coloration alpha at the reference is +33% exposure x 1.6 glow gain', approx(four.alpha01, 0.85 * 1.33 * 1.6, 1e-9));
+    ok(
+      'the coloration alpha at the reference is +33% exposure x 1.6 glow gain',
+      approx(four.alpha01, 0.85 * 1.33 * 1.6, 1e-9)
+    );
     ok('8 candles are brighter than the reference', eight.luminosity01 > four.luminosity01);
     ok(
       'coloration strength scales monotonically with candle count',

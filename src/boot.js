@@ -272,7 +272,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const TIER_SETTLE_FRAMES = 90;
 import { createPerfHud } from './diag/perf-hud.js';
 import { createLogger } from './core/log.js';
-import { wallClockMs } from './core/frame-clock.js';
+import { wallClockMs, captureDriftMs } from './core/frame-clock.js';
 import { validateCue, validateCueStack, orderedCues, cueToFadePatch } from './core/cues-schema.js';
 import {
   STARTER_LOOKS,
@@ -416,6 +416,7 @@ import {
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   forceVtPanViewerLightningStrike,
+  getVtPanViewerStormLightning,
   resetVtPanViewerFrameStats,
   setVtPanViewerIsolateItem,
   getVtPanViewerDrawListIds,
@@ -1576,6 +1577,9 @@ MapShine.unpinWeatherAxis = unpinVtPanViewerWeatherAxis;
 MapShine.setPrecip = (v) => setVtPanViewerWeatherTargets({ precip01: v });
 // The ground mist (mmp-63o.1), 0..1 — the Fog fader's axis.
 MapShine.setFog = (v) => setVtPanViewerWeatherTargets({ fogDensity01: v });
+// The storm's lightning (mmp-63o.33), 0..1 — the Lightning fader's axis. (`setLightning` is the
+// anchored-bolt effect's own dial setter, older than the axis.)
+MapShine.setLightningLevel = (v) => setVtPanViewerWeatherTargets({ lightning01: v });
 MapShine.setTemperature = (v) => setVtPanViewerWeatherTargets({ temperature01: v });
 MapShine.setPrecipKind = setVtPanViewerPrecipKind;
 /**
@@ -5357,14 +5361,19 @@ function install() {
    * report "anchor count" back through this seam yet).
    * @returns {{ok: boolean, message: string}}
    */
-  MapShine.strikeLightning = () => {
-    const result = forceVtPanViewerLightningStrike();
+  MapShine.strikeLightning = (at) => {
+    // `at` (optional, console only): `{x, y}` in scene px for where the storm's strike lands, `{kind: 'sky'}` for a
+    // flash inside the cloud. The Strike impulse passes nothing: a ground strike near the middle of the view.
+    const result = forceVtPanViewerLightningStrike(at);
     if (result.skipped) return { ok: false, message: `Strike skipped — ${result.reason}.` };
     return {
       ok: true,
-      message: 'Strike triggered (nothing visible happens if no lightning is placed on this floor).',
+      message:
+        'Strike! The storm lands a strike near the middle of the view, and any placed lightning bolts fire (players who reduce flashing effects see nothing).',
     };
   };
+  /** The storm's lightning right now (mmp-63o.2) — live strikes, this frame's flash, bolts drawn. */
+  MapShine.getStormLightning = getVtPanViewerStormLightning;
 
   /**
    * MapShine.setFire — the console tuner AND the Workshop card's write path.
@@ -6860,7 +6869,17 @@ function install() {
       };
     }
     // DELEGATES 2026-08-30 — see getCandleRenderState's own identical comment.
-    return { ...projectCascadeRenderState(lightningReadout), anchors: lightningAnchorMemo.anchors };
+    return {
+      ...projectCascadeRenderState(lightningReadout),
+      anchors: lightningAnchorMemo.anchors,
+      // THE STORM'S SHARED CLOCK (mmp-63o.2): server time, the same clock tile motion runs on, so every client's
+      // storm strikes at the same moments; plus the capture clock's drift so a recorded video replays a strike
+      // frame-exact. Falls back to the one sanctioned wall clock before Foundry has a server time.
+      sharedNowMs: (() => {
+        const s = Number(globalThis.game?.time?.serverTime);
+        return Number.isFinite(s) && s > 0 ? s + captureDriftMs() : wallClockMs();
+      })(),
+    };
   };
 
   // THE ROPE & CHAIN data seam (effects/rope-chain-subsystem.js, Phase 2,
@@ -13890,7 +13909,8 @@ function install() {
     // commit went straight through `editSky()` with no fade at all — see
     // `fadeTemperatureTo`'s own doc for the mechanism that bug actually hit.
     // `fogDensity01` (mmp-63o.1) — the Fog fader, archetype-owned like cloud/rain.
-    keys: () => ['cloudCover01', 'precip01', 'fogDensity01', 'temperature01'],
+    // `lightning01` (mmp-63o.33) — the Lightning fader, archetype-owned like fog.
+    keys: () => ['cloudCover01', 'precip01', 'fogDensity01', 'lightning01', 'temperature01'],
     typeOf: () => 'float',
     // Cloud/rain read what the map is RENDERING, not the stored field: under a
     // named mood the stored `cloudCover01`/`precip01` are stale by design (the
@@ -13907,7 +13927,9 @@ function install() {
             ? dial?.precipEased01
             : field === 'fogDensity01'
               ? dial?.fogEased01
-              : undefined;
+              : field === 'lightning01'
+                ? dial?.lightningEased01
+                : undefined;
       return Number.isFinite(eased) ? eased : (skyScope.sky?.[field] ?? 0);
     },
     // LIVE push only — matches the astrolabe's own slider-drag preview
@@ -13924,6 +13946,7 @@ function install() {
       // another target for the manager's own separate "brisk" ease to chase.
       else if (field === 'precip01') setVtPanViewerWeatherTargets({ precip01: value }, { immediate: true });
       else if (field === 'fogDensity01') setVtPanViewerWeatherTargets({ fogDensity01: value }, { immediate: true });
+      else if (field === 'lightning01') setVtPanViewerWeatherTargets({ lightning01: value }, { immediate: true });
       // Same shape as precip01 immediately above — temperature rides the
       // SAME weather-target manager (setWeatherTargets), so the identical
       // bypass applies unchanged.
@@ -14227,7 +14250,7 @@ function install() {
     const nowMs = wallClockMs();
     const gestureId = `archetype:${archetypeId}:${nowMs}`;
     const targets = {};
-    for (const field of ['cloudCover01', 'precip01', 'fogDensity01']) {
+    for (const field of ['cloudCover01', 'precip01', 'fogDensity01', 'lightning01']) {
       const to = archetype.axes?.[field];
       if (!Number.isFinite(to)) continue;
       targets[`weather.${field}`] = {
@@ -14276,7 +14299,12 @@ function install() {
   /** Display label for a LIVE_CHANNELS axis's own fade gesture — matches
    * weather-board.js's own LIVE_CHANNELS labels, duplicated rather than
    * imported (boot.js doesn't otherwise reach into ui/rooms/remote/). */
-  const LIVE_CHANNEL_LABELS = { cloudCover01: 'Clouds', precip01: 'Rain', fogDensity01: 'Fog' };
+  const LIVE_CHANNEL_LABELS = {
+    cloudCover01: 'Clouds',
+    precip01: 'Rain',
+    fogDensity01: 'Fog',
+    lightning01: 'Lightning',
+  };
 
   /**
    * The Channels rack's own direct-drag commit for a LIVE_CHANNELS axis
@@ -14340,6 +14368,7 @@ function install() {
       cloudCover01: fadeSourceRegistry.readLive('weather.cloudCover01'),
       precip01: fadeSourceRegistry.readLive('weather.precip01'),
       fogDensity01: fadeSourceRegistry.readLive('weather.fogDensity01'),
+      lightning01: fadeSourceRegistry.readLive('weather.lightning01'),
     };
     pendingSkyFadeCompletions.set(gestureId, { ...live, [axisName]: value });
     void editSky({ weatherArchetype: 'custom', ...live });
@@ -14538,7 +14567,7 @@ function install() {
     }
     const id = `cue-${wallClockMs()}`;
     const targets = {};
-    for (const field of ['cloudCover01', 'precip01', 'fogDensity01']) {
+    for (const field of ['cloudCover01', 'precip01', 'fogDensity01', 'lightning01']) {
       targets[`weather.${field}`] = { to: fadeSourceRegistry.readLive(`weather.${field}`), overMs, curve };
     }
     const order = cueStack.length === 0 ? 0 : Math.max(...cueStack.map((c) => c.order)) + 1;
@@ -14820,6 +14849,18 @@ function install() {
         s.weatherAxes.precip01 = v;
       },
     },
+    'weather.fogDensity01': {
+      read: () => fadeSourceRegistry.readLive('weather.fogDensity01'),
+      stage: (v, s) => {
+        s.weatherAxes.fogDensity01 = v;
+      },
+    },
+    'weather.lightning01': {
+      read: () => fadeSourceRegistry.readLive('weather.lightning01'),
+      stage: (v, s) => {
+        s.weatherAxes.lightning01 = v;
+      },
+    },
     'weather.temperature01': {
       read: () => fadeSourceRegistry.readLive('weather.temperature01'),
       stage: (v, s) => {
@@ -15098,6 +15139,7 @@ function install() {
       cloudCover01: fadeSourceRegistry.readLive('weather.cloudCover01'),
       precip01: fadeSourceRegistry.readLive('weather.precip01'),
       fogDensity01: fadeSourceRegistry.readLive('weather.fogDensity01'),
+      lightning01: fadeSourceRegistry.readLive('weather.lightning01'),
     };
     pendingSkyFadeCompletions.set(gestureId, { ...live, ...patch });
     void editSky({ weatherArchetype: 'custom', ...live });
@@ -15569,6 +15611,7 @@ function install() {
               ...(Number.isFinite(axes.cloudCover01) ? { cloudCover01: axes.cloudCover01 } : {}),
               ...(Number.isFinite(axes.precip01) ? { precip01: axes.precip01 } : {}),
               ...(Number.isFinite(axes.fogDensity01) ? { fogDensity01: axes.fogDensity01 } : {}),
+              ...(Number.isFinite(axes.lightning01) ? { lightning01: axes.lightning01 } : {}),
             });
           }
         } else if (completion.__wind) {
@@ -16058,6 +16101,9 @@ function install() {
       // The fog (mmp-63o.1), same rule and same guard as precip just above.
       const fogFading = fadeState['weather.fogDensity01'] && !isEntryExpired(fadeState['weather.fogDensity01'], nowMs);
       if (!fogFading) setVtPanViewerWeatherTargets({ fogDensity01: sky.fogDensity01 ?? 0 });
+      // The lightning (mmp-63o.33), same rule and same guard again.
+      const boltFading = fadeState['weather.lightning01'] && !isEntryExpired(fadeState['weather.lightning01'], nowMs);
+      if (!boltFading) setVtPanViewerWeatherTargets({ lightning01: sky.lightning01 ?? 0 });
     }
     // ⭐ CLIMATE RESTORE — unconditional, unlike precipitation above, BECAUSE
     // temperature is deliberately NOT archetype-owned (`ARCHETYPE_OWNED_AXES`:
@@ -16431,6 +16477,7 @@ function install() {
               cloudCover01: liveFadeValue('weather.cloudCover01') ?? payload.cloudCoverEased01,
               precip01: liveFadeValue('weather.precip01') ?? payload.precipEased01,
               fogDensity01: liveFadeValue('weather.fogDensity01') ?? payload.fogEased01,
+              lightning01: liveFadeValue('weather.lightning01') ?? payload.lightningEased01,
             };
             const fadingTemp = liveFadeValue('weather.temperature01');
             if (fadingTemp !== null) liveAxes.temperature01 = fadingTemp;
@@ -19810,6 +19857,7 @@ function install() {
             cloudCover01: skyScope.sky?.cloudCover01 ?? 0,
             precip01: skyScope.sky?.precip01 ?? 0,
             fogDensity01: skyScope.sky?.fogDensity01 ?? 0,
+            lightning01: skyScope.sky?.lightning01 ?? 0,
           };
         } catch (err) {
           log.error('fade state (canvasReady) failed:', err);

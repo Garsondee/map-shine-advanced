@@ -81,6 +81,17 @@ export const AXIS_CONSUMERS = Object.freeze({
     }),
     Object.freeze({ module: 'boot.js (fadeSourceRegistry)', describe: "the weather board's Fog fader / fade target" }),
   ]),
+  lightning01: Object.freeze([
+    Object.freeze({
+      module: 'effects/lightning-storm.js (via vt-pan-viewer.js)',
+      describe:
+        'the storm strikes: sky flash on the outdoor light, window light + beams, cloud glow, rain lit, bolts and the strike light',
+    }),
+    Object.freeze({
+      module: 'boot.js (fadeSourceRegistry)',
+      describe: "the weather board's Lightning fader / fade target",
+    }),
+  ]),
   temperature01: Object.freeze([
     Object.freeze({ module: 'world/weather.js#derivePrecipKind', describe: 'the rain/snow/sleet split' }),
     Object.freeze({ module: 'effects/precipitation/precip-subsystem.js', describe: "the mantle's dry-rate input" }),

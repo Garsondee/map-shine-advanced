@@ -17,8 +17,9 @@
  * not exist) and are not rendered at all here — Law 5,
  * `tools/verify-structure.mjs#ui/no-dead-axis` holds the line structurally.
  * The mock's own 7-channel list (rain/clouds/fog/wind/freeze/bolt/ash) is
- * NOT reproduced whole: fog/freeze/ash have no live axis, lightning is an
- * impulse (not a fade channel, U7's job). Wind STRENGTH, unlike those three,
+ * NOT reproduced whole: freeze/ash have no live axis. Lightning is BOTH now: a
+ * fader (`lightning01`, how often the storm strikes, mmp-63o.33) and the Strike
+ * impulse (one strike now). Wind STRENGTH, unlike those,
  * IS a channel here (2026-08-27 fix, author: "wind speed should be one of
  * the vertical sliders") — this reverses an earlier call on this exact
  * question: `ui/astrolabe.js`'s OLD dial had its own always-visible wind
@@ -135,6 +136,14 @@ const LIVE_CHANNELS = Object.freeze([
     shortLabel: 'Fog',
     icon: 'fog',
     help: 'Ground mist outdoors: soft banks that thin toward walls and in wind. Lamps glow in it.',
+  },
+  // mmp-63o.33 (2026-11-08): the storm's lightning. Live since the storm flashes (effects/lightning-storm.js).
+  {
+    axis: 'lightning01',
+    label: 'Lightning',
+    shortLabel: 'Bolts',
+    icon: 'bolt',
+    help: 'How often the storm strikes. Each flash lights the land, the clouds and the rain, and shines in through the windows. Off for players who reduce flashing effects.',
   },
 ]);
 

@@ -1,9 +1,10 @@
 /**
  * LIGHTNING — the forked-bolt strike effect (V2's `LightningEffectV2`: a
  * procedural fractal ribbon mesh with branching and a leader/return-stroke
- * flicker envelope). Distinct from a "weather/landscape lightning" screen-flash
- * effect (V2's `WeatherLightningEffectV2`) — that effect has no V3 equivalent
- * yet and is out of scope here; nothing in this file merges with it.
+ * flicker envelope), AND (2026-11-08, mmp-63o.2) the STORM's own landscape
+ * lightning — V2's `WeatherLightningEffectV2` successor — whose dials are the
+ * 'Storm' section below and whose model is `lightning-storm.js`. One effect,
+ * so one photosensitive switch turns every flash off for a player who asks.
  *
  * THIS FILE IS THE DECLARATION (params schema + manifest) — mirrors
  * candle-flame.js's split exactly. The pure path/envelope/scheduling math
@@ -611,6 +612,99 @@ export const LIGHTNING_PARAMS = Object.freeze({
     label: 'Origin light wall-clip radius',
     help: 'Radius used for the wall-clip test — can differ from the light’s own visual radius so clipping does not thrash every time the light flickers.',
   },
+  // ── STORM — the lightning the weather makes on its own (mmp-63o.2/.11/.33) ─
+  // How OFTEN is the weather's Lightning fader (`lightning01`); these dials shape
+  // what each strike looks like. Read by `vt-pan-viewer.js` into
+  // `lightning-storm.js#createStormLightning` and its consumers.
+  stormRate: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.05,
+    default: 1,
+    category: 'Storm',
+    label: 'Storm strikes how often',
+    help: 'Multiplies how often the storm strikes at any Lightning fader setting. 1 = as the fader says; 2 = twice as often.',
+  },
+  stormBrightness: {
+    type: 'float',
+    min: 0,
+    max: 4,
+    step: 0.05,
+    default: 1,
+    category: 'Storm',
+    label: 'Flash brightness',
+    help: 'How much light a strike throws across the land at night. 1 is about a noon’s worth outdoors at the flash’s peak.',
+  },
+  stormDayStrength: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.3,
+    category: 'Storm',
+    label: 'Flash strength by day',
+    help: 'How much of the night flash a strike still adds in full daylight. Real daytime lightning is a modest flicker; 1 = as bright as at night.',
+  },
+  stormGroundShare: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.35,
+    category: 'Storm',
+    label: 'Ground strikes',
+    help: 'The share of strikes that reach the ground (a bolt, hard shadows, a lit doorway). The rest flash inside the cloud and light it from within.',
+  },
+  stormColor: {
+    type: 'color',
+    space: 'srgb',
+    default: '#d0dcff',
+    category: 'Storm',
+    label: 'Flash colour',
+    help: 'The colour of the flash. Real lightning is a cold blue-white.',
+  },
+  stormBolts: {
+    type: 'bool',
+    default: true,
+    category: 'Storm',
+    label: 'Bolts on ground strikes',
+    help: 'Draw the forked bolt where a strike reaches the ground. Off = the flash and the light only.',
+  },
+  stormStrikeLight: {
+    type: 'bool',
+    default: true,
+    category: 'Storm',
+    label: 'Strike casts shadows',
+    help: 'A ground strike lights the map from where it lands: walls throw hard shadows away from it and its light pours through open doors and windows.',
+  },
+  stormShadows: {
+    type: 'bool',
+    default: true,
+    category: 'Storm',
+    label: 'Flash throws shadows',
+    help: 'At night each strike casts its own hard shadows from buildings, trees and bushes, thrown away from where it strikes — a far strike rakes long shadows across the map, a flash overhead short ones. By day the sun keeps its shadows.',
+  },
+  stormWindowBeams: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 1,
+    category: 'Storm',
+    label: 'Window beams turn to the strike',
+    help: 'How far window light swings round to stream away from a strike while it flashes (only where the flash outshines the daylight). 0 = window light only brightens.',
+  },
+  stormCloudGlow: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.05,
+    default: 1,
+    category: 'Storm',
+    label: 'Clouds glow',
+    help: 'How brightly the storm clouds light up from inside with each flash.',
+  },
 });
 
 /**
@@ -668,14 +762,14 @@ export const LIGHTNING = Object.freeze({
       name: 'flash',
       fromProfile: 'low',
       cost: Object.freeze({ class: 'C1', estMsPerMp: 0.01 }),
-      adds: 'a screen-wide flash signal on return-stroke connect (attack/decay/flicker), published for downstream consumers',
+      adds: 'a screen-wide flash signal on return-stroke connect (attack/decay/flicker), published for downstream consumers; the STORM flash (lightning-storm.js): the outdoor light, window light and beams, cloud glow and lit rain',
     }),
     Object.freeze({
       n: 3,
       name: 'originFlash',
       fromProfile: 'performance',
       cost: Object.freeze({ class: 'C6', estMsPerMp: 0.15 }),
-      adds: 'a wall-clipped, darkness-punching point light at the bolt origin/impact, reusing the shared point-light pool',
+      adds: 'a wall-clipped, darkness-punching point light at the bolt origin/impact, reusing the shared point-light pool; the STORM ground strike’s own light (hard shadows away from it, light through open doors)',
     }),
   ]),
   // Recorded, NOT built — still genuinely absent (Effects.md §0).
@@ -694,7 +788,11 @@ export const LIGHTNING = Object.freeze({
     }),
     Object.freeze({
       name: 'weather-lightning-flash-merge',
-      note: "V2 merged this effect's outsideFlash signal with its WeatherLightningEffectV2 sibling via max() for downstream consumers (vegetation brighten, etc). Out of scope until a V3 weather/landscape lightning effect exists.",
+      note: "V2 merged this effect's outsideFlash signal with its WeatherLightningEffectV2 sibling via max() for downstream consumers. The storm flash (lightning-storm.js, 2026-11-08) now IS that sibling and lights the scene; an ANCHORED bolt's own outsideFlash01 still reaches no consumer (its origin light does). Merging it into the storm flash is the remaining step.",
+    }),
+    Object.freeze({
+      name: 'storm-scorch-ignite-thunder',
+      note: 'mmp-63o.11 leftovers: a fading scorch mark where a ground strike lands, a small chance it lights the fire system there, and a thunder cue delayed by distance. The strike plan already carries the position and time each needs.',
     }),
   ]),
 });

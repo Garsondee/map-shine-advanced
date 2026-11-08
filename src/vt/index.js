@@ -100,6 +100,7 @@ export {
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
   forceVtPanViewerLightningStrike,
+  getVtPanViewerStormLightning,
   setVtPanViewerWindForceThaw,
   getVtPanViewerWindSimStatus,
   resetVtPanViewerFrameStats,

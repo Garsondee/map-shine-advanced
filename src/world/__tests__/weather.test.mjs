@@ -36,7 +36,13 @@ export function run(t) {
   {
     // Four cloud axes (slice 1) + precip01/temperature01 (P1, the slice that
     // wired their first real consumer — the unconsumed-axis rule in action).
-    t.ok('seven axes ship: four cloud + two precipitation + fog', WEATHER_AXIS_NAMES.length === 7);
+    t.ok('eight axes ship: four cloud + two precipitation + fog + lightning', WEATHER_AXIS_NAMES.length === 8);
+    t.ok(
+      'lightning01 is a live 0..1 axis defaulting calm (mmp-63o.33)',
+      WEATHER_AXES.lightning01?.consumerStatus === 'live' &&
+        WEATHER_AXES.lightning01.fallback === 0 &&
+        WEATHER_AXES.lightning01.max === 1
+    );
     t.ok(
       'fogDensity01 is a live 0..1 axis defaulting clear (mmp-63o.1)',
       WEATHER_AXES.fogDensity01?.consumerStatus === 'live' &&

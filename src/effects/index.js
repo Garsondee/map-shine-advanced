@@ -872,6 +872,17 @@ export {
 } from './lightning-geometry.js';
 export { buildLightningGeometry, refillLightningGeometry, buildLightningMaterial } from './lightning-render.js';
 export { createLightningSubsystem } from './lightning-subsystem.js';
+// THE STORM'S LIGHTNING (2026-11-08, mmp-63o.2/.11/.33) — the strikes a thunderstorm makes on its own.
+export {
+  createStormLightning,
+  stormStrikeLightSource,
+  stormShadowSun,
+  STORM_IDLE,
+  STORM_FLASH_RGB,
+  STORM_SHADOW_SOFTNESS,
+  STORM_SHADOW_STRENGTH_MUL,
+  STORM_SHADOW_STROKE_JITTER_DEG,
+} from './lightning-storm.js';
 
 // ROPE & CHAIN (mythica-machina-press#1) — a rope/chain span hanging between
 // two GM-placed tether points, sagging under gravity and swaying in the
@@ -1090,6 +1101,7 @@ export {
   pushStorybookUniforms,
   resolveStorybookDeck,
   storybookPalette,
+  storybookFlashPalette,
   storybookLight,
   buildStorybookCloudNode,
   buildStorybookShadowNode,

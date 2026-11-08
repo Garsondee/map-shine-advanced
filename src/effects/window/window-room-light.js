@@ -146,6 +146,45 @@ export function resolveRoomSunFrame(sun, look) {
   };
 }
 
+/**
+ * THE STRIKE'S FRAME (mmp-63o.2): a lightning flash is, for a window, a second sun — low, cold and brief, standing
+ * where the strike is. `toLight` is the unit vector from the scene toward the strike; the beam is thrown away from
+ * it the full `maxDriftPx · drift` (a flash comes in low), and every window facing it counts as sunward.
+ * @param {{toLightX:number, toLightY:number}} flash
+ * @param {ReturnType<typeof resolveRoomLook>} look
+ */
+export function resolveRoomFlashFrame(flash, look) {
+  const x = Number.isFinite(flash?.toLightX) ? flash.toLightX : 0;
+  const y = Number.isFinite(flash?.toLightY) ? flash.toLightY : 0;
+  const l = Math.hypot(x, y);
+  const ux = l > 1e-6 ? x / l : 0;
+  const uy = l > 1e-6 ? y / l : -1;
+  const len = look.maxDriftPx * look.drift;
+  return { throwX: -ux * len, throwY: -uy * len, throwLenPx: len, toSunX: ux, toSunY: uy, lowSun01: 1 };
+}
+
+/**
+ * The sun's frame and the strike's, mixed by how much of the light at this moment is the flash (`w`, 0..1). At
+ * w = 0 it is exactly the sun's frame (byte-identical uniforms); at night a strike's w is near 1. Pure.
+ * @param {ReturnType<typeof resolveRoomSunFrame>} sun @param {ReturnType<typeof resolveRoomFlashFrame>} flash
+ * @param {number} w
+ */
+export function blendRoomFrames(sun, flash, w) {
+  const k = clamp01(Number.isFinite(w) ? w : 0);
+  if (!(k > 0) || !flash) return sun;
+  const m = (a, b) => a + (b - a) * k;
+  const throwX = m(sun.throwX, flash.throwX);
+  const throwY = m(sun.throwY, flash.throwY);
+  return {
+    throwX,
+    throwY,
+    throwLenPx: Math.hypot(throwX, throwY),
+    toSunX: m(sun.toSunX, flash.toSunX),
+    toSunY: m(sun.toSunY, flash.toSunY),
+    lowSun01: m(sun.lowSun01, flash.lowSun01),
+  };
+}
+
 /** Where along the throw tap `k` reads: from `1 − smear` of the way back to the full drift. */
 export function roomTapT(k, smear) {
   return 1 - smear * (1 - (k + 0.5) / WINDOW_ROOM_TAPS);

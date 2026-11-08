@@ -122,6 +122,8 @@ export const DEFAULT_SKY = Object.freeze({
   /** The ground mist (mmp-63o.1). Like `precip01`, authoritative ONLY under a `custom` sky — a named mood carries
    * its own fog. */
   fogDensity01: 0,
+  /** The storm's lightning (mmp-63o.33). Like `fogDensity01`, authoritative ONLY under a `custom` sky. */
+  lightning01: 0,
   /** `auto` | rain | snow | sleet | hail | ash | embers. Stored so a GM who
    * pinned "always snow" gets it back; `auto` hands control to temperature. */
   precipKindAuthored: 'auto',
@@ -190,6 +192,7 @@ export function normalizeSky(raw) {
     precip01: clampRange(r.precip01, 0, 1, DEFAULT_SKY.precip01),
     temperature01: clampRange(r.temperature01, 0, 1, DEFAULT_SKY.temperature01),
     fogDensity01: clampRange(r.fogDensity01, 0, 1, DEFAULT_SKY.fogDensity01),
+    lightning01: clampRange(r.lightning01, 0, 1, DEFAULT_SKY.lightning01),
     // Fails open to `auto` on an unknown kind — the closed list lives in
     // `world/weather.js`, and a stored value from a future version must hand
     // control back to the derivation rather than storm-lock a species.

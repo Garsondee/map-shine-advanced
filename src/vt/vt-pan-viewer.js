@@ -475,6 +475,16 @@ import {
   buildTorchFireBatchGeometry,
   updateTorchFireBatchGeometry,
   createLightningSubsystem,
+  // THE STORM'S LIGHTNING (mmp-63o.2) — strike schedule, flash, strike light (effects/lightning-storm.js).
+  createStormLightning,
+  stormStrikeLightSource,
+  stormShadowSun,
+  STORM_IDLE,
+  STORM_FLASH_RGB,
+  STORM_SHADOW_SOFTNESS,
+  STORM_SHADOW_STRENGTH_MUL,
+  STORM_SHADOW_STROKE_JITTER_DEG,
+  lightningHexToRgb01,
   // ROPE & CHAIN (mythica-machina-press#1, Phase 2) — the per-instance CPU
   // subsystem (effects/rope-chain-subsystem.js's own header explains why
   // this effect is per-instance, not pooled, unlike every other name in
@@ -677,6 +687,7 @@ import {
   pushStorybookUniforms,
   resolveStorybookDeck,
   storybookPalette,
+  storybookFlashPalette,
   storybookLight,
   buildStorybookCloudNode,
   buildStorybookShadowNode,
@@ -3550,7 +3561,8 @@ async function startVtPanViewerUnserialized({
       getShadowFloorPlan,
       getSunShadowRenderState,
       getMaskAuthorityVersion,
-      getShadowHandle: () => shadowHandle,
+      // At night, while a storm strikes, the field carries the strike's shadows (see `stormBuildingHandle`).
+      getShadowHandle: () => stormBuildingHandle ?? shadowHandle,
       getEnvLight: () => envLight,
       renderSunShadowPass,
       // LINEAR + MIPMAPPED — see createMaskDataTexture's own doc for why each
@@ -6036,6 +6048,121 @@ async function startVtPanViewerUnserialized({
      * origin-flash light (`getLightningActiveStrands` below) — same
      * `uGlobalTimeMs` plain-value handoff as the pool itself.
      */
+    // ── THE STORM'S LIGHTNING (mmp-63o.2/.11/.33, 2026-11-08) ─────────────────
+    // Stepped once a frame in `updateEnvSnapshot` (after the sky handle, before the clouds); every consumer reads
+    // `stormFrame`: the outdoor light (envLight.setFlash), the window light and its beams, the cloud palette, the rain
+    // (`getSceneLight01` + `flash01`), the bolt (lightningSubsystem.sync) and the strike light (pointLights). Declared
+    // HERE, ahead of every closure that reads it, so none can meet it in its temporal dead zone.
+    const stormLightning = createStormLightning();
+    let stormFrame = STORM_IDLE;
+    /** The flash colour as linear RGB at unit luminance (sRGB hex in, from the Storm card), cached on the hex. */
+    let stormColorKey = '';
+    let stormColorLinear = STORM_FLASH_RGB;
+    let stormColorSrgb = [0.82, 0.86, 1];
+    function stormColorFor(hex) {
+      if (typeof hex !== 'string' || hex === stormColorKey) return stormColorLinear;
+      stormColorKey = hex;
+      const s = lightningHexToRgb01(hex);
+      const lin = s.map((c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
+      const l = lin[0] * 0.2126 + lin[1] * 0.7152 + lin[2] * 0.0722;
+      stormColorLinear = l > 1e-4 ? lin.map((c) => c / l) : STORM_FLASH_RGB;
+      stormColorSrgb = s;
+      return stormColorLinear;
+    }
+    /**
+     * THE STRIKE'S SHADOWS, once a frame after the storm steps (mmp-63o.2). See `stormBuildingHandle`'s declaration.
+     * The building field is re-baked by the sun-shadow subsystem itself (its handle changed), within its own throttle,
+     * so a scheduled strike's shadows are ready before it lands; `setFieldVisMix` only lets the field cut the flash
+     * once the bake for THIS strike has actually landed. Plants follow each stroke at the flash's share of the light.
+     */
+    function syncStormShadows(ls, lp, stormView) {
+      const want = !!ls?.enabled && lp.stormShadows !== false && Number(ls?.perfTier) >= 2;
+      // By day the field is the sun's: a flash adds light there but never moves the sun's shadows.
+      const sunCasts = (shadowHandle?.depth01 ?? 0) >= 0.05;
+      if (!want || sunCasts || !dimensions?.sceneRect) {
+        if (stormBuildingHandle || stormVegHandle) {
+          stormBuildingHandle = null;
+          stormVegHandle = null;
+          stormShadowTargetId = null;
+          stormFieldReady = false;
+          stormVegKey = '';
+        }
+        envLight.setFieldVisMix(1, 0);
+        return;
+      }
+      const f = stormFrame;
+      const target = f.active ? { id: f.strikeId, kind: f.kind, x: f.x, y: f.y, seed: f.strikeSeed } : (f.next ?? null);
+      const gridPx = readGridSizePixels().gridSizePixels;
+      const rect = dimensions.sceneRect;
+      const cx = stormView ? (stormView.minX + stormView.maxX) / 2 : rect.x + rect.width / 2;
+      const cy = stormView ? (stormView.minY + stormView.maxY) / 2 : rect.y + rect.height / 2;
+      const look = getSunShadowRenderState().params ?? {};
+      const strikeHandle = (sun) =>
+        createShadowHandle({
+          version: ++stormShadowVersion,
+          sun,
+          weather: { shadowCloudCover01: 0 },
+          look,
+          gridSizePx: dimensions?.size,
+          atmosphereOverride: { softnessMul: STORM_SHADOW_SOFTNESS, strengthMul: STORM_SHADOW_STRENGTH_MUL },
+        });
+      if (target && target.id !== stormShadowTargetId) {
+        stormShadowTargetId = target.id;
+        stormBuildingHandle = strikeHandle(stormShadowSun(target, { cx, cy, gridPx }));
+        stormFieldReady = false;
+      }
+      if (stormBuildingHandle && !stormFieldReady) {
+        const a = stormBuildingHandle.atmosphere;
+        const floors = sunShadows.getStatus().floors;
+        stormFieldReady =
+          floors.length > 0 &&
+          floors.every(
+            (s) =>
+              s.lastBake?.sun &&
+              Math.abs(s.lastBake.sun.azimuthDeg - a.azimuthDeg) < 0.01 &&
+              Math.abs(s.lastBake.sun.elevationDeg - a.elevationDeg) < 0.01
+          );
+      }
+      const live = f.active && !!target && target.id === stormShadowTargetId;
+      envLight.setFieldVisMix(0, live && stormFieldReady ? 1 : 0);
+      if (!live) {
+        stormVegHandle = null;
+        stormVegKey = '';
+        return;
+      }
+      // Plants: a fresh strike-as-sun per return stroke (each stroke's channel differs a little), at the flash's
+      // share of the light — the shadow is the flash missing, so it fades as the flash does.
+      stormVegWeight = f.share01;
+      const key = `${target.id}:${Math.max(0, f.stroke)}`;
+      if (key !== stormVegKey) {
+        stormVegKey = key;
+        const base = strikeHandle(
+          stormShadowSun(target, {
+            cx,
+            cy,
+            gridPx,
+            stroke: Math.max(0, f.stroke),
+            jitterDeg: STORM_SHADOW_STROKE_JITTER_DEG,
+          })
+        );
+        stormVegHandle = Object.freeze({
+          ...base,
+          forCaster: (a) => {
+            const c = base.forCaster(a);
+            return { ...c, strength01: c.strength01 * stormVegWeight };
+          },
+        });
+      }
+    }
+
+    /** What the window beams turn by: `{toLightX, toLightY, weight}` while a flash outshines the day, else null. */
+    function stormWindowFrame() {
+      if (!stormFrame.active) return null;
+      const beams = getLightningRenderState()?.params?.stormWindowBeams;
+      const weight = stormFrame.share01 * (Number.isFinite(beams) ? Math.max(0, Math.min(1, beams)) : 1);
+      return weight > 0.001 ? { toLightX: stormFrame.toLightX, toLightY: stormFrame.toLightY, weight } : null;
+    }
+
     const lightningSubsystem = createLightningSubsystem({
       THREE,
       uGlobalTimeMs,
@@ -6647,7 +6774,11 @@ async function startVtPanViewerUnserialized({
                 torrentStrength: cascade.params.torrentStrength,
               }
             : undefined,
-          flash01: 0, // sky-flash's own consumer is a later slice.
+          // THE STORM FLASH (mmp-63o.2): rain and snow catch it (each species' own flash response); the scene
+          // light above already includes the flash's light, so this is the extra glint, not the whole lift.
+          // Weighted by the flash's share of the light: by day rain is already sunlit, and the full x4 glint turned
+          // every streak white (rig, 2026-11-08).
+          flash01: Math.min(1, stormFrame.flash01 * stormFrame.share01),
           // BUDGET-AWARE 2026-08-29, LIVE-RESOLVED 2026-08-30 — was hardcoded
           // `1` forever (docs/planning/Effect-Tier-Gradient-Audit-2026-08-29.md
           // §3.4), then genuinely tier-scaled but off a RAW settings read
@@ -6686,6 +6817,13 @@ async function startVtPanViewerUnserialized({
       getCandleRenderState,
       getLightningRenderState,
       getLightningActiveStrands: () => lightningSubsystem.activeStrands(),
+      // The storm's ground-strike light (mmp-63o.2): hard shadows away from the strike, light through open doors.
+      getStormLightSources: () => {
+        const g = stormFrame.ground;
+        if (!g || getLightningRenderState()?.params?.stormStrikeLight === false) return [];
+        const l = stormStrikeLightSource(g, { colorSrgb: stormColorSrgb });
+        return l ? [l] : [];
+      },
       // Fire's lights, built during `fireSubsystem.sync()` just above in the
       // frame loop — so they are THIS frame's, on the same puff clock the
       // flame is drawing with. (The goo's light left this pool 2026-11-08: MAX-blended discs drew hard pale
@@ -7316,7 +7454,11 @@ async function startVtPanViewerUnserialized({
      * light pass — an unmeasured scene keeps its weather.
      */
     function getSceneLight01() {
-      return lastAmbientColors ? sceneLightLevel(maxRgb(lastAmbientColors.background, lastGlobalLightFloor)) : 1;
+      if (!lastAmbientColors) return 1;
+      const base = maxRgb(lastAmbientColors.background, lastGlobalLightFloor);
+      // A lightning flash lights the weather too (mmp-63o.2): rain drawn after the lighting multiply reads this.
+      const f = stormFrame.addRgb;
+      return sceneLightLevel(f[0] + f[1] + f[2] > 0 ? [base[0] + f[0], base[1] + f[1], base[2] + f[2]] : base);
     }
     /** The last-read grid size (px/square) — tracked for the SAME reason as
      * lastAmbientColors, specifically to let getPointLightsInfo() report the
@@ -11102,7 +11244,11 @@ async function startVtPanViewerUnserialized({
       // other guarded `tMs` read in this file), but a real bug in its own
       // right and worth closing on the same pass.
       profiler?.begin(Z.lightLightningSync);
-      lightningSubsystem.sync(env.time?.tMs ?? uGlobalTimeMs.value);
+      // The storm's ground strike (if one is flashing) rides in beside the anchored bolts (mmp-63o.11).
+      lightningSubsystem.sync(env.time?.tMs ?? uGlobalTimeMs.value, {
+        ground: stormFrame.ground,
+        gridPx: readGridSizePixels().gridSizePixels,
+      });
       profiler?.end(Z.lightLightningSync);
 
       // FIRE's compute step does NOT happen here — see the `sims` block, which
@@ -13765,6 +13911,18 @@ async function startVtPanViewerUnserialized({
      * Starts neutral (overhead clear noon) so a caster built before the first
      * env snapshot still gets a finite, sane answer rather than a null check. */
     let shadowHandle = createShadowHandle();
+    // ── THE STRIKE'S SHADOWS (mmp-63o.2; Ingram 2026-11-08: "use a duplicate of the building and veg shadows to
+    // throw the scene into relief") — the SAME producers, driven by a strike-as-sun handle
+    // (`lightning-storm.js#stormShadowSun`) instead of the sun's. Only at night, when the sun casts nothing and its
+    // baked field is free: the building bake carries the NEXT strike's shadows (baked ahead, so they are ready when
+    // it lands) and the plants follow each return stroke. By day the sun's shadows stay untouched.
+    let stormBuildingHandle = null;
+    let stormVegHandle = null;
+    let stormVegWeight = 0;
+    let stormVegKey = '';
+    let stormShadowTargetId = null;
+    let stormFieldReady = false;
+    let stormShadowVersion = 1_000_000;
 
     function updateEnvSnapshot() {
       const time = frameClock.tick();
@@ -14009,6 +14167,38 @@ async function startVtPanViewerUnserialized({
         envLight.setMoon(skyHandle.moonAddRgb);
       }
 
+      // ── THE STORM'S LIGHTNING (mmp-63o.2/.11/.33) — every frame, on the SHARED clock (server time, which follows
+      // the capture clock), so every client sees the same strike and a recorded video replays it. Off (and idle)
+      // when the Lightning effect is off — which it is for a player who reduces flashing effects — or below its
+      // 'flash' rung. The strike light rides the 'originFlash' rung (the pool checks it).
+      {
+        const ls = getLightningRenderState();
+        const lp = ls?.params ?? {};
+        const bg = lastAmbientColors ? maxRgb(lastAmbientColors.background, lastGlobalLightFloor) : [0, 0, 0];
+        const stormView = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+        stormFrame = stormLightning.step({
+          nowMs: Number.isFinite(ls?.sharedNowMs) ? ls.sharedNowMs : (env.time?.tMs ?? 0),
+          lightning01: env.weather.lightning01 ?? 0,
+          enabled: !!ls?.enabled && Number(ls?.perfTier) >= 2,
+          dayFactor01: env.sun.dayFactor01,
+          ambientLum: bg[0] * 0.2126 + bg[1] * 0.7152 + bg[2] * 0.0722,
+          sceneRect: dimensions?.sceneRect ?? null,
+          gridPx: readGridSizePixels().gridSizePixels,
+          view: stormView,
+          params: {
+            rateScale: lp.stormRate,
+            brightness: lp.stormBrightness,
+            dayStrength: lp.stormDayStrength,
+            groundShare: lp.stormGroundShare,
+            // No strike light (switched off, or below its rung): the sky part carries the whole flash.
+            pointLightShare: lp.stormStrikeLight === false || Number(ls?.perfTier) < 3 ? 0 : undefined,
+          },
+          colorRgb: stormColorFor(lp.stormColor),
+        });
+        envLight.setFlash(stormFrame);
+        syncStormShadows(ls, lp, stormView);
+      }
+
       // ── THE CLOUD FIELD — ticked every frame, never gated on `skyKey` ────
       // (see this module's own declaration comment on why: `drift`/`boil`
       // are continuous state, not a function of the current instant, so
@@ -14170,10 +14360,15 @@ async function startVtPanViewerUnserialized({
           lastStorybookDeck = sbDeck;
           pushStorybookUniforms(sbU, {
             deck: sbDeck,
-            palette: storybookPalette(env.sun, {
-              cover01: env.weather.cloudCover01,
-              precip01: env.weather.precip01,
-            }),
+            // A lightning flash lights the cloud from inside (mmp-63o.2) — a palette lift, no shader change.
+            palette: storybookFlashPalette(
+              storybookPalette(env.sun, {
+                cover01: env.weather.cloudCover01,
+                precip01: env.weather.precip01,
+              }),
+              stormFrame.addRgb,
+              getLightningRenderState()?.params?.stormCloudGlow ?? 1
+            ),
             light: storybookLight({ x: skyHandle.key.dirX, y: skyHandle.key.dirY }, skyHandle.key.elevationDeg),
             eye: sbEye,
             board: sbBoard,
@@ -17971,7 +18166,9 @@ async function startVtPanViewerUnserialized({
       const bg = maxRgb(lastAmbientColors.background, lastGlobalLightFloor);
       const m = skyHandle?.ambientMultiplierRgb ?? [1, 1, 1];
       const moon = skyHandle?.moonAddRgb ?? [0, 0, 0];
-      return [bg[0] * m[0] + moon[0], bg[1] * m[1] + moon[1], bg[2] * m[2] + moon[2]];
+      // A lightning flash is outdoor light too (mmp-63o.2): the windows let it in — all of it.
+      const f = stormFrame.windowAddRgb;
+      return [bg[0] * m[0] + moon[0] + f[0], bg[1] * m[1] + moon[1] + f[1], bg[2] * m[2] + moon[2] + f[2]];
     }
     /**
      * THE ROOM MAP CACHE (scene/room-map.js) — one map per floor, built from that floor's walls and `_Outdoors`,
@@ -18057,6 +18254,8 @@ async function startVtPanViewerUnserialized({
         // THE OUTDOOR MATCH (2026-10-27) — what a fully painted _Window pulls
         // its room toward; see `windowOutdoorLightRgb`.
         getOutdoorLightRgb: windowOutdoorLightRgb,
+        // A lightning flash swings the window beams round to stream away from the strike (mmp-63o.2).
+        getFlashFrame: stormWindowFrame,
         // So sync() can bracket its own per-frame cost (light.windowSync) —
         // perf-instrumentation-audit-2026-08-12, same shape as specular's
         // own `profiler` above.
@@ -18366,7 +18565,8 @@ async function startVtPanViewerUnserialized({
       THREE,
       scene: vegShadowIllumScene,
       dimensions,
-      getShadowHandle: () => shadowHandle,
+      // During a flash at night, every tree and bush throws the strike's shadow instead (see `stormVegHandle`).
+      getShadowHandle: () => stormVegHandle ?? shadowHandle,
       getPxPerFt: vegetationPxPerFt,
       getLongestShadowPx: longestShadowPxNow,
       setTileGeometry: (rec, placement, imageW, imageH, segments, padPx) =>
@@ -31613,7 +31813,31 @@ async function startVtPanViewerUnserialized({
        * wrapper turns that into an honest status message rather than a
        * silent nothing.
        */
-      forceLightningStrike: lightningSubsystem.forceStrike,
+      // The Strike impulse: every anchored bolt fires AND the storm lands a ground strike near the middle of the
+      // view (mmp-63o.11) — so Strike always shows something, anchors or not, slider at 0 or not.
+      forceLightningStrike: (at) => {
+        lightningSubsystem.forceStrike();
+        stormLightning.force(at ?? {});
+      },
+      /** DIAGNOSTIC: the storm's live strikes and this frame's flash (mmp-63o.2). */
+      getStormLightning: () => ({
+        ...stormLightning.status(),
+        frame: stormFrame,
+        boltsSpawned: lightningSubsystem.stormBoltsSpawned(),
+        shadows: {
+          target: stormShadowTargetId,
+          fieldReady: stormFieldReady,
+          plants: !!stormVegHandle,
+          plantWeight: stormVegWeight,
+          sun: stormBuildingHandle
+            ? {
+                azimuthDeg: stormBuildingHandle.atmosphere.azimuthDeg,
+                elevationDeg: stormBuildingHandle.atmosphere.elevationDeg,
+                depth01: stormBuildingHandle.depth01,
+              }
+            : null,
+        },
+      }),
       disposeFire: fireSubsystem.dispose,
       /**
        * FIRE'S OWN PER-FRAME COUNTS — `{engines, fires, lights, spawnPoints}`
@@ -32325,6 +32549,8 @@ async function startVtPanViewerUnserialized({
           precipEased01: env.weather.precip01,
           // The fog's (mmp-63o.1) — the Fog fader follows a mood-chip fade the same way.
           fogEased01: env.weather.fogDensity01,
+          // The lightning's (mmp-63o.33), the same way.
+          lightningEased01: env.weather.lightning01,
           // The Face darkens at night. `dayFactor01` is the same signal the
           // shadow handle and the daylight tint already read — not a second
           // "is it dark" derivation.
@@ -35122,10 +35348,16 @@ export function triggerVtPanViewerWindDoorImpulse(wallSegment) {
  * its own status text instead of pretending to detect it.
  * @returns {{skipped: boolean, reason?: string}}
  */
-export function forceVtPanViewerLightningStrike() {
+export function forceVtPanViewerLightningStrike(at) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
-  _active.forceLightningStrike();
+  _active.forceLightningStrike(at);
   return { skipped: false };
+}
+
+/** The storm's lightning right now (mmp-63o.2): live strikes, this frame's flash, bolts drawn. Diagnostic. */
+export function getVtPanViewerStormLightning() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getStormLightning();
 }
 
 /**

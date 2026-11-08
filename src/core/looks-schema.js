@@ -121,6 +121,8 @@ export const LOOK_CHANNELS = Object.freeze([
   { key: 'weather.archetype', facet: 'weather', label: 'Sky type', kind: 'id' },
   { key: 'weather.cloudCover01', facet: 'weather', label: 'Clouds', kind: 'number', min: 0, max: 1 },
   { key: 'weather.precip01', facet: 'weather', label: 'Rain', kind: 'number', min: 0, max: 1 },
+  { key: 'weather.fogDensity01', facet: 'weather', label: 'Fog', kind: 'number', min: 0, max: 1 },
+  { key: 'weather.lightning01', facet: 'weather', label: 'Lightning', kind: 'number', min: 0, max: 1 },
   { key: 'weather.temperature01', facet: 'weather', label: 'Temperature', kind: 'number', min: 0, max: 1 },
   { key: 'wind.speed01', facet: 'wind', label: 'Wind', kind: 'number', min: 0, max: 1 },
   { key: 'wind.directionDeg', facet: 'wind', label: 'Wind direction', kind: 'number', min: 0, max: 360, wrap: true },
@@ -307,6 +309,8 @@ export function reconcileLook(look, { channels = LOOK_CHANNELS, isKnownArchetype
   if (typeof playable['weather.archetype'] === 'string') {
     delete playable['weather.cloudCover01'];
     delete playable['weather.precip01'];
+    delete playable['weather.fogDensity01'];
+    delete playable['weather.lightning01'];
   }
   const facets = LOOK_FACET_IDS.filter((f) => Object.keys(playable).some((k) => byKey.get(k)?.facet === f));
   return { playable, stale, invalid, facets };
@@ -366,6 +370,8 @@ export function captureLook({ id, name, facets, read, group = 'mine' }) {
   if (typeof values['weather.archetype'] === 'string') {
     delete values['weather.cloudCover01'];
     delete values['weather.precip01'];
+    delete values['weather.fogDensity01'];
+    delete values['weather.lightning01'];
   }
   // A captured style keeps its one-click colour button: a GM who saved a
   // one-colour or tinted look can re-pick the colour from the tile, like a starter.
@@ -570,6 +576,8 @@ export function describeLook(look, archetypeLabel) {
   } else if (Number.isFinite(playable['weather.cloudCover01'])) {
     parts.push(`cloud ${pct(playable['weather.cloudCover01'])}`);
     if ((playable['weather.precip01'] ?? 0) > 0.02) parts.push(`rain ${pct(playable['weather.precip01'])}`);
+    if ((playable['weather.fogDensity01'] ?? 0) > 0.02) parts.push(`fog ${pct(playable['weather.fogDensity01'])}`);
+    if ((playable['weather.lightning01'] ?? 0) > 0.02) parts.push(`lightning ${pct(playable['weather.lightning01'])}`);
   }
   if (Number.isFinite(playable['wind.speed01'])) parts.push(`wind ${pct(playable['wind.speed01'])}`);
   if (Number.isFinite(playable['night.darkness01'])) parts.push(`dark ${pct(playable['night.darkness01'])}`);

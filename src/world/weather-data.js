@@ -92,6 +92,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 1100,
       precip01: 0,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -106,6 +107,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 4000,
       precip01: 0,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -120,6 +122,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 4200,
       precip01: 0,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -134,6 +137,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 1100,
       precip01: 0,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -148,6 +152,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 350,
       precip01: 0,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -162,6 +167,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 700,
       precip01: 0,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -176,6 +182,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 5000,
       precip01: 0,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -190,6 +197,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 6000,
       precip01: 0,
       fogDensity01: 0.7,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -204,6 +212,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 5000,
       precip01: 0.3,
       fogDensity01: 0.2,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -218,6 +227,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 5000,
       precip01: 0.7,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -253,6 +263,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 4500,
       precip01: 0.6,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -277,6 +288,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 4200,
       precip01: 0.65,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -298,6 +310,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 6000,
       precip01: 0.55,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   // ── WONDERS (mmp-63o.7, 2026-11-07): the four species rows that existed with no way to pick them. ──
@@ -314,6 +327,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 5200,
       precip01: 0.6,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -329,6 +343,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 1500,
       precip01: 0.35,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -344,6 +359,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 1700,
       precip01: 0.4,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -359,6 +375,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 2400,
       precip01: 0.4,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -388,6 +405,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
        * bombardment. */
       precip01: 0.7,
       fogDensity01: 0,
+      lightning01: 0.35,
     }),
   }),
   Object.freeze({
@@ -402,6 +420,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 2600,
       precip01: 0,
       fogDensity01: 0,
+      lightning01: 0,
     }),
   }),
   Object.freeze({
@@ -416,6 +435,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudScalePx: 1600,
       precip01: 0.85,
       fogDensity01: 0,
+      lightning01: 0.6,
     }),
   }),
 ]);
@@ -446,6 +466,8 @@ export const ARCHETYPE_OWNED_AXES = Object.freeze([
   'precip01',
   // mmp-63o.1 (2026-11-07): fog is the sky's business too — a mood says how foggy it is, and switching mood clears it.
   'fogDensity01',
+  // mmp-63o.33 (2026-11-08): so is lightning — the Storm mood brings it, any calmer mood ends it.
+  'lightning01',
 ]);
 
 /** Index for O(1) lookup. Built once; the table is frozen so it cannot drift. */

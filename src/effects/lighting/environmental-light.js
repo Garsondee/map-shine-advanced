@@ -490,6 +490,8 @@ export function buildEnvironmentalLightMaterials({
     sRGBTransferEOTF,
     sRGBTransferOETF,
     min,
+    dot,
+    exp,
   } = THREE.TSL;
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -521,6 +523,19 @@ export function buildEnvironmentalLightMaterials({
   const uSkyMultiplier = uniform(vec3(1, 1, 1));
   /** The moon's additive light (`sky-access.js#moonAddRgb`), gamma-space ambient units. */
   const uMoonAdd = uniform(vec3(0, 0, 0));
+  /**
+   * THE STORM FLASH (mmp-63o.2, `lightning-storm.js`): the light a strike adds outdoors, gamma-space ambient units,
+   * and where it comes from — (x, y, reach px, far share). `[0,0,0]` between strikes, so the term adds nothing.
+   */
+  const uFlashAdd = uniform(vec3(0, 0, 0));
+  const uFlashAt = uniform(vec4(0, 0, 1, 1));
+  /**
+   * WHOSE SHADOW THE BAKED FIELD HOLDS (mmp-63o.2): (x) how much the field shades the ambient — 1 by day, when it
+   * is the sun's; (y) how much it shades the storm flash — 1 at night while it holds the strike's own shadows (the
+   * sun casts none at night, so the field is free to carry the strike's). Weights, not gates: both terms are always
+   * compiled, and (1, 0) is exactly the pre-storm arithmetic.
+   */
+  const uFieldVisMix = uniform(vec2(1, 0));
   /** The camera's world rect THIS frame: (minX, minY, maxX, maxY). */
   const uViewRect = uniform(vec4(0, 0, 1, 1));
   /** The world rect the outdoors texture covers: (minX, minY, maxX, maxY). */
@@ -830,9 +845,14 @@ export function buildEnvironmentalLightMaterials({
     // otherwise throw its shadow on across the padding. The cloud shadow and
     // sky need no gate of their own here — they ride `outdoors`, which is
     // already 0 off the map.
-    const sunVis = sunVisRaw
-      ? mix(float(1), sunVisRaw, buildInsideRectNode(THREE.TSL, { worldX, worldY, rect: uSceneRect }))
+    const fieldVis = sunVisRaw
+      ? mix(float(1), sunVisRaw, buildInsideRectNode(THREE.TSL, { worldX, worldY, rect: uSceneRect })).toVar(
+          'envFieldVis'
+        )
       : null;
+    // The field is the sun's by day and the lightning strike's at night (`uFieldVisMix`).
+    const sunVis = fieldVis ? mix(float(1), fieldVis, uFieldVisMix.x) : null;
+    const flashVis = fieldVis ? mix(float(1), fieldVis, uFieldVisMix.y) : null;
 
     // ── THE CLOUD SHADOW — doc 03 §2's consumer #1, "the money slice": a
     // passing cloud darkens the outdoor ambient. Gated by the SAME outdoors
@@ -965,7 +985,16 @@ export function buildEnvironmentalLightMaterials({
     // moonlight appears only in the gaps and drifts with them. `uMoonAdd` is
     // `[0,0,0]` unless the Moonlight option is on and it is night.
     const moonGate = (outdoors ?? float(1)).mul(cloudVis ?? float(1));
-    const ambientLit = ambientLitCloud.add(uMoonAdd.mul(moonGate));
+    // THE STORM FLASH — an ADDED cold light, outdoors only (a roof keeps it out: indoors it arrives through the
+    // windows' own light and the strike's point light, never through the ceiling), NOT killed by cloud (the cloud
+    // base is what glows), brightest near the strike and never below its far share anywhere on the map.
+    const flashD = vec2(screenX, screenY).sub(uFlashAt.xy).div(uFlashAt.z);
+    const flashSpatial = mix(uFlashAt.w, float(1), exp(dot(flashD, flashD).negate()));
+    // The strike's own building shadows (the field, at night) cut the flash: hard, cold, thrown away from it.
+    const flashLight = uFlashAdd.mul(outdoors ?? float(1)).mul(flashSpatial);
+    const ambientLit = ambientLitCloud
+      .add(uMoonAdd.mul(moonGate))
+      .add(flashVis ? flashLight.mul(flashVis) : flashLight);
     return { node: vec4(fluidTintAdd ? ambientLit.add(fluidTintAdd) : ambientLit, float(1)), compiledClouds };
   };
   {
@@ -1108,6 +1137,25 @@ export function buildEnvironmentalLightMaterials({
   /** Push the moon's additive light (`sky-access.js#moonAddRgb`). `[0,0,0]` = off. */
   function setMoon(addRgb) {
     uMoonAdd.value.set(addRgb[0], addRgb[1], addRgb[2]);
+  }
+
+  /**
+   * Push this frame's storm flash (`lightning-storm.js#createStormLightning`'s frame). An idle frame writes zeros.
+   * @param {{addRgb:readonly number[], x:number, y:number, reachPx:number, farShare:number}} frame
+   */
+  function setFlash(frame) {
+    const a = frame?.addRgb ?? [0, 0, 0];
+    uFlashAdd.value.set(a[0], a[1], a[2]);
+    uFlashAt.value.set(frame?.x ?? 0, frame?.y ?? 0, Math.max(1, frame?.reachPx ?? 1), frame?.farShare ?? 1);
+  }
+
+  /**
+   * Whose shadow the baked sun-shadow field holds (see `uFieldVisMix`): `(1, 0)` = the sun's (the default),
+   * `(0, 1)` = the lightning strike's.
+   * @param {number} ambientMix @param {number} flashMix
+   */
+  function setFieldVisMix(ambientMix, flashMix) {
+    uFieldVisMix.value.set(ambientMix, flashMix);
   }
 
   /**
@@ -1273,6 +1321,8 @@ export function buildEnvironmentalLightMaterials({
     setAmbience,
     setSky,
     setMoon,
+    setFlash,
+    setFieldVisMix,
     setUiShadowTint,
     setLightLook,
     setViewRect,

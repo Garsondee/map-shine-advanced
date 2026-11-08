@@ -512,6 +512,30 @@ export function createStorybookUniforms(TSL) {
 }
 
 /**
+ * THE STORM FLASH IN THE CLOUD (mmp-63o.2): a strike lights the cloud from inside — the thick body glows most, the
+ * thin rim and the shadow side a little less. A lift of the hour's palette toward the flash colour, on the CPU, so
+ * the cloud shader is untouched (no recompile, no extra cost). `flashRgb` is the light the strike adds outdoors
+ * (`lightning-storm.js` frame `addRgb`, ambient units); `glow` the card's 'Clouds glow'. Pure.
+ * @param {object} palette - {@link storybookPalette}'s result (linear slots).
+ * @param {readonly number[]} flashRgb @param {number} [glow=1] @returns {object}
+ */
+export function storybookFlashPalette(palette, flashRgb, glow = 1) {
+  const g = Number.isFinite(glow) ? Math.max(0, glow) : 1;
+  if (!palette || !Array.isArray(flashRgb) || !(g > 0) || !(flashRgb[0] + flashRgb[1] + flashRgb[2] > 1e-5))
+    return palette;
+  // How much of the flash each slot catches: the body and the lit tops most, the shadow side least.
+  const share = { hi: 0.55, body: 0.5, shadow: 0.32, ink: 0.1, rim: 0.6 };
+  const out = { ...palette };
+  for (const slot of PALETTE_SLOTS) {
+    const c = palette[slot];
+    if (!Array.isArray(c)) continue;
+    const k = (share[slot] ?? 0.4) * g;
+    out[slot] = c.map((v, i) => v + flashRgb[i] * k);
+  }
+  return out;
+}
+
+/**
  * Push one frame. `deck` is {@link resolveStorybookDeck}'s result; `palette` {@link storybookPalette}'s.
  * @param {object} u @param {object} a
  */

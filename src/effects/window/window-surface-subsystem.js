@@ -66,7 +66,13 @@ import {
 } from './window-snow.js';
 import { deriveWindowRainField, buildWindowPresenceGrid, RAIN_FIELD_DEFAULT_EASE_PX } from './window-rain-field.js';
 import { windFlowVector, windStrength01ForSpeed01 } from '../../world/index.js';
-import { createWindowRoomLight, resolveRoomLook, resolveRoomSunFrame } from './window-room-light.js';
+import {
+  createWindowRoomLight,
+  resolveRoomLook,
+  resolveRoomSunFrame,
+  resolveRoomFlashFrame,
+  blendRoomFrames,
+} from './window-room-light.js';
 
 const log = createLogger('WindowSurface');
 
@@ -278,6 +284,7 @@ export function createWindowSurfaceSubsystem({
   getEnvSun,
   getAmbientCeilingRgb,
   getOutdoorLightRgb,
+  getFlashFrame,
   getEnv,
   getWindowOutdoorsGrid,
   getRoomMap,
@@ -290,6 +297,8 @@ export function createWindowSurfaceSubsystem({
   getEnvSun ??= () => null;
   getAmbientCeilingRgb ??= () => null;
   getOutdoorLightRgb ??= () => null;
+  // The storm flash's frame for the beams (mmp-63o.2): `{toLightX, toLightY, weight}` or null between strikes.
+  getFlashFrame ??= () => null;
   getEnv ??= () => null;
   getWindowOutdoorsGrid ??= () => null;
   getRoomMap ??= () => null;
@@ -771,7 +780,14 @@ export function createWindowSurfaceSubsystem({
       roomState.pushedTo = room;
     }
 
-    const frame = resolveRoomSunFrame(getEnvSun(), look);
+    // A lightning flash swings the beams round to stream away from the strike, by how much of the light right now
+    // is the flash (mmp-63o.2): at night nearly all of it, by day barely any. No flash = the sun's frame, untouched.
+    const flash = getFlashFrame();
+    const sunFrame = resolveRoomSunFrame(getEnvSun(), look);
+    const frame =
+      flash && flash.weight > 0
+        ? blendRoomFrames(sunFrame, resolveRoomFlashFrame(flash, look), flash.weight)
+        : sunFrame;
     room.setFrame(frame);
     roomState.frame = frame;
 

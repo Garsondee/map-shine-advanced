@@ -377,6 +377,7 @@ export async function runGuideAction(id, env) {
         cloudCover01: wb.getAxisValue?.('cloudCover01'),
         precip01: wb.getAxisValue?.('precip01'),
         fogDensity01: wb.getAxisValue?.('fogDensity01'),
+        lightning01: wb.getAxisValue?.('lightning01'),
       };
       const overMs = remote.getFadeOverMs?.() ?? 0;
       await wb.fadeToArchetype(a.archetype, overMs);

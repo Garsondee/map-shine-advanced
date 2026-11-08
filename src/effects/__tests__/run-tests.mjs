@@ -24,6 +24,7 @@ import { run as runPlayerTorchFireGeometry } from './player-torch-fire-geometry.
 import { run as runLightning } from './lightning.test.mjs';
 import { run as runLightningGeometry } from './lightning-geometry.test.mjs';
 import { run as runLightningSubsystem } from './lightning-subsystem.test.mjs';
+import { run as runLightningStorm } from './lightning-storm.test.mjs';
 import { run as runRopeChainGeometry } from './rope-chain-geometry.test.mjs';
 import { run as runVegetation } from './vegetation.test.mjs';
 import { run as runVegetationRender } from './vegetation-render.test.mjs';
@@ -93,6 +94,7 @@ const suites = [
   ['lightning', runLightning],
   ['lightning-geometry', runLightningGeometry],
   ['lightning-subsystem', runLightningSubsystem],
+  ['lightning-storm', runLightningStorm],
   ['rope-chain-geometry', runRopeChainGeometry],
   ['vegetation', runVegetation],
   ['vegetation-render', runVegetationRender],

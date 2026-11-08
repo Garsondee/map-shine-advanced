@@ -955,6 +955,9 @@ export function createPointLightPool({
   /** Fire's per-frame light descriptors, already clustered by `fire-subsystem.js`.
    * Optional so the pool stays constructible in rigs that have no fire. */
   getFireLightSources = null,
+  /** The storm's ground-strike lights (mmp-63o.2, `lightning-storm.js#stormStrikeLightSource`), already built for
+   * THIS frame by the viewer. Wall-clipped here exactly like the anchored bolt's origin light. Optional. */
+  getStormLightSources = null,
   /** Player-carried torch/flashlight descriptors (mythica-machina-press#77),
    * already built for THIS frame by `effects/lighting/player-light-geometry.js
    * #buildPlayerLightSources` from the live per-token read + the scene's
@@ -1696,12 +1699,20 @@ export function createPointLightPool({
             lightningState.params ?? {}
           )
         : [];
+    // THE STORM'S STRIKE LIGHT (mmp-63o.2) rides the same list, so it is wall-clipped (hard shadows away from the
+    // strike, light through open doors) and pruned by the same cache. Its clip radius is constant per strike: one
+    // sweep per strike, then cache hits for the rest of its flicker.
+    if (lightningState.enabled && Number(lightningState.perfTier) >= 3 && getStormLightSources) {
+      for (const l of getStormLightSources() ?? []) lightningLights.push(l);
+    }
     // `originFlashWallClipEnabled` (default true) is a per-scene author
     // choice, not per-strike — read once, same as V2's own `if (params.
     // originFlashWallClipEnabled === false)` early return.
     const lightningWallClipEnabled = lightningState.params?.originFlashWallClipEnabled !== false;
     for (const strike of lightningLights) {
-      if (!lightningWallClipEnabled) continue; // KEEPS the naive-circle shapePoints untouched, unclipped by design
+      // KEEPS the naive-circle shapePoints untouched, unclipped by design — never for a storm strike, whose whole point
+      // is the shadows its walls throw.
+      if (!lightningWallClipEnabled && !strike.sourceId.startsWith('storm:')) continue;
       let cached = lightningWallClipCache.get(strike.sourceId);
       if (!cached || cached.floorId !== currentFloorId || cached.radius !== strike.wallClipRadiusPx) {
         wallClipCacheStats.lightning.misses += 1;

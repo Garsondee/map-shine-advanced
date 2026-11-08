@@ -77,6 +77,8 @@ export const DEFAULT_WEATHER = Object.freeze({
   temperature01: 0.55,
   // ── FOG (mmp-63o.1) — the ground mist's density. 0 = clear air, LAW 5's no-op.
   fogDensity01: 0,
+  // ── LIGHTNING (mmp-63o.33) — how often the storm strikes. 0 = none, LAW 5's no-op.
+  lightning01: 0,
   // ── THE OWNER CONTRACT ────────────────────────────────────────────────────
   // `false` means NOBODY WROTE THIS — the values above are the module's own
   // defaults, not a weather owner's answer. Without this flag `cloudCover01: 0`
@@ -223,6 +225,8 @@ export function buildEnvSnapshot({
       temperature01: clamp01(w.temperature01),
       /** The ground mist (mmp-63o.1). */
       fogDensity01: clamp01(w.fogDensity01),
+      /** The storm's lightning (mmp-63o.33). */
+      lightning01: clamp01(w.lightning01),
       /** What is actually falling. DERIVED upstream (one derivation, one place
        * — Weather-Manager.md §2.2), passed through as a string rather than
        * re-derived here, because a second derivation is how two consumers end

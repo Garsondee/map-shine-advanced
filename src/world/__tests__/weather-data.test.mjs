@@ -70,6 +70,20 @@ export function run(t) {
       ARCHETYPE_OWNED_AXES.includes('fogDensity01') &&
         WEATHER_ARCHETYPES.find((a) => a.id === 'clear').axes.fogDensity01 === 0
     );
+    // ⭐ mmp-63o.33: the Storm mood strikes, the calm moods do not.
+    t.ok(
+      'the Storm archetype brings lightning, a clear sky ends it',
+      WEATHER_ARCHETYPES.find((a) => a.id === 'thunderstorm').axes.lightning01 >= 0.5 &&
+        WEATHER_ARCHETYPES.find((a) => a.id === 'clear').axes.lightning01 === 0 &&
+        ARCHETYPE_OWNED_AXES.includes('lightning01')
+    );
+    t.ok(
+      'only storm rows strike',
+      WEATHER_ARCHETYPES.filter((a) => a.axes.lightning01 > 0)
+        .map((a) => a.id)
+        .sort()
+        .join(',') === 'hailstorm,thunderstorm'
+    );
     // ⭐ THE PAYOFF: the wet rows actually carry precipitation, so a shelf click
     // rains rather than only greying the sky.
     t.ok(

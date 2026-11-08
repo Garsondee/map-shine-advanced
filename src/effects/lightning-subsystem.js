@@ -31,6 +31,7 @@ import {
   computeOutsideFlashSignal,
 } from './lightning-geometry.js';
 import { buildLightningMaterial, refillLightningGeometry } from './lightning-render.js';
+import { stormBoltSource } from './lightning-storm.js';
 
 const log = createLogger('Lightning');
 
@@ -39,6 +40,8 @@ const log = createLogger('Lightning');
  * bolt OR a branch, both drawn from the same fixed-capacity budget. */
 const LIGHTNING_MAX_ACTIVE_STRANDS = 24;
 const LIGHTNING_MAX_POINTS_PER_STRAND = 96;
+/** A storm bolt's width against the anchored bolt's own (see `spawnStormBolt`). */
+const STORM_BOLT_WIDTH_SCALE = 0.35;
 
 function clamp01(v) {
   const n = Number(v);
@@ -120,6 +123,9 @@ export function createLightningSubsystem({
    * seeding a stable phase offset once). */
   const outsideFlashState = { flashStartMs: -1, flashPeak: 0, flashSeed: Math.random() };
   let currentOutsideFlash01 = 0;
+  /** Storm strikes whose bolt has already been spawned (mmp-63o.11) — one bolt per strike. Bounded. */
+  const stormBoltIds = new Set();
+  let stormBoltsSpawned = 0;
 
   function ensureMaterial(quality) {
     if (matBundle && materialQuality === quality) return;
@@ -269,6 +275,66 @@ export function createLightningSubsystem({
     }
   }
 
+  /**
+   * THE STORM'S BOLT (mmp-63o.11): a ground strike from `lightning-storm.js` gets the same ribbon an anchored bolt
+   * draws, from a point in the cloud down to where it lands, timed so the leader reaches the ground at the first
+   * return stroke and the restrikes ride the strike's own strokes. Spawned once per strike, back-dated by how long
+   * the strike has already run (it is adopted within a frame or two of its start). Never occluded by a floor (it
+   * comes down from the sky): expected depth 0. Its `linkId` is cleared so the anchored bolt's origin light never
+   * doubles the storm's own strike light.
+   */
+  function spawnStormBolt(storm, nowMs, params, perfTier) {
+    const g = storm?.ground;
+    if (!g || stormBoltIds.has(g.id)) return;
+    stormBoltIds.add(g.id);
+    if (stormBoltIds.size > 32) stormBoltIds.delete(stormBoltIds.values().next().value);
+    const strokes = Array.isArray(g.strokes) && g.strokes.length ? g.strokes : [{ tMs: 30, peak: 1 }];
+    if (activeStrands.length >= LIGHTNING_MAX_ACTIVE_STRANDS) {
+      droppedForCapacity++;
+      return;
+    }
+    const first = strokes[0].tMs;
+    const last = strokes[strokes.length - 1].tMs;
+    const durationMs = last + 260;
+    const n = strokes.length;
+    const effective = {
+      ...params,
+      strikeDurationMs: durationMs,
+      leaderFraction: first / durationMs,
+      burstMinStrikes: n,
+      burstMaxStrikes: n,
+      wildArcChance: 0,
+      endPointRandomnessPx: 0,
+      ...(perfTier < 1 ? { branchMax: 0 } : {}),
+    };
+    const source = { ...stormBoltSource(g, num(storm.gridPx, 100)), expectedDepth: 0 };
+    const { main, branches } = generateBurst({
+      source,
+      burstIndex: 0,
+      spawnMs: nowMs - num(g.tMs, 0),
+      maxPointsPerStrand: LIGHTNING_MAX_POINTS_PER_STRAND,
+      params: effective,
+    });
+    main.linkId = null;
+    main.storm = true;
+    // Seen from above, a storm channel is a thin, hard thread, not the anchored bolt's 30 px glowing ribbon (the
+    // rig, 2026-11-08: at full width it bloomed into a soft white worm).
+    main.widthScale *= STORM_BOLT_WIDTH_SCALE;
+    activeStrands.push(main);
+    stormBoltsSpawned++;
+    dirty = true;
+    for (const branch of branches) {
+      if (activeStrands.length >= LIGHTNING_MAX_ACTIVE_STRANDS) {
+        droppedForCapacity++;
+        break;
+      }
+      branch.linkId = null;
+      branch.storm = true;
+      branch.widthScale *= STORM_BOLT_WIDTH_SCALE;
+      activeStrands.push(branch);
+    }
+  }
+
   function reapExpired(nowMs) {
     const before = activeStrands.length;
     if (!before) return;
@@ -303,7 +369,7 @@ export function createLightningSubsystem({
    * strikes on the burst clock, and rebuild the batched buffer only when the
    * strand SET actually changed. Runs before `pointLights.update()` so the
    * origin-flash light reads this frame's fresh strand snapshot. */
-  function syncLightning(nowMs) {
+  function syncLightning(nowMs, storm = null) {
     const state = getLightningRenderState();
     const enabled = !!state?.enabled;
     const params = state?.params ?? {};
@@ -322,7 +388,10 @@ export function createLightningSubsystem({
 
     const anchors = Array.isArray(state.anchors) ? state.anchors : [];
     const { sources } = groupLightningAnchorsIntoSources(anchors);
-    if (!sources.length) {
+    // The storm's own bolts (mmp-63o.11) live alongside the anchored ones: a scene with no anchors still draws them.
+    const stormStrands = activeStrands.some((s) => s.storm);
+    const stormBolt = !!storm?.ground && params.stormBolts !== false;
+    if (!sources.length && !stormStrands && !stormBolt) {
       if (activeStrands.length || schedules.size) {
         activeStrands = [];
         schedules.clear();
@@ -335,7 +404,15 @@ export function createLightningSubsystem({
     }
 
     const perfTier = num(state.perfTier, 0);
-    advanceSchedulesAndSpawn(sources, nowMs, params, perfTier);
+    if (sources.length) advanceSchedulesAndSpawn(sources, nowMs, params, perfTier);
+    else if (schedules.size) {
+      // The anchors went away: their bolts go with them, the storm's stay.
+      schedules.clear();
+      const before = activeStrands.length;
+      activeStrands = activeStrands.filter((s) => s.storm);
+      if (activeStrands.length !== before) dirty = true;
+    }
+    if (stormBolt) spawnStormBolt(storm, nowMs, params, perfTier);
     reapExpired(nowMs);
     // TIER 2 ('flash') GATES THE OUTSIDE FLASH — below it, the signal stays
     // at 0 (resetOutsideFlash), never silently computed for nobody. Checked
@@ -397,6 +474,8 @@ export function createLightningSubsystem({
      * pool slot — a debug-report readout V2 never had (it silently dropped
      * the same way, unreported). */
     droppedForCapacity: () => droppedForCapacity,
+    /** How many storm bolts this session has drawn (mmp-63o.11) — a diagnostic. */
+    stormBoltsSpawned: () => stormBoltsSpawned,
     /** Fast-forward every tracked source to fire on the very next sync() —
      * see forceStrike's own header for why this doesn't spawn directly. */
     forceStrike,

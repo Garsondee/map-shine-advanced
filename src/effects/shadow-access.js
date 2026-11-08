@@ -437,6 +437,9 @@ export function shadowAtmosphere(sun, weather) {
  * @param {{cloudCover01?: number}} [spec.weather] - `env.weather`.
  * @param {number} [spec.maxOffsetPx] - cap on any caster's throw (world px).
  * @param {number} [spec.gridSizePx] - px per grid square, for the longest shadow ({@link longestShadowPx}).
+ * @param {{softnessMul?: number, strengthMul?: number}|null} [spec.atmosphereOverride] - a light that is not the
+ *   sun (a lightning strike, mmp-63o.2) sets its own softness and darkness instead of the sun's night/cloud rules;
+ *   everything else — the length model, the longest-shadow ceiling, every producer's response — is the same.
  * @returns {Readonly<object>}
  */
 export function createShadowHandle({
@@ -446,8 +449,16 @@ export function createShadowHandle({
   maxOffsetPx = 4096,
   look = null,
   gridSizePx = 100,
+  atmosphereOverride = null,
 } = {}) {
-  const atmosphere = shadowAtmosphere(sun, weather);
+  const base = shadowAtmosphere(sun, weather);
+  const atmosphere = atmosphereOverride
+    ? Object.freeze({
+        ...base,
+        ...(Number.isFinite(atmosphereOverride.softnessMul) ? { softnessMul: atmosphereOverride.softnessMul } : {}),
+        ...(Number.isFinite(atmosphereOverride.strengthMul) ? { strengthMul: atmosphereOverride.strengthMul } : {}),
+      })
+    : base;
   // THE SHARED LOOK (see SHADOW_CORE_STRENGTH): resolved once per sky, read by every caster.
   const shadowLook = resolveShadowLook(look);
   const depth01 = shadowDepth01(atmosphere, shadowLook);

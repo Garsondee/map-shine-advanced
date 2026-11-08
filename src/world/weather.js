@@ -369,6 +369,23 @@ export const WEATHER_AXES = Object.freeze({
     consumerStatus: 'live',
     consumers: 'effects/precipitation/ground-mist-render.js (ground mist, via precip-subsystem.js)',
   }),
+
+  // ── LIGHTNING (mmp-63o.33, 2026-11-08) ────────────────────────────────────
+  // How often the storm strikes (and, through that, how dramatic it is). Ingram,
+  // 2026-11-07: "lightning would be its own vertical slider". Archetype-owned like
+  // fog: the Storm mood brings it, a calmer mood ends it. Read every frame by
+  // `effects/lightning-storm.js` (the strike schedule, sky flash, window beams).
+  lightning01: Object.freeze({
+    min: 0,
+    max: 1,
+    fallback: 0,
+    // A storm builds over half a minute and passes a little slower.
+    durationUpSec: 30,
+    durationDownSec: 45,
+    epsilon: AXIS_EPSILON_UNIT,
+    consumerStatus: 'live',
+    consumers: 'effects/lightning-storm.js (strike schedule, sky flash, window beams, bolts, via vt-pan-viewer.js)',
+  }),
 });
 
 /** @type {readonly string[]} */

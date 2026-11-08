@@ -736,6 +736,11 @@ export function buildStorybookCloudNode(
   const { mx_fractal_noise_float, mx_noise_float } = TSL;
   const F = STORYBOOK_FIELD;
   const out = Fn(() => {
+    // ERODE once, here at the top: built inside each deck's branch, its world-position read became a new vertex
+    // output per use and blew WebGPU's 16-output limit (2026-11-08, no clouds at all).
+    // ×1.2: a cloud core sits at density 1, so an erode of 0.92 (the interior cut's default) left whole solid cores
+    // standing; overshooting clears the cloud completely from ~0.83 up.
+    const er = erode ? erode.mul(1.2).clamp(0, 1).toVar('sbErode') : null;
     // THE FISHEYE: a barrel warp of the deck about the view centre, on top of the world dome below.
     const fromEye = groundXY.sub(u.eye.xy);
     const r2 = dot(fromEye, fromEye).div(max(u.eye.z.mul(u.eye.z).mul(0.25), float(1)));
@@ -836,16 +841,16 @@ export function buildStorybookCloudNode(
           const brk = u.shape2.w;
           dens.assign(dens.mul(tuft.mul(brk).add(float(1.2).sub(brk))).clamp(0, 1));
           // ERODE: thin cloud goes first, the core last, and what is left stays as dense as it was.
-          if (erode)
+          if (er)
             dens.assign(
               dens
-                .sub(erode)
-                .div(max(float(1).sub(erode), float(1e-3)))
+                .sub(er)
+                .div(max(float(1).sub(er), float(1e-3)))
                 .clamp(0, 1)
             );
           // MIST: a diffuse, undefined veil round and between the clouds (thin enough to see the ground through).
           let mist = smoothstep(thrL.sub(0.5), thrL.add(0.15), c1.core).mul(detail.mul(0.5).add(0.5)).mul(u.light3.w);
-          if (erode) mist = mist.mul(float(1).sub(erode));
+          if (er) mist = mist.mul(float(1).sub(er));
 
           // ── LIGHT ────────────────────────────────────────────────────────────
           // THE SHADOW MARCH (2.5-D): step toward the sun; at each step the sun's ray has risen by
@@ -968,7 +973,8 @@ export function buildStorybookCloudNode(
     const want = decks ?? (layered ? [0, 1, 2] : [1]);
     if (want.includes(0)) shadeDeck(0, false);
     if (want.includes(1)) {
-      const { wispA, wispC } = wisps();
+      const { wispA: wispA0, wispC } = wisps();
+      const wispA = er ? wispA0.mul(float(1).sub(er)) : wispA0;
       accC.assign(wispC.mul(wispA).add(accC.mul(float(1).sub(wispA))));
       accA.assign(wispA.add(accA.mul(float(1).sub(wispA))));
       shadeDeck(1, true);

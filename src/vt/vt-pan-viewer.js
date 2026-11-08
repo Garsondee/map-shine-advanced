@@ -25218,7 +25218,8 @@ async function startVtPanViewerUnserialized({
           lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           fireFieldRect,
-          frameSceneEye
+          frameSceneEye,
+          currentViewRect
         );
         // the billow flame's splat (the job list `sync` just prepared), straight away while no target is bound
         tickFireField();

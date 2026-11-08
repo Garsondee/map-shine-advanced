@@ -317,6 +317,9 @@ export function createBillowRenderer({
     // smoke reads the scene's light no brighter than this, so no lamp pool (above all its own fire's, cut off by every wall
     // the fire stands behind) is stamped onto a cloud that floats over those walls. Default: no cap.
     smokeSky: uniform(vec3(64, 64, 64)),
+    // THE VIEW (world px, unclamped: minX, minY, maxX, maxY), so a world point maps to the screen's light buffer. The default is
+    // a view so wide that the mapping moves nothing: the smoke reads the light under itself, as before.
+    viewRect: uniform(vec4(-1e9, -1e9, 1e9, 1e9)),
     expectedDepth: uniform(float(0)),
     // THE SMOKE'S OWN GATES (2026-11-06, mmp-9un.1): smoke rises, so it is gated at two heights above the fire instead of
     // at the ground. Low: anything below it (a bush) never hides the smoke. High: anything between low and high (a tree
@@ -334,24 +337,36 @@ export function createBillowRenderer({
   const lobeA = attribute('lobeA', 'vec4'); // x, y, radius, strength
   const lobeB = attribute('lobeB', 'vec4'); // heat, along, dirX, dirY
   const lobeC = attribute('lobeC', 'vec4'); // kind, tone, across, z
-  const lobeD = attribute('lobeD', 'vec4'); // seed (a smoke puff's own constant random), outdoor clip 0..1, 0, 0
+  // flame: seed, outdoor clip 0..1, 0, 0. smoke: its grain's scale (world px per unit), outdoor clip, its grain offset (x, y)
+  const lobeD = attribute('lobeD', 'vec4');
 
-  const splatVertex = Fn(() => {
+  // the corner's offset from the lobe's centre, world px
+  const splatOffset = Fn(() => {
     const corner = positionGeometry.xy.mul(2);
     const dir = vec2(lobeB.z, lobeB.w);
     const nrm = vec2(dir.y.negate(), dir.x);
     // B.y = the length scale along the lobe's direction, C.z = the width scale across it (set by the model)
     const along = max(lobeB.y, float(1));
     const across = max(lobeC.z, float(0.2));
-    const off = dir.mul(corner.x.mul(lobeA.z).mul(along)).add(nrm.mul(corner.y.mul(lobeA.z).mul(across)));
+    return dir.mul(corner.x.mul(lobeA.z).mul(along)).add(nrm.mul(corner.y.mul(lobeA.z).mul(across)));
+  });
+  const splatVertex = Fn(() => {
+    const off = splatOffset();
     return vec3(lobeA.x.add(off.x), lobeA.y.add(off.y), float(0));
   });
   const vLocal = Fn(() => positionGeometry.xy.mul(2))().toVarying('vBillowLocal');
   const vData = Fn(() => vec4(lobeA.w, lobeB.x, lobeC.x, lobeC.y))().toVarying('vBillowData');
   const vRad = Fn(() => lobeA.z)().toVarying('vBillowRad');
-  const vSeed = Fn(() => lobeD.x)().toVarying('vBillowSeed');
   const vClip = Fn(() => lobeD.y)().toVarying('vBillowClip');
   const vSplatWorld = Fn(() => splatVertex().xy)().toVarying('vBillowSplatWorld');
+  // A SMOKE PUFF'S PLACE IN ITS COLUMN'S SHARED GRAIN (`fire-billow-geometry.js#stampSmokeGrain`): this fragment's spot in
+  // the pattern = its world offset from the puff's centre / the pattern's scale + where the puff's centre sits in it
+  const vGrainAt = Fn(() =>
+    splatOffset()
+      .div(max(lobeD.x, float(1)))
+      .add(vec2(lobeD.z, lobeD.w))
+  )().toVarying('vBillowGrainAt');
+  const vGrainScale = Fn(() => max(lobeD.x, float(1)))().toVarying('vBillowGrainScale');
   // THE OUTDOOR CLIP (mmp-9un.4 — Ingram: an outdoor fire's column showed inside the building it leans over, even from a token
   // standing in that room). A lobe of an outdoor fire keeps only what lands on outdoor ground; off the map (the padding, the
   // table) counts as outdoors. Indoor fires (clip 0) are untouched.
@@ -422,17 +437,29 @@ export function createBillowRenderer({
     const k = mix(k0.mul(k0), kPlat, crisp);
     const w = vData.x.mul(k).mul(outdoorKeep());
     // B carries the STEAM weight (a doused fire's smoke is wet: whiter, denser)
-    // A carries THE PUFF'S OWN GRAIN (2026-11-06, mmp-9un.6 — Ingram: the grain sat still on the map while the smoke flowed
-    // through it). Drawn in the puff's frame (its local position x its radius, in world px, offset by its seed), so it rises,
-    // leans and spreads with the puff; density-weighted so the resolve reads it back as A / density. Same two octaves and
-    // frequencies as the old world-anchored grain; the fine one band-limited to the field's resolution.
-    const pf = vLocal.mul(vRad).add(vec2(vSeed.mul(197.3), vSeed.mul(131.9)));
+    // A carries THE SMOKE'S GRAIN (2026-11-06, mmp-9un.6 — Ingram: the grain sat still on the map while the smoke flowed
+    // through it), density-weighted so the resolve reads it back as A / density. It is the ONLY texture the smoke has: the
+    // resolve draws no noise of its own on the smoke, so nothing in it can stay behind when the smoke or the camera moves.
+    // (2026-11-08 — Ingram: "a tall thin noise where a larger, more even and less predictable pattern would be better")
+    //  - ONE pattern per column, shared by all its puffs (`vGrainAt`, stamped by the geometry): overlapping puffs agree, so
+    //    the pattern survives where dozens of them overlap (a pattern per puff averaged away to a blank veil);
+    //  - in world px, the same both ways: no stretch along the wind or up the column;
+    //  - broad lumps about the plume's width and one softer octave, no fine tooth: big soft patches, not a grain;
+    //  - a slow domain warp first, so the lumps are irregular blobs that never line up into rows, streaks or a tile.
+    const q0 = vGrainAt;
     const gt = U.time.mul(U.warpSpeed);
+    const wq = q0.mul(0.55);
+    const wob = vec2(
+      mx_noise_float(vec3(wq.x, wq.y, gt.mul(0.12).add(3.1))),
+      mx_noise_float(vec3(wq.x.add(17.3), wq.y.add(41.9), gt.mul(0.12).add(8.7)))
+    );
+    const q = q0.add(wob.mul(0.6));
+    // the softer octave fades out once its lumps are under ~6 field texels across (zoomed far out), so it never sparkles
     const worldPerTexelS = U.rectSize.x.mul(U.texel.x);
-    const fineKeep = float(1).sub(smoothstep(float(0.12), float(0.25), worldPerTexelS.mul(0.16)));
-    const gBroad = mx_noise_float(vec3(pf.x.mul(0.035), pf.y.mul(0.035), gt.mul(0.25).add(21.7)));
-    const gFine = mx_noise_float(vec3(pf.x.mul(0.16).add(13.1), pf.y.mul(0.16), gt.mul(0.6).add(4.2)));
-    const puffGrain = gBroad.mul(0.65).add(gFine.mul(0.35).mul(fineKeep));
+    const midKeep = float(1).sub(smoothstep(float(0.08), float(0.17), worldPerTexelS.mul(2.6).div(vGrainScale)));
+    const gBroad = mx_noise_float(vec3(q.x.mul(1.1), q.y.mul(1.1), gt.mul(0.2).add(21.7)));
+    const gMid = mx_noise_float(vec3(q.x.mul(2.6).add(13.1), q.y.mul(2.6), gt.mul(0.35).add(4.2)));
+    const puffGrain = gBroad.mul(0.75).add(gMid.mul(0.25).mul(midKeep));
     return vec4(w, w.mul(vData.w), w.mul(vData.y), w.mul(puffGrain));
   })();
   applySplatState(smokeSplat);
@@ -561,17 +588,16 @@ export function createBillowRenderer({
   resolveMaterial.fragmentNode = Fn(() => {
     const local = vWorld.sub(U.rectMin);
     const uv0 = local.div(U.rectSize);
-    // ZOOM-STABLE DETAIL (2026-11-06, mmp-9un.2): the painterly noise is world-anchored, so zoomed out its fine octaves
-    // shrank below a pixel of the field and sparkled/swam. Each fine octave now fades out as its period drops under ~4
-    // field texels (the field follows the screen's density), so what survives is only detail the screen can draw.
-    const worldPerTexel = U.rectSize.x.mul(U.texel.x);
-    const bandLimit = (freq) => float(1).sub(smoothstep(float(0.12), float(0.25), worldPerTexel.mul(freq)));
+    // ⚠️ NOISE IS DRAWN AT `vWorld`, NEVER AT `local` (2026-11-08 — Ingram: the smoke's grain was "pinned to camera
+    // movement"). `local` is measured from the FIELD's corner, and the field covers the VIEW (clamped to the canvas), so a
+    // noise at `local` stood still on the screen while the map slid under it in a pan and swelled from the view's corner in a
+    // zoom. `local` is only for reading the field; every pattern is either on the map (`vWorld`) or carried by the puffs.
     // ── edge roughening: slow noise advected through the lookup, two octaves ──
-    const pn = local.mul(U.warpFreq);
+    const pn = vWorld.mul(U.warpFreq);
     const tt = U.time.mul(U.warpSpeed);
     const n1 = mx_noise_float(vec3(pn.x, pn.y, tt));
     const n2 = mx_noise_float(vec3(pn.x.add(37.2), pn.y.add(11.7), tt.mul(1.13)));
-    const pn2 = local.mul(U.warpFreq2);
+    const pn2 = vWorld.mul(U.warpFreq2);
     const n3 = mx_noise_float(vec3(pn2.x.add(5.3), pn2.y.add(91.1), tt.mul(1.9)));
     const n4 = mx_noise_float(vec3(pn2.x.add(63.7), pn2.y.add(7.7), tt.mul(2.1)));
     const warp = vec2(n1, n2).mul(U.warpPx).add(vec2(n3, n4).mul(U.warpPx2)).div(U.rectSize);
@@ -581,7 +607,7 @@ export function createBillowRenderer({
     const ey = vec2(float(0), dirY(e.y));
     const c0 = flameNode.sample(p);
     // THE COAL BED has its own, calmer warp: finer grain (2.6x the frequency), a third of the speed, a third of the push
-    const cn = local.mul(U.warpFreq.mul(2.6));
+    const cn = vWorld.mul(U.warpFreq.mul(2.6));
     const ct = U.time.mul(U.warpSpeed.mul(0.3));
     const cwarp = vec2(
       mx_noise_float(vec3(cn.x.add(71.3), cn.y.add(3.9), ct)),
@@ -607,7 +633,7 @@ export function createBillowRenderer({
     const sD = clamp(D.sub(theta0).div(U.span), float(0), float(1));
     const inside0 = smoothstep(theta0.add(0.02), theta0.add(0.3), D);
     let tau = sD.mul(float(1).sub(U.toneHeat)).add(heat.mul(U.toneHeat));
-    const nm = mx_noise_float(vec3(local.x.mul(U.mottleFreq), local.y.mul(U.mottleFreq), tt.mul(0.5).add(3.3)));
+    const nm = mx_noise_float(vec3(vWorld.x.mul(U.mottleFreq), vWorld.y.mul(U.mottleFreq), tt.mul(0.5).add(3.3)));
     tau = clamp(tau.sub(U.toneLo).div(U.toneHi.sub(U.toneLo)), float(0), float(1));
     tau = tau.add(nm.mul(U.mottle)).add(n1.mul(0.03));
     // CEL-SHADED CRESCENTS: the density surface is a landscape of billows; the flank facing the light moves up a
@@ -649,10 +675,10 @@ export function createBillowRenderer({
     const coverC = smoothstep(float(0.3), float(0.8), C);
     // the cells' own outline wobbles (a straight crack reads as a tile edge, not a split in burning wood)
     const cw = vec2(
-      mx_noise_float(vec3(local.x.mul(0.07), local.y.mul(0.07), float(7.7))),
-      mx_noise_float(vec3(local.x.mul(0.07).add(31.4), local.y.mul(0.07).add(5.9), float(2.1)))
+      mx_noise_float(vec3(vWorld.x.mul(0.07), vWorld.y.mul(0.07), float(7.7))),
+      mx_noise_float(vec3(vWorld.x.mul(0.07).add(31.4), vWorld.y.mul(0.07).add(5.9), float(2.1)))
     ).mul(float(6));
-    const w = worley(local.add(cw).mul(U.coalCell));
+    const w = worley(vWorld.add(cw).mul(U.coalCell));
     const crack = smoothstep(float(0.0), U.coalCrack, w.f2.sub(w.f1));
     const pulse = float(0.75).add(sin(U.time.mul(float(0.35).add(w.rnd.mul(0.6))).add(w.rnd.mul(40))).mul(0.25));
     const coalHeat = clamp(cc.w.div(max(C, float(0.001))), float(0), float(1));
@@ -691,13 +717,11 @@ export function createBillowRenderer({
     // from, so the edge is a ragged run of dabs rather than a clean contour. Only the cut moves: tone, steam and soot keep the
     // true density (S0), and the solid body (density well above the outline) stays solid.
     const S0 = s0.x;
-    const grainBroad = mx_noise_float(vec3(local.x.mul(0.035), local.y.mul(0.035), tt.mul(0.25).add(21.7)));
-    const grainFine = mx_noise_float(vec3(local.x.mul(0.16).add(13.1), local.y.mul(0.16), tt.mul(0.6).add(4.2)));
-    const worldGrain = grainBroad.mul(0.65).add(grainFine.mul(0.35).mul(bandLimit(0.16)));
     // the grain each puff carries (its splat's A / density). Overlapping puffs average their grains, which flattens it, so it is
-    // lifted back by 1.35; where there is no smoke at all the world grain stands in (it only ever shapes clear air there).
+    // lifted back by 1.35. Where there is next to no smoke the ratio is only half-float noise, so it eases to 0 there (the old
+    // fallback was a noise of the resolve's own — the one that stayed put on the screen).
     const carried = clamp(s0.w.div(max(S0, float(0.001))).mul(1.35), float(-1), float(1));
-    const grain = mix(worldGrain, carried, smoothstep(float(0.02), float(0.12), S0));
+    const grain = carried.mul(smoothstep(float(0.003), float(0.03), S0));
     const S = S0.add(grain.mul(U.smokeGrain).mul(0.7));
     const toneS = s0.y.div(max(S0, float(0.001))).clamp(0, 1);
     // the field's B channel is steam (+) or soot (-), density weighted
@@ -722,15 +746,8 @@ export function createBillowRenderer({
     // like a 16-bit game; dithering here means a painter's scumble, not dots): where the smoke is part-covered, two octaves of
     // SMOOTH noise thin it in soft patches and streaks, so the feather is a dry-brushed, uneven veil with the floor showing
     // through in places. Nothing is quantised to a pixel grid; the solid body and the clear air are untouched.
-    const worldScumble = mx_noise_float(vec3(local.x.mul(0.06), local.y.mul(0.045), tt.mul(0.3).add(17.3)))
-      .mul(0.6)
-      .add(
-        mx_noise_float(vec3(local.x.mul(0.15).add(4.1), local.y.mul(0.11), tt.mul(0.5).add(2.6)))
-          .mul(0.4)
-          .mul(bandLimit(0.15))
-      );
-    // the fringe's dry-brush thinning rides with the puffs too (their carried grain), wherever there is smoke to thin
-    const scumble = mix(worldScumble, carried, smoothstep(float(0.02), float(0.12), S0));
+    // The thinning rides with the puffs (their carried grain): a veil thinned by a pattern of its own drifts with it.
+    const scumble = grain;
     const fringe = float(1).sub(smoothstep(float(0.5), float(0.95), sCoverSoft));
     const sCover = sCoverSoft.mul(
       float(1).sub(
@@ -762,15 +779,10 @@ export function createBillowRenderer({
     sRgb = mix(sRgb, smokeDeep, float(1).sub(dens).mul(0.35));
     sRgb = mix(smokeLit, sRgb, smoothstep(float(0.0), float(0.22), toneS));
     // BROKEN COLOUR: broad patches of warm peach and dusty mauve, strongest in the thin parts (the body keeps the ramp's value,
-    // the wisps pick up the hue of the air round them), always at the ramp's own brightness so they never read as a stain
-    // (the strokes run up the page, taller than wide, like a loaded brush dragged along a column)
-    const dabN = mx_noise_float(vec3(local.x.mul(0.05).add(51.3), local.y.mul(0.02), tt.mul(0.12)))
-      .mul(0.65)
-      .add(
-        mx_noise_float(vec3(local.x.mul(0.11).add(7.7), local.y.mul(0.045), tt.mul(0.2).add(3.3)))
-          .mul(0.35)
-          .mul(bandLimit(0.11))
-      );
+    // the wisps pick up the hue of the air round them), always at the ramp's own brightness so they never read as a stain.
+    // (2026-11-08: these were strokes 2.5x taller than wide, drawn on the screen — the "tall thin noise" that stayed put while
+    // the camera moved. They are the puffs' own lumps now: a thick lump catches the warm light, a thin one goes cool.)
+    const dabN = grain;
     const dabT = smoothstep(float(-0.22), float(0.22), dabN);
     const dabThin = float(1).sub(smoothstep(float(0.0), float(0.7), dens));
     sRgb = mix(sRgb, mix(smokeDabCool, smokeDabWarm, dabT), U.smokeDabs.mul(float(0.5).add(dabThin.mul(0.5))));
@@ -778,9 +790,8 @@ export function createBillowRenderer({
     // the big shape's crescents, soft: the flank facing away from the light darker, the one facing it lighter
     sRgb = mix(sRgb, sRgb.mul(0.7), shadeBand.mul(0.8));
     sRgb = mix(sRgb, smokeHi, hiBand.mul(0.5));
-    // painterly mottling: slow noise lifts and sinks the value a little, so a billow is a brushed shape, not a flat fill
-    const sMottle = mx_noise_float(vec3(local.x.mul(0.05), local.y.mul(0.05), tt.mul(0.35).add(9.1)));
-    sRgb = sRgb.mul(float(1).add(sMottle.mul(0.2)));
+    // painterly mottling: the puffs' lumps lift and sink the value a little, so a billow is a brushed shape, not a flat fill
+    sRgb = sRgb.mul(float(1).add(grain.mul(0.12)));
     // a sooty fuel's smoke, and a whole burning building's, is charcoal with its own bands
     const sootAmt = clamp(sootL.add(U.smokeSoot.mul(toneS)), float(0), float(1));
     const charcoalBanded = smokeCharcoal.mul(mix(mix(float(1.05), float(0.62), shadeBand), float(1.5), hiBand));
@@ -791,7 +802,21 @@ export function createBillowRenderer({
     // the smoke, strengthens its rim and its shadow (a night scene needs none of that: the dark floor does the work)
     // (2026-11-03: the scene's light here, with every lamp pool taken out — `smokeSky` above. The fire's own light is clipped
     // by the walls round it, so reading it stamped a hard red line across the column wherever it crossed a wall.)
-    const illum = lighting?.illumTexNode ? min(lighting.illumTexNode.sample(screenUV).rgb, U.smokeSky) : null;
+    // ⚠️ READ ON THE BOARD (2026-11-08 — Ingram: smoke crossing the map's edge into the 3D Table "hard finishes" its
+    // lighting at the edge). Off the board the light buffer holds the TABLE's light (the padding rule gives it no sky), so a
+    // plume blown past the edge went from moonlit to bare firelight in a straight line. A cloud over the table is still lit
+    // by the sky over the map, so off the board it reads the light at the nearest point ON the board (the board's own edge,
+    // carried straight out). The world offset becomes a screen offset through the view's size (`U.viewRect`); on the board
+    // the offset is exactly 0. (NOT screen derivatives of `vWorld`: at world coordinates in the thousands their ratio is
+    // float noise, different in every 2x2 block, and it drew fine vertical stripes over the table.)
+    let illumUv = screenUV;
+    if (lighting?.illumTexNode && lighting?.uOutdoorsRect) {
+      const board = lighting.uOutdoorsRect;
+      const onBoard = vec2(vWorld.x.clamp(board.x, board.z), vWorld.y.clamp(board.y, board.w));
+      const viewSize = max(vec2(U.viewRect.z.sub(U.viewRect.x), U.viewRect.w.sub(U.viewRect.y)), vec2(1, 1));
+      illumUv = clamp(screenUV.add(onBoard.sub(vWorld).div(viewSize)), vec2(0, 0), vec2(1, 1));
+    }
+    const illum = lighting?.illumTexNode ? min(lighting.illumTexNode.sample(illumUv).rgb, U.smokeSky) : null;
     const illumLum = illum ? dot(illum, vec3(0.2126, 0.7152, 0.0722)) : float(0);
     const bright = smoothstep(float(0.55), float(1.0), illumLum);
     // the line: the first `smokeLinePx` px inside the silhouette, warm near-black

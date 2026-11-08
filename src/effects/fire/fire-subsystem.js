@@ -333,11 +333,13 @@ export function createFireSubsystem({
    * @param {object} [worldRect] - the visible rect.
    * @param {{x:number,y:number,height:number}|null} [eye] - the frame's scene eye (`scene/scene-eye.js`), the one
    *   perspective the flames, embers, Table and floors share. Absent ⇒ each engine's own camera.
+   * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} [viewRect] - the UNCLAMPED view (world px): the smoke maps a
+   *   world point to the screen's light buffer with it (it reads the light on the board, not the table's). Absent ⇒ under itself.
    */
-  function sync(renderer, nowMs, dtSec, worldRect, eye = null) {
+  function sync(renderer, nowMs, dtSec, worldRect, eye = null, viewRect = null) {
     profiler?.beginById('light.fireSync');
     try {
-      syncUnguarded(renderer, nowMs, dtSec, worldRect, eye);
+      syncUnguarded(renderer, nowMs, dtSec, worldRect, eye, viewRect);
     } finally {
       profiler?.endById('light.fireSync');
     }
@@ -363,7 +365,7 @@ export function createFireSubsystem({
    * whole function would force re-indenting every line, and a thrown error must still close the bracket regardless of
    * which of this function's several early returns would otherwise have skipped that.
    */
-  function syncUnguarded(renderer, nowMs, dtSec, worldRect, eye = null) {
+  function syncUnguarded(renderer, nowMs, dtSec, worldRect, eye = null, viewRect = null) {
     const state = getFireRenderState() ?? {};
     const windHandle = getWindHandle?.() ?? null;
     const fires = firesWithGeometricWindExposure(Array.isArray(state.fires) ? state.fires : [], windHandle);
@@ -471,6 +473,7 @@ export function createFireSubsystem({
         smokeExpectedDepthLow,
         smokeExpectedDepthHigh,
         eye,
+        viewRect,
         sunShadow: smokeSunShadow(getShadowHandle?.() ?? null),
         smokeSky: getSmokeSkyRgb?.() ?? null,
       });

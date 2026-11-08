@@ -837,4 +837,56 @@ export function run(t) {
     }
     t.ok(`small billows are torn off the tongue tops and rise (${frag} such fragments over 40 instants)`, frag > 40);
   }
+
+  // ── THE SMOKE'S GRAIN: ONE PATTERN PER COLUMN, AND IT DOES NOT MOVE WHEN ONLY THE CAMERA DOES (2026-11-08) ─────────────
+  // Ingram: the grain was "pinned to camera movement", "a tall thin noise". A puff reads the pattern at (its world offset from
+  // its centre) / scale + its stamped offset (slots 12, 14, 15), so a world point p reads p / s - (centre / s - offset).
+  {
+    const grainOf = (buf, n) => {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const o = i * LOBE_STRIDE;
+        if (buf[o + LOBE.KIND] !== KIND_SMOKE) continue;
+        out.push({ x: buf[o], y: buf[o + 1], s: buf[o + 12], kx: buf[o + 14], ky: buf[o + 15] });
+      }
+      return out;
+    };
+    // no perspective and no S-wave: every puff of one column must read the SAME pattern at the same world point (a pattern
+    // per puff averages away where dozens overlap, and the veil goes blank)
+    const e = emit({ outdoor01: 1 }, { tSec: 37, parallax: 0 }, { smokeWave: 0 });
+    const g = grainOf(e.smoke, e.r.smoke);
+    const dx = g.map((l) => l.x / l.s - l.kx);
+    const dy = g.map((l) => l.y / l.s - l.ky);
+    const spread = Math.max(Math.max(...dx) - Math.min(...dx), Math.max(...dy) - Math.min(...dy));
+    t.ok(
+      `every smoke puff of a column reads one shared pattern (${g.length} puffs, scale ${g[0]?.s.toFixed(1)} px, offsets agree to ${spread.toExponential(1)} units)`,
+      g.length > 10 && g.every((l) => l.s === g[0].s && l.s > 20) && spread < 1e-3
+    );
+    // a pan moves the puffs on the screen (perspective) but not their place in the pattern: the grain rides with the smoke
+    const a = emit({ outdoor01: 1 }, { tSec: 37, camX: 2000 });
+    const b = emit({ outdoor01: 1 }, { tSec: 37, camX: 2300 });
+    const ga = grainOf(a.smoke, a.r.smoke);
+    const gb = grainOf(b.smoke, b.r.smoke);
+    const moved = ga.filter((l, i) => Math.abs(l.x - gb[i].x) > 1).length;
+    const kept = ga.every((l, i) => l.kx === gb[i].kx && l.ky === gb[i].ky && l.s === gb[i].s);
+    t.ok(
+      `a pan leaves every puff's place in its pattern alone (${moved} of ${ga.length} puffs moved on the screen)`,
+      ga.length === gb.length && moved > ga.length / 2 && kept
+    );
+    // the burning building's column does the same
+    const mass = { x: 2000, y: 2000, radius: 160, seed: 3, lit01: 1, vitality01: 1, outdoor01: 1 };
+    const cap = MASS_SMOKE_MAX * LOBE_STRIDE;
+    const ma = new Float32Array(cap);
+    const mb = new Float32Array(cap);
+    const na = emitMassSmoke(ma, 0, mass, { ...ENV, tSec: 37, camX: 2000 }).count;
+    const nb = emitMassSmoke(mb, 0, mass, { ...ENV, tSec: 37, camX: 2300 }).count;
+    const mga = grainOf(ma, na);
+    const mgb = grainOf(mb, nb);
+    t.ok(
+      `a burning building's column keeps its pattern through a pan too (${mga.length} puffs)`,
+      mga.length > 5 &&
+        mga.length === mgb.length &&
+        mga.every((l, i) => l.s > 20 && l.kx === mgb[i].kx && l.ky === mgb[i].ky && Math.abs(l.x - mgb[i].x) > 1e-3)
+    );
+  }
 }

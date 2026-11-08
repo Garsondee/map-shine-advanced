@@ -594,6 +594,8 @@ export function createBillowEngine({
      * @param {number} [ctx.smokeExpectedDepthLow] [ctx.smokeExpectedDepthHigh] the smoke's own gates (mmp-9un.1)
      * @param {number[]} [ctx.sunShadow] [dirX, dirY, length 0..1, darkness vs clear noon] — the smoke's ground shadow
      * @param {number[]} [ctx.smokeSky] [r, g, b] sRGB — the scene's light with no lamp in it (the smoke reads no more than this)
+     * @param {{minX:number,minY:number,maxX:number,maxY:number}} [ctx.viewRect] the unclamped view (world px): off the board the
+     *   smoke reads the board's light at its nearest edge point, mapped to the screen with this
      * @returns {{lifeByFire: Map<string,{vitality:number,coal:number,phase:string,stress01:number}>}}
      */
     update(ctx) {
@@ -1018,6 +1020,12 @@ export function createBillowEngine({
       // fire's, cut off by the walls round it — is stamped onto it (2026-11-03); absent = no cap
       if (Array.isArray(ctx.smokeSky) && ctx.smokeSky.length === 3 && ctx.smokeSky.every(Number.isFinite)) {
         renderer.uniforms.smokeSky.value.set(...ctx.smokeSky);
+      }
+      // the unclamped view, so the smoke can find the board's light for a point over the Table (2026-11-08); absent = none
+      const vr = ctx.viewRect;
+      if (renderer.uniforms.viewRect && vr && [vr.minX, vr.minY, vr.maxX, vr.maxY].every(Number.isFinite)) {
+        if (vr.maxX > vr.minX && vr.maxY > vr.minY)
+          renderer.uniforms.viewRect.value.set(vr.minX, vr.minY, vr.maxX, vr.maxY);
       }
       jobs = nf + ns > 0 ? renderer.prepareField(rect, { pxPerWorld, timeSec }) : [];
       renderer.scene.visible = nf + ns > 0;

@@ -213,6 +213,7 @@ export const BILLOW_TUNE = Object.freeze({
   windShear: 1.8, // extra downwind shear of every flame lobe, x its height x the lean (a gale lays the whole body over, not just the tip)
   windFlatten: 0.6, // how much of its height a flame loses at full lean (the wind presses it down)
   smokeStreak: 3.5, // how far smoke is stretched along the wind at full lean (a plume is a streamer in a gale)
+  smokeGrainScale: 2.2, // the size of the smoke's shared grain, x the plume radius (2026-11-08; see `stampSmokeGrain`)
   // ── weather ──
   rainShrink: 0.62, // how much of its size a fully rained-on flame loses
   // ── camera ──
@@ -495,6 +496,41 @@ function project(env, x, y, z, out, D = env.cameraHeight ?? BILLOW_TUNE.cameraHe
   out[1] = cy + (y - cy) * M - tiltZ * (env.tilt ?? 0.45);
   out[2] = M;
   return out;
+}
+
+/**
+ * THE SMOKE'S SHARED GRAIN FRAME (2026-11-08 — Ingram: the smoke's grain was "pinned to camera movement" and "a tall thin
+ * noise where a larger, more even and less predictable pattern would be better").
+ *
+ * Every puff of one column draws ONE pattern, so where puffs overlap they agree and the pattern survives. (Each puff drawing a
+ * pattern of its own was tried: dozens overlap in a plume, their patterns average away, and the veil came out blank.) The
+ * pattern is laid in the camera-free frame (ground position, lifted up the page by the tilt, no perspective) and scrolls at the
+ * column's mean speed, so it rises and drifts with the smoke; the shared S-wave is taken out so it meanders with the column.
+ * The puff's offset into that frame is measured from its own centre, so a pan or a zoom (which moves and swells the puff on
+ * the screen) carries the pattern with the puff instead of leaving it behind.
+ *
+ * Writes the lobe's spare slots: 12 = the pattern's scale (world px per pattern unit), 14..15 = where this puff's centre sits
+ * in the pattern (pattern units). Flame and coal lobes leave them 0.
+ *
+ * @param {Float32Array} buf @param {number} o the lobe's first float
+ * @param {number} gx @param {number} gy the puff's ground position with the column's shared sway taken out, world px
+ * @param {number} tiltZ the height the tilt lifts it by (as `project` is given it) @param {number} tilt `env.tilt`
+ * @param {number} vx @param {number} vy the column's mean speed in the same frame, world px per second of `t`
+ * @param {number} t the emitter's clock (seconds) @param {number} scale world px per pattern unit (> 0)
+ */
+function stampSmokeGrain(buf, o, gx, gy, tiltZ, tilt, vx, vy, t, scale) {
+  const s = Math.max(1, scale);
+  buf[o + 12] = s;
+  buf[o + 14] = (gx - vx * t) / s;
+  buf[o + 15] = (gy - tiltZ * tilt - vy * t) / s;
+}
+
+/** The column's mean speed in the camera-free frame: the mean billow's path `at(a)` -> [x, y, tiltZ], differenced over its life. */
+function smokeColumnSpeed(at, lifeSec, tilt) {
+  const p0 = at(0.2);
+  const p1 = at(0.7);
+  const dt = Math.max(0.05, 0.5 * lifeSec);
+  return [(p1[0] - p0[0]) / dt, (p1[1] - p1[2] * tilt - (p0[1] - p0[2] * tilt)) / dt];
 }
 
 /** The smoke's camera height: the billow camera brought down to the scene's eye (see `smokePerspective`). */
@@ -927,6 +963,20 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   const smokeAmt =
     (0.26 + 0.74 * outdoor) * ((0.12 * coalHeat + 0.88 * Math.pow(smokePower, 0.8)) * rainKill + 0.12 * wet);
   const nSmoke = Math.max(0, Math.round(smokeRef * smokeAmt));
+  // THE COLUMN'S MEAN PATH (2026-11-08): the frame the smoke's shared grain scrolls in (`stampSmokeGrain`). The mean billow:
+  // the loop's own climb, drift and life with every per-billow random at its middle, and no S-wave (taken out per billow).
+  const RsG = Math.sqrt(Math.max(R, 1) * 50);
+  const zTopMean = RsG * tune.smokeRise * (0.35 + 0.65 * outdoor) * (0.6 + 0.4 * sz.iPow) * (1 - 0.5 * leanG);
+  const smokeTiltZ = (z) => Math.min(z, height) + Math.max(0, z - height) * tune.smokeLift;
+  const smokeV = smokeColumnSpeed(
+    (a) => {
+      const d = RsG * tune.smokeDrift * (0.15 + 0.85 * leanG) * (0.04 + Math.pow(a, 1.3));
+      return [wdx * d, wdy * d, smokeTiltZ(height * 0.55 + zTopMean * Math.pow(a, 0.9))];
+    },
+    tune.smokeLife * 1.05 * (0.55 + 0.45 * outdoor) * (1 + tune.smokeWindLife * leanG),
+    env.tilt ?? 0.45
+  );
+  const smokeGrainS = plume * (tune.smokeGrainScale ?? 2.2);
   for (let i = 0; i < nSmoke; i++) {
     const id = seed * 131 + i * 17 + 14000;
     // (a blown billow lives longer: the trail downwind is what a gale adds)
@@ -1011,6 +1061,19 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       null,
       r1
     );
+    // its place in the column's shared grain: its ground position without the S-wave, so the grain meanders with the column
+    stampSmokeGrain(
+      outSmoke !== null ? outSmoke : out,
+      ((outSmoke !== null ? ns : n) - 1) * LOBE_STRIDE,
+      x - wvx * wave,
+      y - wvy * wave,
+      smokeTiltZ(z),
+      env.tilt ?? 0.45,
+      smokeV[0],
+      smokeV[1],
+      t,
+      smokeGrainS
+    );
   }
 
   return { count: n - start, flame: flameCount, smoke: smokeCount, coal: coalCount };
@@ -1076,6 +1139,23 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
   const soot = clamp01(m.sootiness01 ?? 0.5) * (1 - wet);
   const smokeD = smokeCameraHeight(env, tune);
   const proj = [0, 0, 1];
+  // the column's mean path and speed, for its shared grain (`stampSmokeGrain`): the loop's climb and drift, randoms at middle
+  const massV = smokeColumnSpeed(
+    (a) => {
+      const climb =
+        Rm *
+        (tune.massRise ?? 1.6) *
+        (0.35 + 0.65 * outdoor) *
+        Math.pow(a, 0.9) *
+        (1 - 0.5 * leanG) *
+        (0.6 + 0.4 * weak);
+      const d = Rm * tune.smokeDrift * 0.35 * (0.15 + 0.85 * leanG) * (0.12 + Math.pow(a, 1.3));
+      return [wdx * d, wdy * d, climb * tune.smokeLift];
+    },
+    tune.smokeLife * 1.7 * (0.55 + 0.45 * outdoor),
+    env.tilt ?? 0.45
+  );
+  const massGrainS = Rm * 0.5 * (tune.smokeGrainScale ?? 2.2);
   let n = start;
   for (let i = 0; i < count; i++) {
     const id = seed * 131 + i * 29 + 41000;
@@ -1131,10 +1211,20 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     out[o + 9] = tone;
     out[o + 10] = 1 / (1 + tune.smokeStreak * 0.25 * leanG * a);
     out[o + 11] = z;
-    out[o + 12] = r1;
     out[o + 13] = outdoorClip;
-    out[o + 14] = 0;
-    out[o + 15] = 0;
+    // its place in the column's shared grain (`stampSmokeGrain`): its ground position without the column's bend
+    stampSmokeGrain(
+      out,
+      o,
+      x - bend,
+      y,
+      Math.min(z, baseZ) + Math.max(0, z - baseZ) * tune.smokeLift,
+      env.tilt ?? 0.45,
+      massV[0],
+      massV[1],
+      t,
+      massGrainS
+    );
     n++;
   }
   return { count: n - start };

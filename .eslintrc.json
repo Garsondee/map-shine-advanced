@@ -32,6 +32,7 @@
   "ignorePatterns": [
     "legacy/",
     "tools/shader-lab/dev/",
+    "tools/lab/out/",
     "src/vendor/",
     "foundryvttsourcecode_v14/",
     "gamesystemsourcecode/",

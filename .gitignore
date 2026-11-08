@@ -68,3 +68,4 @@ tools/test-world/.neutral-restore.json
 
 # guide picture renders (tools/guide/shoot.mjs) — intermediate, not shipped
 tools/guide/raw/
+tools/lab/out/

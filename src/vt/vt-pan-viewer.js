@@ -13601,6 +13601,13 @@ async function startVtPanViewerUnserialized({
       dr.glareFraction =
         GLARE_ENERGY * Math.max(0, bloomNum(p.strength, 1.0)) * (Math.max(0, coreS) + Math.max(0, atmoS));
       dr.glareBudgetTarget = dr.stats ? glareBudgetGain(dr.stats.glowEnergy, dr.glareFraction) : 1;
+      // A STRIKE (mmp-ilo.22): the flash is real light, but at a few frames per stroke the meter (read every 4 frames,
+      // asynchronously) can miss it, so the glare is budgeted from the strike's own share of the frame's light too —
+      // the stone yard no longer blooms to a white blob.
+      if (stormFrame?.active) {
+        const flashShare = Math.max(0, Math.min(1, (stormFrame.flash01 ?? 0) * (stormFrame.share01 ?? 0)));
+        dr.glareBudgetTarget = Math.min(dr.glareBudgetTarget, 1 / (1 + 4 * flashShare));
+      }
       // Fast attack (80 ms: a lightning stroke or a flash is capped within a few frames, mmp-ilo.22), slow release (1 s).
       const glareTau = dr.glareBudgetTarget < dr.glareGain ? 0.08 : 1;
       dr.glareGain +=
@@ -14385,6 +14392,10 @@ async function startVtPanViewerUnserialized({
         });
         envLight.setFlash(stormFrame);
         syncStormShadows(ls, lp, stormView);
+        // THE CAMERA THROUGH A STRIKE (mmp-ilo.22): hold the metered light for the whole strike train and a second
+        // after, so the camera never re-exposes on a 1-frame return stroke (the frame went darker round every flash).
+        // The flash gate would already reject most of it; this also covers a train longer than its window.
+        if (stormFrame.active) holdExposure(1);
       }
 
       // ── THE CLOUD FIELD — ticked every frame, never gated on `skyKey` ────

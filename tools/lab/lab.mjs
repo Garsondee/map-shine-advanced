@@ -20,6 +20,12 @@ import { fileURLToPath } from 'node:url';
 import { LAB_VERSION } from './lab-spec.mjs';
 import { labManifestAll as labManifest, labPaintJobAll as labPaintJob } from './lab-index.mjs';
 import { look } from './lab-look.mjs';
+import { withRigLock } from './rig-lock.mjs';
+
+/** Who holds the rig lock: --owner, else LAB_OWNER, else 'lab.mjs'. */
+const OWNER = process.argv.includes('--owner')
+  ? process.argv[process.argv.indexOf('--owner') + 1]
+  : (process.env.LAB_OWNER ?? 'lab.mjs');
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -75,17 +81,19 @@ function seed() {
 const COMMANDS = {
   paint,
   'deploy-rig': deployRig,
-  seed,
+  seed: () => withRigLock(OWNER, async () => seed()),
   look: async () => {
-    const r = await look({
-      name: opt('name'),
-      plot: opt('plot'),
-      level: opt('level'),
-      view: opt('view', 'shipped'),
-      scale: Number(opt('scale', 0.45)),
-      waitMs: Number(opt('wait', 6000)),
-      keep: argv.includes('--keep'),
-    });
+    const r = await withRigLock(OWNER, () =>
+      look({
+        name: opt('name'),
+        plot: opt('plot'),
+        level: opt('level'),
+        view: opt('view', 'shipped'),
+        scale: Number(opt('scale', 0.45)),
+        waitMs: Number(opt('wait', 6000)),
+        keep: argv.includes('--keep'),
+      })
+    );
     console.log(`${r.plot} on ${r.level} (${r.view}) settled=${r.settled} verdict=${r.verdict} -> ${r.shot}`);
     console.table(r.table);
   },

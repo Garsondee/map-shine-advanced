@@ -304,7 +304,7 @@ export const STORYBOOK_DECK_DEFAULTS = Object.freeze({
   storybookScrapSoftness: 0.3,
   storybookFraySize: 1,
   storybookSwirl: 0.12,
-  storybookEdgeDensity: 3.2,
+  storybookEdgeDensity: 7,
   storybookBreakup: 0.75,
   // Mist & wisps
   storybookMist: 0.1,
@@ -720,6 +720,9 @@ function layerOf(TSL, u, wind, lf) {
  * @param {object} args.u - {@link createStorybookUniforms}.
  * @param {{drift:*, dir:*}} args.wind - the shared cloud field's `drift` (vec2, world px) and `windDir` (unit vec2).
  * @param {*} [args.visibility] - float node multiplied into alpha (e.g. the floors-above gate).
+ * @param {*} [args.erode] - float node 0..1: eats the cloud away from its thin edges inward (1 = none left). The
+ *   interior cut and the scene-edge reach use this rather than alpha, so a cleared cloud keeps a solid body and its
+ *   own edge instead of turning to see-through glass (author, 2026-11-08: "makes the clouds look see through").
  * @param {number[]} [args.decks] - which decks this material draws (0 low, 1 main + its wisps, 2 high); default
  *   all three. The viewer gives each deck its OWN material (three small shaders compile far faster than one big
  *   one — FXC's cost grows faster than the shader), drawn low → main → high so they composite in order.
@@ -727,7 +730,7 @@ function layerOf(TSL, u, wind, lf) {
  */
 export function buildStorybookCloudNode(
   TSL,
-  { groundXY, u, wind, visibility = null, debug = null, layered = true, decks = null }
+  { groundXY, u, wind, visibility = null, erode = null, debug = null, layered = true, decks = null }
 ) {
   const { Fn, If, float, vec2, vec3, max, min, clamp, smoothstep, mix, normalize, dot, length, step } = TSL;
   const { mx_fractal_noise_float, mx_noise_float } = TSL;
@@ -832,8 +835,17 @@ export function buildStorybookCloudNode(
           // light and powder find tufts everywhere (author: "inside ... more painterly fluffy broken up").
           const brk = u.shape2.w;
           dens.assign(dens.mul(tuft.mul(brk).add(float(1.2).sub(brk))).clamp(0, 1));
+          // ERODE: thin cloud goes first, the core last, and what is left stays as dense as it was.
+          if (erode)
+            dens.assign(
+              dens
+                .sub(erode)
+                .div(max(float(1).sub(erode), float(1e-3)))
+                .clamp(0, 1)
+            );
           // MIST: a diffuse, undefined veil round and between the clouds (thin enough to see the ground through).
-          const mist = smoothstep(thrL.sub(0.5), thrL.add(0.15), c1.core).mul(detail.mul(0.5).add(0.5)).mul(u.light3.w);
+          let mist = smoothstep(thrL.sub(0.5), thrL.add(0.15), c1.core).mul(detail.mul(0.5).add(0.5)).mul(u.light3.w);
+          if (erode) mist = mist.mul(float(1).sub(erode));
 
           // ── LIGHT ────────────────────────────────────────────────────────────
           // THE SHADOW MARCH (2.5-D): step toward the sun; at each step the sun's ray has risen by

@@ -265,7 +265,8 @@ export const CLOUD_TOPS_PARAMS = Object.freeze({
     min: 0.5,
     max: 10,
     step: 0.05,
-    default: 3.2,
+    // 2026-11-08 — author: thin cloud read as see-through ("looks silly"). Was 3.2.
+    default: 7,
     category: 'Storybook · Edges & scraps',
     label: 'Edge density',
     help: 'How quickly thin cloud becomes opaque. Low = soft see-through edges and veils; high = solid clouds with harder edges.',

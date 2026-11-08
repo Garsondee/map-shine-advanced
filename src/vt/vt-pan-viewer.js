@@ -4337,11 +4337,13 @@ async function startVtPanViewerUnserialized({
             u: sbU,
             wind: sbWind,
             visibility: openAboveSb,
+            // The interior cut + scene reach ERODE the storybook cloud (thin edges first) instead of fading its alpha.
+            erode: THREE.TSL.float(1).sub(buildTopsInteriorKeep()),
             decks: [deck],
           });
           const m = new THREE.NodeMaterial();
           m.colorNode = sb.rgb;
-          m.opacityNode = sb.alpha.mul(uTopsOpacity).mul(buildTopsInteriorKeep());
+          m.opacityNode = sb.alpha.mul(uTopsOpacity);
           m.transparent = true;
           m.depthTest = false;
           m.depthWrite = false;

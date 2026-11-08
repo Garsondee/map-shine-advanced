@@ -39,6 +39,7 @@ import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { buildStateDigest, compareDigests } from './diag/state-digest.js';
 import { lightMeterStats } from './diag/light-meter.js';
+import { compactMaskStack } from './diag/pixel-probe.js';
 import { paintLightMeterOverlay, removeLightMeterOverlay } from './diag/light-meter-overlay.js';
 import { installDebugPanel } from './diag/debug-panel.js';
 import { installFlightRecorder, downloadText } from './diag/flight-recorder.js';
@@ -99,6 +100,7 @@ import { createGpuQueueProbe } from './diag/gpu-queue-probe.js';
 import { runStructuralAB, runEditCascadeStress } from './diag/perf-structural-ab.js';
 import { pickStressTestTile, pingStressTestTile, unpingStressTestTile, readFoundryTestState } from './foundry/index.js';
 import { installSmoothPan } from './foundry/index.js';
+import { readProbeAttribution } from './foundry/index.js';
 import { registerWorldClockSettings, watchWorldClock, worldSimNowMs, getWorldClockLedger } from './foundry/index.js';
 import { framePacer } from './core/frame-pacer.js';
 // The benchmark route drives the EXISTING camera-path player rather than growing
@@ -460,6 +462,7 @@ import {
   getUiShadow,
   sampleVtPanViewerIllumPixel,
   probeVtPanViewerPixels,
+  probeVtPanViewerV2,
   getVtPanViewerDynamicRangeInfo,
   holdVtPanViewerExposure,
   rackVtPanViewerFocus,
@@ -12830,6 +12833,25 @@ function install() {
   // rather than at module scope because `maskAuthority` is an `install()`-local
   // `const`; touching it from module scope is a TDZ ReferenceError at import.
   MapShine.probeMasks = (worldX, worldY) => maskAuthority.probeStackAt(worldX, worldY);
+  // PROBE v2 (2026-11-08, mmp-78u.12) — the MSA Lab's main instrument. `await MapShine.probe([{x, y, name}],
+  // {markers, stable, presented})`: any number of world points; settled reads (no mid-rebuild garbage); the
+  // PRESENTED pixel with a drift verdict against lit (catches a stale present, e.g. the Lens freeze
+  // mmp-78u.7); per point the viewed floor's mask bytes + derived products, and the Foundry facts that
+  // explain its light (darkness level, Regions, light sources containing it). Markers off by default.
+  MapShine.probe = async (points, opts = {}) => {
+    const r = await probeVtPanViewerV2(points, opts);
+    if (!r || r.skipped || !Array.isArray(r.results)) return r;
+    for (const row of r.results) {
+      if (!Number.isFinite(row.worldX) || !Number.isFinite(row.worldY)) continue;
+      try {
+        row.masks = compactMaskStack(maskAuthority.probeStackAt(row.worldX, row.worldY), row.floorIndex ?? 0);
+      } catch {
+        row.masks = null;
+      }
+      row.foundry = readProbeAttribution(row.worldX, row.worldY);
+    }
+    return r;
+  };
   MapShine.armMaskProbe = async (maxPoints = 3) => {
     const points = await MapShine.armPixelProbe(maxPoints);
     // Merged, not returned side by side: the whole point is reading the

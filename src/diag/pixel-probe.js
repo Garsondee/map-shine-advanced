@@ -139,3 +139,93 @@ export function diffProbeBuffers(prevBuffers, currBuffers) {
   if (!Object.keys(perBuffer).length) return null;
   return { perBuffer, biggestJump };
 }
+
+// ============================================================================
+// PROBE v2 PRIMITIVES (2026-11-08, mmp-78u.12) — the MSA Lab's main instrument.
+// Born from the lab's friction log (tools/lab/FRICTION.md): the probe silently
+// capped at 3 points, its readings mid-rebuild were garbage, and nothing compared
+// the PRESENTED pixel with the lit buffer — the gap that hid the Lens freeze
+// (mmp-78u.7: present kept reading a stale texture while "ready" said all good).
+// ============================================================================
+
+/** sRGB OETF: linear 0..1 → encoded 0..1 (the curve a screen byte is written in). */
+export function srgbEncode(linear) {
+  const c = Math.max(0, Math.min(1, Number(linear) || 0));
+  return c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
+}
+
+/** A linear 0..1 value as the screen byte it would be with NO tone curve: round(255 · OETF). */
+export function linearToSrgbByte(linear) {
+  return Math.round(255 * srgbEncode(linear));
+}
+
+/**
+ * The first pixel of a canvas-texture copy as [r, g, b, a] bytes. The canvas format is
+ * whatever `navigator.gpu.getPreferredCanvasFormat()` said — 'bgra8unorm' on most Windows
+ * GPUs, so the bytes arrive B, G, R, A and must be swapped.
+ * @param {ArrayLike<number>|null} bytes
+ * @param {string} format
+ * @returns {[number,number,number,number]|null}
+ */
+export function decodeCanvasPixel(bytes, format) {
+  if (!bytes || bytes.length < 4) return null;
+  const b = [bytes[0] & 0xff, bytes[1] & 0xff, bytes[2] & 0xff, bytes[3] & 0xff];
+  return String(format).startsWith('bgra') ? [b[2], b[1], b[0], b[3]] : b;
+}
+
+/**
+ * How far the PRESENTED pixel sits from the lit buffer encoded straight to sRGB.
+ *
+ * The present pass legitimately moves a pixel (tone curve, exposure, grade, bloom, lens), so a
+ * small drift is normal: measured on the lab, noon Measure view moves 128 by ~-2, as-shipped by
+ * ~-20. A drift of several dozen levels means the screen is not showing this frame's lit —
+ * the Lens freeze moved a black wedge step (lit 0) to ~100.
+ *
+ * @param {{lit:number[]|null, presented:number[]|null}} a - lit linear RGB, presented bytes.
+ * @param {{check?:number, suspect?:number}} [t] - thresholds in screen levels.
+ * @returns {{expected:number[], drift:number[], maxAbs:number, verdict:'ok'|'check'|'suspect'}|null}
+ */
+export function judgePresentedDrift({ lit, presented }, { check = 32, suspect = 64 } = {}) {
+  if (!lit || !presented) return null;
+  const expected = lit.slice(0, 3).map(linearToSrgbByte);
+  const drift = expected.map((e, i) => Math.round((presented[i] ?? 0) - e));
+  const maxAbs = Math.max(...drift.map(Math.abs));
+  const verdict = maxAbs >= suspect ? 'suspect' : maxAbs >= check ? 'check' : 'ok';
+  return { expected, drift, maxAbs, verdict };
+}
+
+/**
+ * Did a buffer read stay put between two frames? `eps` is in buffer units (linear light).
+ * Used to wait out a rebuild: reads taken mid-swap return garbage (lab: lit 0.488 vs 0.184).
+ * @param {object|null} a - a probe sample's `.buffers`
+ * @param {object|null} b
+ * @param {string[]} [names]
+ * @param {number} [eps]
+ */
+export function buffersAgree(a, b, names = ['illum', 'lit', 'albedo'], eps = 0.004) {
+  if (!a || !b) return false;
+  for (const n of names) {
+    const x = a[n]?.rgba;
+    const y = b[n]?.rgba;
+    if (!x || !y) return false;
+    for (let i = 0; i < 3; i++) if (Math.abs(x[i] - y[i]) > eps) return false;
+  }
+  return true;
+}
+
+/**
+ * One line of mask facts for a point on one floor, from `MapShine.probeMasks`' stack:
+ * every mask kind's composited byte (null = no file / not painted) and the derived products.
+ * @param {object|null} stack - probeStackAt(...) result
+ * @param {number} floorIndex
+ * @returns {{floor:string|null, masks:Record<string, number|null>, derived:object|null}|null}
+ */
+export function compactMaskStack(stack, floorIndex) {
+  const f = stack?.floors?.find?.((x) => x.floorIndex === floorIndex) ?? stack?.floors?.[0];
+  if (!f) return null;
+  const masks = {};
+  for (const [kind, v] of Object.entries(f.masks ?? {})) {
+    if (v && (v.sourceCount ?? 0) > 0) masks[kind] = v.compositedByte ?? null;
+  }
+  return { floor: f.name ?? null, masks, derived: f.derived ?? null };
+}

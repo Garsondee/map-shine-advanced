@@ -1,7 +1,18 @@
 /**
  * Node verification for diag/pixel-probe.js — the half-float readback decoder.
  */
-import { halfFloatBitsToFloat32, decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../pixel-probe.js';
+import {
+  halfFloatBitsToFloat32,
+  decodeHalfFloatRgba,
+  decodeByteRgba,
+  diffProbeBuffers,
+  srgbEncode,
+  linearToSrgbByte,
+  decodeCanvasPixel,
+  judgePresentedDrift,
+  buffersAgree,
+  compactMaskStack,
+} from '../pixel-probe.js';
 
 const near = (a, b, eps = 1e-3) => Math.abs(a - b) < eps;
 
@@ -120,4 +131,68 @@ export function run(t) {
     'two buffers sharing no keys read as null',
     diffProbeBuffers({ a: { rgba: [0, 0, 0, 0] } }, { b: { rgba: [0, 0, 0, 0] } }) === null
   );
+
+  // ---- PROBE v2 (2026-11-08, mmp-78u.12), anchored on numbers the MSA Lab measured. ----
+  ok('sRGB encode: 0 -> 0, 1 -> 1', srgbEncode(0) === 0 && near(srgbEncode(1), 1));
+  ok('linear 0.2195 (sRGB 129 floor) encodes back to byte 129', linearToSrgbByte(0.2195) === 129);
+  ok('lab Measure-view lit 0.184 encodes to 119 (screen read 116: a -3 tone curve)', linearToSrgbByte(0.184) === 119);
+  ok(
+    'bgra canvas bytes are swapped to rgb',
+    JSON.stringify(decodeCanvasPixel([10, 20, 30, 255], 'bgra8unorm')) === '[30,20,10,255]'
+  );
+  ok(
+    'rgba canvas bytes pass through',
+    JSON.stringify(decodeCanvasPixel([10, 20, 30, 255], 'rgba8unorm')) === '[10,20,30,255]'
+  );
+  ok('a short canvas read is null', decodeCanvasPixel([1, 2], 'rgba8unorm') === null);
+  {
+    // Healthy: lab noon, Measure view, floor 128 — lit 0.184 (encodes 119) presented as 116.
+    const healthy = judgePresentedDrift({ lit: [0.184, 0.189, 0.204], presented: [116, 117, 122, 255] });
+    ok('healthy present (lab noon, -3 tone) is ok', healthy.verdict === 'ok' && healthy.maxAbs <= 4);
+    // The Lens freeze (mmp-78u.7): black wedge step, lit 0, screen showed ~98.
+    const frozen = judgePresentedDrift({ lit: [0, 0, 0], presented: [98, 99, 103, 255] });
+    ok('the Lens-freeze reading is suspect', frozen.verdict === 'suspect' && frozen.maxAbs === 103);
+    // As shipped noon pulls 128 down ~20 (DR/grade): noticeable, not alarming.
+    const shipped = judgePresentedDrift({ lit: [0.184, 0.189, 0.204], presented: [106, 106, 107, 255] });
+    ok('as-shipped -12..-20 drift stays ok', shipped.verdict === 'ok');
+    ok('a missing side gives null', judgePresentedDrift({ lit: null, presented: [1, 2, 3] }) === null);
+  }
+  {
+    const A = {
+      illum: { rgba: [0.922, 0.933, 0.966, 1] },
+      lit: { rgba: [0.184, 0.189, 0.204, 1] },
+      albedo: { rgba: [0.22, 0.22, 0.22, 1] },
+    };
+    const B = {
+      illum: { rgba: [0.922, 0.933, 0.966, 1] },
+      lit: { rgba: [0.488, 0.4, 0.4, 1] },
+      albedo: { rgba: [0.22, 0.22, 0.22, 1] },
+    };
+    ok('identical reads agree', buffersAgree(A, A));
+    ok('a mid-rebuild garbage read (lit 0.488 vs 0.184) does not agree', !buffersAgree(A, B));
+    ok('a missing buffer never agrees', !buffersAgree(A, { illum: A.illum }));
+  }
+  {
+    const stack = {
+      floors: [
+        {
+          floorIndex: 0,
+          name: 'Basement',
+          masks: { outdoors: { compositedByte: 0, sourceCount: 1 } },
+          derived: { coverAbove: 255 },
+        },
+        {
+          floorIndex: 1,
+          name: 'Ground',
+          masks: { outdoors: { compositedByte: 255, sourceCount: 1 }, fire: { compositedByte: null, sourceCount: 0 } },
+          derived: { coverAbove: 0, skyReach: 0, casterHeight: 32 },
+        },
+      ],
+    };
+    const c = compactMaskStack(stack, 1);
+    ok('compact mask stack picks the asked floor', c.floor === 'Ground' && c.masks.outdoors === 255);
+    ok('kinds with no source are left out', !('fire' in c.masks));
+    ok('derived products ride along', c.derived.casterHeight === 32);
+    ok('no stack gives null', compactMaskStack(null, 0) === null);
+  }
 }

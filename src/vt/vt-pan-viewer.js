@@ -224,7 +224,14 @@ import {
   resolveRenderScaleFrameBudgetMs,
 } from './render-scale-policy.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
-import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
+import {
+  decodeHalfFloatRgba,
+  decodeByteRgba,
+  diffProbeBuffers,
+  decodeCanvasPixel,
+  judgePresentedDrift,
+  buffersAgree,
+} from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
 import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
 import { createShaderRebuildProbe } from '../diag/shader-rebuild-probe.js';
@@ -10554,6 +10561,8 @@ async function startVtPanViewerUnserialized({
       }
     }
 
+    // Probe v2's queue of presented-pixel reads (served at the end of this pass; see servePresentedReads).
+    let presentedReadQueue = [];
     function runPresentCompositePass() {
       // THE LENS WARP (2026-11-02) — the present grades post.lens's output, so its screen-position reads
       // follow the lens on exactly the frames the lens drew (grade-present.js#lensWarpCompiled).
@@ -10589,6 +10598,9 @@ async function startVtPanViewerUnserialized({
         (debugQuad ?? presentQuad).render(renderer); // three's own fullscreen path — carries its own camera
       }
       profiler?.end(Z.presentBlit);
+      // Probe v2 (mmp-78u.12): copy any requested PRESENTED pixels now, in the same task the canvas texture
+      // was drawn, before the browser hands it to the screen. No-op (one length check) when nothing is asked.
+      if (presentedReadQueue.length) servePresentedReads();
     }
     // light.accumulate — ambient/exterior light PLUS point-light illumination
     // as of 2026-07-18 (coloration, darkness sources, animations, the global
@@ -30575,6 +30587,177 @@ async function startVtPanViewerUnserialized({
       liveMarkerContainer = null;
     }
 
+    // ---------------------------------------------------------------------
+    // PROBE v2 (2026-11-08, mmp-78u.12) — the MSA Lab's main instrument.
+    //
+    // THE PRESENTED PIXEL. Every other probe buffer is an intermediate target;
+    // none of them is what the player sees. The Lens freeze (mmp-78u.7) lived in
+    // exactly that gap: lit was right, present read a stale texture, and every
+    // report said "ready". A WebGPU canvas cannot be read after it is presented
+    // (drawImage into a 2D canvas returns transparent zeros, tested live), but
+    // three configures it with COPY_SRC, so the texture CAN be copied inside the
+    // frame that drew it. `requestPresentedRead` queues device-pixel positions;
+    // `servePresentedReads` runs at the end of `runPresentCompositePass` and
+    // copies them out. Read-only: no material, no target, no pipeline is touched
+    // (the probe that once rendered production materials into a second target
+    // corrupted their pipelines — this one renders nothing).
+    // ---------------------------------------------------------------------
+    function servePresentedReads() {
+      const jobs = presentedReadQueue;
+      presentedReadQueue = [];
+      const device = renderer?.backend?.device;
+      const context = renderer?.backend?.context;
+      if (!device || !context?.getCurrentTexture) {
+        for (const j of jobs) j.resolve({ ok: false, reason: 'no WebGPU canvas context (WebGL fallback?)' });
+        return;
+      }
+      let texture;
+      try {
+        texture = context.getCurrentTexture();
+      } catch (err) {
+        for (const j of jobs) j.resolve({ ok: false, reason: `getCurrentTexture failed: ${err?.message ?? err}` });
+        return;
+      }
+      const W = texture.width;
+      const H = texture.height;
+      for (const job of jobs) {
+        try {
+          const n = job.pixels.length;
+          const buffer = device.createBuffer({
+            size: 256 * n,
+            usage: globalThis.GPUBufferUsage.COPY_DST | globalThis.GPUBufferUsage.MAP_READ,
+          });
+          const encoder = device.createCommandEncoder({ label: 'msa probe v2: presented pixels' });
+          job.pixels.forEach((px, i) => {
+            const x = Math.max(0, Math.min(W - 1, Math.round(px.x)));
+            const y = Math.max(0, Math.min(H - 1, Math.round(px.y)));
+            encoder.copyTextureToBuffer(
+              { texture, origin: { x, y } },
+              { buffer, offset: 256 * i, bytesPerRow: 256 },
+              { width: 1, height: 1 }
+            );
+          });
+          device.queue.submit([encoder.finish()]);
+          buffer.mapAsync(globalThis.GPUMapMode.READ).then(
+            () => {
+              const bytes = new Uint8Array(buffer.getMappedRange().slice(0));
+              buffer.unmap();
+              buffer.destroy();
+              job.resolve({
+                ok: true,
+                format: texture.format,
+                size: [W, H],
+                pixels: job.pixels.map((_, i) =>
+                  decodeCanvasPixel(bytes.subarray(256 * i, 256 * i + 4), texture.format)
+                ),
+              });
+            },
+            (err) => {
+              buffer.destroy();
+              job.resolve({ ok: false, reason: `mapAsync failed: ${err?.message ?? err}` });
+            }
+          );
+        } catch (err) {
+          job.resolve({ ok: false, reason: `copy failed: ${err?.message ?? err}` });
+        }
+      }
+    }
+    /** Queue device-pixel reads of the next presented frame. Resolves {ok:false} after 3 s with no frame. */
+    function requestPresentedRead(pixels) {
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = (v) => {
+          if (done) return;
+          done = true;
+          resolve(v);
+        };
+        presentedReadQueue.push({ pixels, resolve: finish });
+        setTimeout(
+          () => finish({ ok: false, reason: 'no frame presented within 3 s (paused loop or hidden tab?)' }),
+          3000
+        );
+      });
+    }
+    const nextAnimationFrame = () =>
+      new Promise((r) =>
+        typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => r()) : setTimeout(r, 16)
+      );
+
+    /**
+     * Probe v2: any number of world points; waits until the buffers stop moving (a read taken mid-rebuild is
+     * garbage — the lab once read lit 0.488 against a steady 0.184); reads the PRESENTED pixel and judges its
+     * drift from lit; decodes the floor and outdoors attribute; markers only on request.
+     * @param {Array<{x:number,y:number,name?:string}>} points - world (canvas) px
+     * @param {{markers?:boolean, stable?:boolean, presented?:boolean, maxFrames?:number}} [opts]
+     */
+    async function runProbeV2(points, opts = {}) {
+      const { markers = false, stable = true, presented = true, maxFrames = 10 } = opts;
+      const list = (Array.isArray(points) ? points : []).slice(0, 64);
+      const readAll = () => Promise.all(list.map((p) => sampleOnePixel(p?.x, p?.y)));
+      let samples = await readAll();
+      let settled = !stable;
+      let framesWaited = 0;
+      while (stable && !settled && framesWaited < maxFrames) {
+        await nextAnimationFrame();
+        framesWaited++;
+        const again = await readAll();
+        settled = again.every((s, i) => !s.onScreen || buffersAgree(samples[i].buffers, s.buffers));
+        samples = again;
+      }
+      let presentedRead = null;
+      const onScreenIdx = samples.map((s, i) => (s.onScreen && s.pixel ? i : -1)).filter((i) => i >= 0);
+      if (presented && onScreenIdx.length)
+        presentedRead = await requestPresentedRead(onScreenIdx.map((i) => samples[i].pixel));
+      const results = samples.map((s, i) => {
+        const k = onScreenIdx.indexOf(i);
+        const pres = presentedRead?.ok && k >= 0 ? presentedRead.pixels[k] : null;
+        const attr = s.buffers?.attr?.rgba ?? null;
+        return {
+          name: list[i]?.name ?? null,
+          worldX: s.worldX,
+          worldY: s.worldY,
+          pixel: s.pixel,
+          onScreen: s.onScreen,
+          floorIndex: attr ? Math.round(attr[0] * 255) : null,
+          outdoors01: attr ? +attr[1].toFixed(3) : null,
+          albedo: s.buffers?.albedo?.rgba?.slice(0, 3) ?? null,
+          illum: s.buffers?.illum?.rgba?.slice(0, 3) ?? null,
+          lit: s.buffers?.lit?.rgba?.slice(0, 3) ?? null,
+          coloration: s.buffers?.coloration?.rgba?.slice(0, 3) ?? null,
+          presented: pres ? pres.slice(0, 3) : null,
+          drift: pres ? judgePresentedDrift({ lit: s.buffers?.lit?.rgba ?? null, presented: pres }) : null,
+          itemsAtPoint: s.itemsAtPoint,
+        };
+      });
+      if (markers) {
+        clearProbeMarkers();
+        drawProbeMarkers(
+          results
+            .map((r, i) => ({ r, i }))
+            .filter(({ r }) => r.onScreen && r.pixel)
+            .map(({ r, i }) => ({
+              index: i + 1,
+              xPercent: (r.pixel.x / drawBufW) * 100,
+              yPercent: (r.pixel.y / drawBufH) * 100,
+            }))
+        );
+      }
+      const order = { ok: 0, check: 1, suspect: 2 };
+      const worst = results.reduce(
+        (w, r) => (r.drift && order[r.drift.verdict] > order[w] ? r.drift.verdict : w),
+        'ok'
+      );
+      return {
+        settled,
+        framesWaited,
+        presented: presentedRead
+          ? { ok: presentedRead.ok, reason: presentedRead.reason ?? null, format: presentedRead.format ?? null }
+          : null,
+        verdict: presentedRead?.ok ? worst : 'unknown',
+        results,
+      };
+    }
+
     /**
      * Shared core of `probePixels`/`runInteractivePixelProbe`: sample up to
      * `PROBE_MARKER_COLORS.length` world points and draw their markers in
@@ -33795,6 +33978,7 @@ async function startVtPanViewerUnserialized({
        *   deltaFromPrev:{perBuffer:object, biggestJump:object}|null}>>}
        */
       probePixels: async (points) => runProbeOnPoints(points),
+      probe: async (points, opts) => runProbeV2(points, opts),
       /** DYNAMIC RANGE's live controller state (effects/dynamic-range.js) — `MapShine.dynamicRange()`. */
       getDynamicRangeInfo,
       /** Freeze the camera's metered light for `sec` seconds (`MapShine.camera.holdExposure`). */
@@ -35687,6 +35871,15 @@ export function holdVtPanViewerExposure(sec) {
 /** One rack-focus pull of the lens (2026-11-08, mmp-ilo.10); a no-op while the Lens card's rack focus is 0. */
 export function rackVtPanViewerFocus() {
   _active?.rackLensFocus?.();
+}
+
+/**
+ * Probe v2 (mmp-78u.12) — `await MapShine.probe([{x, y, name?}, ...], {markers, stable, presented})`:
+ * any number of points, settled reads, the PRESENTED pixel and its drift from lit. See runProbeV2.
+ */
+export async function probeVtPanViewerV2(points, opts) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.probe(points, opts);
 }
 
 export async function probeVtPanViewerPixels(points) {

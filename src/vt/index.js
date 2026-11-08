@@ -111,6 +111,7 @@ export {
   getVtPanViewerIsolateItemId,
   sampleVtPanViewerIllumPixel,
   probeVtPanViewerPixels,
+  probeVtPanViewerV2,
   getVtPanViewerDynamicRangeInfo,
   holdVtPanViewerExposure,
   rackVtPanViewerFocus,

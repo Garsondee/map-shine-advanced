@@ -56,7 +56,7 @@ const DIRECT = {
   flameEdgeSoft: ['look', 'edgeSoft', 0.3, 0.012, 0.3],
   flameMottle: ['look', 'mottle', 0.5, 0, 0.5],
   flameRelief: ['look', 'relief', 4.2, 0, 8],
-  flameBrightness: ['look', 'emission', 2.5, 0.2, 2.5],
+  flameBrightness: ['look', 'emission', 2.0, 0.2, 2.5],
   flameTone: ['look', 'tonePow', 0.7, 0.4, 1.6],
   flameFullness: ['look', 'outline', 0.81, 0.25, 0.9],
   flameGlowRadius: ['look', 'glowRadiusPx', 6, 0, 60],

@@ -35,9 +35,26 @@
  *  5. THE SHOULDER — grade-ops.js#highlightRolloff, hue-preserving, with a slow burn (DR_WHITEN): what is
  *     pushed past white eases toward it, a flame keeps an orange body round its hot core.
  *
- * THE BLOOM TIE-IN: bloom's bright pass runs the SAME per-pixel gain and glows from what reads past
- * `glowFrom` on screen. Punchy flames and noon snow glare through the lens; lamp pools and ordinary
- * surfaces never glow.
+ * ONE CAMERA (2026-11-08, mmp-ilo.1) — this card is the camera's EXPOSURE; the Bloom card is its GLARE.
+ *  - THE METER is a centre-weighted, trimmed LOG-AVERAGE of the incident light ({@link meterStats} →
+ *    `illumKey`), not a median: a median of a frame that is half lamp-lit interior, half sunlit street jumps
+ *    between the two modes on a few pixels of pan (the author: "flickering of light levels when moving across
+ *    the map"). A weighted log-average moves continuously as the view moves; the centre weight keeps the
+ *    frame's edges (where new ground streams in during a pan) from steering it.
+ *  - THE FLASH GATE ({@link gateReading}): a reading may only RAISE the metered light once it has held for
+ *    FLASH_GATE_SEC. Lightning, a muzzle flash, a spell burst (0.2–0.5 s) never re-expose the camera; a
+ *    darker reading lands at once. `holdSec` freezes the meter outright (MapShine.camera.holdExposure).
+ *  - ADAPTATION in log-luminance ({@link adaptToward}), asymmetric like an eye: into BRIGHTER light it
+ *    adapts in LIGHT_ADAPT_SHARE of the adapt time (light adaptation is fast — glare is uncomfortable), never faster
+ *    than MAX_ADAPT_STOPS_PER_SEC (no lurch at the start of a big change); into
+ *    DARKER light it takes the full adapt time (dark adaptation is slow). Before 2026-11-08 this was the
+ *    wrong way round: a pan into a dark interior lifted the picture twice as fast as a pan out dimmed it,
+ *    which read as pumping.
+ *  - THE GLARE TIE-IN: bloom's bright pass reads the scene at THIS camera's exposure (the stops only — the
+ *    per-pixel drama/punch curve is a tone decision, not more light), and its glow joins after the curve.
+ *    What glows, and how much, is the Bloom card's (bloom.js: an energy fraction, not a halo per pixel).
+ *    Before, the bright pass thresholded the PUNCHED brightness, so a metal glint punched +2.5 stops also
+ *    glowed as if it were that bright (the author: "huge fat chunky bloom around metallics").
  *
  * @module effects/dynamic-range
  */
@@ -75,10 +92,23 @@ export const PUNCH_RANGE = 2.5;
  * punched flame keeps an orange body round its hot core instead of going flat white. */
 export const DR_WHITEN = 0.08;
 
-/** Brightening adapts this much slower than darkening (an eye adapts to glare faster). */
-export const DARK_ADAPT_SLOWER = 2;
+/** Into BRIGHTER light the camera adapts in this share of the adapt time (light adaptation is fast); into
+ * darker light it takes the whole adapt time (dark adaptation is slow). */
+export const LIGHT_ADAPT_SHARE = 1 / 2;
+/** The fastest the metered light may move, in stops of light per second (≈ 0.6 stop/s of exposure at the default
+ * Eye adaptation 0.4): an exponential alone starts a big change at its fastest, which on a pan from a dark hall into
+ * a sunlit yard read as a lurch. Measured on the rig (2026-11-08): it caps the per-frame exposure step at ~0.01. */
+export const MAX_ADAPT_STOPS_PER_SEC = 1.5;
 /** The longest frame step the adaptation integrates. */
 export const MAX_ADAPT_DT_SEC = 0.25;
+/** A brighter meter reading must hold this long before the camera adapts to it: bright events shorter than
+ * this (lightning 0.2–0.5 s, a muzzle flash) never re-expose the picture. Darker readings land at once. */
+export const FLASH_GATE_SEC = 0.8;
+/** The meter's centre weight: a Gaussian whose sigma is this share of the frame's half-diagonal. */
+export const METER_SIGMA = 0.5;
+/** The meter's trim: this share of the weight is dropped at EACH end of the light range (black voids under
+ * the frame, the hot cores of lamp pools) before the log-average is taken. */
+export const METER_TRIM = 0.1;
 
 /** @type {Record<string, object>} */
 export const DYNAMIC_RANGE_PARAMS = Object.freeze({
@@ -169,31 +199,10 @@ export const DYNAMIC_RANGE_PARAMS = Object.freeze({
     min: 0,
     max: 10,
     step: 0.1,
-    default: 1.5,
+    default: 2.5,
     category: 'Response',
     label: 'Adapt time',
-    help: 'How long the camera takes to settle after the light changes, in seconds (glare takes half as long). A floor change or scene load settles at once.',
-  },
-  // ── Light (the bloom tie-in) ────────────────────────────────────────────
-  glowFrom: {
-    type: 'float',
-    min: 0.5,
-    max: 3,
-    step: 0.01,
-    default: 1.15,
-    category: 'Light',
-    label: 'Glow from',
-    help: 'Bloom starts where this camera makes the picture read this bright (1 = white), so only light too bright for the picture glows — flames, glints, noon snow — never a lamp pool. Lower lets more glow. Replaces the Bloom card’s thresholds while this card is on.',
-  },
-  glowAmount: {
-    type: 'float',
-    min: 0,
-    max: 1.5,
-    step: 0.01,
-    default: 0.35,
-    category: 'Light',
-    label: 'Glow amount',
-    help: 'How much of the Bloom card’s glow reaches the picture while this camera is on. The glow is added after the camera’s curve, so it is a soft halo on lamps, flames and glints, never a fat wash over bright surfaces. 1 is the Bloom card’s full strength; 0 turns the glow off.',
+    help: 'How long the camera takes to settle when the light gets darker, in seconds, like eyes getting used to the dark. Into brighter light it settles twice as fast, and never lurches. Flashes shorter than a second (lightning) never change it. A floor change or scene load settles at once.',
   },
 });
 
@@ -206,29 +215,91 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 export const srgbToLinear = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
 const lumOf = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
 
+/** The meter's centre weight for cell (i, j) of a w×h grid (dynamic-range.js#METER_SIGMA). */
+export function meterWeight(i, j, w, h) {
+  const dx = ((i + 0.5) / w - 0.5) * 2;
+  const dy = ((j + 0.5) / h - 0.5) * 2;
+  const r2 = (dx * dx + dy * dy) / 2; // 1 at the corners
+  return Math.exp(-r2 / (2 * METER_SIGMA * METER_SIGMA));
+}
+
 /**
- * One readback → statistics. R = mean scene.lit luminance of the cell, G = mean scene.illum luminance.
+ * The weighted, trimmed mean of `vals` (log2 light): drop `trim` of the total weight at each end (partial
+ * weights at the cut, so the answer moves continuously as the weights do), average the rest.
+ * @param {Float64Array|number[]} vals @param {Float64Array|number[]} wts @param {number} n @param {number} trim
+ */
+export function trimmedWeightedMean(vals, wts, n, trim = METER_TRIM) {
+  const order = Array.from({ length: n }, (_, k) => k).sort((a, b) => vals[a] - vals[b]);
+  let total = 0;
+  for (let k = 0; k < n; k++) total += wts[k];
+  if (!(total > 0)) return null;
+  const lo = total * trim;
+  const hi = total * (1 - trim);
+  let acc = 0;
+  let sum = 0;
+  let wsum = 0;
+  for (const k of order) {
+    const a = acc;
+    const b = acc + wts[k];
+    acc = b;
+    const keep = Math.max(0, Math.min(b, hi) - Math.max(a, lo));
+    if (keep > 0) {
+      sum += vals[k] * keep;
+      wsum += keep;
+    }
+  }
+  return wsum > 0 ? sum / wsum : null;
+}
+
+/**
+ * One readback → statistics. Per cell: R = mean scene.lit luminance, G = mean scene.illum luminance,
+ * B = mean bright EXCESS at the camera's exposure (exposed luminance over the glare threshold — the energy
+ * the glare spreads), A = share of the cell's taps over that threshold (dynamic-range-render.js meter).
+ * `illumKey` (what the camera meters, 2026-11-08) = 2^(centre-weighted, trimmed mean of log2 illum).
+ * `glowEnergy` / `glowCover` = the in-scene, unweighted means of B and A (the glare budget's inputs).
  * @param {ArrayLike<number>} px RGBA floats @param {number} w @param {number} h
- * @returns {{n:number, litP50:number, litP99:number, illumP50:number}|null}
+ * @returns {{n:number, litP50:number, litP99:number, illumP50:number, illumKey:number, glowEnergy:number,
+ *   glowCover:number}|null}
  */
 export function meterStats(px, w, h) {
   const cells = w * h;
   if (!px || px.length < cells * 4) return null;
   const lit = new Float32Array(cells);
   const ill = new Float32Array(cells);
+  const logs = new Float64Array(cells);
+  const wts = new Float64Array(cells);
   let n = 0;
-  for (let i = 0; i < cells; i++) {
-    const l = Number(px[i * 4]);
-    if (!(l > METER_VALID_MIN)) continue;
-    lit[n] = l;
-    ill[n] = Math.max(0, Number(px[i * 4 + 1]) || 0);
-    n++;
+  let energy = 0;
+  let cover = 0;
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      const c = j * w + i;
+      const l = Number(px[c * 4]);
+      if (!(l > METER_VALID_MIN)) continue;
+      lit[n] = l;
+      const il = Math.max(0, Number(px[c * 4 + 1]) || 0);
+      ill[n] = il;
+      logs[n] = Math.log2(Math.max(1e-6, il));
+      wts[n] = meterWeight(i, j, w, h);
+      energy += Math.max(0, Number(px[c * 4 + 2]) || 0);
+      cover += Math.max(0, Number(px[c * 4 + 3]) || 0);
+      n++;
+    }
   }
   if (!n) return null;
+  const key = trimmedWeightedMean(logs, wts, n);
   const a = lit.subarray(0, n).sort();
   const b = ill.subarray(0, n).sort();
   const at = (s, q) => s[Math.min(n - 1, Math.max(0, Math.floor(q * (n - 1) + 0.5)))];
-  return { n, litP50: at(a, 0.5), litP99: at(a, 0.99), illumP50: at(b, 0.5) };
+  return {
+    n,
+    litP50: at(a, 0.5),
+    litP99: at(a, 0.99),
+    illumP50: at(b, 0.5),
+    illumKey: key === null ? at(b, 0.5) : 2 ** key,
+    glowEnergy: energy / n,
+    glowCover: cover / n,
+  };
 }
 
 /** What an 18% grey card reads (linear) under incident light `illum` — the composite's own formula. */
@@ -311,11 +382,12 @@ export function drGain(rgb, illumRgb, curve, colorationRgb = null) {
 /**
  * The full per-pixel transform (CPU mirror of the shader): scene-referred linear RGB → display-ready
  * linear RGB (≤ ~1 after the shoulder).
- * GLARE (2026-11-07) — `glareRgb`, bloom's glow, joins AFTER the curve, scaled by the exposure only, and goes through
- * the shoulder with the picture. Added into `rgb` instead (as it was), the curve read a halo as a bright material and
- * punched it: a halo lifting a dark floor 1.25 stops over its grey card took the punch's extra stops on top.
+ * GLARE (2026-11-07) — `glareRgb`, bloom's glow, joins AFTER the curve and goes through the shoulder with the
+ * picture. Added into `rgb` instead (as it was), the curve read a halo as a bright material and punched it: a halo
+ * lifting a dark floor 1.25 stops over its grey card took the punch's extra stops on top. Since 2026-11-08 the bloom
+ * pyramid is built from the scene AT THIS EXPOSURE, so the glare arrives already exposed (no extra gain here).
  * @param {readonly number[]} rgb @param {readonly number[]} illumRgb @param {ReturnType<typeof curveFor>} curve
- * @param {readonly number[]|null} [colorationRgb] @param {readonly number[]|null} [glareRgb] bloom, scene-referred
+ * @param {readonly number[]|null} [colorationRgb] @param {readonly number[]|null} [glareRgb] bloom, already exposed
  * @returns {[number,number,number]}
  */
 export function drTransform(rgb, illumRgb, curve, colorationRgb = null, glareRgb = null) {
@@ -325,27 +397,75 @@ export function drTransform(rgb, illumRgb, curve, colorationRgb = null, glareRgb
   // Colour in light: full above the pivot + 2 stops, none below a stop under it.
   const w = clamp((Math.log2(L2 / curve.mid) + 1) / 3, 0, 1);
   const sat = 1 + (curve.colour - 1) * w;
-  const coloured = graded.map(
-    (v, i) => Math.max(0, L2 + (v - L2) * sat) + (glareRgb ? Math.max(0, glareRgb[i]) * g : 0)
-  );
+  const coloured = graded.map((v, i) => Math.max(0, L2 + (v - L2) * sat) + (glareRgb ? Math.max(0, glareRgb[i]) : 0));
   return highlightRolloff(coloured, undefined, DR_WHITEN);
 }
 
-/** What bloom's bright pass compares with `glowFrom`: the pixel's brightest channel as this camera shows it (pre-shoulder). */
-export function drDisplayBrightness(rgb, illumRgb, curve, colorationRgb = null) {
-  const { g, k } = drGain(rgb, illumRgb, curve, colorationRgb);
-  return Math.max(0, ...rgb) * g * k;
+/**
+ * What bloom's bright pass thresholds while this camera is on: the pixel's brightest channel at the camera's
+ * EXPOSURE (stops only). The drama/punch curve is deliberately left out — it decides how bright a thing LOOKS,
+ * not how much light reaches the lens (a punched metal glint must not also glare like a light that bright).
+ */
+export function drExposedBrightness(rgb, curve) {
+  return Math.max(0, ...rgb) * 2 ** num(curve?.ev, 0);
 }
 
-/** One adaptation step toward `target` on the real frame delta (exponential). */
+/**
+ * One adaptation step of the metered light (log2) toward `target` on the real frame delta (exponential in
+ * log-luminance). Into BRIGHTER light (target above current) it runs at LIGHT_ADAPT_SHARE of the adapt
+ * time; into darker light at the full adapt time — an eye adapts to glare fast and to the dark slowly.
+ */
 export function adaptToward(current, target, dtSec, adaptSeconds) {
   const cur = num(current, 0);
   const tgt = num(target, 0);
   const tau = num(adaptSeconds, DYNAMIC_RANGE_DEFAULTS.adaptSeconds);
   if (!(tau > 0)) return tgt;
   const dt = clamp(num(dtSec, 0), 0, MAX_ADAPT_DT_SEC);
-  const t = tgt > cur ? tau : tau / DARK_ADAPT_SLOWER;
-  return cur + (tgt - cur) * (1 - Math.exp(-dt / t));
+  const t = tgt > cur ? tau * LIGHT_ADAPT_SHARE : tau;
+  const step = (tgt - cur) * (1 - Math.exp(-dt / t));
+  const cap = MAX_ADAPT_STOPS_PER_SEC * dt;
+  return cur + clamp(step, -cap, cap);
+}
+
+/** A fresh flash gate (see {@link gateReading}). */
+export function createFlashGate() {
+  return { t: 0, readings: [], holdUntil: 0, gated: null };
+}
+
+/**
+ * THE FLASH GATE — feed it the frame's real delta and, when a new meter reading has landed, that reading
+ * (log2 light; null = none this frame). Returns the light the camera should adapt toward: the LOWEST
+ * reading of the last FLASH_GATE_SEC, so a brighter reading counts only once it has held that long, and a
+ * darker one counts at once. While held (`hold(gate, sec)`), it returns its last answer unchanged.
+ * Pure state in, number out: no clock is read (time is the summed deltas).
+ * @param {ReturnType<typeof createFlashGate>} gate @param {number|null} reading @param {number} dtSec
+ * @returns {number|null}
+ */
+export function gateReading(gate, reading, dtSec, windowSec = FLASH_GATE_SEC) {
+  gate.t += clamp(num(dtSec, 0), 0, 1);
+  if (Number.isFinite(reading)) gate.readings.push({ t: gate.t, v: reading });
+  // keep the newest reading older than the window too: it is the light that held through the window's start
+  while (gate.readings.length > 1 && gate.readings[1].t <= gate.t - windowSec) gate.readings.shift();
+  if (gate.t < gate.holdUntil && gate.gated !== null) return gate.gated;
+  if (!gate.readings.length) return gate.gated;
+  let lo = Infinity;
+  for (const r of gate.readings) lo = Math.min(lo, r.v);
+  gate.gated = lo;
+  return lo;
+}
+
+/** Freeze the gate's answer for `sec` seconds of frame time (e.g. through a lightning storm's strike train). */
+export function holdGate(gate, sec) {
+  const s = clamp(num(sec, 0), 0, 30);
+  gate.holdUntil = Math.max(gate.holdUntil, gate.t + s);
+  return gate.holdUntil - gate.t;
+}
+
+/** Forget every reading (a scene load or floor change: the old light says nothing about the new view). */
+export function resetGate(gate) {
+  gate.readings.length = 0;
+  gate.gated = null;
+  gate.holdUntil = 0;
 }
 
 /** @type {import('./effect-manifest.js').EffectManifest} */

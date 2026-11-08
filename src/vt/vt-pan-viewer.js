@@ -623,9 +623,23 @@ import {
   dynamicRangeExposure,
   dynamicRangeCurve,
   dynamicRangeAdapt,
+  dynamicRangeFlashGate,
+  dynamicRangeGateReading,
+  dynamicRangeHoldGate,
+  dynamicRangeResetGate,
   createDynamicRangeUniforms,
   writeDynamicRangeUniforms,
+  writeGlareThreshold,
   readDynamicRangeUniforms,
+  GLARE_ENERGY,
+  GLARE_MIN_FROM,
+  glareBudgetGain,
+  buildCameraGlareMaterial,
+  createCameraGlareUniforms,
+  cameraGlareFeatures,
+  cameraGlareCoverScale,
+  LENS_LEAK_IMAGE,
+  LENS_RAINBOW_IMAGE,
   // LENS (mythica-machina-press#57) — see effects/lens-render.js's own
   // header for the two materials' shapes and effects/lens-motion.js's own
   // header for why the autofocus/motion/light-burn MATHS is imported
@@ -5667,6 +5681,23 @@ async function startVtPanViewerUnserialized({
       uViewRect: envLight.uViewRect,
       uOutdoorsRect: envLight.uOutdoorsRect,
     });
+    // ========================================================================
+    // THE CAMERA'S GLARE (2026-11-08, epic mmp-ilo) — effects/camera-glare-render.js. Bloom's PSF plus everything
+    // bright light does inside the lens (halation, dirt on the glass, starbursts, streaks, ghosts, a golden-hour
+    // leak, prism rainbows), composed at the bloom's half resolution in SCREEN space (through the lens warp) into
+    // ONE texture the present adds after the camera's curve. Built for the set of terms that are on (Law 4), and
+    // rebuilt only when that set changes.
+    // ========================================================================
+    const cameraGlareTarget = allocator.create('camera.glare', describeBloomMip(bloomMipW(0), bloomMipH(0)));
+    const cameraGlareUniforms = createCameraGlareUniforms(THREE);
+    const cameraGlare = {
+      quad: null,
+      built: null,
+      key: null,
+      drawn: false,
+      images: { dirt: null, leak: null, rainbow: null },
+      placeholder: null,
+    };
     const bloomBrightQuad = new THREE.QuadMesh(bloom.brightMaterial);
     const bloomDownKarisQuad = new THREE.QuadMesh(bloom.downsampleKaris.material);
     const bloomDownQuad = new THREE.QuadMesh(bloom.downsample.material);
@@ -5698,18 +5729,25 @@ async function startVtPanViewerUnserialized({
         // The same camera rect + map rect the bloom's outdoor clamp uses: padding is left out.
         uViewRect: envLight.uViewRect,
         uSceneRect: envLight.uOutdoorsRect,
+        // The camera's exposure + glare threshold: the meter's B/A channels measure the glare budget's energy.
+        dynamicRangeUniforms: drUniforms,
       }).material
     );
     /** The live controller state (see `stepDynamicRange`); read-only copy via getDynamicRangeInfo. */
     const dr = {
       on: false,
-      logIllum: 0, // the metered light (log2 of median illum), adapted — the one eased state
+      logIllum: 0, // the metered light (log2 of the meter's weighted log-average illum), adapted — the one eased state
       ev: 0,
       curve: null, // what the present pass runs now (dynamic-range.js#curveFor)
-      bloomGain: 1, // the scale on bloom's strength as drawn (Glow amount while the glow joins in the present)
-      glowAmount: 0.35, // "Glow amount": the share of bloom's glow the present adds after the curve
-      glowFrom: null, // "Glow from": the bright pass's threshold while on (display units)
-      bloomThresholdUsed: null, // what the bright pass used last (for the fire's inverse-bloom)
+      /** THE FLASH GATE (2026-11-08): a brighter reading must hold FLASH_GATE_SEC before the camera adapts to it. */
+      gate: dynamicRangeFlashGate(),
+      gated: null, // the gate's answer this frame (log2 light the camera adapts toward)
+      fresh: false, // a meter reading landed since the last step
+      /** THE GLARE BUDGET (mmp-ilo.2): the eased gain on the glare's strength (bloom.js#glareBudgetGain). */
+      glareGain: 1,
+      glareBudgetTarget: 1,
+      glareFraction: 0,
+      bloomThresholdUsed: null, // what the bright pass used last, in SCENE units (for the fire's inverse-bloom)
       stats: null,
       inFlight: false,
       frame: 0,
@@ -9691,12 +9729,12 @@ async function startVtPanViewerUnserialized({
       },
       // The lamps' coloured glow, so a Look's colourise can keep lamplight white.
       lampGlowTexture: sceneColoration.texture,
+      // THE CAMERA'S GLARE (2026-11-08): bloom + lens glare, composed in screen space (runCameraGlarePass).
+      cameraGlareTexture: cameraGlareTarget.texture,
       // DYNAMIC RANGE (2026-11-04) — the HDR camera before the Look grade (effects/dynamic-range-render.js).
       illumTexture: sceneIllum.texture,
       dynamicRangeUniforms: drUniforms,
-      // BLOOM AFTER THE CURVE (2026-11-07): while Dynamic Range is on, the glow joins the picture inside the present,
-      // after the camera's curve (runPostBloomPass skips its composite into scene.lit then).
-      bloomGlareAt: bloom.glareAt,
+
       // The lens's own Table guard, so the present's lens-warped mask reads match the lens to the pixel.
       lensUvGuard: tableSubsystem.lensGuard,
       directSrgb: presentDirectSrgb,
@@ -10517,6 +10555,7 @@ async function startVtPanViewerUnserialized({
       const lensK = lensDrewDistortion;
       lensDrewDistortion = null;
       gradePresent.setLensWarp(lensK !== null, lensK ?? 0);
+      runCameraGlarePass(lensK ?? 0);
       syncFoundryOverlay();
       // Every structural change asked for since the last frame, applied as ONE shader build (grade-present.js
       // `rebuildFragment`) — a load used to build this ~50k-character shader seven times. After the first shape
@@ -12890,6 +12929,14 @@ async function startVtPanViewerUnserialized({
     }
 
     // ── Autofocus state (V2's own event-scheduler shape, see lens-motion.js) ──
+    /** RACK FOCUS (mmp-ilo.10): one pull at a time, restarted by each new event. */
+    const LENS_RACK_SEC = 0.7;
+    const lensRack = { active: false, t: 0 };
+    /** Pull focus once (a token selected, a combat turn): the Lens card's "Rack focus on events" sets how far. */
+    function rackLensFocus() {
+      lensRack.active = true;
+      lensRack.t = 0;
+    }
     let lensAutoFocusScheduled = false;
     let lensAutoFocusEventActive = false;
     let lensAutoFocusEventElapsedSec = 0;
@@ -12968,7 +13015,11 @@ async function startVtPanViewerUnserialized({
       u.uChromaticEdgePower.value = lensNum(p.chromaticEdgePower, 6);
       u.uVignetteIntensity.value = lensNum(p.vignetteIntensity, 1);
       u.uVignetteSoftness.value = lensNum(p.vignetteSoftness, 0.02);
-      u.uGrainAmount.value = lensNum(p.grainAmount, 0.003);
+      // ONE CAMERA MODEL (mmp-ilo.9): when the camera opens up for a dark scene (Dynamic Range's exposure, stops above
+      // noon), the grain grows like a faster film's: x 2^(0.5 x stops x "Grain follows exposure"), at most x3.
+      const isoStops = dr.on && Number.isFinite(dr.ev) ? Math.max(0, dr.ev) : 0;
+      const isoGain = Math.min(3, 2 ** (0.5 * isoStops * Math.max(0, lensNum(p.grainFromExposure, 0.5))));
+      u.uGrainAmount.value = lensNum(p.grainAmount, 0.003) * isoGain;
       u.uGrainSpeed.value = lensNum(p.grainSpeed, 1.05);
       u.uAdaptiveGrainEnabled.value = p.adaptiveGrainEnabled === false ? 0 : 1;
       u.uGrainLowLightBoost.value = lensNum(p.grainLowLightBoost, 0.12);
@@ -13104,10 +13155,29 @@ async function startVtPanViewerUnserialized({
       }
       lensCameraLast = cameraCurr;
 
+      // RACK FOCUS (mmp-ilo.10): a focus pull requested by a game event (`rackLensFocus`) — out and back in over
+      // LENS_RACK_SEC, the same envelope as an autofocus pulse, independent of the random autofocus.
+      const rackPx = Math.max(0, lensNum(p.rackFocus, 0));
+      let rackAmount = 0;
+      if (lensRack.active) {
+        lensRack.t += dtSec;
+        const phase = lensRack.t / LENS_RACK_SEC;
+        rackAmount = rackPx > 0 ? computeAutoFocusAmount(phase) : 0;
+        if (phase >= 1) lensRack.active = false;
+      }
+      const rackWins = rackAmount > (autoFocusEnabled ? lensAutoFocusAmount : 0);
+
       if (plan.motionEnabled) {
-        u.uAutoFocusAmount.value = autoFocusEnabled ? lensAutoFocusAmount : 0;
-        u.uAutoFocusBlurPx.value = lensNum(p.autoFocusMaxBlurPx, 2.5);
-        u.uAutoFocusShiftPx.value.set(lensAutoFocusShiftPx.x, lensAutoFocusShiftPx.y);
+        u.uAutoFocusAmount.value = rackWins ? rackAmount : autoFocusEnabled ? lensAutoFocusAmount : 0;
+        u.uAutoFocusBlurPx.value = rackWins ? rackPx : lensNum(p.autoFocusMaxBlurPx, 2.5);
+        u.uTiltShift.value.set(
+          Math.max(0, Math.min(1, lensNum(p.tiltShift, 0))),
+          Math.max(0, Math.min(0.95, lensNum(p.tiltShiftBand, 0.3))),
+          Math.max(0, lensNum(p.tiltShiftBlurPx, 6)),
+          0
+        );
+        if (rackWins) u.uAutoFocusShiftPx.value.set(0, 0);
+        else u.uAutoFocusShiftPx.value.set(lensAutoFocusShiftPx.x, lensAutoFocusShiftPx.y);
         // `!== false`, not `=== true` — default flips ON with the 2026-10-16
         // live tuning (lens.js), the same missing-means-default shape as
         // autofocus's own gate above.
@@ -13262,7 +13332,8 @@ async function startVtPanViewerUnserialized({
       const st = getDynamicRangeRenderState();
       if (!st?.enabled) {
         if (dr.on) {
-          Object.assign(dr, { on: false, stats: null, curve: null, glowFrom: null });
+          Object.assign(dr, { on: false, curve: null, gated: null });
+          dynamicRangeResetGate(dr.gate);
           writeDynamicRangeUniforms(drUniforms, null);
         }
         return;
@@ -13276,7 +13347,15 @@ async function startVtPanViewerUnserialized({
       if (!renderScaleHeld && !drSnapWhileBusy) dr.snapUntilSettled = false;
       const snap = (dr.snapUntilSettled && renderScaleHeld) || !dr.curve || captureSnapExposure;
       if (snap) dr.snaps++;
-      const target = Math.log2(Math.max(1e-6, dr.stats.illumP50));
+      // THE METERED LIGHT (2026-11-08): the meter's centre-weighted, trimmed log-average (`illumKey`), through the flash
+      // gate (a brighter reading counts only once it has held FLASH_GATE_SEC), then adapted in log-luminance —
+      // effects/dynamic-range.js has the why. A snap forgets the gate's history and lands on the reading itself.
+      const reading = Math.log2(Math.max(1e-6, dr.stats.illumKey ?? dr.stats.illumP50));
+      if (snap) dynamicRangeResetGate(dr.gate);
+      const gated = dynamicRangeGateReading(dr.gate, dr.fresh || snap ? reading : null, dr.lastRealDtSec);
+      dr.fresh = false;
+      const target = snap || gated === null ? reading : gated;
+      dr.gated = target;
       dr.logIllum = snap ? target : dynamicRangeAdapt(dr.logIllum, target, dr.lastRealDtSec, p.adaptSeconds);
       const illum = 2 ** dr.logIllum;
       dr.ev = dynamicRangeExposure(illum, { eyeAdapt: p.eyeAdapt, exposure: p.exposure });
@@ -13288,9 +13367,93 @@ async function startVtPanViewerUnserialized({
         colour: p.colour,
         lightRange: p.lightRange,
       });
-      dr.glowFrom = Number.isFinite(Number(p.glowFrom)) ? Number(p.glowFrom) : 1.15;
-      dr.glowAmount = Number.isFinite(Number(p.glowAmount)) ? Number(p.glowAmount) : 0.35;
       writeDynamicRangeUniforms(drUniforms, dr.curve);
+    }
+
+    /** The camera glare's image for a role (dirt / leak / rainbow): the placeholder until it has loaded. */
+    function cameraGlareImage(role, filename) {
+      cameraGlare.placeholder ??= createMaskDataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, 'linear', false);
+      const slot = cameraGlare.images[role];
+      if (slot?.name === filename) return slot.texture ?? cameraGlare.placeholder;
+      const entry = { name: filename, texture: null };
+      cameraGlare.images[role] = entry;
+      getLensOverlayTexture(filename).then((result) => {
+        if (!result?.texture || cameraGlare.images[role] !== entry) return;
+        entry.texture = result.texture;
+        const node = cameraGlare.built?.[`${role}TexNode`];
+        if (node) node.value = result.texture;
+      });
+      return cameraGlare.placeholder;
+    }
+
+    /**
+     * THE CAMERA'S GLARE PASS (2026-11-08) — compose bloom's PSF and the lens's glare terms into `camera.glare`, which
+     * the present adds after the camera's curve. Runs on frames the bloom ran (the pyramid is this frame's); the lens
+     * terms need the Lens card on. `lensK` = the lens warp the present uses this frame (0 = none).
+     */
+    function runCameraGlarePass(lensK) {
+      cameraGlare.drawn = false;
+      if (!gradePresent.bloomInPresent?.()) return;
+      const lensSt = getLensRenderState();
+      const lp = lensSt?.enabled ? (lensSt.params ?? {}) : {};
+      const features = cameraGlareFeatures(lp);
+      const dirtName = `${String(lp.dirtImage || 'lens_grease_01')}.jpg`;
+      const key = `${features.join(',')}|${bloomActiveAtmoTop}|${dirtName}`;
+      if (key !== cameraGlare.key) {
+        cameraGlare.key = key;
+        const fineMip = bloomMips[Math.min(1, bloomActiveMipCount - 1)];
+        const midMip = bloomMips[Math.min(2, bloomActiveMipCount - 1)];
+        const prev = cameraGlare.built;
+        cameraGlare.built = buildCameraGlareMaterial({
+          THREE,
+          glareAt: bloom.glareAt,
+          midTexture: midMip.texture,
+          fineTexture: fineMip.texture,
+          wideTexNode: bloom.atmoTexNode,
+          dirtTexture: features.includes('dirt') ? cameraGlareImage('dirt', dirtName) : null,
+          leakTexture: features.includes('leak') ? cameraGlareImage('leak', LENS_LEAK_IMAGE) : null,
+          rainbowTexture: features.includes('rainbow') ? cameraGlareImage('rainbow', LENS_RAINBOW_IMAGE) : null,
+          features,
+          uniforms: cameraGlareUniforms,
+          uvGuard: tableSubsystem.lensGuard,
+        });
+        if (cameraGlare.quad) cameraGlare.quad.material = cameraGlare.built.material;
+        else cameraGlare.quad = new THREE.QuadMesh(cameraGlare.built.material);
+        prev?.material?.dispose?.();
+      }
+      const n = (k, d) => (Number.isFinite(Number(lp[k])) ? Number(lp[k]) : d);
+      const U = cameraGlareUniforms;
+      const fine = bloomMips[Math.min(1, bloomActiveMipCount - 1)];
+      U.a.value.set(n('dirtAmount', 0), n('halation', 0), n('starburstAmount', 0), n('starburstFrom', 3));
+      U.b.value.set(n('streakAmount', 0), n('streakLength', 0.7), n('ghostAmount', 0), n('flareFrom', 2));
+      // The leak follows golden hour under a clear sky; it enters from the sun's side of the frame.
+      const golden = Math.max(0, Math.min(1, Number(skyHandle?.golden01) || 0));
+      const clear = Math.max(0, Math.min(1, Number(skyHandle?.clear01 ?? 1)));
+      const aspect = Math.max(1, internalW) / Math.max(1, internalH);
+      U.c.value.set(
+        n('leakAmount', 0) * golden * clear,
+        n('rainbowAmount', 0),
+        aspect,
+        (n('starburstAngle', 15) * Math.PI) / 180
+      );
+      U.d.value.set(Number(lensK) || 0, dr.glareGain ?? 1, 1 / Math.max(1, fine.width), 1 / Math.max(1, fine.height));
+      const sx = Number(skyHandle?.key?.dirX);
+      const sy = Number(skyHandle?.key?.dirY);
+      const cover = cameraGlareCoverScale(aspect);
+      U.e.value.set(Number.isFinite(sx) ? sx : 1, Number.isFinite(sy) ? sy : 0, cover[0], cover[1]);
+      renderer.setRenderTarget(cameraGlareTarget);
+      cameraGlare.quad.render(renderer);
+      renderer.setRenderTarget(null);
+      cameraGlare.drawn = true;
+    }
+
+    /**
+     * HOLD THE EXPOSURE (2026-11-08) — freeze what the camera meters for `sec` seconds of frame time, e.g. through a
+     * lightning storm's strike train or a scripted flash. The flash gate already ignores bright events under
+     * FLASH_GATE_SEC; this is for longer ones a caller knows are coming. Returns the seconds now held.
+     */
+    function holdExposure(sec) {
+      return dynamicRangeHoldGate(dr.gate, sec);
     }
 
     /**
@@ -13317,8 +13480,8 @@ async function startVtPanViewerUnserialized({
       return { w: DYNAMIC_RANGE_METER_W, h: DYNAMIC_RANGE_METER_H, px };
     }
 
-    function runDynamicRangeMeter() {
-      if (!dr.on || dr.inFlight) return;
+    function runDynamicRangeMeter(forGlare = false) {
+      if ((!dr.on && !forGlare) || dr.inFlight) return;
       if (dr.frame++ % DR_METER_EVERY !== 0) return;
       renderer.setRenderTarget(drMeterTarget);
       drMeterQuad.render(renderer);
@@ -13332,7 +13495,10 @@ async function startVtPanViewerUnserialized({
         .then((px) => {
           dr.reads++;
           const stats = dynamicRangeMeterStats(px, DYNAMIC_RANGE_METER_W, DYNAMIC_RANGE_METER_H);
-          if (stats) dr.stats = stats;
+          if (stats) {
+            dr.stats = stats;
+            dr.fresh = true;
+          }
         })
         .catch((err) => {
           dr.errors++;
@@ -13356,8 +13522,10 @@ async function startVtPanViewerUnserialized({
       return {
         ...st,
         params: {
-          // the glow the present adds after the curve is scaled by "Glow amount"; the fire predicts what lands
-          strength: Number.isFinite(p.strength) ? p.strength * (dr.bloomGain ?? 1) : p.strength,
+          // The fire's predictor (fire-billow-bloom.js) models the OLD un-normalised pyramid (three mips per band,
+          // K = strength × 3 × bands). The glare is now a normalised kernel carrying GLARE_ENERGY × strength × band of
+          // the bright energy, eased by the glare budget: report the strength that makes its K come out the same.
+          strength: Number.isFinite(p.strength) ? (p.strength * (dr.glareGain ?? 1) * GLARE_ENERGY) / 3 : p.strength,
           coreStrength: p.coreStrength,
           coreTint: p.coreTint,
           atmoStrength: p.atmoStrength,
@@ -13409,23 +13577,37 @@ async function startVtPanViewerUnserialized({
       // past "Glow from" on screen — light too bright for the picture — instead of the card's thresholds.
       // The bright pass then thresholds the brightness the camera SHOWS (dynamic-range-render.js), so the
       // threshold is "Glow from" itself, in screen units.
-      const drGlowing = dr.on && dr.curve && dr.glowFrom != null;
-      u.threshold.value = drGlowing
-        ? dr.glowFrom
-        : bloomEffectiveThreshold(bloomNum(p.threshold, 1.0), bloomNum(p.dayThreshold, 0), lastRaisedBackground);
-      // Scene units for the fire's predictor: "Glow from" back through the exposure (the per-pixel curve is
-      // not undone — an approximation the inverse-bloom tolerates).
-      dr.bloomThresholdUsed = drGlowing ? dr.glowFrom / 2 ** dr.curve.ev : u.threshold.value;
-      // BLOOM AFTER THE CURVE (2026-11-07): while the Dynamic Range camera is on, the present adds the glow after its
-      // curve (exposure only) and the composite into scene.lit below is skipped. In scene.lit the curve read every
-      // halo as a bright material and punched it (the author: "huge fat chunky bloom around metallics").
-      // Revert: localStorage `msa.bloomAfterCurve` = '0'.
-      const bloomInPresent = gradePresent.setBloomInPresent(drGlowing && bloomAfterCurve, dr.glowAmount);
-      dr.bloomGain = bloomInPresent ? dr.glowAmount : 1;
+      // ONE CAMERA (2026-11-08, mmp-ilo.1): the bright pass reads the scene at the camera's exposure (stops only), so
+      // the Bloom card's own "Glow from" is in the picture's units (1 = white at this exposure) whether Dynamic Range
+      // is on or off — it no longer replaces this card's thresholds. The daylight floor still applies.
+      const drExposed = dr.on && dr.curve;
+      u.threshold.value = bloomEffectiveThreshold(
+        Math.max(GLARE_MIN_FROM, bloomNum(p.threshold, 1.0)),
+        bloomNum(p.dayThreshold, 0),
+        lastRaisedBackground
+      );
+      writeGlareThreshold(drUniforms, u.threshold.value);
+      // Scene units for the fire's predictor: the threshold back through the exposure.
+      dr.bloomThresholdUsed = drExposed ? u.threshold.value / 2 ** dr.curve.ev : u.threshold.value;
+      // THE GLARE JOINS AFTER THE CURVE (2026-11-07; camera on OR off since 2026-11-08): the present adds the glow and
+      // the composite into scene.lit below is skipped. Revert: localStorage `msa.bloomAfterCurve` = '0'.
+      const bloomInPresent = gradePresent.setBloomInPresent(bloomAfterCurve, 1);
       u.knee.value = bloomNum(p.knee, 0.5);
-      u.strength.value = bloomNum(p.strength, 1.0);
-      u.coreStrength.value = bloomNum(p.coreStrength, 1.0);
-      u.atmoStrength.value = bloomNum(p.atmoStrength, 0.5);
+      const coreS = bloomNum(p.coreStrength, 1.0);
+      const atmoS = bloomNum(p.atmoStrength, 0.5);
+      // THE GLARE BUDGET (mmp-ilo.2): the meter measures the frame's bright excess; when the glare would veil the frame
+      // (many lamps, noon snow, a lava field, a lightning stroke) its strength eases down, so a 40-torch map looks as
+      // composed as a one-torch room. bloom.js#glareBudgetGain has the curve.
+      dr.glareFraction =
+        GLARE_ENERGY * Math.max(0, bloomNum(p.strength, 1.0)) * (Math.max(0, coreS) + Math.max(0, atmoS));
+      dr.glareBudgetTarget = dr.stats ? glareBudgetGain(dr.stats.glowEnergy, dr.glareFraction) : 1;
+      // Fast attack (80 ms: a lightning stroke or a flash is capped within a few frames, mmp-ilo.22), slow release (1 s).
+      const glareTau = dr.glareBudgetTarget < dr.glareGain ? 0.08 : 1;
+      dr.glareGain +=
+        (dr.glareBudgetTarget - dr.glareGain) * (1 - Math.exp(-Math.min(0.25, dr.lastRealDtSec) / glareTau));
+      u.strength.value = bloomNum(p.strength, 1.0) * dr.glareGain;
+      u.coreStrength.value = coreS;
+      u.atmoStrength.value = atmoS;
       u.spillEnabled.value = p.outdoorSpillSuppress === false ? 0 : 1;
       u.spillLo.value = bloomNum(p.spillLumLo, 0.42);
       u.spillHi.value = bloomNum(p.spillLumHi, 0.92);
@@ -13471,6 +13653,11 @@ async function startVtPanViewerUnserialized({
       // (atmoTop=3) that is mip2 → mip1 → mip0, unchanged; the cheap tier
       // (atmoTop=2) shortens it to mip1 → mip0, one fewer step.
       profiler?.begin(Z.bloomUpCore);
+      // Energy normalisation: each band's accumulated mip holds one copy of the bright energy per mip it summed.
+      u.bandNorm.value.set(
+        GLARE_ENERGY / Math.max(1, bloomActiveAtmoTop),
+        GLARE_ENERGY / Math.max(1, bloomActiveMipCount - bloomActiveAtmoTop)
+      );
       const coreTexels = bloomSpreadToTexels(bloomNum(p.coreSpread, 0.4));
       for (let k = bloomActiveAtmoTop - 2; k >= 0; k--) {
         bloomSetUpRadius(coreTexels, bloomMips[k + 1]);
@@ -13493,8 +13680,9 @@ async function startVtPanViewerUnserialized({
       }
       profiler?.end(Z.bloomUpAtmo);
 
-      // 3b) DYNAMIC RANGE METER — the scene's own light, before its glow is added.
-      runDynamicRangeMeter();
+      // 3b) DYNAMIC RANGE METER — the scene's own light, before its glow is added (also the glare budget's energy,
+      // so it runs while the camera is off too).
+      runDynamicRangeMeter(true);
 
       // 4) COMPOSITE — core (mip0) + atmosphere (mip3) additively into scene.lit.
       //    autoClearColor is still false here — an unguarded clear would wipe the
@@ -28564,6 +28752,7 @@ async function startVtPanViewerUnserialized({
       settleTracker.reset();
       // Dynamic Range snaps to the new floor's light until it settles (see `dr.snapUntilSettled`).
       dr.snapUntilSettled = true;
+      dynamicRangeResetGate(dr.gate);
       view = { ...view, floorIndex };
       // WIND REBAKE ON FLOOR SWITCH (2026-07-23, live author report: on a
       // real two-floor map, the floor BELOW kept reading the floor ABOVE's
@@ -29161,6 +29350,9 @@ async function startVtPanViewerUnserialized({
       for (let k = 0; k < BLOOM_MIP_COUNT; k++) {
         allocator.resize(bloomMips[k], bloomMipW(k), bloomMipH(k), describeBloomMip(bloomMipW(k), bloomMipH(k)));
       }
+      // The camera's glare composes at the bloom's top-mip size (same in-place resize, so the present's texture node
+      // stays valid).
+      allocator.resize(cameraGlareTarget, bloomMipW(0), bloomMipH(0), describeBloomMip(bloomMipW(0), bloomMipH(0)));
       // post.dof's mip chain tracks the internal tier too — same reasoning
       // as bloom's own mip chain just above (setSize mutates the SAME
       // texture object in place, so the composite material's baked mip
@@ -33566,6 +33758,10 @@ async function startVtPanViewerUnserialized({
       probePixels: async (points) => runProbeOnPoints(points),
       /** DYNAMIC RANGE's live controller state (effects/dynamic-range.js) — `MapShine.dynamicRange()`. */
       getDynamicRangeInfo,
+      /** Freeze the camera's metered light for `sec` seconds (`MapShine.camera.holdExposure`). */
+      holdExposure,
+      /** One rack-focus pull (`MapShine.camera.rackFocus`; foundry/camera-events.js fires it on game events). */
+      rackLensFocus,
       /**
        * THE INTERACTIVE FLOW: arm (see `armInteractivePixelProbe`'s own
        * header for the full input-model reasoning), collect up to
@@ -35437,6 +35633,21 @@ export async function sampleVtPanViewerIllumPixel(worldX, worldY) {
 export function getVtPanViewerDynamicRangeInfo() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getDynamicRangeInfo?.() ?? { skipped: true, reason: 'not wired' };
+}
+
+/**
+ * Freeze the camera's metered light for `sec` seconds of frame time (2026-11-08) — for bright events longer than the
+ * flash gate's window that a caller knows are coming (a lightning storm's strike train). Returns the seconds held.
+ * @param {number} sec
+ */
+export function holdVtPanViewerExposure(sec) {
+  if (!_active) return 0;
+  return _active.holdExposure?.(sec) ?? 0;
+}
+
+/** One rack-focus pull of the lens (2026-11-08, mmp-ilo.10); a no-op while the Lens card's rack focus is 0. */
+export function rackVtPanViewerFocus() {
+  _active?.rackLensFocus?.();
 }
 
 export async function probeVtPanViewerPixels(points) {

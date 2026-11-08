@@ -212,10 +212,12 @@ export function buildGradePresentMaterial({
   // (dynamic-range-render.js#createDynamicRangeUniforms). Either missing = no transform compiled.
   illumTexture = null,
   dynamicRangeUniforms = null,
-  // BLOOM AFTER THE CURVE (2026-11-07): bloom-render.js#buildBloomMaterials' `glareAt(uv)`. While Dynamic Range is
-  // on the viewer skips bloom's composite into scene.lit and this pass adds the glow after the curve instead
-  // (`setBloomInPresent`). Omitted = bloom always composites into scene.lit, as before.
-  bloomGlareAt = null,
+  // THE CAMERA'S GLARE (2026-11-08, epic mmp-ilo): one SCREEN-SPACE texture (effects/camera-glare-render.js) holding
+  // bloom's PSF and the lens's glare terms, already at the camera's exposure. The viewer skips bloom's composite
+  // into scene.lit and this pass adds the glare after the camera's curve (`setBloomInPresent`). It replaced the
+  // 2026-11-07 `bloomGlareAt` node (two bloom taps + five bloom uniforms inside this shader). Omitted = bloom always
+  // composites into scene.lit.
+  cameraGlareTexture = null,
 }) {
   const TSL = THREE.TSL;
   // THE LAMP GLOW (2026-11-01) — the coloration buffer (lamps' coloured light, 0 where
@@ -283,9 +285,10 @@ export function buildGradePresentMaterial({
    * scene-referred image BEFORE the artistic grade. Live uniforms only (shared with bloom's bright pass),
    * so no dial ever recompiles this shader; `on` 0 returns the input exactly. */
   const drIllumTexNode = illumTexture && dynamicRangeUniforms ? texture(illumTexture) : null;
-  /** 1 while the viewer has bloom's glow added here, after the Dynamic Range curve (`setBloomInPresent`); 0 = bloom
-   * is in scene.lit already. Only meaningful with the curve compiled (the glow joins inside it). */
+  /** The gain on the camera's glare added here, after the Dynamic Range curve (`setBloomInPresent`); 0 = bloom is in
+   * scene.lit already. Only meaningful with the curve compiled (the glare joins inside it, camera on or off). */
   const uBloomInPresent = uniform(float(0));
+  const cameraGlareTexNode = cameraGlareTexture && drIllumTexNode ? texture(cameraGlareTexture) : null;
 
   /** The player vision-mode grade currently BAKED into the fragment
    * (mythica-machina-press#77 Stage 2b) — a different Fn per choice, so a
@@ -728,8 +731,9 @@ export function buildGradePresentMaterial({
               drIllumTexNode.sample(maskUv).rgb,
               dynamicRangeUniforms,
               lampGlowTexNode ? lampGlowTexNode.sample(maskUv).rgb : null,
-              // Bloom's pyramid describes the unwarped frame, like the light: read at `maskUv` too.
-              bloomGlareAt ? bloomGlareAt(maskUv).mul(uBloomInPresent) : null
+              // The camera's glare is composed in SCREEN space (the lens warp already applied to its pyramid reads),
+              // so it is read at the picture's own `sampleUv`.
+              cameraGlareTexNode ? cameraGlareTexNode.sample(sampleUv).rgb.mul(uBloomInPresent) : null
             )
           : afterEnv;
         const gradedLook = buildGradeNode(TSL, exposedEnv, uArt, {
@@ -1036,15 +1040,17 @@ export function buildGradePresentMaterial({
     /**
      * Is bloom's glow added HERE, after the Dynamic Range curve, this frame (2026-11-07)? The viewer sets it on
      * the frames it skips bloom's composite into scene.lit. A live uniform; false (and a no-op) when this
-     * material was built without `bloomGlareAt` or without the curve.
+     * material was built without `cameraGlareTexture` or without the curve.
      * @param {boolean} on
      * @returns {boolean} whether the glow really joins here (so the viewer may skip its composite)
      */
     setBloomInPresent: (on, gain = 1) => {
-      const really = !!on && !!bloomGlareAt && !!drIllumTexNode;
+      const really = !!on && !!cameraGlareTexNode;
       uBloomInPresent.value = really ? (Number.isFinite(gain) ? Math.max(0, gain) : 1) : 0;
       return really;
     },
+    /** Does the camera's glare join here this frame (the viewer composes `camera.glare` only then)? */
+    bloomInPresent: () => uBloomInPresent.value > 0,
     setStylize: (style, amount) => {
       const next = STYLE_NAMES_SAFE.has(style) ? style : 'none';
       currentStyle = next;

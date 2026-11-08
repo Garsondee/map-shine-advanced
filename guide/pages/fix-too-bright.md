@@ -1,5 +1,5 @@
 ---
-sources: src/effects/grade/grade.js (exposure), src/effects/bloom.js (strength, enable), src/effects/window/window.js (strength), src/effects/dynamic-range.js (drama, glowAmount)
+sources: src/effects/grade/grade.js (exposure), src/effects/bloom.js (strength, enable, glare budget), src/effects/window/window.js (strength), src/effects/dynamic-range.js (drama), src/effects/lens.js (Glare), src/core/looks-schema.js (camera Looks)
 ---
 The picture looks washed out, white areas have lost their detail, or every light wears a foggy halo.
 
@@ -9,11 +9,11 @@ The picture looks washed out, white areas have lost their detail, or every light
 
 ### Too much glow round lights
 
-That haze is **Bloom**. A little makes lamps feel hot. Too much turns the picture to mush.
+That haze is **Bloom**, the camera's glare. Only light brighter than the picture can show glows, and only a small share of it, so a halo should hug the light. Maps with many lamps are eased down automatically.
 
 [[do: bloom-softer, bloom-off, bloom-on]]
 
-With **Dynamic Range** on, its **Glow amount** sets how much of the glow reaches the picture. Lower it for a tighter, quieter halo.
+For a quieter camera all round, play the **Subtle** or **Clean** Look in the Remote's **Camera** group. Dirt, starbursts and streaks are on the **Lens** card's **Glare** settings.
 
 > [!tip] Turning Bloom off is on this computer only. Use **Less glow** if the whole table should see the change.
 

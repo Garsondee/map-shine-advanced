@@ -32,7 +32,8 @@
  */
 
 import { buildOutdoorsGate } from './lighting/environmental-light.js';
-import { buildDynamicRangeBrightnessNode } from './dynamic-range-render.js';
+import { buildExposureGainNode } from './dynamic-range-render.js';
+import { GLARE_ENERGY } from './bloom.js';
 
 /** Rec.709 luminance of a linear-RGB node (for the Karis firefly weight). */
 function lumaOf(TSL, c) {
@@ -89,25 +90,22 @@ export function buildBloomMaterials({
   // The world-space gate (null when no `_Outdoors` mask node was supplied — the
   // whole clamp term then compiles OUT, per the dead-code rule). 1 = outdoors.
   const outdoorsGate = buildOutdoorsGate(TSL, { uViewRect, uOutdoorsRect, outdoorsTexNode });
-  const drIllumNode = illumTexture && dynamicRangeUniforms ? texture(illumTexture) : null;
-  const drColorationNode = drIllumNode && colorationTexture ? texture(colorationTexture) : null;
+  // ONE CAMERA (2026-11-08, mmp-ilo.1): the pyramid is built from the scene AT THE CAMERA'S EXPOSURE (Dynamic Range's
+  // stops; exactly 1 while that card is off), so "Glow from" is in the picture's own units (1 = white at this exposure)
+  // and the glow reaches the present already exposed. The camera's per-pixel drama/punch curve is NOT applied here:
+  // it decides how bright a thing looks, not how much light hits the lens (thresholding the punched brightness made
+  // every punched metal glint glare like a lamp — "huge fat chunky bloom around metallics").
+  void illumTexture;
+  void colorationTexture;
+  const exposureGain = dynamicRangeUniforms ? buildExposureGainNode(TSL, dynamicRangeUniforms) : null;
 
   const brightMaterial = new THREE.NodeMaterial();
   brightMaterial.depthTest = false;
   brightMaterial.depthWrite = false;
   brightMaterial.fragmentNode = Fn(() => {
-    const c = litTexNode.sample(uv()).rgb;
-    // Brightness = max channel (does not desaturate coloured highlights) — or, under the Dynamic Range
-    // camera, the brightest channel as that camera shows it (equal to the max channel while it is off).
-    const br = drIllumNode
-      ? buildDynamicRangeBrightnessNode(
-          TSL,
-          c,
-          drIllumNode.sample(uv()).rgb,
-          dynamicRangeUniforms,
-          drColorationNode ? drColorationNode.sample(uv()).rgb : null
-        )
-      : c.r.max(c.g).max(c.b);
+    const c = exposureGain ? litTexNode.sample(uv()).rgb.mul(exposureGain) : litTexNode.sample(uv()).rgb;
+    // Brightness = max channel (does not desaturate coloured highlights).
+    const br = c.r.max(c.g).max(c.b);
 
     // Quadratic soft knee: a gentle roll-in across [threshold-knee, threshold+knee]
     // instead of a hard step (the hard step is the classic "grainy bloom" source).
@@ -238,21 +236,30 @@ export function buildBloomMaterials({
   const uWideStrength = uniform(0.5);
   const uCoreTint = uniform(new THREE.Vector3(1, 1, 1));
   const uWideTint = uniform(new THREE.Vector3(1, 1, 1));
+  // THE ENERGY NORMALISATION (2026-11-08, mmp-ilo.1): the additive upsample leaves each band holding the SUM of its
+  // mips (core = mips 0..2, three copies of the bright energy), so the old composite added ~3x per band. `uBandNorm`
+  // = (GLARE_ENERGY / core mips, GLARE_ENERGY / atmosphere mips), written by the viewer for the live tier: each band
+  // becomes a normalised kernel and the dials are fractions of the bright energy (bloom.js#GLARE_ENERGY).
+  const uBandNorm = uniform(new THREE.Vector2(GLARE_ENERGY / 3, GLARE_ENERGY / 3));
 
-  /** The glow at screen `at` (the two bands, tinted and weighted): the composite's colour, and what the present adds
-   * AFTER the Dynamic Range curve while that camera is on (see `glareAt` in the return literal). */
+  /** The glow at screen `at` (the two bands, tinted and weighted, energy-normalised): what the present adds after the
+   * camera's curve (see `glareAt` in the return literal). Already at the camera's exposure. */
   const glareAt = (at) => {
-    const core = coreTexNode.sample(at).rgb.mul(uCoreTint).mul(uCoreStrength);
-    const atmo = atmoTexNode.sample(at).rgb.mul(uWideTint).mul(uWideStrength);
+    const core = coreTexNode.sample(at).rgb.mul(uCoreTint).mul(uCoreStrength.mul(uBandNorm.x));
+    const atmo = atmoTexNode.sample(at).rgb.mul(uWideTint).mul(uWideStrength.mul(uBandNorm.y));
     return core.add(atmo).mul(uStrength);
   };
 
+  // The revert path (localStorage `msa.bloomAfterCurve` = '0') adds the glow into scene.lit, which is NOT exposed:
+  // undo the exposure there so the glow lands at the scene's own scale.
   const compositeMaterial = new THREE.NodeMaterial();
   compositeMaterial.depthTest = false;
   compositeMaterial.depthWrite = false;
   compositeMaterial.transparent = true;
   compositeMaterial.blending = THREE.AdditiveBlending;
-  compositeMaterial.fragmentNode = Fn(() => vec4(glareAt(uv()), 1.0))();
+  compositeMaterial.fragmentNode = Fn(() =>
+    vec4(exposureGain ? glareAt(uv()).div(exposureGain.max(1e-4)) : glareAt(uv()), 1.0)
+  )();
   compositeMaterial.name = 'Bloom_composite';
 
   return {
@@ -293,6 +300,7 @@ export function buildBloomMaterials({
       atmoStrength: uWideStrength,
       coreTint: uCoreTint,
       atmoTint: uWideTint,
+      bandNorm: uBandNorm,
     },
     /** True when the outdoor-spill clamp is compiled in (a mask node was supplied). */
     outdoorGateCompiled: !!outdoorsGate,

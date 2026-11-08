@@ -112,6 +112,8 @@ export {
   sampleVtPanViewerIllumPixel,
   probeVtPanViewerPixels,
   getVtPanViewerDynamicRangeInfo,
+  holdVtPanViewerExposure,
+  rackVtPanViewerFocus,
   runInteractiveVtPanViewerPixelProbe,
   pickVtPanViewerWorldPoint,
   probeVtPanViewerWindAndParticles,

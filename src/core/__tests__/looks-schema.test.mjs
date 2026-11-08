@@ -343,8 +343,23 @@ export function run(t) {
   // ---- the round-2 starter set (author 2026-11-01: four rows, the full spectrum) -----
   {
     t.ok(
-      'thirty-one starters (round 3 catalogue + the blank Clear and still, 2026-11-06)',
-      STARTER_LOOKS.length === 31
+      'thirty-seven starters (round 3 catalogue + Clear and still, 2026-11-06 + six camera Looks, 2026-11-08)',
+      STARTER_LOOKS.length === 37
+    );
+    const camera = STARTER_LOOKS.filter((l) => l.group === 'camera').map((l) => l.name);
+    t.ok(
+      `the Camera group holds the six camera Looks (${camera.join(', ')})`,
+      camera.join('|') === 'Balanced|Subtle|Cinematic|Extreme flare|Film|Clean'
+    );
+    t.ok(
+      'camera Looks carry no hour and no weather (they play over any scene)',
+      STARTER_LOOKS.filter((l) => l.group === 'camera').every(
+        (l) => !('time.hour' in l.values) && !('weather.archetype' in l.values)
+      )
+    );
+    t.ok(
+      'every starter sets the glare channels (no Look leaves streaks or a leak behind)',
+      STARTER_LOOKS.every((l) => 'lens.streakAmount' in l.values && 'lens.leakAmount' in l.values)
     );
     t.ok(
       'every starter sits in a real group, never Mine',

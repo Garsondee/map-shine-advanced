@@ -95,7 +95,7 @@ export const BILLOW_LOOK = Object.freeze({
   glow: 0.35,
   glowRadiusPx: 6,
   /** Emission multiplier on the flame colours (1 = the painted colours exactly). */
-  emission: 2.5,
+  emission: 2.0,
   /** HDR added at the flame's hottest cream core (after the bloom counter), so the heart of the fire exceeds the bloom threshold and blooms. */
   coreBloom: 0.4,
   /** The coal bed: its glow strength, the cracked cells' size (1/px) and crack width. */

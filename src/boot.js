@@ -460,6 +460,8 @@ import {
   sampleVtPanViewerIllumPixel,
   probeVtPanViewerPixels,
   getVtPanViewerDynamicRangeInfo,
+  holdVtPanViewerExposure,
+  rackVtPanViewerFocus,
   runInteractiveVtPanViewerPixelProbe,
   probeVtPanViewerWindAndParticles,
   runInteractiveVtPanViewerWindProbe,
@@ -794,6 +796,7 @@ import {
   broadcastImpulse,
   listenForImpulses,
   watchViewerToken,
+  watchCameraEvents,
   watchScenePlayerLightPermissions,
   readActivePlayerCarriedLightTokens,
   // PLAYER VISION-MODE GRADE (mythica-machina-press#77 Stage 2b, #580) — the
@@ -1221,6 +1224,13 @@ MapShine.probePixels = probeVtPanViewerPixels;
 // DYNAMIC RANGE (2026-11-04): `MapShine.dynamicRange()` — the metered light, the exposure, the
 // target and applied exposure (stops), and the bloom's glow-budget and threshold scales.
 MapShine.dynamicRange = getVtPanViewerDynamicRangeInfo;
+// THE CAMERA (2026-11-08, mmp-ilo.1): `MapShine.camera.holdExposure(sec)` freezes what the camera meters for `sec`
+// seconds (a lightning storm's strike train, a scripted flash). Flashes under ~0.8 s never re-expose it anyway.
+MapShine.camera = {
+  ...(MapShine.camera ?? {}),
+  holdExposure: (sec) => holdVtPanViewerExposure(sec),
+  rackFocus: () => rackVtPanViewerFocus(),
+};
 // THE INTERACTIVE PIXEL PROBE (2026-07-19, author-requested: "I want to
 // click on the screen and set the points"). MapShine.armPixelProbe() also
 // exists for console use; the debug-panel "Pixel Probe" button (registered
@@ -2455,6 +2465,9 @@ function install() {
       MapShine.__player?.refreshPlayerLightPicker?.();
       MapShine.__remote?.refreshCarriedLightPicker?.();
     });
+    // RACK FOCUS (mmp-ilo.10): the lens pulls focus when a token is selected or a combat turn changes (Lens card,
+    // "Rack focus on events"; 0 = off).
+    watchCameraEvents(() => rackVtPanViewerFocus());
     // A flashlight points where its bearer's cursor points, and every client
     // sees it: start the aim sender and the socket listener that carries it
     // (`playerAimChannel`, declared beside the carried-light getter further down).
@@ -14149,7 +14162,21 @@ function install() {
 
   // THE LENS (round 3) — vignette, grain, colour fringing, curvature, per Look.
   registerLiveLookSource('lookLens', {
-    fields: ['vignetteIntensity', 'vignetteSoftness', 'grainAmount', 'chromaticAmountPx', 'distortion'],
+    fields: [
+      'vignetteIntensity',
+      'vignetteSoftness',
+      'grainAmount',
+      'chromaticAmountPx',
+      'distortion',
+      // The camera's glare (2026-11-08, mmp-ilo.11).
+      'halation',
+      'dirtAmount',
+      'starburstAmount',
+      'streakAmount',
+      'ghostAmount',
+      'leakAmount',
+      'rainbowAmount',
+    ],
     params: LENS_PARAMS,
     override: lensLiveOverride,
     readout: () => lensReadout,
@@ -15108,6 +15135,34 @@ function install() {
     'lens.chromaticAmountPx': {
       read: () => fadeSourceRegistry.readLive('lookLens.chromaticAmountPx'),
       stage: (v, s) => stageLive(s, 'lookLens', 'chromaticAmountPx', v),
+    },
+    'lens.halation': {
+      read: () => fadeSourceRegistry.readLive('lookLens.halation'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'halation', v),
+    },
+    'lens.dirtAmount': {
+      read: () => fadeSourceRegistry.readLive('lookLens.dirtAmount'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'dirtAmount', v),
+    },
+    'lens.starburstAmount': {
+      read: () => fadeSourceRegistry.readLive('lookLens.starburstAmount'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'starburstAmount', v),
+    },
+    'lens.streakAmount': {
+      read: () => fadeSourceRegistry.readLive('lookLens.streakAmount'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'streakAmount', v),
+    },
+    'lens.ghostAmount': {
+      read: () => fadeSourceRegistry.readLive('lookLens.ghostAmount'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'ghostAmount', v),
+    },
+    'lens.leakAmount': {
+      read: () => fadeSourceRegistry.readLive('lookLens.leakAmount'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'leakAmount', v),
+    },
+    'lens.rainbowAmount': {
+      read: () => fadeSourceRegistry.readLive('lookLens.rainbowAmount'),
+      stage: (v, s) => stageLive(s, 'lookLens', 'rainbowAmount', v),
     },
     'lens.distortion': {
       read: () => fadeSourceRegistry.readLive('lookLens.distortion'),

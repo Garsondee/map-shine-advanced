@@ -1,5 +1,5 @@
 ---
-sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), src/foundry/scene-environment.js (readSceneAuthoredDarkness), boot.js onSweepToHour
+sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/lens.js (Glare), src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), src/foundry/scene-environment.js (readSceneAuthoredDarkness), boot.js onSweepToHour
 ---
 Map Shine lights a scene like a camera would see it: a real sun that moves, shadows that stretch, lamps that glow, and a camera that copes with bright and dark together.
 
@@ -28,8 +28,9 @@ Rooms get daylight through the patches you paint on `_Window`. It follows the su
 
 ### The camera
 
-- **Dynamic Range** lets bright windows and dark corners sit in one picture without either washing out. **Drama** sets how hard they push apart.
-- **Bloom** is the soft glow around the brightest lights. A little goes a long way. With Dynamic Range on, its **Glow amount** sets how much glow reaches the picture.
+- **Dynamic Range** is the camera's exposure. It lets bright windows and dark corners sit in one picture, and slowly adjusts like an eye when you pan between a dark room and a sunny street. **Drama** sets how hard light and dark push apart. A flash of lightning never makes it re-adjust.
+- **Bloom** is the camera's glare: a small share of the light that is too bright for the picture spreads into a tight glow with a faint wide haze. It is eased down on maps with many lights.
+- The **Lens** card's **Glare** settings add what bright light does inside a lens: a warm film fringe, dirt on the glass that shows only in front of a light, and starbursts on the fiercest glints. Streaks, flare ghosts and light leaks are there too, off until you want them. The **Camera** Looks set all of this in one press.
 - **Exposure** brightens or darkens the whole picture.
 
 > [!tip] Interiors look best a little darker than you expect. Dark rooms make lamps and window light the stars. If players can't see, raise the **lamps** before the exposure.

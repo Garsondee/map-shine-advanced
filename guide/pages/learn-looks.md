@@ -1,5 +1,5 @@
 ---
-sources: src/core/looks-schema.js (LOOK_CHANNELS, STARTER_LOOKS), src/ui/rooms/remote/looks-board.js (Save look, facets, running order, GO), MapShine.looks
+sources: src/core/looks-schema.js (LOOK_CHANNELS, STARTER_LOOKS, LOOK_GROUPS camera), src/ui/rooms/remote/looks-board.js (Save look, facets, running order, GO), MapShine.looks
 ---
 A **Look** is a whole mood saved in one button: the time of day, the weather, the colour and the light. During a session one press sets the scene, fading over your Fade Time.
 
@@ -16,6 +16,7 @@ A **Look** is a whole mood saved in one button: the time of day, the weather, th
 - Press a Look to fade to it.
 - The **running order** lines Looks up for the session. **GO** plays the next one: "the tavern at dusk", then "the ambush at night", then "dawn on the road".
 - Looks are grouped (Day, Night, Dread and so on) so the right one is easy to find mid-game.
+- The **Camera** group changes only the camera's character, at any hour and in any weather: **Balanced** (the default), **Subtle**, **Cinematic** (streaks and flare ghosts), **Extreme flare**, **Film** (halation, grain, a golden-hour light leak) and **Clean** (no glare effects).
 
 ### Tips
 

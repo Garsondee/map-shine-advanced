@@ -25,6 +25,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
 const require = createRequire(path.join(REPO, 'package.json'));
 const { chromium } = require('playwright');
+const { PNG } = require('pngjs');
 
 const argv = process.argv.slice(2);
 const opt = (k, d) => {
@@ -43,6 +44,62 @@ export const TARGETS = Object.freeze({
   night: { evMedianMin: -11, evMedianMax: -3 },
   any: { overWhiteMax: 0.03, crushedMax: 0.35 },
 });
+
+/**
+ * WHAT THE VIEWER SEES (2026-11-08, mmp-ilo.3): the light meter above judges scene.lit, before the camera. These
+ * judge the finished picture (the screenshot, sRGB 0-255) and the camera's glare:
+ *   clippedMax  — share of pixels with a channel at 250+ (blown highlights)
+ *   crushedMax  — share of pixels at luma 8 or below (crushed blacks)
+ *   rangeMin    — p95 − p5 luma: a picture flatter than this reads as a grey veil
+ *   veilMax     — the glare's mean glow over the frame (bloom.js#glareBudgetGain's quantity, after the budget)
+ */
+export const DISPLAY_TARGETS = Object.freeze({ clippedMax: 0.02, crushedMax: 0.25, rangeMin: 30, veilMax: 0.03 });
+
+/**
+ * Judge the finished picture. Pure, exported for tests.
+ * @param {{clippedPct:number, crushedPct:number, p5:number, p95:number}} pic screenshot stats (percent, 0-255)
+ * @param {{glowEnergy?:number, glareFraction?:number, glareGain?:number}|null} glare `MapShine.dynamicRange()`
+ * @returns {{pass: boolean, reasons: string[], veil: number|null}}
+ */
+export function judgeDisplay(pic, glare) {
+  const reasons = [];
+  const T = DISPLAY_TARGETS;
+  if (pic.clippedPct / 100 > T.clippedMax) reasons.push(`blown on screen: ${pic.clippedPct}% clipped`);
+  if (pic.crushedPct / 100 > T.crushedMax) reasons.push(`crushed on screen: ${pic.crushedPct}% black`);
+  if (pic.p95 - pic.p5 < T.rangeMin) reasons.push(`flat: p95-p5 ${Math.round(pic.p95 - pic.p5)} < ${T.rangeMin}`);
+  const e = Number(glare?.glowEnergy);
+  const f = Number(glare?.glareFraction);
+  const g = Number(glare?.glareGain ?? 1);
+  const veil = Number.isFinite(e) && Number.isFinite(f) ? e * f * (Number.isFinite(g) ? g : 1) : null;
+  if (veil !== null && veil > T.veilMax) reasons.push(`glare veil ${veil.toFixed(3)} > ${T.veilMax}`);
+  return { pass: reasons.length === 0, reasons, veil };
+}
+
+/** Display stats of an sRGB RGBA buffer (pngjs) — the inputs {@link judgeDisplay} needs. */
+export function pictureStats(img) {
+  const n = img.width * img.height;
+  const lum = new Float32Array(n);
+  let clipped = 0;
+  let crushed = 0;
+  for (let i = 0; i < n; i++) {
+    const r = img.data[i * 4];
+    const g = img.data[i * 4 + 1];
+    const b = img.data[i * 4 + 2];
+    const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    lum[i] = l;
+    if (Math.max(r, g, b) >= 250) clipped++;
+    if (l <= 8) crushed++;
+  }
+  lum.sort();
+  const q = (p) => Math.round(lum[Math.floor(p * (n - 1))] * 10) / 10;
+  return {
+    p5: q(0.05),
+    p50: q(0.5),
+    p95: q(0.95),
+    clippedPct: Math.round((10000 * clipped) / n) / 100,
+    crushedPct: Math.round((10000 * crushed) / n) / 100,
+  };
+}
 
 export const DEFAULT_MAPS = Object.freeze([
   'Mythica Machina - Big Bank (MSA)',
@@ -147,14 +204,27 @@ async function main() {
           });
           await page.screenshot({ path: path.join(out, file) });
           await style.evaluate((el) => el.remove());
-          const verdict = judgeCase(m, time);
-          rows.push({ map: mapName, time, weather, ...verdict, meter: m, shot: file });
+          const lightVerdict = judgeCase(m, time);
+          const pic = pictureStats(PNG.sync.read(fs.readFileSync(path.join(out, file))));
+          const glare = await page.evaluate(() => {
+            const d = MapShine.dynamicRange?.() ?? {};
+            return { glowEnergy: d.stats?.glowEnergy, glareFraction: d.glareFraction, glareGain: d.glareGain };
+          });
+          const shown = judgeDisplay(pic, glare);
+          const verdict = {
+            pass: lightVerdict.pass && shown.pass,
+            reasons: [...lightVerdict.reasons, ...shown.reasons],
+          };
+          rows.push({ map: mapName, time, weather, ...verdict, meter: m, picture: pic, glare, shot: file });
           log(`${mapName} | ${time} | ${weather}: ${verdict.pass ? 'PASS' : 'FAIL ' + verdict.reasons.join('; ')}`);
         }
       }
     }
   } finally {
-    fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify({ targets: TARGETS, rows }, null, 2));
+    fs.writeFileSync(
+      path.join(out, 'report.json'),
+      JSON.stringify({ targets: TARGETS, display: DISPLAY_TARGETS, rows }, null, 2)
+    );
     await browser.close().catch(() => {});
   }
   const pass = rows.filter((r) => r.pass).length;

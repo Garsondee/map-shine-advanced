@@ -5,7 +5,8 @@
  * are well-formed as DATA, and pin the SHAPE so a key cannot be added without
  * someone noticing it needs a consumer (`params/no-dead-controls`).
  */
-import { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset, LENS_OVERLAY_CATALOG } from '../lens.js';
+import { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset, LENS_OVERLAY_CATALOG, LENS_ASSET_ROLES } from '../lens.js';
+import { cameraGlareFeatures, CAMERA_GLARE_FEATURES, coverScale } from '../camera-glare-render.js';
 import * as LENS_RENDER from '../lens-render.js';
 import { validateEffectManifest } from '../effect-manifest.js';
 import { validateParamsSchema } from '../../core/params-schema.js';
@@ -94,13 +95,42 @@ export function run(t) {
     'the crossfade can never (by declared range) outlast a very short cycle',
     LENS_PARAMS.overlayCrossfadeSeconds.min <= LENS_PARAMS.overlayCycleSeconds.min
   );
+  // mmp-ilo.7: the library by role — every one of the 13 images in exactly one role; the grime overlay cycles dirt only.
+  const roleFiles = Object.values(LENS_ASSET_ROLES).flat();
   ok(
-    'LENS_OVERLAY_CATALOG lists the real 13-image library, once each',
-    Array.isArray(LENS_OVERLAY_CATALOG) &&
-      LENS_OVERLAY_CATALOG.length === 13 &&
-      new Set(LENS_OVERLAY_CATALOG).size === 13 &&
-      LENS_OVERLAY_CATALOG.every((f) => typeof f === 'string' && /\.jpe?g$/i.test(f))
+    'the 13-image library is classified by role, each image once',
+    roleFiles.length === 13 &&
+      new Set(roleFiles).size === 13 &&
+      roleFiles.every((f) => typeof f === 'string' && /\.jpe?g$/i.test(f))
   );
+  ok(
+    'the grime overlay cycles the dirt role only (no viewfinder, leak or rainbow drifting through it)',
+    LENS_OVERLAY_CATALOG === LENS_ASSET_ROLES.dirt && LENS_OVERLAY_CATALOG.every((f) => /dust|grease|scratch/.test(f))
+  );
+  ok(
+    'every dirt pattern the card offers is a dirt image',
+    LENS_PARAMS.dirtImage.values.every((v) => LENS_ASSET_ROLES.dirt.includes(`${v}.jpg`))
+  );
+  // The camera's glare (2026-11-08): subtle physical terms ship on, stylised ones off (author: only highly
+  // stylistic options default off).
+  const defaults = Object.fromEntries(Object.entries(LENS_PARAMS).map(([k, d]) => [k, d.default]));
+  ok(
+    `default glare terms: ${cameraGlareFeatures(defaults).join(', ')}`,
+    cameraGlareFeatures(defaults).join(',') === 'halation,dirt,starburst'
+  );
+  ok(
+    'every glare term can be turned on',
+    cameraGlareFeatures({
+      halation: 1,
+      dirtAmount: 1,
+      starburstAmount: 1,
+      streakAmount: 1,
+      ghostAmount: 1,
+      leakAmount: 1,
+      rainbowAmount: 1,
+    }).length === CAMERA_GLARE_FEATURES.length
+  );
+  ok('the overlay cover-fit keeps a 16:9 image unstretched', coverScale(16 / 9).join() === '1,1');
   ok('the overlay catalog is frozen', Object.isFrozen(LENS_OVERLAY_CATALOG));
 
   ok('the declaration is frozen', Object.isFrozen(LENS) && Object.isFrozen(LENS_PARAMS));

@@ -607,7 +607,206 @@ export const LENS_PARAMS = Object.freeze({
     label: 'Crossfade time',
     help: 'How many seconds the transition to the next image in the cycle above takes, so the catalog advancing never reads as a hard cut. Clamped to the cycle time above — it can never outlast the cycle it belongs to.',
   },
+  // ── Glare (2026-11-08, epic mmp-ilo) — what bright light does INSIDE the lens. All of it is driven by the
+  // bloom pyramid (light really too bright for the picture, at the camera's exposure) and composed by
+  // effects/camera-glare-render.js; a term at 0 is not built at all. Subtle, physical terms ship on; the
+  // stylised ones (streaks, ghosts, leak, rainbow) ship off and are turned on by the camera Looks.
+  halation: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 0.3,
+    category: 'Glare',
+    label: 'Halation',
+    help: 'Film’s warm red-orange fringe around very bright lights — flames, lamps, the sun on snow. 0 is off.',
+  },
+  dirtAmount: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 0.35,
+    category: 'Glare',
+    label: 'Lens dirt',
+    help: 'Smudges and dust on the glass that only show where a bright light sits behind them, like a real lens. 0 is off.',
+  },
+  dirtImage: {
+    type: 'enum',
+    values: ['lens_grease_01', 'lens_grease_02', 'lens_grease_03', 'lens_dust_01', 'lens_scratches_01'],
+    default: 'lens_grease_01',
+    category: 'Glare',
+    label: 'Dirt pattern',
+    help: 'Which smudge pattern is on the glass.',
+  },
+  starburstAmount: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 0.25,
+    category: 'Glare',
+    label: 'Starbursts',
+    help: 'Six-pointed spikes from the very brightest glints (polished metal, the sun on water), from the lens aperture. Only the most extreme highlights get them. 0 is off.',
+  },
+  starburstFrom: {
+    type: 'float',
+    min: 0.5,
+    max: 12,
+    step: 0.1,
+    default: 3,
+    category: 'Glare',
+    label: 'Starbursts from',
+    help: 'How much brighter than white (at the camera’s exposure) a glint must be before it gets spikes. Higher = only the fiercest.',
+  },
+  starburstAngle: {
+    type: 'float',
+    min: 0,
+    max: 60,
+    step: 1,
+    default: 15,
+    category: 'Glare',
+    label: 'Starburst angle',
+    help: 'The rotation of the spikes, in degrees.',
+  },
+  streakAmount: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 0,
+    category: 'Glare',
+    label: 'Anamorphic streaks',
+    help: 'Long horizontal blue streaks through the brightest lights — the widescreen-film look. 0 is off.',
+  },
+  streakLength: {
+    type: 'float',
+    min: 0.1,
+    max: 2,
+    step: 0.01,
+    default: 0.7,
+    category: 'Glare',
+    label: 'Streak length',
+    help: 'How far the anamorphic streaks reach.',
+  },
+  ghostAmount: {
+    type: 'float',
+    min: 0,
+    max: 3,
+    step: 0.01,
+    default: 0,
+    category: 'Glare',
+    label: 'Lens flare ghosts',
+    help: 'Coloured reflections of the brightest lights mirrored through the middle of the frame, like a real lens flare. 0 is off.',
+  },
+  flareFrom: {
+    type: 'float',
+    min: 0.5,
+    max: 12,
+    step: 0.1,
+    default: 2,
+    category: 'Glare',
+    label: 'Flare from',
+    help: 'How much brighter than white a light must be before it throws streaks, ghosts and rainbows.',
+  },
+  leakAmount: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 0,
+    category: 'Glare',
+    label: 'Golden-hour light leak',
+    help: 'A warm light leak that creeps in from the sun’s side of the frame at sunrise and sunset, under a clear sky. 0 is off.',
+  },
+  rainbowAmount: {
+    type: 'float',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: 0,
+    category: 'Glare',
+    label: 'Prism rainbows',
+    help: 'Rainbow prism colours on the glass around the most extreme highlights. 0 is off.',
+  },
+  // ── Rack focus (mmp-ilo.10): a brief focus pull when a token is selected or a combat turn changes. It blurs the
+  // whole frame for a moment, so it is a stylistic choice: off by default (the Cinematic camera Look turns it on).
+  rackFocus: {
+    type: 'float',
+    min: 0,
+    max: 6,
+    step: 0.1,
+    default: 0,
+    category: 'Autofocus',
+    label: 'Rack focus on events',
+    help: 'When a token is selected or a combat turn changes, the lens pulls focus for a moment, this many pixels of blur at the peak. 0 is off.',
+  },
+  // ── Miniature focus band (mmp-ilo.15): a tilt-shift lens's "tiny diorama" look. Stylistic: off by default.
+  tiltShift: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0,
+    category: 'Optics',
+    label: 'Miniature focus band',
+    help: 'A sharp band across the middle of the picture with the top and bottom blurred, like a tilt-shift lens — the map looks like a tiny model. 0 is off.',
+  },
+  tiltShiftBand: {
+    type: 'float',
+    min: 0,
+    max: 0.9,
+    step: 0.01,
+    default: 0.3,
+    category: 'Optics',
+    label: 'Focus band height',
+    help: 'How tall the sharp band is, as a share of the picture.',
+  },
+  tiltShiftBlurPx: {
+    type: 'float',
+    min: 1,
+    max: 16,
+    step: 0.5,
+    default: 6,
+    category: 'Optics',
+    label: 'Focus band blur',
+    help: 'How blurred the top and bottom edges get, in pixels.',
+  },
+  // ── One camera model (mmp-ilo.9): the camera's exposure drives the grain, like a film's ISO.
+  grainFromExposure: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 0.5,
+    category: 'Grain',
+    label: 'Grain follows exposure',
+    help: 'How much the grain grows when the camera opens up for a dark scene, like a faster film. 0 keeps the grain the same at every exposure.',
+  },
 });
+
+/**
+ * THE LENS IMAGE LIBRARY BY ROLE (mmp-ilo.7). The 13 bundled texturelabs images are not one family: dust and grease
+ * belong ON the glass (lit by the light behind them), leaks are light ENTERING the lens, rainbow chroma is prismatic
+ * glare, and the two viewfinder overlays are a camera HUD. Each role has one job, and nothing cycles every image
+ * uniformly any more: the grime overlay cycles the `dirt` role only.
+ * @type {Readonly<Record<'dirt'|'leak'|'rainbow'|'viewfinder', readonly string[]>>}
+ */
+export const LENS_ASSET_ROLES = Object.freeze({
+  dirt: Object.freeze([
+    'lens_dust_01.jpg',
+    'lens_grease_01.jpg',
+    'lens_grease_02.jpg',
+    'lens_grease_03.jpg',
+    'lens_scratches_01.jpg',
+  ]),
+  leak: Object.freeze(['light_leak_01.jpg', 'light_leak_02.jpg', 'lens_leak_01.jpg', 'lens_leak_02.jpg']),
+  rainbow: Object.freeze(['rainbow_chroma_01.jpg', 'rainbow_chroma_02.jpg']),
+  viewfinder: Object.freeze(['lens_overlay_01.jpg', 'lens_overlay_02.jpg']),
+});
+/** The leak and rainbow images the glare uses (the clearest of each role). */
+export const LENS_LEAK_IMAGE = 'light_leak_01.jpg';
+export const LENS_RAINBOW_IMAGE = 'rainbow_chroma_02.jpg';
 
 /** The schema defaults as a flat object. */
 const LENS_DEFAULTS = Object.freeze(
@@ -635,28 +834,14 @@ export const LENS_PRESETS = Object.freeze({ none: {} });
  * would be the wrong tool even though it superficially "scans a folder"
  * too).
  *
- * Order matches how the files were introduced by `attribution.md`'s own
- * grouping (dust, grease, leak, overlay, scratches, light-leak, rainbow-
- * chroma) — arbitrary but stable, which is all a uniform, semantics-free
- * cycle needs.
+ * BY ROLE SINCE 2026-11-08 (mmp-ilo.7): the grime overlay cycles the `dirt` role of {@link LENS_ASSET_ROLES}
+ * only. It used to cycle all 13 images uniformly, so a "grime" layer drifted through viewfinder HUDs, rainbow
+ * prisms and light leaks in turn. Leaks and rainbows now belong to the glare (camera-glare-render.js), where they
+ * are driven by the light that causes them.
  *
  * @type {readonly string[]}
  */
-export const LENS_OVERLAY_CATALOG = Object.freeze([
-  'lens_dust_01.jpg',
-  'lens_grease_01.jpg',
-  'lens_grease_02.jpg',
-  'lens_grease_03.jpg',
-  'lens_leak_01.jpg',
-  'lens_leak_02.jpg',
-  'lens_overlay_01.jpg',
-  'lens_overlay_02.jpg',
-  'lens_scratches_01.jpg',
-  'light_leak_01.jpg',
-  'light_leak_02.jpg',
-  'rainbow_chroma_01.jpg',
-  'rainbow_chroma_02.jpg',
-]);
+export const LENS_OVERLAY_CATALOG = LENS_ASSET_ROLES.dirt;
 
 /**
  * Resolve a named preset to a full params object. Kept as a real function

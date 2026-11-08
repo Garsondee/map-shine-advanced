@@ -736,7 +736,16 @@ export { STYLIZE, STYLIZE_PARAMS, STYLIZE_LOOK_NAMES } from './stylize.js';
 // BLOOM (docs/planning/Bloom.md) — the first `post` stage effect. The declaration
 // (schema + manifest + presets) and the TSL pyramid builders, imported through
 // this door exactly as grade/candle are.
-export { BLOOM, BLOOM_PARAMS, BLOOM_PRESETS, bloomPreset, bloomEffectiveThreshold } from './bloom.js';
+export {
+  BLOOM,
+  BLOOM_PARAMS,
+  BLOOM_PRESETS,
+  bloomPreset,
+  bloomEffectiveThreshold,
+  GLARE_ENERGY,
+  GLARE_MIN_FROM,
+  glareBudgetGain,
+} from './bloom.js';
 // DYNAMIC RANGE (2026-11-04) — the HDR camera: an incident-light meter and a per-pixel display transform
 // (drama, highlight punch, colour in light, hue-preserving shoulder); bloom glows from what reads past white.
 export {
@@ -749,18 +758,40 @@ export {
   exposureFromIncident as dynamicRangeExposure,
   curveFor as dynamicRangeCurve,
   adaptToward as dynamicRangeAdapt,
+  createFlashGate as dynamicRangeFlashGate,
+  gateReading as dynamicRangeGateReading,
+  holdGate as dynamicRangeHoldGate,
+  resetGate as dynamicRangeResetGate,
 } from './dynamic-range.js';
 export {
   buildDynamicRangeMeterMaterial,
   createDynamicRangeUniforms,
   writeDynamicRangeUniforms,
+  writeGlareThreshold,
   readDynamicRangeUniforms,
 } from './dynamic-range-render.js';
 // LENS (mythica-machina-press#57) — the THIRD `post` stage effect: the
 // camera's own glass, grain and shutter, ported from V2's own real
 // LensEffectV2.js/lens-shader.js (recovered from git history — see
 // lens.js's own header). Same declaration + TSL-builder split as bloom/DoF.
-export { LENS, LENS_PARAMS, LENS_PRESETS, lensPreset, LENS_OVERLAY_CATALOG } from './lens.js';
+export {
+  LENS,
+  LENS_PARAMS,
+  LENS_PRESETS,
+  lensPreset,
+  LENS_OVERLAY_CATALOG,
+  LENS_ASSET_ROLES,
+  LENS_LEAK_IMAGE,
+  LENS_RAINBOW_IMAGE,
+} from './lens.js';
+// THE CAMERA'S GLARE (2026-11-08, epic mmp-ilo) — bloom's PSF + the lens's glare terms, one screen-space texture.
+export {
+  buildCameraGlareMaterial,
+  createCameraGlareUniforms,
+  cameraGlareFeatures,
+  coverScale as cameraGlareCoverScale,
+  CAMERA_GLARE_FEATURES,
+} from './camera-glare-render.js';
 export {
   buildLensCompositeMaterial,
   buildLightBurnAccumulateMaterial,

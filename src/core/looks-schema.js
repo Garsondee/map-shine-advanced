@@ -80,7 +80,7 @@ export const LOOK_FACETS = Object.freeze([
     id: 'lens',
     label: 'Lens',
     icon: 'camera',
-    help: 'The camera: vignette, film grain, colour fringing and lens curvature.',
+    help: 'The camera: vignette, film grain, colour fringing, lens curvature, and what bright light does in the lens — halation, dirt, starbursts, streaks, flare ghosts, light leaks.',
   },
   { id: 'dark', label: 'Darkness', icon: 'moon', help: 'How black unlit ground gets at night.' },
 ]);
@@ -98,6 +98,12 @@ export const LOOK_GROUPS = Object.freeze([
   { id: 'dread', label: 'Dread', icon: 'warn', help: 'Horror and menace: fog, plague, the eldritch, the infernal.' },
   { id: 'wonder', label: 'Wonder', icon: 'gem', help: 'Magic and the uncanny: fey, arcane, divine, dreams.' },
   { id: 'style', label: 'Style', icon: 'palette', help: 'Film styles: noir, one colour, an old photograph.' },
+  {
+    id: 'camera',
+    label: 'Camera',
+    icon: 'camera',
+    help: 'The camera’s character: how lights glow, flare and streak, lens dirt, grain and film colour. Balanced is the default.',
+  },
   { id: 'mine', label: 'Mine', icon: 'user', help: 'Looks you saved yourself.' },
 ]);
 
@@ -186,6 +192,14 @@ export const LOOK_CHANNELS = Object.freeze([
   { key: 'lens.grainAmount', facet: 'lens', label: 'Film grain', kind: 'number', min: 0, max: 0.15 },
   { key: 'lens.chromaticAmountPx', facet: 'lens', label: 'Colour fringing', kind: 'number', min: 0, max: 12 },
   { key: 'lens.distortion', facet: 'lens', label: 'Lens curvature', kind: 'number', min: -0.3, max: 0.3 },
+  // THE CAMERA'S GLARE (2026-11-08, mmp-ilo.11) — what bright light does in the lens, per Look (effects/lens.js 'Glare').
+  { key: 'lens.halation', facet: 'lens', label: 'Halation', kind: 'number', min: 0, max: 2 },
+  { key: 'lens.dirtAmount', facet: 'lens', label: 'Lens dirt', kind: 'number', min: 0, max: 2 },
+  { key: 'lens.starburstAmount', facet: 'lens', label: 'Starbursts', kind: 'number', min: 0, max: 3 },
+  { key: 'lens.streakAmount', facet: 'lens', label: 'Anamorphic streaks', kind: 'number', min: 0, max: 3 },
+  { key: 'lens.ghostAmount', facet: 'lens', label: 'Lens flare ghosts', kind: 'number', min: 0, max: 3 },
+  { key: 'lens.leakAmount', facet: 'lens', label: 'Light leak', kind: 'number', min: 0, max: 2 },
+  { key: 'lens.rainbowAmount', facet: 'lens', label: 'Prism rainbows', kind: 'number', min: 0, max: 2 },
   { key: 'night.darkness01', facet: 'dark', label: 'Night darkness', kind: 'number', min: 0, max: 1 },
 ]);
 
@@ -733,7 +747,7 @@ function colour(o = {}) {
   Object.assign(base, light, { exposureInside: 0, exposureOutside: 0 });
   // Bloom keys are written `glow*` here (glowFrom/glow/haze/hazeTint) and land on the
   // 'bloom.' channels; its at-rest values are the bloom effect's own shipped defaults.
-  const bloom = { threshold: 0.51, dayThreshold: 1.1, strength: 0.96, atmoStrength: 0.43, atmoTint: '#fff0dc' };
+  const bloom = { threshold: 1, dayThreshold: 1.1, strength: 0.96, atmoStrength: 0.43, atmoTint: '#fff0dc' };
   const glowKeys = {
     glowFrom: 'threshold',
     glowDay: 'dayThreshold',
@@ -750,12 +764,20 @@ function colour(o = {}) {
   for (const [k, v] of Object.entries({ ...base, ...styles, ...rest })) out[`grade.${k}`] = v;
   for (const [k, v] of Object.entries(bloom)) out[`bloom.${k}`] = v;
   // The lens at its shipped defaults unless the Look says otherwise (keys lens*).
+  // The camera's glare (2026-11-08) at its shipped defaults too, so a Look never leaves streaks or a leak behind.
   const lens = {
     vignetteIntensity: 1,
     vignetteSoftness: 0.02,
     grainAmount: 0.003,
     chromaticAmountPx: 1.2,
     distortion: -0.1,
+    halation: 0.3,
+    dirtAmount: 0.35,
+    starburstAmount: 0.25,
+    streakAmount: 0,
+    ghostAmount: 0,
+    leakAmount: 0,
+    rainbowAmount: 0,
   };
   const lensKeys = {
     lensVignette: 'vignetteIntensity',
@@ -763,6 +785,13 @@ function colour(o = {}) {
     grain: 'grainAmount',
     fringe: 'chromaticAmountPx',
     curve: 'distortion',
+    halation: 'halation',
+    dirt: 'dirtAmount',
+    stars: 'starburstAmount',
+    streaks: 'streakAmount',
+    ghosts: 'ghostAmount',
+    leak: 'leakAmount',
+    rainbow: 'rainbowAmount',
   };
   for (const [k, v] of Object.entries(o)) if (lensKeys[k]) lens[lensKeys[k]] = v;
   for (const k of Object.keys(lensKeys)) delete out[`grade.${k}`];
@@ -803,6 +832,12 @@ const STARTER_GROUPS = Object.freeze({
   'one-colour': 'style',
   'old-photograph': 'style',
   vivid: 'style',
+  'camera-balanced': 'camera',
+  'camera-subtle': 'camera',
+  'camera-cinematic': 'camera',
+  'camera-extreme': 'camera',
+  'camera-film': 'camera',
+  'camera-off': 'camera',
 });
 
 /** One starter: id, name, values, optional options. */
@@ -1500,10 +1535,99 @@ export const STARTER_LOOKS = Object.freeze([
       lensVignette: 0.5,
     })
   ),
+  // ---- the camera (2026-11-08, mmp-ilo.11) ----
+  // The camera's whole character as one button: how bright light glows, flares and streaks, lens dirt, grain and
+  // film colour. Each holds the colour/light/lens facets only (no hour, no weather), so it plays over any scene.
+  // Balanced IS the shipped default; the wild looks live here, not in the default (author, 2026-11-07).
+  starter('camera-balanced', 'Balanced', colour({})),
+  starter(
+    'camera-subtle',
+    'Subtle',
+    colour({
+      glow: 0.6,
+      haze: 0.25,
+      halation: 0.12,
+      dirt: 0.15,
+      stars: 0,
+      grain: 0.002,
+      lensVignette: 0.7,
+      curve: -0.05,
+      fringe: 0.6,
+    })
+  ),
+  starter(
+    'camera-cinematic',
+    'Cinematic',
+    colour({
+      glow: 1.15,
+      haze: 0.6,
+      halation: 0.5,
+      dirt: 0.5,
+      stars: 0.4,
+      streaks: 0.6,
+      ghosts: 0.35,
+      contrast: 1.08,
+      saturation: 0.95,
+      temperature: 0.04,
+      shadows: '#222630',
+      fringe: 1.6,
+    })
+  ),
+  starter(
+    'camera-extreme',
+    'Extreme flare',
+    colour({
+      glowFrom: 0.4,
+      glow: 1.6,
+      haze: 1,
+      halation: 0.8,
+      dirt: 1.1,
+      stars: 1.4,
+      streaks: 1.4,
+      ghosts: 1.2,
+      rainbow: 0.8,
+      leak: 0.8,
+      fringe: 3,
+    })
+  ),
+  starter(
+    'camera-film',
+    'Film',
+    colour({
+      halation: 0.9,
+      grain: 0.035,
+      leak: 0.6,
+      dirt: 0.3,
+      stars: 0,
+      contrast: 1.06,
+      saturation: 0.9,
+      temperature: 0.06,
+      shadows: '#2c2622',
+      highlights: '#fff4e2',
+      lensSoftness: 0.4,
+      fringe: 1.4,
+    })
+  ),
+  starter(
+    'camera-off',
+    'Clean',
+    colour({
+      glow: 0.4,
+      haze: 0.15,
+      halation: 0,
+      dirt: 0,
+      stars: 0,
+      grain: 0,
+      lensVignette: 0,
+      fringe: 0,
+      curve: 0,
+    })
+  ),
 ]);
 
-/** Bump when {@link STARTER_LOOKS} is replaced; {@link upgradeStarters} brings a stored library up once. */
-export const STARTER_SET_VERSION = 4;
+/** Bump when {@link STARTER_LOOKS} is replaced; {@link upgradeStarters} brings a stored library up once.
+ * 5 (2026-11-08): the Camera group (mmp-ilo.11) and the glare channels on every starter. */
+export const STARTER_SET_VERSION = 5;
 
 /** Starter ids of earlier sets, retired by {@link upgradeStarters}. */
 export const RETIRED_STARTER_IDS = Object.freeze([

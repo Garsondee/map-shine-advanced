@@ -639,6 +639,8 @@ export {
   isViewingUserGM,
   watchViewerToken,
 } from './viewer-token.js';
+// RACK FOCUS (2026-11-08, mmp-ilo.10): token selected / combat turn → the lens pulls focus.
+export { watchCameraEvents } from './camera-events.js';
 
 // PLAYER-LIGHT PERMISSIONS (mythica-machina-press#77, mythica-machina-press#577)
 // — the GM's scene-scoped "which player-carried light modes are allowed

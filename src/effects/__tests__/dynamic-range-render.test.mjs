@@ -9,9 +9,11 @@ import {
   writeDynamicRangeUniforms,
   readDynamicRangeUniforms,
   buildDynamicRangeNode,
-  buildDynamicRangeBrightnessNode,
+  buildExposureGainNode,
+  writeGlareThreshold,
 } from '../dynamic-range-render.js';
 import { buildBloomMaterials } from '../bloom-render.js';
+import { buildCameraGlareMaterial, CAMERA_GLARE_FEATURES } from '../camera-glare-render.js';
 
 function stubTexture() {
   const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
@@ -31,6 +33,10 @@ export function run(t) {
   for (const [label, extra] of [
     ['without the padding rects', {}],
     ['with the padding rects', { uViewRect: rect(), uSceneRect: rect() }],
+    [
+      'with the glare channels',
+      { uViewRect: rect(), uSceneRect: rect(), dynamicRangeUniforms: createDynamicRangeUniforms(THREE) },
+    ],
   ]) {
     const r = tryBuild(() =>
       buildDynamicRangeMeterMaterial({ THREE, litTexture: stubTexture(), illumTexture: stubTexture(), ...extra })
@@ -66,8 +72,13 @@ export function run(t) {
   const i = TSL.vec3(0.6, 0.6, 0.6);
   const tn = tryBuild(() => buildDynamicRangeNode(TSL, c, i, U));
   t.ok(`the transform node constructs (${tn.err ? tn.err.message : 'clean'})`, !tn.err && !!tn.value);
-  const bn = tryBuild(() => buildDynamicRangeBrightnessNode(TSL, c, i, U));
-  t.ok(`the brightness node constructs (${bn.err ? bn.err.message : 'clean'})`, !bn.err && !!bn.value);
+  const bn = tryBuild(() => buildExposureGainNode(TSL, U));
+  t.ok(`the exposure-gain node constructs (${bn.err ? bn.err.message : 'clean'})`, !bn.err && !!bn.value);
+  const tg = tryBuild(() => buildDynamicRangeNode(TSL, c, i, U, null, TSL.vec3(0.1, 0.1, 0.1)));
+  t.ok(`the transform with glare constructs (${tg.err ? tg.err.message : 'clean'})`, !tg.err && !!tg.value);
+  writeGlareThreshold(U, 0.8);
+  writeDynamicRangeUniforms(U, { ev: 1, mid: 0.05, lightRange: 2.5 });
+  t.ok('the glare threshold rides in c.y beside the light range', U.c.value.y === 0.8 && U.c.value.x === 2.5);
   const bl = tryBuild(() =>
     buildBloomMaterials({
       THREE,
@@ -82,4 +93,24 @@ export function run(t) {
     `bloom builds with the shared uniforms (${bl.err ? bl.err.message : 'clean'})`,
     !bl.err && bl.value.brightMaterial.isNodeMaterial
   );
+  // THE CAMERA'S GLARE (2026-11-08): the PSF alone, and every lens term at once, construct in Node.
+  for (const features of [[], [...CAMERA_GLARE_FEATURES]]) {
+    const cg = tryBuild(() =>
+      buildCameraGlareMaterial({
+        THREE,
+        glareAt: bl.value.glareAt,
+        midTexture: stubTexture(),
+        fineTexture: stubTexture(),
+        wideTexNode: bl.value.atmoTexNode,
+        dirtTexture: stubTexture(),
+        leakTexture: stubTexture(),
+        rainbowTexture: stubTexture(),
+        features,
+      })
+    );
+    t.ok(
+      `the camera glare constructs with [${features.join(', ') || 'psf only'}] (${cg.err ? cg.err.message : 'clean'})`,
+      !cg.err && cg.value.material.isNodeMaterial && cg.value.features.length === features.length
+    );
+  }
 }

@@ -146,7 +146,9 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 4,
     step: 0.05,
-    default: 1.7, // 2026-10-27 author's live-tuned defaults (was 0.25)
+    // 2026-11-08 (author: "fat ugly bloom" round fire): 1.7 -> 0.6. The camera's glare is now a physical, energy-limited
+    // halo (bloom.js), so the flame's own painted halo was counting the same glow twice (2026-10-27 dump: 1.7, was 0.25).
+    default: 0.6,
     category: 'Look',
     label: 'Flame glow',
     help: 'The faint orange halo around the flame (it also feeds the bloom). The fire’s real light on the room is the Light category.',
@@ -683,7 +685,8 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0,
     max: 6,
     step: 0.1,
-    default: 1, // 2026-10-27 author's live-tuned defaults (was 0.4)
+    // 2026-11-08: 1 -> 1.2 — a small, hot cream heart is where the glare should come from (2026-10-27 dump: 1, was 0.4).
+    default: 1.2,
     category: 'Look',
     label: 'Core bloom (HDR)',
     help: 'How far the hottest cream heart of the flame goes above white, so it triggers the scene bloom. 0 = painted colours only.',
@@ -883,7 +886,9 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.2,
     max: 2.5,
     step: 0.05,
-    default: 2.5, // 2026-10-27 author's live-tuned defaults (was 1.25)
+    // 2026-11-08: 2.5 -> 2.0 — at night the camera opens up 1-1.6 stops, and at 2.5 the flame body went far enough past
+    // white to wash its orange toward salmon; 2.0 keeps the body saturated while the core stays hot (2026-10-27 dump: 2.5).
+    default: 2.0,
     category: 'Look',
     label: 'Flame brightness',
     help: '1 = the painted colours exactly.',

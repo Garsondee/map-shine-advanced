@@ -316,6 +316,9 @@ export function buildLensCompositeMaterial({
   // the first real tick, which is what makes these safe to leave unwired.
   const uAutoFocusAmount = uniform(float(0));
   const uAutoFocusBlurPx = uniform(float(0));
+  /** MINIATURE FOCUS BAND (mmp-ilo.15, 2026-11-08): (amount 0..1, sharp band half-height 0..1, blur px at the
+   * frame's top/bottom, —). Rides the autofocus blur below, so it costs nothing extra while 0. */
+  const uTiltShift = uniform(new THREE.Vector4(0, 0.3, 6, 0));
   const uAutoFocusShiftPx = uniform(vec2(0, 0));
   const uCameraMotionBlurPx = uniform(vec2(0, 0));
   const uZoomMotionBlurPx = uniform(float(0));
@@ -389,10 +392,17 @@ export function buildLensCompositeMaterial({
   const distortCenter = vec2(LENS_DISTORTION_CENTER[0], LENS_DISTORTION_CENTER[1]);
   const distortedUv = lensWarpUv(THREE.TSL, uv(), uDistortion, uvGuard).toVar();
 
-  /** `sampleSceneWithCA` — red/blue split along the radial direction from
-   * distortion centre, blue and red offset OPPOSITE ways, green stays the
-   * untouched reference channel. Edge-weighted so the centre of frame stays
-   * clean (V2's own `caEdge = pow(clamp(edgeR·1.9, 0, 1), edgePower)`). */
+  /** `sampleSceneWithCA` — SPECTRAL chromatic aberration (mmp-ilo.16, 2026-11-08): five taps along the radial
+   * direction from the distortion centre, each a band of the spectrum (red outermost, blue innermost), weighted so
+   * each channel's weights sum to 1 — a smooth rainbow fringe instead of V2's hard red/blue split (3 taps). Edge-
+   * weighted so the centre of frame stays clean (V2's own `caEdge = pow(clamp(edgeR·1.9, 0, 1), edgePower)`). */
+  const SPECTRAL_TAPS = [
+    [1, [0.5, 0, 0]],
+    [0.5, [0.35, 0.25, 0]],
+    [0, [0.15, 0.5, 0.15]],
+    [-0.5, [0, 0.25, 0.35]],
+    [-1, [0, 0, 0.5]],
+  ];
   function sampleSceneWithCA(sampleUv) {
     const clampedUv = clamp(sampleUv, vec2(0, 0), vec2(1, 1));
     const toCenter = clampedUv.sub(distortCenter);
@@ -400,10 +410,12 @@ export function buildLensCompositeMaterial({
     const caDir = toCenter.div(maxNode(edgeR, float(1e-5)));
     const caEdge = clamp(edgeR.mul(1.9), 0, 1).pow(maxNode(uChromaticEdgePower, float(0.01)));
     const caDelta = caDir.mul(uChromaticAmountPx).mul(caEdge).mul(texelSize);
-    const r = sceneTexNode.sample(clamp(clampedUv.add(caDelta), vec2(0, 0), vec2(1, 1))).r;
-    const g = sceneTexNode.sample(clampedUv).g;
-    const b = sceneTexNode.sample(clamp(clampedUv.sub(caDelta), vec2(0, 0), vec2(1, 1))).b;
-    return vec3(r, g, b);
+    let sum = vec3(0, 0, 0);
+    for (const [t, w] of SPECTRAL_TAPS) {
+      const at = t === 0 ? clampedUv : clamp(clampedUv.add(caDelta.mul(t)), vec2(0, 0), vec2(1, 1));
+      sum = sum.add(sceneTexNode.sample(at).rgb.mul(vec3(w[0], w[1], w[2])));
+    }
+    return sum;
   }
 
   // ⚠️ 1 FETCH, NOT 3 (2026-09-16, mythica-machina-press#556 perf audit).
@@ -440,6 +452,17 @@ export function buildLensCompositeMaterial({
     // `lens.js`'s own tier-1 doc for why the TAPS still only compile in
     // from this tier, even though the AMOUNT is a per-frame value, not a
     // per-tier one). ──────────────────────────────────────────────────────
+    // MINIATURE FOCUS BAND (mmp-ilo.15): a sharp horizontal band through the middle of the frame, blurring toward
+    // the top and bottom like a tilt-shift lens (the "tiny diorama" look). Shares the autofocus taps: the blur
+    // amount is the larger of the pulse and the band, the radius grows with distance from the band.
+    const tiltT = clamp(
+      THREE.TSL.abs(uv().y.sub(0.5))
+        .mul(2)
+        .sub(uTiltShift.y)
+        .div(maxNode(float(1).sub(uTiltShift.y), float(0.05))),
+      0,
+      1
+    ).mul(uTiltShift.x);
     const focusShiftUv = uAutoFocusShiftPx.mul(texelSize).mul(clamp(uAutoFocusAmount, 0, 1));
     focusUv = clamp(distortedUv.add(focusShiftUv), vec2(0, 0), vec2(1, 1)).toVar();
     // ⚠️ BRANCHED ON THE PER-FRAME AMOUNT (perf wave 2, 2026-09-25). The nine
@@ -451,9 +474,12 @@ export function buildLensCompositeMaterial({
     // animated per-frame envelope, the shader must hold the taps for the frames
     // that pulse, and a branch every fragment takes the same way is coherent,
     // so the skipped taps genuinely cost nothing.
-    const focusAmount = clamp(uAutoFocusAmount, 0, 1);
+    const focusAmount = maxNode(clamp(uAutoFocusAmount, 0, 1), tiltT.min(1).sqrt());
     const kawaseBlur = Fn(() => {
-      const r1 = maxNode(uAutoFocusBlurPx, float(0.001));
+      const r1 = maxNode(
+        maxNode(uAutoFocusBlurPx.mul(THREE.TSL.step(1e-4, uAutoFocusAmount)), uTiltShift.z.mul(tiltT)),
+        float(0.001)
+      );
       const r2 = r1.mul(2);
       const d1 = texelSize.mul(r1);
       const d2 = texelSize.mul(r2);
@@ -708,6 +734,7 @@ export function buildLensCompositeMaterial({
       uTimeSec,
       uAutoFocusAmount,
       uAutoFocusBlurPx,
+      uTiltShift,
       uAutoFocusShiftPx,
       uCameraMotionBlurPx,
       uZoomMotionBlurPx,

@@ -88,6 +88,7 @@ export function run(t) {
     'uTimeSec',
     'uAutoFocusAmount',
     'uAutoFocusBlurPx',
+    'uTiltShift',
     'uAutoFocusShiftPx',
     'uCameraMotionBlurPx',
     'uZoomMotionBlurPx',

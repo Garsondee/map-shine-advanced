@@ -6489,6 +6489,16 @@ async function startVtPanViewerUnserialized({
       openSkyTexture: precipOpenSkyTexture,
       // ⭐ P7's LUXURY RUNG (§3.5) — rain glitters passing a torch.
       illumTexture: sceneIllum.texture,
+      // The ground mist's blurred wall gate (mmp-63o.1): a small coarse grid, built once per outdoors bake.
+      createMistGateTexture: ({ data, w, h }) => {
+        const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.needsUpdate = true;
+        return tex;
+      },
       // ── THE MANTLE (P3) ──
       createMantleTarget: createMantleRenderTarget,
       disposeMantleTarget: disposeMantleRenderTarget,
@@ -32287,6 +32297,8 @@ async function startVtPanViewerUnserialized({
           // pre-fade number until the fade completes and the board rebuilds
           // (see ui/rooms/remote/weather-board.js's own updateLiveAxisValues).
           precipEased01: env.weather.precip01,
+          // The fog's (mmp-63o.1) — the Fog fader follows a mood-chip fade the same way.
+          fogEased01: env.weather.fogDensity01,
           // The Face darkens at night. `dayFactor01` is the same signal the
           // shadow handle and the daylight tint already read — not a second
           // "is it dark" derivation.

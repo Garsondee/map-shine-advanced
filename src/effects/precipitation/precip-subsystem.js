@@ -35,6 +35,7 @@ import { createMantleRuntime, STEP_INTERVAL_SEC as MANTLE_STEP_INTERVAL_SEC } fr
 import { deriveTokenMotion, buildTrampleStamps } from '../../world/index.js';
 import { createPrecipCurtain, VEIL_TINT, DEFAULT_TINT } from './curtain-render.js';
 import { createStormFog } from './storm-fog-render.js';
+import { createGroundMist } from './ground-mist-render.js';
 import { createTorrent } from './torrent-render.js';
 import { createPrecipDripEngine } from '../particles/precip-drip-runtime.js';
 import {
@@ -197,6 +198,8 @@ export function createPrecipitationSubsystem({
   /** ⭐ P7 (§3.5) — `buf:scene.illum`, so a body picks up the light it passes
    * through. Absent ⇒ the term compiles out of every engine. */
   illumTexture = null,
+  /** The ground mist's texture door for its blurred wall gate (`ground-mist-render.js`); absent ⇒ a hard edge. */
+  createMistGateTexture = null,
   renderOrder = 0,
   // ── THE MANTLE (P3) ──
   /** The ALLOCATOR DOOR for the mantle's ping-pong pair, injected exactly as
@@ -387,6 +390,11 @@ export function createPrecipitationSubsystem({
    * posture the mantle and every curtain already use.
    */
   let stormFog = null;
+  /**
+   * ⭐ THE GROUND MIST (mmp-63o.1) — the `fogDensity01` axis. ONE instance, built lazily on scene bounds like the
+   * storm fog, but stepped BEFORE the clear-day early-out: fog is weather with nothing falling.
+   */
+  let groundMist = null;
   /** ⭐ THE TORRENT (`torrent-render.js`) — ONE combined instance, storm-fog's
    * own shape and for its reason; built lazily on scene bounds. */
   let torrent = null;
@@ -452,6 +460,38 @@ export function createPrecipitationSubsystem({
     if (lastTuning) stormFog.setTuning(lastTuning);
     log.info('built the storm-fog quad over the scene rect');
     return stormFog;
+  }
+
+  /** Build the ONE ground-mist quad on first use — {@link stormFogQuadFor}'s twin. */
+  function groundMistQuadFor(sceneBounds) {
+    if (groundMist) return groundMist;
+    if (!sceneBounds || !(sceneBounds.maxX > sceneBounds.minX)) return null;
+    groundMist = createGroundMist({
+      THREE,
+      worldRect: sceneBounds,
+      // On the ground: after the splashes, under the veils and the falling bodies (see `scenes`).
+      renderOrder: renderOrder - 0.75,
+      openSkyTexture,
+      illumTexture,
+      createGateTexture: createMistGateTexture,
+    });
+    if (fogGate().texture) groundMist.setSkyReachTexture(fogGate().texture, fogGate().rect);
+    log.info('built the ground-mist quad over the scene rect');
+    return groundMist;
+  }
+
+  /**
+   * ⭐ STEP THE GROUND MIST — any precip, any precipitation switch. A JS `if` keeps a fog-free sky free: no quad is
+   * built until the axis first rises, and `hasContent` keeps it out of `scenes` at 0.
+   */
+  function stepGroundMist(st, weather, nowMs) {
+    const density01 = Number.isFinite(weather?.fogDensity01) ? weather.fogDensity01 : 0;
+    if (!groundMist && !(density01 > 0)) return;
+    const mist = groundMistQuadFor(st.sceneBounds ?? null);
+    if (!mist) return;
+    const light = Number.isFinite(st.sceneLight01) ? st.sceneLight01 : 1;
+    mist.setFrame({ density01, lightRgb: [light, light, light] });
+    mist.step(nowMs, getWindHandle());
   }
 
   /** Build the ONE torrent quad on first use — {@link stormFogQuadFor}'s twin. */
@@ -845,6 +885,8 @@ export function createPrecipitationSubsystem({
       const real = getPrecipRenderState?.() ?? null;
       if (!real || real.enabled === false) {
         activePopulations = [];
+        // The fog is not precipitation: switching the falling weather off (or a low tier doing it) keeps the mist.
+        if (real) stepGroundMist(real, real.weather ?? {}, nowMs);
         return;
       }
       // ⭐ A WARM FRAME (the load-time shader warm-up, `warmUpKinds`/`endWarm` below): the same code path as a
@@ -867,6 +909,8 @@ export function createPrecipitationSubsystem({
       // (1/3) WARM: the mantle is skipped. It would seed snow or puddle depth from the forced storm, and the
       // ground would keep it.
       if (!warm) stepMantle(dtRealSec, st, weather, precip01);
+      // ⭐ THE GROUND MIST, ALSO BEFORE THE EARLY-OUT — the Fog mood is precip 0 (mmp-63o.1: it used to draw nothing).
+      stepGroundMist(st, weather, nowMs);
 
       // ⭐ BOTH DRIP LAYERS STEP **BEFORE** THE CLEAR-DAY EARLY-OUT, like the
       // mantle — and now for TWO reasons (mythica-machina-press#316 added the
@@ -1082,6 +1126,7 @@ export function createPrecipitationSubsystem({
       // the identical reason, and in 'always' mode more strongly still — see
       // `sync()`'s own comment.
       if (activePopulations.length === 0) {
+        if (groundMist?.hasContent) out.push(groundMist.scene);
         if (!onDripMeshes && drips?.hasContent) out.push(drips.scene);
         if (!onDripMeshes && authoredDrips?.hasContent) out.push(authoredDrips.scene);
         return out;
@@ -1098,6 +1143,8 @@ export function createPrecipitationSubsystem({
         const splash = splashEngines.get(speciesId);
         if (splash?.ok && splash.debugState().visible) out.push(splash.scene);
       }
+      // ⭐ THE GROUND MIST lies on the ground: over the splashes, under the far veil and the near rain.
+      if (groundMist?.hasContent) out.push(groundMist.scene);
       for (const { speciesId } of activePopulations) {
         const curtain = curtains.get(speciesId);
         if (curtain?.hasContent) out.push(curtain.scene);
@@ -1201,6 +1248,7 @@ export function createPrecipitationSubsystem({
       // The storm fog gates on the same mask too — LAW 3, restated a third
       // time: reduced visibility is outdoor weather, never an indoor pixel.
       if (stormFog) results.stormFog = stormFog.setSkyReachTexture(fogGate().texture, fogGate().rect);
+      if (groundMist) results.groundMist = groundMist.setSkyReachTexture(fogGate().texture, fogGate().rect);
       // The torrent takes the ATMOSPHERE gate, like the fog: its water is the
       // nearest to the eye, above any roof — only a genuine interior is dry.
       if (torrent) results.torrent = torrent.setSkyReachTexture(fogGate().texture, fogGate().rect);
@@ -1219,6 +1267,7 @@ export function createPrecipitationSubsystem({
       for (const [id, c] of curtains)
         results[`${id}:curtain`] = c.setSkyReachTexture(fogGate().texture, fogGate().rect);
       if (stormFog) results.stormFog = stormFog.setSkyReachTexture(fogGate().texture, fogGate().rect);
+      if (groundMist) results.groundMist = groundMist.setSkyReachTexture(fogGate().texture, fogGate().rect);
       if (torrent) results.torrent = torrent.setSkyReachTexture(fogGate().texture, fogGate().rect);
       return results;
     },
@@ -1448,6 +1497,8 @@ export function createPrecipitationSubsystem({
          * `respond.fog` threshold vs. no precipitation at all). */
         stormFog: stormFog ? stormFog.debugState() : { built: false, reason: 'waiting for scene bounds' },
         torrent: torrent ? torrent.debugState() : { built: false, reason: 'waiting for scene bounds' },
+        /** ⭐ THE GROUND MIST (mmp-63o.1) — the `fogDensity01` axis; unbuilt until the axis first rises. */
+        groundMist: groundMist ? groundMist.debugState() : { built: false, reason: 'fog axis never above 0 yet' },
       };
     },
   };

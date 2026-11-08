@@ -92,7 +92,7 @@ export const DEFAULT_TINT = Object.freeze([0.7, 0.72, 0.76]);
  *
  * ⚠️ LOW, AND IT HAS TO BE. The curtain's job is *"raining over there"*, not
  * *"the map is behind frosted glass"*. Anything that genuinely obscures the map
- * is the mist axis's business (`fogDensity01`), which is upstream, authored,
+ * is the mist axis's business (`fogDensity01`, drawn by `ground-mist-render.js`), which is upstream, authored,
  * and — critically — the thing a GM can turn off. A curtain that hid the floor
  * would be an effect nobody could disable without also stopping the rain.
  */

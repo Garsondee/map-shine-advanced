@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mist Lab</title>
+    <style>
+      body {
+        margin: 0;
+        background: #0d0f13;
+        color: #e8e8ea;
+        font:
+          13px ui-monospace,
+          monospace;
+        padding: 12px;
+      }
+      #log {
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="log">booting…</div>
+    <script type="module">
+      import * as THREE from '/src/vendor/three/three.webgpu.js';
+      import { MistLabDriver, MIST_HOURS, MIST_MAPS } from './mist-lab.js';
+      const log = (m) => {
+        document.getElementById('log').textContent = String(m);
+      };
+      try {
+        const driver = new MistLabDriver({ THREE });
+        await driver.ready;
+        window.THREE = THREE;
+        // `mist.job(fn)` runs an async job in the background (a pane tool call dies at 45 s); poll `mist.last`.
+        window.mist = {
+          driver,
+          MIST_HOURS,
+          MIST_MAPS,
+          last: null,
+          job(fn) {
+            mist.last = 'pending';
+            Promise.resolve()
+              .then(fn)
+              .then(
+                (v) => (mist.last = v),
+                (e) => (mist.last = 'ERROR ' + String((e && e.stack) || e))
+              );
+            return 'started';
+          },
+        };
+        log(`ready — backend: ${driver.backend}`);
+      } catch (e) {
+        log('FAILED: ' + (e && e.stack ? e.stack : e));
+      }
+    </script>
+  </body>
+</html>

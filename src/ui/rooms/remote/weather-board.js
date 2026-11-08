@@ -10,9 +10,9 @@
  * LABELS its own toggle "Direct"/"Drift", exactly the discipline the plan
  * flagged before U2 started ("the mock already dodges this correctly").
  *
- * ⚠️ ONLY `cloudCover01`, `precip01`, AND (2026-08-18) `temperature01` GET
- * FADERS — `WEATHER_AXES`' own `consumerStatus` names exactly these three
- * as `'live'`; `cloudType01`/`cloudAltitudePx`/`cloudScalePx` are still
+ * ⚠️ ONLY `cloudCover01`, `precip01`, `fogDensity01` (2026-11-07, mmp-63o.1)
+ * AND (2026-08-18) `temperature01` GET FADERS — `WEATHER_AXES`' own
+ * `consumerStatus` names exactly these as `'live'`; `cloudType01`/`cloudAltitudePx`/`cloudScalePx` are still
  * honestly `'pending'` (re-checked fresh, `world/cloud-field.js` still does
  * not exist) and are not rendered at all here — Law 5,
  * `tools/verify-structure.mjs#ui/no-dead-axis` holds the line structurally.
@@ -119,14 +119,23 @@ function blockLabel(icon, titleEl, trailingEl) {
   return label;
 }
 
-/** The two, and only two, live-today WEATHER channels (their own commit
+/** The live-today, archetype-owned WEATHER channels (their own commit
  * path, `ctx.onAxisCommit`, also stamps `weatherArchetype:'custom'` — right
- * for these, wrong for the two env channels below). Adding a third is a
- * schema change in world/weather.js (flip consumerStatus, wire a real
+ * for these, wrong for the env channels below). Fog joined as the third on
+ * 2026-11-07 (mmp-63o.1), in the commit that gave it a real consumer — a new
+ * one is a schema change in world/weather.js (flip consumerStatus, wire a real
  * consumer) BEFORE it is a UI change here — never the other way round. */
 const LIVE_CHANNELS = Object.freeze([
   { axis: 'cloudCover01', label: 'Clouds', shortLabel: 'Clouds', icon: 'cloud', help: 'How much sky is covered.' },
   { axis: 'precip01', label: 'Rain', shortLabel: 'Rain', icon: 'rain', help: 'How hard it is coming down.' },
+  // mmp-63o.1 (2026-11-07): the ground mist. Live since the Fog mood finally draws fog.
+  {
+    axis: 'fogDensity01',
+    label: 'Fog',
+    shortLabel: 'Fog',
+    icon: 'fog',
+    help: 'Ground mist outdoors: soft banks that thin toward walls and in wind. Lamps glow in it.',
+  },
 ]);
 
 /** A 0..1 value as a whole percent, for tooltip text. */

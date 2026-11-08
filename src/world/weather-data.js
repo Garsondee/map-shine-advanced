@@ -85,7 +85,14 @@ export const WEATHER_ARCHETYPES = Object.freeze([
     label: 'Clear',
     icon: '☀',
     blurb: 'Cloudless. Hard architectural shadows, maximum colour.',
-    axes: Object.freeze({ cloudCover01: 0, cloudType01: 0.5, cloudAltitudePx: 1400, cloudScalePx: 1100, precip01: 0 }),
+    axes: Object.freeze({
+      cloudCover01: 0,
+      cloudType01: 0.5,
+      cloudAltitudePx: 1400,
+      cloudScalePx: 1100,
+      precip01: 0,
+      fogDensity01: 0,
+    }),
   }),
   Object.freeze({
     id: 'streaks',
@@ -98,6 +105,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 2800,
       cloudScalePx: 4000,
       precip01: 0,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -111,6 +119,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 3000,
       cloudScalePx: 4200,
       precip01: 0,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -124,6 +133,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 1400,
       cloudScalePx: 1100,
       precip01: 0,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -131,14 +141,28 @@ export const WEATHER_ARCHETYPES = Object.freeze([
     label: 'Mackerel',
     icon: '🐟',
     blurb: 'Altocumulus. Fine dappled grain, medium-soft.',
-    axes: Object.freeze({ cloudCover01: 0.5, cloudType01: 0.4, cloudAltitudePx: 1900, cloudScalePx: 350, precip01: 0 }),
+    axes: Object.freeze({
+      cloudCover01: 0.5,
+      cloudType01: 0.4,
+      cloudAltitudePx: 1900,
+      cloudScalePx: 350,
+      precip01: 0,
+      fogDensity01: 0,
+    }),
   }),
   Object.freeze({
     id: 'broken',
     label: 'Broken',
     icon: '🌥',
     blurb: 'Stratocumulus. Moving HOLES of light — the most dramatic sky here.',
-    axes: Object.freeze({ cloudCover01: 0.65, cloudType01: 0.7, cloudAltitudePx: 900, cloudScalePx: 700, precip01: 0 }),
+    axes: Object.freeze({
+      cloudCover01: 0.65,
+      cloudType01: 0.7,
+      cloudAltitudePx: 900,
+      cloudScalePx: 700,
+      precip01: 0,
+      fogDensity01: 0,
+    }),
   }),
   Object.freeze({
     id: 'overcast',
@@ -151,14 +175,22 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 700,
       cloudScalePx: 5000,
       precip01: 0,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
     id: 'fog',
     label: 'Fog',
     icon: '🌫',
-    blurb: 'Stratus at ground level. Shadows nearly gone; the air itself glows.',
-    axes: Object.freeze({ cloudCover01: 0.7, cloudType01: 1.0, cloudAltitudePx: 300, cloudScalePx: 6000, precip01: 0 }),
+    blurb: 'Ground mist in soft banks; shadows nearly gone, lamps glow in it.',
+    axes: Object.freeze({
+      cloudCover01: 0.7,
+      cloudType01: 1.0,
+      cloudAltitudePx: 300,
+      cloudScalePx: 6000,
+      precip01: 0,
+      fogDensity01: 0.7,
+    }),
   }),
   Object.freeze({
     id: 'drizzle',
@@ -171,6 +203,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 550,
       cloudScalePx: 5000,
       precip01: 0.3,
+      fogDensity01: 0.2,
     }),
   }),
   Object.freeze({
@@ -184,6 +217,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 500,
       cloudScalePx: 5000,
       precip01: 0.7,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -218,6 +252,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 600,
       cloudScalePx: 4500,
       precip01: 0.6,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -241,6 +276,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 700,
       cloudScalePx: 4200,
       precip01: 0.65,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -261,6 +297,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 500,
       cloudScalePx: 6000,
       precip01: 0.55,
+      fogDensity01: 0,
     }),
   }),
   // ── WONDERS (mmp-63o.7, 2026-11-07): the four species rows that existed with no way to pick them. ──
@@ -276,6 +313,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 600,
       cloudScalePx: 5200,
       precip01: 0.6,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -290,6 +328,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 1400,
       cloudScalePx: 1500,
       precip01: 0.35,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -304,6 +343,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 1300,
       cloudScalePx: 1700,
       precip01: 0.4,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -318,6 +358,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 1100,
       cloudScalePx: 2400,
       precip01: 0.4,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -346,6 +387,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
        * number would buy raindrops. A downpour's value here would be a
        * bombardment. */
       precip01: 0.7,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -359,6 +401,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 2200,
       cloudScalePx: 2600,
       precip01: 0,
+      fogDensity01: 0,
     }),
   }),
   Object.freeze({
@@ -372,6 +415,7 @@ export const WEATHER_ARCHETYPES = Object.freeze([
       cloudAltitudePx: 900,
       cloudScalePx: 1600,
       precip01: 0.85,
+      fogDensity01: 0,
     }),
   }),
 ]);
@@ -400,6 +444,8 @@ export const ARCHETYPE_OWNED_AXES = Object.freeze([
   'cloudAltitudePx',
   'cloudScalePx',
   'precip01',
+  // mmp-63o.1 (2026-11-07): fog is the sky's business too — a mood says how foggy it is, and switching mood clears it.
+  'fogDensity01',
 ]);
 
 /** Index for O(1) lookup. Built once; the table is frozen so it cannot drift. */

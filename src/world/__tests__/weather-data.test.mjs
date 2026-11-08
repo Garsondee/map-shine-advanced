@@ -59,6 +59,17 @@ export function run(t) {
       ARCHETYPE_OWNED_AXES.every((n) => WEATHER_AXIS_NAMES.includes(n)) &&
         ARCHETYPE_OWNED_AXES.length < WEATHER_AXIS_NAMES.length
     );
+    // ⭐ mmp-63o.1: the Fog row makes FOG — the ground mist axis, at precip 0 (it used to set a low cloud only).
+    t.ok(
+      'the Fog archetype carries real fog and no precipitation',
+      WEATHER_ARCHETYPES.find((a) => a.id === 'fog').axes.fogDensity01 >= 0.5 &&
+        WEATHER_ARCHETYPES.find((a) => a.id === 'fog').axes.precip01 === 0
+    );
+    t.ok(
+      'fog is archetype-owned, and a clear sky clears it',
+      ARCHETYPE_OWNED_AXES.includes('fogDensity01') &&
+        WEATHER_ARCHETYPES.find((a) => a.id === 'clear').axes.fogDensity01 === 0
+    );
     // ⭐ THE PAYOFF: the wet rows actually carry precipitation, so a shelf click
     // rains rather than only greying the sky.
     t.ok(

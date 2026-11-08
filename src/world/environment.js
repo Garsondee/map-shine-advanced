@@ -72,6 +72,8 @@ export const DEFAULT_WEATHER = Object.freeze({
   // 0.55 is a mild default WELL clear of the sleet band, so a map that never
   // sets it rains rather than sitting ambiguously on a species boundary.
   temperature01: 0.55,
+  // ── FOG (mmp-63o.1) — the ground mist's density. 0 = clear air, LAW 5's no-op.
+  fogDensity01: 0,
   // ── THE OWNER CONTRACT ────────────────────────────────────────────────────
   // `false` means NOBODY WROTE THIS — the values above are the module's own
   // defaults, not a weather owner's answer. Without this flag `cloudCover01: 0`
@@ -216,6 +218,8 @@ export function buildEnvSnapshot({
       // asserts every axis in `WEATHER_AXES` appears here — so the next axis
       // added without wiring fails a check instead of a scene.
       temperature01: clamp01(w.temperature01),
+      /** The ground mist (mmp-63o.1). */
+      fogDensity01: clamp01(w.fogDensity01),
       /** What is actually falling. DERIVED upstream (one derivation, one place
        * — Weather-Manager.md §2.2), passed through as a string rather than
        * re-derived here, because a second derivation is how two consumers end

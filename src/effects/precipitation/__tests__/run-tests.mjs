@@ -22,6 +22,7 @@ import { run as runPrecipitation } from './precipitation.test.mjs';
 import { run as runGlint } from './precip-glint.test.mjs';
 import { run as runTorrent } from './torrent-field.test.mjs';
 import { run as runCloudRain } from './cloud-rain.test.mjs';
+import { run as runGroundMist } from './ground-mist.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -60,6 +61,7 @@ const suites = [
   ['precip-glint', runGlint],
   ['torrent-field', runTorrent],
   ['cloud-rain', runCloudRain],
+  ['ground-mist', runGroundMist],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

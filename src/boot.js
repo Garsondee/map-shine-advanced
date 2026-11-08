@@ -1574,6 +1574,8 @@ MapShine.unpinWeatherAxis = unpinVtPanViewerWeatherAxis;
 // already sets it — `MapShine.getPrecipitation()` reports exactly that state
 // rather than letting "I set it and nothing happened" look like a bug.
 MapShine.setPrecip = (v) => setVtPanViewerWeatherTargets({ precip01: v });
+// The ground mist (mmp-63o.1), 0..1 — the Fog fader's axis.
+MapShine.setFog = (v) => setVtPanViewerWeatherTargets({ fogDensity01: v });
 MapShine.setTemperature = (v) => setVtPanViewerWeatherTargets({ temperature01: v });
 MapShine.setPrecipKind = setVtPanViewerPrecipKind;
 /**
@@ -13887,7 +13889,8 @@ function install() {
     // had a Channels fader (weather-board.js's own ENV_CHANNELS), but its
     // commit went straight through `editSky()` with no fade at all — see
     // `fadeTemperatureTo`'s own doc for the mechanism that bug actually hit.
-    keys: () => ['cloudCover01', 'precip01', 'temperature01'],
+    // `fogDensity01` (mmp-63o.1) — the Fog fader, archetype-owned like cloud/rain.
+    keys: () => ['cloudCover01', 'precip01', 'fogDensity01', 'temperature01'],
     typeOf: () => 'float',
     // Cloud/rain read what the map is RENDERING, not the stored field: under a
     // named mood the stored `cloudCover01`/`precip01` are stale by design (the
@@ -13898,7 +13901,13 @@ function install() {
       if (fading !== null) return fading;
       const dial = getVtPanViewerTimeDialState();
       const eased =
-        field === 'cloudCover01' ? dial?.cloudCoverEased01 : field === 'precip01' ? dial?.precipEased01 : undefined;
+        field === 'cloudCover01'
+          ? dial?.cloudCoverEased01
+          : field === 'precip01'
+            ? dial?.precipEased01
+            : field === 'fogDensity01'
+              ? dial?.fogEased01
+              : undefined;
       return Number.isFinite(eased) ? eased : (skyScope.sky?.[field] ?? 0);
     },
     // LIVE push only — matches the astrolabe's own slider-drag preview
@@ -13914,6 +13923,7 @@ function install() {
       // land on the manager's real `state` directly rather than becoming yet
       // another target for the manager's own separate "brisk" ease to chase.
       else if (field === 'precip01') setVtPanViewerWeatherTargets({ precip01: value }, { immediate: true });
+      else if (field === 'fogDensity01') setVtPanViewerWeatherTargets({ fogDensity01: value }, { immediate: true });
       // Same shape as precip01 immediately above — temperature rides the
       // SAME weather-target manager (setWeatherTargets), so the identical
       // bypass applies unchanged.
@@ -14217,7 +14227,7 @@ function install() {
     const nowMs = wallClockMs();
     const gestureId = `archetype:${archetypeId}:${nowMs}`;
     const targets = {};
-    for (const field of ['cloudCover01', 'precip01']) {
+    for (const field of ['cloudCover01', 'precip01', 'fogDensity01']) {
       const to = archetype.axes?.[field];
       if (!Number.isFinite(to)) continue;
       targets[`weather.${field}`] = {
@@ -14266,7 +14276,7 @@ function install() {
   /** Display label for a LIVE_CHANNELS axis's own fade gesture — matches
    * weather-board.js's own LIVE_CHANNELS labels, duplicated rather than
    * imported (boot.js doesn't otherwise reach into ui/rooms/remote/). */
-  const LIVE_CHANNEL_LABELS = { cloudCover01: 'Clouds', precip01: 'Rain' };
+  const LIVE_CHANNEL_LABELS = { cloudCover01: 'Clouds', precip01: 'Rain', fogDensity01: 'Fog' };
 
   /**
    * The Channels rack's own direct-drag commit for a LIVE_CHANNELS axis
@@ -14329,6 +14339,7 @@ function install() {
     const live = {
       cloudCover01: fadeSourceRegistry.readLive('weather.cloudCover01'),
       precip01: fadeSourceRegistry.readLive('weather.precip01'),
+      fogDensity01: fadeSourceRegistry.readLive('weather.fogDensity01'),
     };
     pendingSkyFadeCompletions.set(gestureId, { ...live, [axisName]: value });
     void editSky({ weatherArchetype: 'custom', ...live });
@@ -14527,7 +14538,7 @@ function install() {
     }
     const id = `cue-${wallClockMs()}`;
     const targets = {};
-    for (const field of ['cloudCover01', 'precip01']) {
+    for (const field of ['cloudCover01', 'precip01', 'fogDensity01']) {
       targets[`weather.${field}`] = { to: fadeSourceRegistry.readLive(`weather.${field}`), overMs, curve };
     }
     const order = cueStack.length === 0 ? 0 : Math.max(...cueStack.map((c) => c.order)) + 1;
@@ -15086,6 +15097,7 @@ function install() {
     const live = {
       cloudCover01: fadeSourceRegistry.readLive('weather.cloudCover01'),
       precip01: fadeSourceRegistry.readLive('weather.precip01'),
+      fogDensity01: fadeSourceRegistry.readLive('weather.fogDensity01'),
     };
     pendingSkyFadeCompletions.set(gestureId, { ...live, ...patch });
     void editSky({ weatherArchetype: 'custom', ...live });
@@ -15556,6 +15568,7 @@ function install() {
               weatherArchetype: completion,
               ...(Number.isFinite(axes.cloudCover01) ? { cloudCover01: axes.cloudCover01 } : {}),
               ...(Number.isFinite(axes.precip01) ? { precip01: axes.precip01 } : {}),
+              ...(Number.isFinite(axes.fogDensity01) ? { fogDensity01: axes.fogDensity01 } : {}),
             });
           }
         } else if (completion.__wind) {
@@ -16042,6 +16055,9 @@ function install() {
       // so restoring the stored one on top would let a shelf sky and a stale
       // hand-set shower disagree about how hard it is raining.
       if (!precipFading) setVtPanViewerWeatherTargets({ precip01: sky.precip01 });
+      // The fog (mmp-63o.1), same rule and same guard as precip just above.
+      const fogFading = fadeState['weather.fogDensity01'] && !isEntryExpired(fadeState['weather.fogDensity01'], nowMs);
+      if (!fogFading) setVtPanViewerWeatherTargets({ fogDensity01: sky.fogDensity01 ?? 0 });
     }
     // ⭐ CLIMATE RESTORE — unconditional, unlike precipitation above, BECAUSE
     // temperature is deliberately NOT archetype-owned (`ARCHETYPE_OWNED_AXES`:
@@ -16414,6 +16430,7 @@ function install() {
             const liveAxes = {
               cloudCover01: liveFadeValue('weather.cloudCover01') ?? payload.cloudCoverEased01,
               precip01: liveFadeValue('weather.precip01') ?? payload.precipEased01,
+              fogDensity01: liveFadeValue('weather.fogDensity01') ?? payload.fogEased01,
             };
             const fadingTemp = liveFadeValue('weather.temperature01');
             if (fadingTemp !== null) liveAxes.temperature01 = fadingTemp;
@@ -19792,6 +19809,7 @@ function install() {
           baselineWeatherSnapshot = {
             cloudCover01: skyScope.sky?.cloudCover01 ?? 0,
             precip01: skyScope.sky?.precip01 ?? 0,
+            fogDensity01: skyScope.sky?.fogDensity01 ?? 0,
           };
         } catch (err) {
           log.error('fade state (canvasReady) failed:', err);

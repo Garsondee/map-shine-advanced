@@ -352,6 +352,23 @@ export const WEATHER_AXES = Object.freeze({
     consumerStatus: 'live',
     consumers: 'precipKind derivation (below), wetness dry-rate (P3)',
   }),
+
+  // ── FOG (mmp-63o.1, 2026-11-07) ───────────────────────────────────────────
+  // The mist axis `curtain-render.js` and `storm-fog-field.js` always named as
+  // upstream and nothing ever declared: the Fog mood set a low cloud and drew
+  // no fog at all. Archetype-owned (a mood says how foggy it is), so every row
+  // in `weather-data.js` carries it and a mood switch clears it.
+  fogDensity01: Object.freeze({
+    min: 0,
+    max: 1,
+    fallback: 0,
+    // Fog rolls in slower than rain arrives and burns off slower still.
+    durationUpSec: 60,
+    durationDownSec: 90,
+    epsilon: AXIS_EPSILON_UNIT,
+    consumerStatus: 'live',
+    consumers: 'effects/precipitation/ground-mist-render.js (ground mist, via precip-subsystem.js)',
+  }),
 });
 
 /** @type {readonly string[]} */

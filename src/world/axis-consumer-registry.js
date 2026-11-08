@@ -74,6 +74,13 @@ export const AXIS_CONSUMERS = Object.freeze({
     }),
     Object.freeze({ module: 'boot.js (fadeSourceRegistry)', describe: "the weather board's fade/cue target" }),
   ]),
+  fogDensity01: Object.freeze([
+    Object.freeze({
+      module: 'effects/precipitation/ground-mist-render.js (via precip-subsystem.js)',
+      describe: 'the ground mist — drawn at any precip, outdoors only, never a vision input',
+    }),
+    Object.freeze({ module: 'boot.js (fadeSourceRegistry)', describe: "the weather board's Fog fader / fade target" }),
+  ]),
   temperature01: Object.freeze([
     Object.freeze({ module: 'world/weather.js#derivePrecipKind', describe: 'the rain/snow/sleet split' }),
     Object.freeze({ module: 'effects/precipitation/precip-subsystem.js', describe: "the mantle's dry-rate input" }),

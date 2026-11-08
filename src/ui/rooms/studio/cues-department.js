@@ -49,7 +49,7 @@ const TEMPO_OPTIONS = Object.freeze([
 /** fade key's own axis suffix -> icon name, for the "what it touches"
  * glyph row. Anything not listed here (a future non-weather fade source)
  * shows no glyph rather than guessing at one. */
-const AXIS_ICON = Object.freeze({ cloudCover01: 'cloud', precip01: 'rain' });
+const AXIS_ICON = Object.freeze({ cloudCover01: 'cloud', precip01: 'rain', fogDensity01: 'fog' });
 
 function longestOverMs(cue) {
   return Math.max(...Object.values(cue.targets).map((t) => t.overMs));

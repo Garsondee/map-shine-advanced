@@ -903,6 +903,7 @@ export function run(t) {
     let allOne = true;
     for (let i = 0; i <= 100; i++) if (rainMaskFade({ maskValue: i / 100, peak: 1, pct: 100 }) !== 1) allOne = false;
     t.ok('rain-mask: at 100 the weight is exactly 1 everywhere', allOne);
+    const look = { ...WINDOW_RAIN_DEFAULTS, maskFloorPct: 100 };
     const frame = frameFor(0.8);
     let identical = true;
     for (let i = 0; i < 300; i++) {

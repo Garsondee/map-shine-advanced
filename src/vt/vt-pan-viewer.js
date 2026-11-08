@@ -4101,6 +4101,11 @@ async function startVtPanViewerUnserialized({
     const topsInteriorTexNode = THREE.TSL.texture(interiorCutPlaceholder);
     const uTopsInteriorRect = THREE.TSL.uniform(THREE.TSL.vec4(0, 0, 1, 1));
     const uTopsInteriorCut = THREE.TSL.uniform(THREE.TSL.float(0));
+    /** How far past the scene rect the tops may reach, world px (2026-11-08, author: "just above the scene +5 into
+     * the padded region with a very soft fade"). 1e9 until the first outdoors bake = no limit, so the placeholder
+     * rect (0,0,1,1) never wipes the sky. Set to REACH_CELLS grid squares by `bakeOutdoorsTexture`. */
+    const uTopsReachPx = THREE.TSL.uniform(THREE.TSL.float(1e9));
+    const TOPS_REACH_CELLS = 5;
     /** The cloud-tops opacity multiplier: 1 over open sky, down to 1 − cut inside a building. Wide
      * smoothstep on the already-blurred mask, so the hole has no visible rim. */
     const buildTopsInteriorKeep = () => {
@@ -4110,8 +4115,18 @@ async function startVtPanViewerUnserialized({
         outdoorsTexNode: topsInteriorTexNode,
         worldXY: THREE.TSL.positionWorld.xy,
       });
-      const inside = float(1).sub(smoothstep(0.1, 0.9, open));
-      return float(1).sub(uTopsInteriorCut.mul(inside));
+      // Past the scene rect the mask samples its clamped EDGE texel, which smeared a building's dark edge out
+      // across the padding as bands (author, 2026-11-08): the cut fades out over 120 px beyond the rect.
+      const r = uTopsInteriorRect;
+      const wx = THREE.TSL.positionWorld.x;
+      const wy = THREE.TSL.positionWorld.y;
+      const past = THREE.TSL.max(THREE.TSL.max(r.x.sub(wx), wx.sub(r.z)), THREE.TSL.max(r.y.sub(wy), wy.sub(r.w)));
+      const inside = float(1)
+        .sub(smoothstep(0.1, 0.9, open))
+        .mul(float(1).sub(smoothstep(0, 120, past)));
+      // The reach: full strength over the scene, fading to nothing REACH_CELLS squares into the padding.
+      const reach = float(1).sub(smoothstep(0, uTopsReachPx, past));
+      return float(1).sub(uTopsInteriorCut.mul(inside)).mul(reach);
     };
     /** STORYBOOK CLOUDS (2026-11-03) — the deck's own uniforms (drift and wind direction stay the shared
      * `cloudUniforms`' own, so both styles drift identically). Pushed every frame the sky has cloud, because
@@ -5372,6 +5387,7 @@ async function startVtPanViewerUnserialized({
           grid.spec.x + grid.spec.width,
           grid.spec.y + grid.spec.height
         );
+        uTopsReachPx.value = TOPS_REACH_CELLS * Math.max(20, Number(globalThis.canvas?.scene?.grid?.size) || 100);
         interiorCutTexture?.dispose();
         interiorCutTexture = cutTex;
       } catch (err) {

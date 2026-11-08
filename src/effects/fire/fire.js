@@ -521,7 +521,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.25,
     max: 3,
     step: 0.05,
-    default: 1.85, // 2026-10-27 author's live-tuned defaults (was 2.3)
+    default: 2.3, // 2026-11-08 author: fire light barely visible (was 1.85; 2.3 before 10-27)
     category: 'Light',
     label: 'Light reach',
     // ⚠️ NOT WIDENED IN THE 2026-09-04 ROH RANGE PASS, DELIBERATELY — this one has a REAL, EXPLAINED cost curve
@@ -531,7 +531,7 @@ export const FIRE_PARAMS = Object.freeze({
   lightColor: {
     type: 'color',
     space: 'srgb',
-    default: '#ff5900', // 2026-10-27 author's live-tuned defaults (was '#ffa047')
+    default: '#ff7a26', // 2026-11-08 brighter orange: #ff5900 carried little luminance (was #ff5900; '#ffa047' before 10-27)
     category: 'Light',
     label: 'Light colour',
     help: "The colour this fire throws into the room, separate from the flame's own tint.",
@@ -548,7 +548,7 @@ export const FIRE_PARAMS = Object.freeze({
     min: 0.05,
     max: 0.9,
     step: 0.01,
-    default: 0.05, // 2026-10-27 author's live-tuned defaults (was 0.35)
+    default: 0.14, // 2026-11-08 wider full-strength core (was 0.05; 0.35 before 10-27)
     category: 'Light',
     label: 'Light core size',
     help: "Radius of the fire light's brighter inner core, as a fraction of its outer reach. Higher keeps the glow at full strength further out before it starts to fade.",

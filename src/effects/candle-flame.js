@@ -114,7 +114,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.07, // 2026-10-27 author's live-tuned defaults (was 0.37)
+    default: 0.3, // 2026-11-08 author: candles barely brighten the scene, boost a lot without blowing out (was 0.07; 0.37 before 10-27)
     category: 'Light',
     label: 'Core strength',
     help: 'How strongly the light pool shows right next to the flame. 1 = full. Turn it down to take the glare off the area closest to the candle while keeping the wide glow.',
@@ -124,7 +124,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 0.33, // 2026-10-27 author's live-tuned defaults (was 0.58)
+    default: 0.6, // 2026-11-08 boosted with the core (was 0.33; 0.58 before 10-27)
     category: 'Light',
     label: 'Bounce glow',
     help: 'A wide, soft fill of bounced light that reaches all the way to the Light radius, on top of the core. 0 = none (the original look). Raise it with a big Light radius to light a whole room faintly.',
@@ -134,7 +134,7 @@ export const CANDLE_FLAME_PARAMS = Object.freeze({
     min: 0.5,
     max: 6,
     step: 0.05,
-    default: 5.2, // was 2
+    default: 3.4, // 2026-11-08 wider bounce so the glow reaches across the room (was 5.2; 2 originally)
     category: 'Light',
     label: 'Bounce falloff',
     help: 'How the bounce glow fades with distance. Low = it stays strong most of the way out; high = it hugs the candle and dies quickly.',

@@ -416,7 +416,8 @@ export function candleClusterLightParams(strength, baseRadius) {
   // Coloration (warm-glow) strength scales linearly off the reference.
   const alpha01 =
     clampNum(CANDLE_ALPHA_BASE * (s / CANDLE_STRENGTH_REF), CANDLE_ALPHA_MIN, CANDLE_ALPHA_MAX) *
-    CANDLE_BRIGHTNESS_BOOST;
+    CANDLE_BRIGHTNESS_BOOST *
+    CANDLE_ALPHA_BOOST;
   // Reach: the flat +25% (RADIUS_BOOST) plus a gentle sqrt growth with cluster
   // size, so a candelabra lights a bigger area without ballooning.
   const radiusFactor = clampNum(
@@ -461,6 +462,10 @@ const CANDLE_RADIUS_BOOST = 1.25; // flat +25% reach for the inverse-square fall
 /** Candle lights read as very dim (author, 2026-10-08) → +33% on both halves of
  * the light: the coloration (warm-glow) alpha and the illumination exposure. */
 const CANDLE_BRIGHTNESS_BOOST = 1.33;
+/** 2026-11-08 (author: candles barely brighten the scene): extra gain on the coloration
+ * (warm-glow) alpha ONLY. The exposure half is already at 0.83 luminosity at the reference;
+ * pushing it further only drives the fragment toward white, so the extra light goes in the tint. */
+const CANDLE_ALPHA_BOOST = 1.6;
 const CANDLE_EXPO_PER_STRENGTH = 0.14; // exposure gained per unit strength past the ref
 const CANDLE_EXPO_MIN = -0.55; // a lone candle's floor (dim, not out)
 const CANDLE_EXPO_MAX = 0.7; // a big candelabra's ceiling (bright, not blown out)

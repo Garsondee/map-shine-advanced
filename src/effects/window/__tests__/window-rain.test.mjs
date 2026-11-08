@@ -898,7 +898,7 @@ export function run(t) {
 
   // ── "Rain only in the brightest N% of the mask" (rainMaskFloorPct) ─────────
   {
-    t.ok('rain-mask: the shipped default is 100 (off)', WINDOW_RAIN_DEFAULTS.maskFloorPct === 100);
+    t.ok('rain-mask: the shipped default is 50', WINDOW_RAIN_DEFAULTS.maskFloorPct === 50);
     // at the default the fade is exactly 1 for every mask value, and evalWindowRainPixel is bit-identical to before
     let allOne = true;
     for (let i = 0; i <= 100; i++) if (rainMaskFade({ maskValue: i / 100, peak: 1, pct: 100 }) !== 1) allOne = false;

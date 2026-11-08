@@ -172,7 +172,7 @@ export const WINDOW_RAIN_DEFAULTS = Object.freeze({
   sheeting: 1,
   lingerSec: 40,
   /** Rain only in the brightest N% of the mask (relative to the mask's own peak). 100 = everywhere, as before. */
-  maskFloorPct: 100,
+  maskFloorPct: 50,
   /** Side-to-side wobble of a running drop's path, px (the amplitude; random phase and rate per drop). 0 = straight runs. */
   wobblePx: 1.5,
 });

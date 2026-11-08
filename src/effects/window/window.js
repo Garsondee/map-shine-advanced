@@ -650,7 +650,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 100,
     step: 1,
-    default: 75, // 2026-11-01 author's export
+    default: 50, // 2026-11-08 author: only the brightest 50% shows rain
     category: 'Rain',
     label: 'Rain only in the brightest (%)',
     help: 'Shows the raindrops only in the brightest part of the window light. 100 = drops everywhere the window light is (the normal look). 30 = drops only in the brightest 30% of the light, fading out smoothly where it is dimmer. 0 = only the very brightest spots.',

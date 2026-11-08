@@ -126,6 +126,22 @@ function clamp01(v) {
 }
 
 /**
+ * ORGANIC LIGHTS NEVER HAVE A RIM (2026-11-08, Ingram: "for organic effects like candles and fire we
+ * should always have a soft falloff of lighting"). The effects' own lights (fire, candle, lightning,
+ * the player torch) already run soft inverse-square curves. A hand-placed Foundry light is the
+ * exception: the default attenuation 0.5 is a flat disc out to ~72% of the radius with a short fade,
+ * so a torch/flame light a GM drops on the map showed a visible edge. Those animation types get an
+ * attenuation FLOOR (0.8: the fade starts at ~19% of the radius); a GM can still go softer, and every
+ * other animation (pulse, chroma, grids...) and every plain light keeps exactly what was authored,
+ * so a crisp point light stays crisp.
+ */
+export const ORGANIC_LIGHT_ANIMATIONS = Object.freeze(['torch', 'flame', 'firePuff', 'candleFlicker']);
+export const ORGANIC_MIN_ATTENUATION = 0.8;
+function softenOrganic(attenuation01, animationType) {
+  return ORGANIC_LIGHT_ANIMATIONS.includes(animationType) ? Math.max(attenuation01, ORGANIC_MIN_ATTENUATION) : attenuation01;
+}
+
+/**
  * Validate and normalize one raw light-source read into the shape the
  * illumination pass consumes, or `null` if it should not be drawn this frame.
  *
@@ -174,7 +190,7 @@ export function deriveLightSnapshot(raw, darkness01) {
     y,
     radius,
     ratio: clamp01(raw.ratio),
-    attenuation01: clamp01(raw.attenuation ?? 0.5),
+    attenuation01: softenOrganic(clamp01(raw.attenuation ?? 0.5), raw.animation?.type),
     // LightData.luminosity default 0.5 (common/data/data.mjs) — the EXPOSURE
     // uniform's own neutral point (exposure = luminosity*2-1 = 0 at 0.5), so
     // a light that never sets this reads as a no-op adjustment, matching

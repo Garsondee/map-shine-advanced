@@ -12,6 +12,7 @@ import {
   deriveGlobalLightConfig,
   isDarknessOnlyDisable,
   wallClipCacheEntryMatches,
+  ORGANIC_MIN_ATTENUATION,
 } from '../scene-lights.js';
 
 /** A valid triangle around the origin — 3 vertices, 6 numbers, even length. */
@@ -130,6 +131,17 @@ export function run(t) {
     });
     ok('non-numeric ratio reads as 0, never propagated', bad.ratio === 0);
     ok('NaN attenuation reads as 0, never propagated', bad.attenuation01 === 0);
+  }
+
+  // ---- organic lights never have a rim (2026-11-08) ------------------------
+  {
+    const mk = (type, attenuation) =>
+      deriveLightSnapshot({ sourceId: 'a', x: 0, y: 0, radius: 1, attenuation, animation: { type }, shapePoints: TRIANGLE });
+    ok('a default torch light is floored to soft (0.8)', mk('torch', 0.5).attenuation01 === ORGANIC_MIN_ATTENUATION);
+    ok('flame is floored too', mk('flame', 0).attenuation01 === ORGANIC_MIN_ATTENUATION);
+    ok('a softer-than-floor torch is left alone', mk('torch', 1).attenuation01 === 1);
+    ok('a plain light keeps its authored crisp edge', mk(null, 0.1).attenuation01 === 0.1);
+    ok('a non-organic animation (pulse) keeps its authored edge', mk('pulse', 0.2).attenuation01 === 0.2);
   }
 
   // ---- luminosity01 ---------------------------------------------------------

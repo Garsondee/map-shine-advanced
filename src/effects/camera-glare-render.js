@@ -40,9 +40,9 @@ export const CAMERA_GLARE_FEATURES = Object.freeze([
 
 /** Starburst spokes (3 lines = 6 spokes, a hexagonal aperture) and taps per spoke. */
 export const STAR_LINES = 3;
-export const STAR_TAPS = 6;
+export const STAR_TAPS = 12;
 /** Streak taps each side. */
-export const STREAK_TAPS = 8;
+export const STREAK_TAPS = 14;
 /** Ghosts: scale of each mirrored copy about the centre (negative = mirrored) and its tint. */
 export const GHOSTS = Object.freeze([
   Object.freeze({ s: -0.45, tint: [0.55, 0.75, 1.0] }),
@@ -163,22 +163,24 @@ export function buildCameraGlareMaterial({
         const ang = rot.add((k * Math.PI) / STAR_LINES);
         const dir = vec2(TSL.cos(ang), TSL.sin(ang).mul(aspect));
         for (let i = 1; i <= STAR_TAPS; i++) {
-          const fall = Math.exp((-2.6 * i) / STAR_TAPS);
-          const off = dir.mul(texel).mul(i * i * 0.9 + i * 1.5);
+          // Contiguous taps (1.2 fine-mip texels apart, inside the mip's own blur) so a spike is a line, not beads.
+          const fall = Math.exp((-3 * i) / STAR_TAPS);
+          const off = dir.mul(texel).mul(i * 1.2);
           const a = over(fineTexNode.sample(w.add(off)).rgb, U.a.w);
           const b = over(fineTexNode.sample(w.sub(off)).rgb, U.a.w);
           star = star.add(a.add(b).mul(fall));
         }
       }
-      extra = extra.add(star.mul(U.a.z.mul(0.12)));
+      extra = extra.add(star.mul(U.a.z.mul(0.08)));
     }
     if (has.has('streaks')) {
       // Anamorphic: a long horizontal smear of the brightest light, cool blue.
       let st = vec3(0, 0, 0);
       const len = U.b.y.max(0.05);
       for (let i = 1; i <= STREAK_TAPS; i++) {
-        const off = vec2(texel.x.mul(i * i * 1.6 + 2), 0).mul(len.mul(2));
-        const fall = Math.exp((-2.2 * i) / STREAK_TAPS);
+        // The mid mip's texel is twice the fine one; ~1.1 of them apart at the default length keeps the streak smooth.
+        const off = vec2(texel.x.mul(2 * i), 0).mul(len.mul(0.8));
+        const fall = Math.exp((-2.5 * i) / STREAK_TAPS);
         const a = over(midTexNode.sample(w.add(off)).rgb, U.b.w.mul(0.6));
         const b = over(midTexNode.sample(w.sub(off)).rgb, U.b.w.mul(0.6));
         st = st.add(a.add(b).mul(fall));
@@ -186,7 +188,7 @@ export function buildCameraGlareMaterial({
       extra = extra.add(
         lum(st)
           .mul(vec3(...STREAK_TINT))
-          .mul(U.b.x.mul(0.1))
+          .mul(U.b.x.mul(0.06))
       );
     }
     if (has.has('ghosts')) {

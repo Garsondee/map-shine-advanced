@@ -13543,6 +13543,16 @@ async function startVtPanViewerUnserialized({
         stats: dr.stats ? { ...dr.stats } : null,
         curve: dr.curve ? { ...dr.curve } : null,
         applied: readDynamicRangeUniforms(drUniforms),
+        // The camera's glare pass: which terms are built, whether it drew this frame, and its live uniforms.
+        cameraGlare: {
+          key: cameraGlare.key,
+          drawn: cameraGlare.drawn,
+          inPresent: gradePresent.bloomInPresent?.() ?? false,
+          a: cameraGlareUniforms.a.value.toArray(),
+          b: cameraGlareUniforms.b.value.toArray(),
+          c: cameraGlareUniforms.c.value.toArray(),
+          d: cameraGlareUniforms.d.value.toArray(),
+        },
       };
     }
 

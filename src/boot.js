@@ -5708,53 +5708,11 @@ function install() {
         .catch((err) => log.error('lens enable write/reapply failed:', err));
     }
     let changed = false;
-    // Every key LENS_PARAMS declares — explicit, matching setBloom's
-    // precedent so a rename is a visible typo, not a silent no-op.
+    // Every key LENS_PARAMS declares (2026-11-08: from the declaration itself — the hand-kept list had fallen behind,
+    // so the grime overlay's dials and the camera's glare keys were silently dropped, and a camera Look's lens
+    // glare never persisted).
     const scenePatch = {};
-    for (const k of [
-      'distortion',
-      'chromaticAmountPx',
-      'chromaticEdgePower',
-      'vignetteIntensity',
-      'vignetteSoftness',
-      'grainAmount',
-      'grainSpeed',
-      'adaptiveGrainEnabled',
-      'grainLowLightBoost',
-      'grainCellSizeBright',
-      'grainCellSizeDark',
-      'digitalNoiseEnabled',
-      'digitalNoiseAmount',
-      'digitalNoiseChance',
-      'digitalNoiseGreenBias',
-      'digitalNoiseLowLightBoost',
-      'autoFocusEnabled',
-      'autoFocusMinIntervalSeconds',
-      'autoFocusMaxIntervalSeconds',
-      'autoFocusDefocusDurationSeconds',
-      'autoFocusMaxBlurPx',
-      'autoFocusMaxShiftPx',
-      'autoFocusZoomTriggerEnabled',
-      'autoFocusZoomTriggerThreshold',
-      'autoFocusZoomTriggerCooldownSeconds',
-      'autoFocusZoomTriggerStrength',
-      'motionBlurEnabled',
-      'motionBlurStrength',
-      'motionBlurMaxPx',
-      'motionBlurZoomStrength',
-      'motionBlurSmoothingSeconds',
-      'lightBurnEnabled',
-      'lightBurnThreshold',
-      'lightBurnThresholdSoftness',
-      'lightBurnIntensity',
-      'lightBurnResponse',
-      'lightBurnPersistenceSeconds',
-      'lightBurnBlurPx',
-      'lightBurnDarknessGateEnabled',
-      'lightBurnDarknessStart',
-      'lightBurnDarknessEnd',
-      'lightBurnDarknessInfluence',
-    ]) {
+    for (const k of Object.keys(LENS_PARAMS)) {
       if (k in p) {
         lensLiveOverride[k] = p[k];
         if (LENS_PARAMS[k]?.scope !== 'client') scenePatch[k] = p[k];

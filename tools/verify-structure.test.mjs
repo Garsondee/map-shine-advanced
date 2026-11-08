@@ -1081,7 +1081,40 @@ export function run(t) {
       t.ok('other files are not its business', rule.scan('src/effects/glow/glow-render.js', quad).length === 0);
     }
   }
+  // --- world motion on the pausing clock (2026-11-08): each shape that shipped -----------------
+  {
+    const rule = RULES.find((r) => r.id === 'time/world-on-sim-clock');
+    t.ok('time/world-on-sim-clock exists and scans', !!rule && typeof rule.scan === 'function');
+    if (rule) {
+      const hits = (src) => rule.scan('src/vt/vt-pan-viewer.js', src.split('\n')).length;
+      t.ok(
+        'rain handed the wall delta is caught',
+        hits('precipitationSubsystem.sync(\n  renderer,\n  env.time.realDtSec ?? 0,\n  env.time.tMs,\n);') > 0
+      );
+      t.ok('a critter handed the wall clock is caught', hits('fliesSubsystem.sync(renderer, env.time.realMs, 0);') > 0);
+      t.ok(
+        'a wall delta hidden in a local (the spray) is caught',
+        hits('const sprayDt = env?.time?.realDtSec ?? 0;') > 0
+      );
+      t.ok('raw server time (lightning) is caught', hits('const s = Number(game?.time?.serverTime);') > 0);
+      t.ok(
+        'sim time passes',
+        hits('precipitationSubsystem.sync(\n  renderer,\n  env.time.dtSec ?? 0,\n  env.time.tMs,\n);') === 0
+      );
+      t.ok('a listed throttle may take wall time', hits('syntheticLights.sync(env.time?.realMs ?? 0);') === 0);
+      t.ok('the camera may read the wall delta', hits('dr.lastRealDtSec = time.realDtSec;') === 0);
+      t.ok(
+        'comments explaining the old ruling never trip it',
+        hits('// was env.time.realDtSec and game.time.serverTime') === 0
+      );
+      t.ok(
+        'the world clock itself is the one door for server time',
+        rule.allow.some((a) => `src${sep}foundry${sep}world-clock.js`.includes(a))
+      );
+    }
+  }
   const scanRulesProven = new Set([
+    'time/world-on-sim-clock',
     'zones/one-door',
     'graph/reachable-from-boot',
     'vt/residency-one-writer',

@@ -14162,11 +14162,19 @@ async function startVtPanViewerUnserialized({
       const ambient = readSceneAmbient();
       // ⭐ THE WEATHER OWNER, ticked (docs/planning/Weather-Manager.md §4.1).
       //
-      // ⚠️ THE EASE runs on the **REAL** delta, not the sim one — the opposite
-      // of the day clock two lines above, deliberately. An ease is
-      // PRESENTATION PACING (the same family as V2's 10s sprite fade); a GM
-      // slowing the world down should not stretch a weather transition to ten
-      // minutes.
+      // ⚠️ THE EASE runs on the **REAL** delta — and this is the ONE kind of
+      // wall time the 2026-11-08 pause audit kept on purpose. Two kinds of
+      // time, and the line between them:
+      //   • WORLD MOTION — anything that moves by itself (rain, spray, critters,
+      //     lightning, turning tiles, frost creeping): SIM time, so it eases to
+      //     a stop with Foundry's pause. `time/world-on-sim-clock` enforces it.
+      //   • THE GM'S HAND ON THE CONTROLS — a weather change easing in, the
+      //     Remote's Fade Engine (weather/time/Look fades, wall-clock
+      //     timestamps): WALL time, so a GM prepping a paused scene still sees
+      //     the change land. This ease is that kind; the Remote's own weather
+      //     fades push values through the Fade Engine on the same wall clock,
+      //     so splitting them would make one storm ease two ways.
+      // (Decision bead filed: the author may want GM changes to wait too.)
       //
       // ⭐ THE ALMANAC'S WALK (slice 3) is the opposite and deliberately so —
       // it integrates GAME time, via the observed hour delta computed above
@@ -15289,7 +15297,6 @@ async function startVtPanViewerUnserialized({
         enabled: !!st?.enabled,
         params: st?.params,
         temperature01: env?.weather?.temperature01,
-        realDtSec: Math.max(0, env?.time?.realDtSec ?? env?.time?.dtSec ?? 0),
         worldDtSec: Math.max(0, env?.time?.dtSec ?? 0),
         darkness01: env?.darkness01 ?? 0,
         screenW: W,
@@ -25226,14 +25233,16 @@ async function startVtPanViewerUnserialized({
       }
       // THE CRITTERS' compute steps — the same no-target-bound block, for the same reason as fire's.
       //
-      // ⚠️ REAL TIME, BOTH THE DELTA AND THE CLOCK, like the rain below: a fly is presentation pacing,
-      // and a GM who slows the world clock must not put the swarm in slow motion (nor freeze it on
-      // pause, which would make a paused scene read as a screenshot). The clock matters as much as
-      // the delta: wing phases, the bob and the grooming rhythm are functions of it, so a sim clock
-      // frozen by a pause would freeze a grooming fly's legs mid-stroke while it kept walking. The
-      // env snapshot rides along because the sky is what decides how many of them are out — daylight
-      // and weather for the flies, the sun's twilight window for the fireflies — and the sky is the
-      // frame's ONE, never re-derived here.
+      // ⚠️ SIM TIME, BOTH THE DELTA AND THE CLOCK (2026-11-08, author: "when I pause they don't pause
+      // correctly … make sure EVERYTHING uses the same method"). These used to take WALL time as
+      // "presentation pacing" so a paused scene would not read as a screenshot — but the only thing
+      // that ever scales the world clock is Foundry's pause, so that ruling meant flies, maggots,
+      // fireflies and dust kept crawling while every other effect coasted to a stop. Both halves move
+      // together: wing phases, the bob and the grooming rhythm are functions of the clock, so a sim
+      // delta with a wall clock would freeze a fly mid-walk while its legs kept grooming. The env
+      // snapshot rides along because the sky decides how many are out — daylight and weather for the
+      // flies, the sun's twilight window for the fireflies — and the sky is the frame's ONE.
+      // `time/world-on-sim-clock` (tools/verify-structure.mjs) fails the build if wall time comes back.
       // GROUND DISTURBANCE'S SIBLING — the same live token snapshot the mantle's trample stamps
       // read (precip-subsystem.js), shared across all three groups rather than each re-walking
       // `canvas.tokens.placeables` for itself. `maggotsSubsystem` is handed it too for call-site
@@ -25242,8 +25251,8 @@ async function startVtPanViewerUnserialized({
       if (view && smellyFliesSubsystem) {
         smellyFliesSubsystem.sync(
           renderer,
-          lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
-          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           windSpawnRect,
           lastEnvSnapshot?.env ?? null,
           activeTokenPoints,
@@ -25253,8 +25262,8 @@ async function startVtPanViewerUnserialized({
       if (view && maggotsSubsystem) {
         maggotsSubsystem.sync(
           renderer,
-          lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
-          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           windSpawnRect,
           lastEnvSnapshot?.env ?? null,
           activeTokenPoints,
@@ -25264,8 +25273,8 @@ async function startVtPanViewerUnserialized({
       if (view && firefliesSubsystem) {
         firefliesSubsystem.sync(
           renderer,
-          lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
-          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           windSpawnRect,
           lastEnvSnapshot?.env ?? null,
           activeTokenPoints,
@@ -25275,8 +25284,8 @@ async function startVtPanViewerUnserialized({
       if (view && dustSubsystem) {
         dustSubsystem.sync(
           renderer,
-          lastEnvSnapshot?.env?.time?.realMs ?? uGlobalTimeMs.value,
-          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+          lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           windSpawnRect,
           lastEnvSnapshot?.env ?? null,
           activeTokenPoints,
@@ -25293,12 +25302,13 @@ async function startVtPanViewerUnserialized({
         // Was its own `projectShadowOffset` (a 3× ceiling against everyone else's) and
         // the ambient light level for darkness (no cloud fade, a moonlit floor).
         const per = shadowHandle.forCaster({ heightPx: 100 });
-        // WATER SPRAY — births planned by the viewed floor's water surface, then one compute step. REAL seconds
-        // (presentation pacing, like the rain): a slowed world clock must not slow the spray.
+        // WATER SPRAY — births planned by the viewed floor's water surface, then one compute step. SIM seconds
+        // (2026-11-08): the foam flecks were on wall time and kept flying through a pause while the water under
+        // them stopped. A sim delta of 0 plans no births and moves no fleck, so a paused shore holds still.
         {
           profiler?.begin(Z.simsWaterSpray);
           const sprayFloor = view?.floorIndex ?? 0;
-          const sprayDt = lastEnvSnapshot?.env?.time?.realDtSec ?? 0;
+          const sprayDt = lastEnvSnapshot?.env?.time?.dtSec ?? 0;
           const plan = waterSurfacesByFloor.get(sprayFloor)?.planSpray?.({
             dtSec: sprayDt,
             view: windSpawnRect,
@@ -25337,16 +25347,17 @@ async function startVtPanViewerUnserialized({
       // PRECIPITATION — its compute step, in the same no-target-bound block as
       // fire and the two wind engines above, and for the same reason.
       //
-      // ⚠️ REAL SECONDS, not the sim delta. Rain is presentation pacing, the
-      // same family as the weather manager's own eases: a GM slowing the world
-      // clock must not make the rain fall in slow motion. `realDtSec` is the
-      // wall delta; `env.time.dtSec` is the sim one, and using it here would be
-      // a genuine bug in the other direction.
+      // ⚠️ SIM SECONDS (2026-11-08). This used to take the WALL delta as
+      // "presentation pacing" while its noise phase read sim `tMs` — so on a
+      // pause the drops kept falling at full speed with their pattern frozen,
+      // the exact "doesn't pause correctly" the author saw. The only thing that
+      // scales the world clock is Foundry's pause, so rain falls, slows and
+      // hangs with everything else. Delta and clock are both sim now.
       if (view && precipitationSubsystem) {
         updateCloudRain(windSpawnRect, frameSceneEye, lastEnvSnapshot?.env?.weather?.precip01 ?? 0);
         precipitationSubsystem.sync(
           renderer,
-          lastEnvSnapshot?.env?.time?.realDtSec ?? 0,
+          lastEnvSnapshot?.env?.time?.dtSec ?? 0,
           lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
           windSpawnRect,
           // The UNCLAMPED view — the torrent lays its streaks out in screen

@@ -49,6 +49,7 @@ import { run as runOffBoardPrivacy } from './off-board-privacy.test.mjs';
 import { run as runSceneTiles } from './scene-tiles.test.mjs';
 import { run as runTileMotion } from './tile-motion.test.mjs';
 import { run as runTileMotionRuntime } from './tile-motion-runtime.test.mjs';
+import { run as runWorldClock } from './world-clock.test.mjs';
 import { run as runV2AnchorImport } from './v2-anchor-import.test.mjs';
 import { run as runSettingsAdapter } from './settings-adapter.test.mjs';
 import { run as runSettingsAdapterCache } from './settings-adapter-cache.test.mjs';
@@ -139,6 +140,7 @@ const suites = [
   ['scene-tiles', runSceneTiles],
   ['tile-motion', runTileMotion],
   ['tile-motion-runtime', runTileMotionRuntime],
+  ['world-clock', runWorldClock],
   ['v2-anchor-import', runV2AnchorImport],
   ['settings-adapter', runSettingsAdapter],
   ['settings-adapter-cache', runSettingsAdapterCache],

@@ -560,6 +560,15 @@ export {
   watchTileMotionSelection,
 } from './tile-motion-runtime.js';
 
+// THE SHARED WORLD CLOCK (2026-11-08) — pausing time every client agrees on; see that module's own header.
+export {
+  registerWorldClockSettings,
+  watchWorldClock,
+  worldSimNowMs,
+  worldTimeScale,
+  getWorldClockLedger,
+} from './world-clock.js';
+
 // SCENE INTRO ZOOM (mythica-machina-press#6) — see that module's own header.
 export { scheduleSceneIntroZoom, runSceneIntroZoom } from './scene-intro-zoom.js';
 

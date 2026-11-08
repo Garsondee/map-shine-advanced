@@ -125,6 +125,88 @@ export const PARALLAX_SCREEN_LOCKED_SURFACES = {
 /** Vendored third-party code is never ours to police. */
 const IGNORED = [`${sep}vendor${sep}`, `${sep}__tests__${sep}`];
 
+/**
+ * Frame-loop receivers that are handed WALL time on purpose, and why. Anything
+ * else whose `.sync(` / `.step(` / `.tick(` / `.planSpray(` call carries wall
+ * time fails `time/world-on-sim-clock`.
+ */
+export const WALL_TIME_SYNC_RECEIVERS = {
+  syntheticLights: 'a poll throttle — re-reads scene lights every N wall ms, moves nothing',
+  weather:
+    "the GM's hand on the controls — a weather change easing in, on the same wall clock as the Remote's " +
+    'Fade Engine, so a GM prepping a paused scene sees it land (vt-pan-viewer.js, "THE WEATHER OWNER")',
+};
+
+/**
+ * The only places allowed to read the WALL DELTA (`.realDtSec`), and why. A delta
+ * only ever feeds an integrator — something that moves — so any other read is
+ * world motion on the wrong clock (the water spray hid one behind a local variable).
+ */
+export const WALL_DELTA_READERS = [
+  {
+    re: /\bdr\.lastRealDtSec\s*=/,
+    why: 'Dynamic Range: the camera re-exposes on wall time; it is the lens, not the world',
+  },
+  {
+    re: /\bweather\.tick\(time\.realDtSec\b/,
+    why: "the weather ease — the GM's hand on the controls (see WALL_TIME_SYNC_RECEIVERS.weather)",
+  },
+];
+
+/** Wall-time or never-pausing reads that world motion must not be handed. */
+const WALL_TIME_RE = /\breal(?:Ms|DtSec)\b|\bwallClockMs\s*\(|\bperfNowMs\s*\(|\bserverTime\b/;
+const SYNC_CALL_RE = /\b([A-Za-z_$][\w$]*)\.(sync|step|tick|planSpray)\s*\(/g;
+
+/**
+ * `time/world-on-sim-clock`'s scan. Two shapes, both of which shipped:
+ *  1. a raw `serverTime` read anywhere (it never pauses) — the one door is
+ *     foundry/world-clock.js, which this rule's `allow` exempts;
+ *  2. a `.sync(`/`.step(`/`.tick(`/`.planSpray(` call whose ARGUMENTS read wall
+ *     time, unless its receiver is listed in WALL_TIME_SYNC_RECEIVERS;
+ *  3. any read of the wall DELTA (`.realDtSec`) not listed in WALL_DELTA_READERS.
+ * Comments are stripped first, so the long comments explaining the old rulings
+ * never trip it.
+ * @param {string[]} lines @returns {{line:number, text:string}[]}
+ */
+export function scanWorldOnSimClock(lines) {
+  const out = [];
+  const code = lines.map((text) => {
+    const t = text.trim();
+    if (t.startsWith('*') || t.startsWith('//') || t.startsWith('/*')) return '';
+    return text.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/s, '');
+  });
+  code.forEach((c, i) => {
+    if (/\bserverTime\b/.test(c)) out.push({ line: i + 1, text: c.trim().slice(0, 100) });
+    if (/\.realDtSec\b/.test(c) && !WALL_DELTA_READERS.some((r) => r.re.test(c))) {
+      out.push({ line: i + 1, text: `reads the wall delta: ${c.trim().slice(0, 80)}` });
+    }
+    for (const m of c.matchAll(SYNC_CALL_RE)) {
+      if (Object.prototype.hasOwnProperty.call(WALL_TIME_SYNC_RECEIVERS, m[1])) continue;
+      // Gather the argument list: from the `(` to its matching `)`, up to 30 lines.
+      let depth = 0;
+      let args = '';
+      let done = false;
+      for (let j = i; j < Math.min(code.length, i + 30) && !done; j++) {
+        const s = j === i ? c.slice(m.index + m[0].length - 1) : code[j];
+        for (const ch of s) {
+          if (ch === '(') depth++;
+          else if (ch === ')') depth--;
+          args += ch;
+          if (depth === 0) {
+            done = true;
+            break;
+          }
+        }
+        args += '\n';
+      }
+      if (WALL_TIME_RE.test(args) && !/\bserverTime\b/.test(c)) {
+        out.push({ line: i + 1, text: `${m[1]}.${m[2]}(…) is handed wall time: ${c.trim().slice(0, 70)}` });
+      }
+    }
+  });
+  return out;
+}
+
 /** @returns {string[]} every .js/.mjs file under src/, excluding vendor + tests */
 export function sourceFiles(dir = SRC, out = []) {
   for (const name of readdirSync(dir)) {
@@ -523,6 +605,39 @@ export const RULES = [
       'Time is an INPUT: the frame snapshot (env.time / dt), handed to you. Never sampled privately. ' +
       '(docs/planning/Environment.md)',
     ratchet: true,
+  },
+
+  // ===================================================================
+  // WORLD MOTION ON THE PAUSING CLOCK (2026-11-08) — the author: "when I
+  // pause they don't pause correctly … make sure EVERYTHING uses the same
+  // method". Rain, water spray, flies, maggots, fireflies, dust, frost and
+  // the weather eases were each handed WALL time as "presentation pacing",
+  // and lightning + moving tiles read Foundry's server time — none of which
+  // stops when Foundry pauses. `time/one-clock` could not see it: they all
+  // used sanctioned doors, just the wrong ones.
+  // ===================================================================
+  {
+    id: 'time/world-on-sim-clock',
+    pattern: /(?!)/, // never matches by line — `scan` below does the work
+    allow: [
+      `${sep}foundry${sep}world-clock.js`,
+      `${sep}diag${sep}`,
+      `${sep}core${sep}frame-clock.js`,
+      `${sep}world${sep}environment.js`, // builds the env.time snapshot itself
+    ],
+    why:
+      'Effects stepped on wall time (env.time.realMs/realDtSec) or on raw game.time.serverTime keep moving ' +
+      'while Foundry is paused, so a paused scene shows rain still falling, foam still flying and lightning ' +
+      'still striking while everything else has coasted to a stop. Seven effects did exactly that until ' +
+      '2026-11-08, each with a comment explaining why wall time was right for it.',
+    instead:
+      'Hand an effect env.time.tMs / env.time.dtSec (the sim clock: it eases to a stop over five seconds on ' +
+      'pause). Something that must also agree ACROSS clients reads worldSimNowMs() (foundry/world-clock.js). ' +
+      'Wall time is only for things that are not world motion — poll throttles, bakes, the camera, UI — and ' +
+      'a frame-loop .sync/.step/.tick that genuinely needs it is listed in WALL_TIME_SYNC_RECEIVERS with its reason.',
+    scan(rel, lines) {
+      return scanWorldOnSimClock(lines);
+    },
   },
 
   // ===================================================================

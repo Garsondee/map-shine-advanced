@@ -17,6 +17,13 @@ import {
   endCaptureClock,
   isCaptureClockActive,
   captureDriftMs,
+  pauseRampScale,
+  pauseRampIntegralSec,
+  initialWorldClockLedger,
+  normalizeWorldClockLedger,
+  ledgerScale,
+  ledgerSimMs,
+  retargetWorldClockLedger,
 } from '../frame-clock.js';
 
 export function run(t) {
@@ -247,5 +254,103 @@ export function run(t) {
       /* real time passes again */
     }
     t.ok('after end perfNowMs() follows real time again', perfNowMs() > r0);
+  }
+
+  // ===========================================================================
+  // THE SHARED WORLD CLOCK LEDGER (2026-11-08) — lightning and moving tiles
+  // used Foundry's server time, which never pauses. The ledger is the same
+  // pause ramp, made a pure function of (stored record, server now).
+  // ===========================================================================
+  {
+    const R = DEFAULT_PAUSE_RAMP_SEC;
+    // The integral really is the integral: sum the scale in tiny slices.
+    let acc = 0;
+    const dt = 0.001;
+    for (let x = 0; x < 7; x += dt) acc += pauseRampScale(1, 0, x + dt / 2, R) * dt;
+    t.ok(
+      'pauseRampIntegralSec(1→0) matches a numeric integral over 7 s',
+      close(pauseRampIntegralSec(1, 0, 7, R), acc, 1e-4)
+    );
+    t.ok('a full stop from speed 1 coasts exactly half the ramp', close(pauseRampIntegralSec(1, 0, 100, R), R / 2));
+    t.ok('a spool-up from 0 loses exactly half the ramp', close(pauseRampIntegralSec(0, 1, 100, R), 100 - R / 2));
+    t.ok('a zero-length ramp is a snap', pauseRampIntegralSec(1, 0, 3, 0) === 0 && pauseRampScale(1, 0, 0, 0) === 0);
+
+    const L0 = initialWorldClockLedger();
+    t.ok(
+      'a world that never paused: sim time IS server time',
+      ledgerSimMs(L0, 1_700_000_000_000) === 1_700_000_000_000
+    );
+
+    const T = 1_700_000_000_000;
+    const L1 = retargetWorldClockLedger(L0, T, 0);
+    t.ok('pausing at T changes nothing at T itself', close(ledgerSimMs(L1, T), T) && close(ledgerScale(L1, T), 1));
+    t.ok(
+      'mid-ramp the world is slowing',
+      ledgerScale(L1, T + (R / 2) * 1000) > 0.4 && ledgerScale(L1, T + (R / 2) * 1000) < 0.6
+    );
+    const held = ledgerSimMs(L1, T + R * 1000);
+    t.ok(
+      'after the ramp the shared clock stands still',
+      close(ledgerSimMs(L1, T + 60_000), held, 1e-6) && ledgerScale(L1, T + 60_000) === 0
+    );
+    t.ok('…having coasted half a ramp past the pause', close(held, T + (R / 2) * 1000, 1e-6));
+
+    const U = T + 60_000;
+    const L2 = retargetWorldClockLedger(L1, U, 1);
+    t.ok('resuming starts from the held instant', close(ledgerSimMs(L2, U), held, 1e-6));
+    t.ok(
+      '…and runs at full speed once spooled up',
+      close(ledgerSimMs(L2, U + 20_000) - ledgerSimMs(L2, U + 10_000), 10_000, 1e-6)
+    );
+
+    // Sim time never runs backwards, through any sequence of pause/resume taps.
+    let L = L0;
+    let prev = -Infinity;
+    let monotonic = true;
+    let now = T;
+    const taps = [0.7, 1.9, 0.2, 6, 0.05, 3.3];
+    taps.forEach((gap, i) => {
+      for (let k = 0; k < 40; k++) {
+        now += (gap * 1000) / 40;
+        const s = ledgerSimMs(L, now);
+        if (s < prev - 1e-6) monotonic = false;
+        prev = s;
+      }
+      L = retargetWorldClockLedger(L, now, i % 2 === 0 ? 0 : 1);
+      const s = ledgerSimMs(L, now);
+      if (Math.abs(s - prev) > 1e-6) monotonic = false; // a re-target never jumps the clock
+    });
+    t.ok('rapid pause/resume taps never jump or reverse the shared clock', monotonic);
+
+    t.ok(
+      're-asserting the same target is a no-op (no needless GM write)',
+      retargetWorldClockLedger(L1, T + 1000, 0) === L1
+    );
+
+    // The shared clock and the per-client frame clock ramp the SAME way.
+    {
+      let wall = 0;
+      const clock = makeFrameClock({ now: () => wall });
+      clock.tick();
+      clock.setScaleTarget(0, R);
+      for (let i = 0; i < 70 * 10; i++) {
+        wall += 10;
+        clock.tick();
+      }
+      const ledger = retargetWorldClockLedger(initialWorldClockLedger(), 0, 0, R);
+      t.ok(
+        'frame clock and shared ledger coast the same distance into a pause',
+        close(clock.peek().tMs, ledgerSimMs(ledger, 7000), 15)
+      );
+    }
+
+    t.ok(
+      'a junk stored ledger reads as the never-paused one',
+      ledgerSimMs(normalizeWorldClockLedger('{nope'), 5) === 5
+    );
+    t.ok(
+      'a stored ledger round-trips through JSON',
+      JSON.stringify(normalizeWorldClockLedger(JSON.stringify(L2))) === JSON.stringify(L2)
+    );
   }
 }

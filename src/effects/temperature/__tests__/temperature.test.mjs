@@ -183,6 +183,13 @@ export function run(t) {
   );
   for (let i = 0; i < 60 * 30; i++) cs = cold.step(frame({ temperature01: 0.6 }));
   ok('…and once melted the layer compiles back out', cs.warp.frost === false);
+  // THE ONE PAUSING CLOCK (2026-11-08): frost grows on world time, so a paused world (sim dt 0)
+  // holds it exactly where it is — even with a wall delta offered alongside, which it must ignore.
+  const paused = createTemperatureFxStepper();
+  paused.setFrost01(0.3);
+  let ps = paused.step(frame({ temperature01: 0.02, worldDtSec: 0, realDtSec: 1 / 60 }));
+  for (let i = 0; i < 600; i++) ps = paused.step(frame({ temperature01: 0.02, worldDtSec: 0, realDtSec: 1 / 60 }));
+  ok('a paused world holds the frost still (sim dt 0, wall dt ignored)', ps.info.frost01 === 0.3);
   const hot = createTemperatureFxStepper();
   const hs = hot.step(frame({ temperature01: 0.95 }));
   ok(

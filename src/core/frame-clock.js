@@ -247,7 +247,7 @@ export function makeFrameClock({ now = perfNowMs, maxDtSec = DEFAULT_MAX_DT_SEC,
       // ramp completes on already runs at its final scale (V2's own ordering).
       if (rampT < 1) {
         rampT = rampSec > 0 ? Math.min(1, rampT + realDtSec / rampSec) : 1;
-        currentScale = scaleFrom + (scaleTarget - scaleFrom) * easeInOut01(rampT);
+        currentScale = pauseRampScale(scaleFrom, scaleTarget, rampT, 1);
       } else {
         currentScale = scaleTarget;
       }
@@ -333,6 +333,137 @@ export function makeFrameClock({ now = perfNowMs, maxDtSec = DEFAULT_MAX_DT_SEC,
 /** @param {Omit<FrameTime,'paused'>} t @returns {Readonly<FrameTime>} */
 function freezeTime(t) {
   return Object.freeze({ ...t, paused: t.timeScale <= STOPPED_EPSILON });
+}
+
+/**
+ * THE PAUSE RAMP — the one curve every pausing clock in MSA uses: this file's
+ * own frame clock above, and the shared world clock below. The scale `tSec`
+ * into a ramp from `fromScale` to `toScale` that lasts `rampSec`.
+ * @param {number} fromScale @param {number} toScale @param {number} tSec
+ * @param {number} [rampSec=DEFAULT_PAUSE_RAMP_SEC] - 0 snaps at once.
+ * @returns {number}
+ */
+export function pauseRampScale(fromScale, toScale, tSec, rampSec = DEFAULT_PAUSE_RAMP_SEC) {
+  const x = rampSec > 0 ? tSec / rampSec : 1;
+  return fromScale + (toScale - fromScale) * easeInOut01(x);
+}
+
+/**
+ * How many SIM seconds pass during the first `tSec` WALL seconds of a ramp —
+ * the exact integral of {@link pauseRampScale}, so a clock built from it lands
+ * on the same instant whatever its frame rate (or whether it has frames at all).
+ * ∫ e(u/R) du for the cosine ease e(x) = ½ − ½cos(πx) is R·(x/2 − sin(πx)/2π).
+ * @param {number} fromScale @param {number} toScale @param {number} tSec
+ * @param {number} [rampSec=DEFAULT_PAUSE_RAMP_SEC]
+ * @returns {number}
+ */
+export function pauseRampIntegralSec(fromScale, toScale, tSec, rampSec = DEFAULT_PAUSE_RAMP_SEC) {
+  const t = Math.max(0, Number(tSec) || 0);
+  const d = toScale - fromScale;
+  if (!(rampSec > 0)) return toScale * t;
+  const x = Math.min(1, t / rampSec);
+  const inRamp = rampSec * (x / 2 - Math.sin(Math.PI * x) / (2 * Math.PI));
+  return fromScale * t + d * inRamp + d * Math.max(0, t - rampSec);
+}
+
+/**
+ * ============================================================================
+ * THE SHARED WORLD CLOCK LEDGER (2026-11-08) — pausing time every client agrees on
+ * ============================================================================
+ * `makeFrameClock` is per client: its `tMs` starts at 0 on every page load, so
+ * it cannot say "the same instant" to two players. A few effects must agree
+ * across clients — storm lightning strikes at the same moment for everyone, and
+ * a moving tile sits at the same angle on every screen — so they ran on Foundry's
+ * `game.time.serverTime`, which NEVER pauses. That is why lightning kept
+ * striking through a pause while everything else coasted to a stop.
+ *
+ * The ledger is the shared version of the frame clock's scale: one small record
+ * (the last pause or resume, when it happened on the server clock, the scale it
+ * ramped from and to, and the time the world had already lost to earlier
+ * pauses). The GM writes it on every Foundry pause/unpause; every client reads
+ * it, and `ledgerSimMs(ledger, serverNowMs)` is then a PURE function — any
+ * client, joining at any time, gets the same answer. Same 5-second cosine ramp
+ * as the frame clock ({@link pauseRampScale}), so lightning and moving tiles
+ * slow and stop with the rain, not instantly and not never.
+ *
+ * Starts equal to server time (lag 0), so switching an effect from server time
+ * to this clock moves nothing until the first pause.
+ *
+ * @typedef {{atMs:number, lagMs:number, fromScale:number, toScale:number, rampSec:number}} WorldClockLedger
+ */
+
+/** @returns {WorldClockLedger} the ledger of a world that has never paused: sim time IS server time. */
+export function initialWorldClockLedger() {
+  return { atMs: 0, lagMs: 0, fromScale: 1, toScale: 1, rampSec: DEFAULT_PAUSE_RAMP_SEC };
+}
+
+/**
+ * Read a ledger from anything (a stored JSON string, an object, junk) — never throws.
+ * @param {*} raw @returns {WorldClockLedger}
+ */
+export function normalizeWorldClockLedger(raw) {
+  let v = raw;
+  if (typeof v === 'string') {
+    try {
+      v = v ? JSON.parse(v) : null;
+    } catch (_) {
+      v = null;
+    }
+  }
+  const base = initialWorldClockLedger();
+  if (!v || typeof v !== 'object') return base;
+  const fin = (x, d) => (Number.isFinite(Number(x)) ? Number(x) : d);
+  return {
+    atMs: fin(v.atMs, base.atMs),
+    lagMs: Math.max(0, fin(v.lagMs, 0)),
+    fromScale: clampScale(fin(v.fromScale, 1)),
+    toScale: clampScale(fin(v.toScale, 1)),
+    rampSec: Math.max(0, fin(v.rampSec, DEFAULT_PAUSE_RAMP_SEC)),
+  };
+}
+
+/** @param {WorldClockLedger} ledger @param {number} nowMs - server ms. @returns {number} the world's time scale now. */
+export function ledgerScale(ledger, nowMs) {
+  const t = Math.max(0, (nowMs - ledger.atMs) / 1000);
+  return pauseRampScale(ledger.fromScale, ledger.toScale, t, ledger.rampSec);
+}
+
+/**
+ * SIM time on the shared clock: server time minus every millisecond the world
+ * has spent (partly or wholly) stopped. Never runs backwards while server time
+ * moves forwards; stands still once a pause's ramp has finished.
+ * @param {WorldClockLedger} ledger @param {number} nowMs - server ms.
+ * @returns {number}
+ */
+export function ledgerSimMs(ledger, nowMs) {
+  const t = Math.max(0, (nowMs - ledger.atMs) / 1000);
+  const simSinceSec = pauseRampIntegralSec(ledger.fromScale, ledger.toScale, t, ledger.rampSec);
+  // At the ledger's own instant the world had lost `lagMs`; from there it gains
+  // exactly the ramp's integral. (A server clock that reads BEFORE `atMs` — a skew
+  // correction — holds at that instant rather than running time backwards.)
+  return ledger.atMs - ledger.lagMs + simSinceSec * 1000;
+}
+
+/**
+ * The ledger after the world starts heading to `targetScale` at `nowMs` (a pause:
+ * 0, a resume: 1). Mid-ramp re-targets ease on from the scale ACTUALLY in force,
+ * exactly like the frame clock's `setScaleTarget`. Already heading there ⇒ the same
+ * ledger back (no write needed).
+ * @param {WorldClockLedger} ledger @param {number} nowMs @param {number} targetScale
+ * @param {number} [rampSec=DEFAULT_PAUSE_RAMP_SEC]
+ * @returns {WorldClockLedger}
+ */
+export function retargetWorldClockLedger(ledger, nowMs, targetScale, rampSec = DEFAULT_PAUSE_RAMP_SEC) {
+  const to = clampScale(targetScale);
+  if (to === ledger.toScale && rampSec === ledger.rampSec) return ledger;
+  const simNow = ledgerSimMs(ledger, nowMs);
+  return {
+    atMs: nowMs,
+    lagMs: Math.max(0, nowMs - simNow),
+    fromScale: ledgerScale(ledger, nowMs),
+    toScale: to,
+    rampSec: Math.max(0, rampSec),
+  };
 }
 
 /**

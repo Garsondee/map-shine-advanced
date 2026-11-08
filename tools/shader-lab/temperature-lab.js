@@ -242,7 +242,6 @@ async function main() {
       enabled: state.enabled,
       params,
       temperature01: state.temperature01,
-      realDtSec: dt,
       worldDtSec: dt,
       darkness01: state.darkness01,
       screenW: W,

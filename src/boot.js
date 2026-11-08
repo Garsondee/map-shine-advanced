@@ -99,6 +99,7 @@ import { createGpuQueueProbe } from './diag/gpu-queue-probe.js';
 import { runStructuralAB, runEditCascadeStress } from './diag/perf-structural-ab.js';
 import { pickStressTestTile, pingStressTestTile, unpingStressTestTile, readFoundryTestState } from './foundry/index.js';
 import { installSmoothPan } from './foundry/index.js';
+import { registerWorldClockSettings, watchWorldClock, worldSimNowMs, getWorldClockLedger } from './foundry/index.js';
 import { framePacer } from './core/frame-pacer.js';
 // The benchmark route drives the EXISTING camera-path player rather than growing
 // a second motion system — a fixed route is what makes two runs comparable.
@@ -272,7 +273,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const TIER_SETTLE_FRAMES = 90;
 import { createPerfHud } from './diag/perf-hud.js';
 import { createLogger } from './core/log.js';
-import { wallClockMs, captureDriftMs } from './core/frame-clock.js';
+import { wallClockMs } from './core/frame-clock.js';
 import { validateCue, validateCueStack, orderedCues, cueToFadePatch } from './core/cues-schema.js';
 import {
   STARTER_LOOKS,
@@ -1947,6 +1948,9 @@ function install() {
       stopTileMotion: () => stopTileMotion(),
       pauseTileMotion: () => pauseTileMotion(),
       resumeTileMotion: () => resumeTileMotion(),
+      // THE SHARED WORLD CLOCK (foundry/world-clock.js): the pause ledger + the scale in force now, for checking
+      // that lightning and moving tiles are stopping with the rest of the world.
+      getWorldClockLedger: () => getWorldClockLedger(),
       // THE SCENE DEPARTMENT's Darkness-at-max card (UI parity plan, phase
       // 4a) — the SAME real functions the old panel's own 'darkness-realism'
       // select already calls (see that registration's own comment, below,
@@ -6843,13 +6847,12 @@ function install() {
     return {
       ...projectCascadeRenderState(lightningReadout),
       anchors: lightningAnchorMemo.anchors,
-      // THE STORM'S SHARED CLOCK (mmp-63o.2): server time, the same clock tile motion runs on, so every client's
-      // storm strikes at the same moments; plus the capture clock's drift so a recorded video replays a strike
-      // frame-exact. Falls back to the one sanctioned wall clock before Foundry has a server time.
-      sharedNowMs: (() => {
-        const s = Number(globalThis.game?.time?.serverTime);
-        return Number.isFinite(s) && s > 0 ? s + captureDriftMs() : wallClockMs();
-      })(),
+      // THE STORM'S SHARED CLOCK (mmp-63o.2): the shared WORLD clock (foundry/world-clock.js), the same clock tile
+      // motion runs on, so every client's storm strikes at the same moments. It was raw server time, which never
+      // pauses, so strikes kept flashing through a pause (2026-11-08); the world clock is server time that eases
+      // to a stop with Foundry's pause like every other effect. It carries the capture clock's drift, so a
+      // recorded video still replays a strike frame-exact.
+      sharedNowMs: worldSimNowMs(),
     };
   };
 
@@ -17534,6 +17537,13 @@ function install() {
     // scene switch must load THIS scene's own tiles/transport, not keep
     // serving the previous scene's cache. Not purely lazy like camera-path —
     // autoplay must take effect even if nobody ever opens the dialog.
+    // THE SHARED WORLD CLOCK first (idempotent): squares the pause ledger with the pause state this world is
+    // actually in, before tile motion and lightning read it.
+    try {
+      watchWorldClock();
+    } catch (err) {
+      log.error('world clock watch (scene load) failed:', err);
+    }
     try {
       initializeTileMotionRuntime();
     } catch (err) {
@@ -20796,6 +20806,14 @@ function install() {
         });
       } catch (err) {
         log.error('fog memory reset listener failed to install:', err);
+      }
+
+      // THE SHARED WORLD CLOCK (foundry/world-clock.js, 2026-11-08): the GM's record of every pause, so lightning
+      // and moving tiles slow and stop with the rest of the world on every client.
+      try {
+        registerWorldClockSettings();
+      } catch (err) {
+        log.error('world clock settings registration failed:', err);
       }
 
       // FORCE DEFAULTS (foundry/force-defaults.js): the GM flipping it re-resolves every effect on every client.

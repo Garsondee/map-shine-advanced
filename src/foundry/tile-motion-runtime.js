@@ -33,7 +33,8 @@ import {
   buildMotionGraph,
   convertTileMotionToTileScrollFlags,
 } from './tile-motion.js';
-import { wallClockMs, perfNowMs, captureDriftMs } from '../core/frame-clock.js';
+import { perfNowMs } from '../core/frame-clock.js';
+import { worldSimNowMs } from './world-clock.js';
 
 const NAMESPACE = 'map-shine-advanced';
 const TILE_FLAG_KEY = 'tileMotion';
@@ -59,14 +60,16 @@ let cachedTileEditActive = false;
 // FOUNDRY ACCESSORS — small, local, never throw.
 // ===========================================================================
 
-/** @returns {number} `game.time.serverTime` (shared across clients), falling back to the one sanctioned wall clock. */
+/**
+ * THE SHARED WORLD CLOCK (foundry/world-clock.js) — server time that eases to a stop when Foundry pauses, the
+ * same five-second ramp as every other effect, and identical on every client. Was raw `game.time.serverTime`
+ * plus an INSTANT transport pause on `pauseGame`, so tiles stopped dead while the rain round them coasted
+ * (author, 2026-11-08: "make sure EVERYTHING uses the same method"). Equal to server time until the world first
+ * pauses, so anchors already saved in server time stay where they are. Carries the capture clock's drift.
+ * @returns {number}
+ */
 function nowMs() {
-  const s = typeof game !== 'undefined' ? Number(game?.time?.serverTime) : NaN;
-  // `serverTime` runs on the real clock; under the video capture clock
-  // (core/frame-clock.js) add the drift so a moving tile follows the video's
-  // time, frame-exact, instead of the time each frame happened to finish at.
-  // `wallClockMs()` already follows the capture clock by itself.
-  return Number.isFinite(s) && s > 0 ? s + captureDriftMs() : wallClockMs();
+  return worldSimNowMs();
 }
 
 /** @returns {*|null} the active scene document, or null outside a live canvas. */
@@ -276,7 +279,12 @@ export function watchTransportState(onChange) {
 /**
  * GATES TILE MOTION BY FOUNDRY'S OWN PAUSE STATE (mythica-machina-press#524,
  * live request: "starting and stopping of all these rotational animations
- * should be gated by... the pause/unpause"). `Hooks.callAll("pauseGame",
+ * should be gated by... the pause/unpause").
+ *
+ * ⚠️ 2026-11-08: the STOP half moved to the shared world clock (`nowMs`, from
+ * foundry/world-clock.js), which coasts tiles to a halt over the same five
+ * seconds as every other effect instead of freezing them on the spot. Only
+ * the RESUME half below is still live — see the hook body. `Hooks.callAll("pauseGame",
  * this.data.paused, options)` — confirmed in the real v14 source
  * (`client/game.mjs`) — fires with the RESULTING paused state as its one
  * argument, not a toggle; `pauseTileMotion`/`resumeTileMotion` are called
@@ -301,8 +309,11 @@ export function watchGamePause() {
   if (typeof Hooks === 'undefined') return () => {};
   const id = Hooks.on('pauseGame', (paused) => {
     try {
-      if (paused) void pauseTileMotion();
-      else void resumeTileMotion();
+      // PAUSING is the shared world clock's job now (`nowMs` above stands still with the world), so a game
+      // pause no longer writes the transport. UNPAUSE still resumes a paused transport: it is how a tile
+      // paused by the old game-pause write (before 2026-11-08) gets going again, and it was always the
+      // behaviour for a GM's own transport pause too.
+      if (!paused) void resumeTileMotion();
     } catch (_) {
       // mid-teardown update; nothing to recover.
     }

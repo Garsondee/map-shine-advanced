@@ -206,16 +206,18 @@ export function stepHeatScroll(scroll, dtSec, params = {}) {
  * the GPU, so the viewer and the shader lab run the same code. Holds the
  * frost's grown coverage and the ripple's scroll between frames.
  *
- * Frost grows on WALL time (a GM setting the mood with the game paused still
- * sees it creep in); the ripple rises on world time, so it holds still while
- * paused like the rest of the weather.
+ * Frost and the ripple both run on WORLD (sim) time, so both hold still while
+ * paused like every other effect. Frost used to grow on wall time "so a GM
+ * setting the mood while paused still sees it creep in"; the author asked on
+ * 2026-11-08 for EVERYTHING to share the one pausing clock, so a frost set
+ * during a pause creeps in once the world resumes.
  *
  * The `warp.frost` / `warp.heatRipple` flags are the present's COMPILE flags:
  * they follow the temperature only — never zoom or darkness, which only scale
  * the amount — so panning or nightfall never rebuilds the present.
  *
  * @returns {{step: (frame: {enabled: boolean, params?: object, temperature01?: number,
- *   realDtSec?: number, worldDtSec?: number, darkness01?: number, screenW: number,
+ *   worldDtSec?: number, darkness01?: number, screenW: number,
  *   screenH: number, worldPerScreenPx?: number}) => {grade: object, indoorShare: number,
  *   warp: object, info: object}}}
  */
@@ -223,12 +225,12 @@ export function createTemperatureFxStepper() {
   let frost01 = 0;
   const scroll = [0, 0];
   return {
-    step({ enabled, params, temperature01, realDtSec, worldDtSec, darkness01, screenW, screenH, worldPerScreenPx }) {
+    step({ enabled, params, temperature01, worldDtSec, darkness01, screenW, screenH, worldPerScreenPx }) {
       const p = params ?? {};
       const on = !!enabled;
       const dark = Number.isFinite(darkness01) ? clamp01(darkness01) : 0;
       const bands = on ? temperatureBands(temperature01, p) : { cold01: 0, warm01: 0, frostTarget01: 0, heat01: 0 };
-      frost01 = stepFrost(frost01, realDtSec, bands.frostTarget01, p);
+      frost01 = stepFrost(frost01, worldDtSec, bands.frostTarget01, p);
       const W = Math.max(1, Number(screenW) || 1);
       const H = Math.max(1, Number(screenH) || 1);
       const ripplePx = heatRipplePx(bands.heat01, p, { darkness01: dark, worldPerScreenPx });

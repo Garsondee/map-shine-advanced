@@ -127,10 +127,65 @@ export function playTileVideo(video, tileDoc) {
     // attenuate") matches this setting's own registered default.
   }
   const ownVolume = typeof cfg.volume === 'number' ? cfg.volume : 0;
+  const playing = cfg.autoplay ?? true;
   gv.play(video, {
-    playing: cfg.autoplay ?? true,
+    playing,
     loop: cfg.loop ?? true,
     volume: ownVolume * globalVolume,
   });
+  if (playing) worldPacedVideos.add(video);
   return true;
+}
+
+// ===========================================================================
+// VIDEO TILES PAUSE WITH THE WORLD (2026-11-08) — author: "Everything should
+// pause. Everything should use the same exact clock." Foundry never pauses a
+// tile's video on a game pause, so an animated water or torch tile kept
+// playing while every other effect coasted to a stop. Each frame the viewer
+// hands the frame clock's own scale here: the video slows with the same
+// five-second ramp (`playbackRate`), and pauses once the browser cannot play
+// it any slower; it resumes — only if THIS code paused it — when the world
+// starts again. A video whose tile set `autoplay: false` is never tracked.
+// ===========================================================================
+
+/** Browsers refuse `playbackRate` below ~1/16 (Chrome throws); under it, pause outright. */
+const MIN_PLAYBACK_RATE = 0.0625;
+
+/** @type {Set<HTMLVideoElement>} MSA's playing tile videos. */
+const worldPacedVideos = new Set();
+/** @type {WeakSet<HTMLVideoElement>} the ones paused by the world (never a GM's own pause). */
+const pausedByWorld = new WeakSet();
+
+/**
+ * Pace every tracked tile video to the world's time scale. Call once per frame
+ * with `env.time.timeScale`. A torn-down tile (its `src` detached by
+ * `stopAndDetachTileVideo`) drops out of the set here.
+ * @param {number} timeScale - 0 (stopped) .. 1 (normal) .. 4.
+ * @returns {number} how many videos are tracked.
+ */
+export function syncTileVideoTimeScale(timeScale) {
+  const scale = Number.isFinite(timeScale) ? Math.max(0, timeScale) : 1;
+  for (const video of worldPacedVideos) {
+    try {
+      if (!video.getAttribute?.('src')) {
+        worldPacedVideos.delete(video);
+        continue;
+      }
+      if (scale < MIN_PLAYBACK_RATE) {
+        if (!video.paused) {
+          video.pause();
+          pausedByWorld.add(video);
+        }
+        continue;
+      }
+      if (Math.abs(video.playbackRate - scale) > 1e-3) video.playbackRate = scale;
+      if (pausedByWorld.has(video)) {
+        pausedByWorld.delete(video);
+        if (video.paused) void Promise.resolve(video.play?.()).catch(() => {});
+      }
+    } catch (_) {
+      // A media element mid-teardown; the next frame prunes it.
+    }
+  }
+  return worldPacedVideos.size;
 }

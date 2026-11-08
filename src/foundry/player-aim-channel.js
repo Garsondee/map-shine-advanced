@@ -87,7 +87,8 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { perfNowMs, wallClockMs } from '../core/frame-clock.js';
+import { perfNowMs } from '../core/frame-clock.js';
+import { worldSimNowMs } from './world-clock.js';
 import { readMouseHoverPoint, readGridSizePixels } from './scene-occlusion-sources.js';
 import { resolveCarriedLightTarget } from './viewer-token.js';
 import { readActivePlayerCarriedLightTokens } from './player-light-mode.js';
@@ -140,7 +141,9 @@ const UNRESOLVED = Symbol('unresolved');
 /**
  * @param {object} [options] - every option is a test seam; production passes none.
  * @param {() => number} [options.now] - monotonic milliseconds (`core/frame-clock.js#perfNowMs`).
- * @param {() => number} [options.wallNow] - wall-clock milliseconds, for effects every client must agree on.
+ * @param {() => number} [options.sharedNow] - the SHARED WORLD CLOCK (`foundry/world-clock.js#worldSimNowMs`): the hand
+ *   tremor every client must agree on, and that stands still while Foundry is paused (2026-11-08 — it was wall time,
+ *   so a held torch kept swaying through a pause). `now` stays wall time: it times the player's own aim input. Was for effects every client must agree on.
  * @param {number} [options.wanderPx] - a held torch's hand tremor, px (0 = none).
  * @param {number} [options.wanderDeg] - a flashlight's hand tremor, degrees of bearing (0 = none).
  * @param {(fn: () => void, ms: number) => *} [options.setIntervalFn]
@@ -148,7 +151,7 @@ const UNRESOLVED = Symbol('unresolved');
  */
 export function createPlayerAimChannel({
   now = perfNowMs,
-  wallNow = wallClockMs,
+  sharedNow = worldSimNowMs,
   wanderPx = AIM_TORCH_WANDER_PX,
   wanderDeg = AIM_FLASHLIGHT_WANDER_DEG,
   setIntervalFn = (fn, ms) => setInterval(fn, ms),
@@ -336,7 +339,7 @@ export function createPlayerAimChannel({
     if (!Array.isArray(snapshots) || snapshots.length === 0) return snapshots;
     try {
       const nowMs = now();
-      const wallMs = wallNow();
+      const wallMs = sharedNow();
       let localToken = UNRESOLVED;
       for (const snap of snapshots) {
         if (!PLAYER_AIM_MODES.includes(snap?.mode)) continue;

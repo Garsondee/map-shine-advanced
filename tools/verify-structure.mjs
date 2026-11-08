@@ -126,15 +126,61 @@ export const PARALLAX_SCREEN_LOCKED_SURFACES = {
 const IGNORED = [`${sep}vendor${sep}`, `${sep}__tests__${sep}`];
 
 /**
- * Frame-loop receivers that are handed WALL time on purpose, and why. Anything
- * else whose `.sync(` / `.step(` / `.tick(` / `.planSpray(` call carries wall
- * time fails `time/world-on-sim-clock`.
+ * ============================================================================
+ * ONE CLOCK FOR EVERYTHING THAT MOVES (`time/world-on-sim-clock`, 2026-11-08)
+ * ============================================================================
+ * The author: "Everything should pause. Everything should use the same exact
+ * clock … make it harder for a future effect to accidentally use the wrong
+ * system." The one clock is the PAUSING clock: `env.time.tMs`/`dtSec` (handed
+ * to every effect each frame) and, for what must agree across clients,
+ * `worldSimNowMs()` (foundry/world-clock.js) — both driven by one ledger with
+ * one five-second ramp.
+ *
+ * Wall time still exists for things that are not the world moving (loading
+ * timers, poll throttles, decode latency, the camera, UI). Those reads are a
+ * BUDGET, file by file, each with its reason: a wall-time read in a file not
+ * listed here, or one more read than a file's budget, fails the build. That is
+ * the "harder": a new effect that reaches for `perfNowMs()` or `env.time.realMs`
+ * cannot land without someone writing down here why it is not world motion.
+ * Lower a budget when a read goes away; raise one only with the reason updated.
+ */
+export const WALL_TIME_BUDGETS = {
+  'src/boot.js': {
+    max: 8,
+    why: 'names (cue-/look- ids), the mask-discovery cache expiry, the first-paint wait and zone-arm timing at load',
+  },
+  'src/vt/vt-pan-viewer.js': {
+    max: 51,
+    why:
+      'load/compile/settle timing and frame stats; poll throttles (fog memory, snapshot publish, mask authority, ' +
+      'darkness publish, wind-speed apply, sun/water bake, synthetic lights, room-map rebuild); the camera (Dynamic ' +
+      'Range, parallax glide); the fog REVEAL fade (what a token can see, not the world moving); roof hover fades; ' +
+      'frame pacing; a cloud-drift diagnostic sample',
+  },
+  'src/vt/pipeline-governor.js': { max: 2, why: 'shader-compile in-flight timing' },
+  'src/ui/loading-screen.js': { max: 1, why: 'the loading screen (UI)' },
+  'src/foundry/player-aim-channel.js': {
+    max: 1,
+    why: "times the player's own aim INPUT (smoothing, network receipt); the hand tremor itself is worldSimNowMs",
+  },
+  'src/vt/decode-pool.js': { max: 13, why: 'texture decode latency and yield timing' },
+  'src/vt/decode-pool.worker.js': { max: 10, why: 'texture decode latency, off the main thread' },
+  'src/vt/vt-live-decode-report.js': { max: 4, why: 'decode timing report' },
+  'src/vt/compressed-textures.js': { max: 3, why: 'worker rebuild cooldown' },
+  'src/foundry/scene-synthetic-lights.js': { max: 2, why: 'a poll throttle — re-reads scene lights, moves nothing' },
+  'src/foundry/scene-switch-gate.js': { max: 1, why: 'a diagnostic timestamp' },
+  'src/foundry/tile-motion-runtime.js': { max: 1, why: 'the tile-edit poll throttle (motion itself is worldSimNowMs)' },
+  'src/graph/frame-graph.js': { max: 1, why: 'per-pass timing' },
+  'src/ui/floor-transition.js': { max: 1, why: 'the floor-transition curtain timeout (UI)' },
+};
+
+/**
+ * Frame-loop receivers that may be handed WALL time inside an otherwise-budgeted
+ * file, and why. Any other `.sync(` / `.step(` / `.tick(` / `.planSpray(` call
+ * whose arguments read wall time fails — a budget alone would let a swap through.
  */
 export const WALL_TIME_SYNC_RECEIVERS = {
   syntheticLights: 'a poll throttle — re-reads scene lights every N wall ms, moves nothing',
-  weather:
-    "the GM's hand on the controls — a weather change easing in, on the same wall clock as the Remote's " +
-    'Fade Engine, so a GM prepping a paused scene sees it land (vt-pan-viewer.js, "THE WEATHER OWNER")',
 };
 
 /**
@@ -147,38 +193,58 @@ export const WALL_DELTA_READERS = [
     re: /\bdr\.lastRealDtSec\s*=/,
     why: 'Dynamic Range: the camera re-exposes on wall time; it is the lens, not the world',
   },
-  {
-    re: /\bweather\.tick\(time\.realDtSec\b/,
-    why: "the weather ease — the GM's hand on the controls (see WALL_TIME_SYNC_RECEIVERS.weather)",
-  },
 ];
 
-/** Wall-time or never-pausing reads that world motion must not be handed. */
-const WALL_TIME_RE = /\breal(?:Ms|DtSec)\b|\bwallClockMs\s*\(|\bperfNowMs\s*\(|\bserverTime\b/;
+/**
+ * Wall-time or never-pausing reads that world motion must not be handed. Any REFERENCE to the wall-clock doors
+ * counts, not only a call: `const now = perfNowMs` followed by `now()` is the same read in disguise.
+ */
+const WALL_TIME_RE = /\breal(?:Ms|DtSec)\b|\b(?:wallClockMs|perfNowMs)\b|\bserverTime\b/;
 const SYNC_CALL_RE = /\b([A-Za-z_$][\w$]*)\.(sync|step|tick|planSpray)\s*\(/g;
+/** A self-scheduled timer: an effect or world model that runs one has its own clock. */
+const SELF_TIMER_RE = /\b(?:setTimeout|setInterval|requestAnimationFrame|requestIdleCallback)\s*\(/;
+/** Folders whose code is world motion by definition: no wall time, no timers of their own, at all. */
+const WORLD_MOTION_DIRS = ['src/effects/', 'src/world/'];
 
 /**
- * `time/world-on-sim-clock`'s scan. Two shapes, both of which shipped:
- *  1. a raw `serverTime` read anywhere (it never pauses) — the one door is
- *     foundry/world-clock.js, which this rule's `allow` exempts;
- *  2. a `.sync(`/`.step(`/`.tick(`/`.planSpray(` call whose ARGUMENTS read wall
- *     time, unless its receiver is listed in WALL_TIME_SYNC_RECEIVERS;
- *  3. any read of the wall DELTA (`.realDtSec`) not listed in WALL_DELTA_READERS.
- * Comments are stripped first, so the long comments explaining the old rulings
- * never trip it.
- * @param {string[]} lines @returns {{line:number, text:string}[]}
+ * `time/world-on-sim-clock`'s scan. Every shape below shipped at least once:
+ *  1. a raw `serverTime` read (never pauses) — the one door, foundry/world-clock.js, is exempt via `allow`;
+ *  2. a `.sync(`/`.step(`/`.tick(`/`.planSpray(` call whose ARGUMENTS read wall time (unless its receiver
+ *     is in WALL_TIME_SYNC_RECEIVERS);
+ *  3. a read of the wall DELTA (`.realDtSec`) not in WALL_DELTA_READERS;
+ *  4. ANY wall-time read in a file over its WALL_TIME_BUDGETS entry, or in a file with none (the fog mist
+ *     drifted on a private `perfNowMs()` delta inside the viewer);
+ *  5. in effects/ and world/: a self-scheduled timer (setTimeout/setInterval/rAF) — its own clock.
+ * Comments are stripped first, so the comments explaining old rulings never trip it.
+ * @param {string[]} lines
+ * @param {string} [rel] - repo-relative path (forward or back slashes); enables checks 4 and 5.
+ * @returns {{line:number, text:string}[]}
  */
-export function scanWorldOnSimClock(lines) {
+export function scanWorldOnSimClock(lines, rel = '') {
   const out = [];
+  const file = String(rel).replace(/\\/g, '/');
+  const worldMotion = WORLD_MOTION_DIRS.some((d) => file.startsWith(d));
+  let inImport = false;
   const code = lines.map((text) => {
     const t = text.trim();
+    // Import lines name the doors without reading them; a multi-line `import {` runs to its `from`.
+    if (inImport || /^import\b/.test(t)) {
+      inImport = !/\bfrom\s*['"]/.test(t) && !/^import\s*['"]/.test(t);
+      return '';
+    }
     if (t.startsWith('*') || t.startsWith('//') || t.startsWith('/*')) return '';
     return text.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/s, '');
   });
+  /** @type {number[]} */
+  const wallLines = [];
   code.forEach((c, i) => {
+    if (WALL_TIME_RE.test(c)) wallLines.push(i + 1);
     if (/\bserverTime\b/.test(c)) out.push({ line: i + 1, text: c.trim().slice(0, 100) });
     if (/\.realDtSec\b/.test(c) && !WALL_DELTA_READERS.some((r) => r.re.test(c))) {
       out.push({ line: i + 1, text: `reads the wall delta: ${c.trim().slice(0, 80)}` });
+    }
+    if (worldMotion && SELF_TIMER_RE.test(c)) {
+      out.push({ line: i + 1, text: `world-motion code runs its own timer: ${c.trim().slice(0, 70)}` });
     }
     for (const m of c.matchAll(SYNC_CALL_RE)) {
       if (Object.prototype.hasOwnProperty.call(WALL_TIME_SYNC_RECEIVERS, m[1])) continue;
@@ -204,6 +270,17 @@ export function scanWorldOnSimClock(lines) {
       }
     }
   });
+  if (file && wallLines.length > 0) {
+    const budget = WALL_TIME_BUDGETS[file];
+    const max = worldMotion ? 0 : (budget?.max ?? 0);
+    if (wallLines.length > max) {
+      const where = budget ? `over its wall-time budget (${wallLines.length} > ${max})` : 'not in WALL_TIME_BUDGETS';
+      out.push({
+        line: wallLines[max] ?? wallLines[0],
+        text: `${file} reads wall time and is ${where} — lines ${wallLines.slice(0, 8).join(', ')}`,
+      });
+    }
+  }
   return out;
 }
 
@@ -634,9 +711,10 @@ export const RULES = [
       'Hand an effect env.time.tMs / env.time.dtSec (the sim clock: it eases to a stop over five seconds on ' +
       'pause). Something that must also agree ACROSS clients reads worldSimNowMs() (foundry/world-clock.js). ' +
       'Wall time is only for things that are not world motion — poll throttles, bakes, the camera, UI — and ' +
-      'a frame-loop .sync/.step/.tick that genuinely needs it is listed in WALL_TIME_SYNC_RECEIVERS with its reason.',
+      'every file that reads it has a counted entry in WALL_TIME_BUDGETS with its reason (effects/ and world/ ' +
+      'never do, and never run timers of their own). The table: src/CONVENTIONS.md §8.',
     scan(rel, lines) {
-      return scanWorldOnSimClock(lines);
+      return scanWorldOnSimClock(lines, rel);
     },
   },
 

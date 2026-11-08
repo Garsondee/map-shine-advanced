@@ -51,7 +51,7 @@ export {
 // Foundry's own first-gesture gate, at the Tile's own configured
 // loop/autoplay/volume. See tile-video.js's own header for the full
 // mechanism + Foundry-source citations.
-export { playTileVideo } from './tile-video.js';
+export { playTileVideo, syncTileVideoTimeScale } from './tile-video.js';
 
 // The coordinate model — Foundry canvas space, placements, quads.
 export {
@@ -566,6 +566,7 @@ export {
   watchWorldClock,
   worldSimNowMs,
   worldTimeScale,
+  sharedFrameScale,
   getWorldClockLedger,
 } from './world-clock.js';
 

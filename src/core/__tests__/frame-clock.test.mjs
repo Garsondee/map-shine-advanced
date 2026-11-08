@@ -344,6 +344,57 @@ export function run(t) {
       );
     }
 
+    // ONE CLOCK (2026-11-08): the frame clock takes its scale FROM the ledger when handed one.
+    {
+      let wall = 0;
+      const ledger = retargetWorldClockLedger(initialWorldClockLedger(), 1000, 0, R);
+      const clock = makeFrameClock({ now: () => wall, scaleSource: () => ledgerScale(ledger, wall) });
+      clock.tick();
+      let samePath = true;
+      for (let i = 0; i < 800; i++) {
+        wall += 10;
+        const f = clock.tick();
+        if (Math.abs(f.timeScale - ledgerScale(ledger, wall)) > 1e-12) samePath = false;
+      }
+      t.ok('with a scaleSource, every frame runs at exactly the ledger scale', samePath);
+      t.ok('…so the world is stopped when the ledger says so', clock.peek().paused === true);
+      t.ok(
+        '…and the frame clock lands on the same coast as the shared clock',
+        // 1 s at full speed before the pause (the ledger's own instant), then the coast.
+        close(clock.peek().tMs, 1000 + ledgerSimMs(ledger, wall) - ledgerSimMs(ledger, 1000), 15)
+      );
+    }
+    {
+      // No answer from the ledger (null) ⇒ the clock's own pause ramp still stops the world.
+      let wall = 0;
+      const clock = makeFrameClock({ now: () => wall, scaleSource: () => null });
+      clock.tick();
+      clock.setScaleTarget(0, R);
+      for (let i = 0; i < 600; i++) {
+        wall += 10;
+        clock.tick();
+      }
+      t.ok('a null scaleSource falls back to the local pause ramp', clock.peek().paused === true);
+      // …and a source that starts answering mid-ramp takes over without a jump.
+      let answer = null;
+      let wall2 = 0;
+      const c2 = makeFrameClock({ now: () => wall2, scaleSource: () => answer });
+      c2.tick();
+      c2.setScaleTarget(0, R);
+      for (let i = 0; i < 100; i++) {
+        wall2 += 10;
+        c2.tick();
+      }
+      const before = c2.getScale();
+      answer = before; // the ledger arrives agreeing with where the ramp had got to
+      wall2 += 10;
+      c2.tick();
+      answer = null; // and goes quiet again
+      wall2 += 10;
+      const after = c2.tick().timeScale;
+      t.ok('handing over between ledger and local ramp never jumps the scale', Math.abs(after - before) < 0.02);
+    }
+
     t.ok(
       'a junk stored ledger reads as the never-paused one',
       ledgerSimMs(normalizeWorldClockLedger('{nope'), 5) === 5

@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   RULES,
+  WALL_TIME_BUDGETS,
   validateExceptions,
   applyExceptions,
   evaluateUniformBudgets,
@@ -1110,6 +1111,41 @@ export function run(t) {
       t.ok(
         'the world clock itself is the one door for server time',
         rule.allow.some((a) => `src${sep}foundry${sep}world-clock.js`.includes(a))
+      );
+      // THE BUDGETS (2026-11-08, "make it harder for a future effect to accidentally use the wrong system").
+      const at = (file, src) => rule.scan(file, src.split('\n')).length;
+      t.ok(
+        'a NEW file reading wall time fails (no budget)',
+        at('src/effects/new-sparkle.js', 'const t = perfNowMs();') > 0
+      );
+      t.ok('…even disguised as an alias', at('src/ui/new-thing.js', 'const now = perfNowMs;\nnow();') > 0);
+      t.ok(
+        'an import line alone is not a read',
+        at('src/ui/new-thing.js', "import { perfNowMs } from '../core/frame-clock.js';") === 0
+      );
+      t.ok(
+        'a multi-line import is not a read either',
+        at('src/ui/new-thing.js', "import {\n  perfNowMs,\n  wallClockMs,\n} from '../core/frame-clock.js';") === 0
+      );
+      t.ok(
+        'an effect reading env.time.realMs fails',
+        at('src/effects/glow/glow.js', 'const p = env.time.realMs * 0.001;') > 0
+      );
+      t.ok('a world model reading wall time fails', at('src/world/tides.js', 'const t = wallClockMs();') > 0);
+      t.ok('an effect running its own timer fails', at('src/effects/sparkle.js', 'setInterval(() => step(), 16);') > 0);
+      t.ok(
+        '…and so does its own animation frame loop',
+        at('src/effects/sparkle.js', 'requestAnimationFrame(loop);') > 0
+      );
+      t.ok('an effect on the sim clock passes', at('src/effects/sparkle.js', 'phase += env.time.dtSec * speed;') === 0);
+      const oneLine = 'const t0 = perfNowMs();';
+      t.ok('a budgeted file within its budget passes', at('src/graph/frame-graph.js', oneLine) === 0);
+      t.ok('one read over a budget fails', at('src/graph/frame-graph.js', `${oneLine}\n${oneLine}`) > 0);
+      t.ok(
+        'every budget names its reason',
+        Object.values(WALL_TIME_BUDGETS).every(
+          (b) => Number.isInteger(b.max) && typeof b.why === 'string' && b.why.length > 10
+        )
       );
     }
   }

@@ -311,7 +311,7 @@ function hash01(text, salt) {
  * token id, so two bearers' torches never wander in step.
  *
  * @param {string} tokenId
- * @param {number} wallMs - wall-clock milliseconds (`core/frame-clock.js#wallClockMs`).
+ * @param {number} wallMs - shared world-clock ms (`foundry/world-clock.js#worldSimNowMs`; stands still while paused).
  * @param {number} [amplitudePx]
  * @param {number} [stepPx] - the grid the result is snapped to (see AIM_TORCH_WANDER_PX).
  * @returns {{x: number, y: number}} never beyond ±amplitude (plus half a step).
@@ -341,7 +341,7 @@ export function torchWanderOffset(
  * not have to agree on a tremor, they simply both wobble.
  *
  * @param {string} tokenId
- * @param {number} wallMs - wall-clock milliseconds (`core/frame-clock.js#wallClockMs`).
+ * @param {number} wallMs - shared world-clock ms (`foundry/world-clock.js#worldSimNowMs`; stands still while paused).
  * @param {number} [amplitudeDeg]
  * @returns {number} degrees, within ±amplitudeDeg.
  */

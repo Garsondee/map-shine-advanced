@@ -174,7 +174,7 @@ function makeChannel(clock = makeClock(), options = {}) {
   // settled, exactly as the torch's own tests already do.
   const channel = createPlayerAimChannel({
     now: clock.now,
-    wallNow: clock.now,
+    sharedNow: clock.now,
     wanderPx: 0,
     wanderDeg: 0,
     ...timers,

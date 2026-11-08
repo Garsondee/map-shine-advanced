@@ -197,6 +197,11 @@ const STOPPED_EPSILON = 1e-6;
  *   default-built clock follows the capture clock above when it is on.
  * @param {number} [options.maxDtSec]
  * @param {number} [options.scale] - starting time scale (1 = normal speed).
+ * @param {() => (number|null)} [options.scaleSource] - THE SHARED WORLD CLOCK'S SCALE (2026-11-08, author:
+ *   "everything should use the same exact clock"). Asked once per tick; a finite answer IS this frame's scale, so
+ *   the frame clock and the cross-client world clock (`foundry/world-clock.js`) pause on one record with one ramp.
+ *   `null` (no ledger yet, or one that has not caught up with Foundry's pause) falls back to this clock's own
+ *   `setScaleTarget` ramp, so a missing GM write can never leave the world running through a pause.
  * @returns {{
  *   tick: () => Readonly<FrameTime>,
  *   peek: () => Readonly<FrameTime>,
@@ -204,7 +209,7 @@ const STOPPED_EPSILON = 1e-6;
  *   getScale: () => number,
  * }}
  */
-export function makeFrameClock({ now = perfNowMs, maxDtSec = DEFAULT_MAX_DT_SEC, scale = 1 } = {}) {
+export function makeFrameClock({ now = perfNowMs, maxDtSec = DEFAULT_MAX_DT_SEC, scale = 1, scaleSource = null } = {}) {
   let frame = 0;
   let lastMs = null;
   /** Accumulated SIM milliseconds — scaled, starts at 0. See the header. */
@@ -245,7 +250,14 @@ export function makeFrameClock({ now = perfNowMs, maxDtSec = DEFAULT_MAX_DT_SEC,
 
       // Advance the ramp BEFORE spending this frame's delta, so the frame the
       // ramp completes on already runs at its final scale (V2's own ordering).
-      if (rampT < 1) {
+      const shared = typeof scaleSource === 'function' ? scaleSource() : null;
+      if (shared !== null && Number.isFinite(shared)) {
+        // The shared ledger answers: its scale is this frame's. The local ramp is re-based on it, so a later
+        // fall-back eases on from HERE rather than snapping to wherever its own ramp had got to.
+        currentScale = clampScale(shared);
+        scaleFrom = currentScale;
+        rampT = currentScale === scaleTarget ? 1 : 0;
+      } else if (rampT < 1) {
         rampT = rampSec > 0 ? Math.min(1, rampT + realDtSec / rampSec) : 1;
         currentScale = pauseRampScale(scaleFrom, scaleTarget, rampT, 1);
       } else {

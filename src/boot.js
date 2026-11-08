@@ -2243,7 +2243,7 @@ function install() {
         // always has — the mood chip a fade is heading toward, or null —
         // and simply keeps looking past a temperature-only fade instead.
         getFadingArchetypeId: () => {
-          const nowMs = wallClockMs();
+          const nowMs = worldSimNowMs();
           for (const [key, entry] of Object.entries(fadeState)) {
             if (!key.startsWith('weather.') || isEntryExpired(entry, nowMs)) continue;
             const completion = pendingSkyFadeCompletions.get(entry.id);
@@ -2302,7 +2302,7 @@ function install() {
         },
         next: (overMs) => playNextInSequence(overMs),
         activeId: () => activeLook?.id ?? null,
-        isFading: () => Boolean(activeLook && wallClockMs() < activeLook.untilMs),
+        isFading: () => Boolean(activeLook && worldSimNowMs() < activeLook.untilMs),
         isWorldClock: () => isWorldClock(),
         baseline: (overMs) => fadeWeatherToBaseline(overMs),
       },
@@ -14101,7 +14101,7 @@ function install() {
       },
     });
     entry.fadeTo = (patch, overMs, label) => {
-      const nowMs = wallClockMs();
+      const nowMs = worldSimNowMs();
       const gestureId = `look-${ns}:${nowMs}`;
       const targets = {};
       for (const [field, to] of Object.entries(patch)) {
@@ -14161,7 +14161,7 @@ function install() {
    * last-rendered number and sit there until the fade arrives. */
   function liveFadeValue(key) {
     const entry = fadeState[key];
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     if (!entry || isEntryExpired(entry, nowMs)) return null;
     const v = computeEasedValue(entry, nowMs);
     return Number.isFinite(v) ? v : null;
@@ -14235,7 +14235,7 @@ function install() {
   function fadeWeatherToArchetype(archetypeId, overMs) {
     const archetype = WEATHER_ARCHETYPES.find((a) => a.id === archetypeId);
     if (!archetype) return;
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `archetype:${archetypeId}:${nowMs}`;
     const targets = {};
     for (const field of ['cloudCover01', 'precip01', 'fogDensity01', 'lightning01']) {
@@ -14266,7 +14266,7 @@ function install() {
       log.warn('Baseline: no captured resting look for this scene yet.');
       return;
     }
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `baseline:${nowMs}`;
     const targets = {};
     for (const [field, to] of Object.entries(baselineWeatherSnapshot)) {
@@ -14329,7 +14329,7 @@ function install() {
    * @param {'cloudCover01'|'precip01'} axisName @param {number} value @param {number} overMs
    */
   function fadeWeatherAxisTo(axisName, value, overMs) {
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `axis:${axisName}:${nowMs}`;
     fadeState = mergeFadeState(
       fadeState,
@@ -14391,7 +14391,7 @@ function install() {
    * @param {number} value @param {number} overMs
    */
   function fadeTemperatureTo(value, overMs) {
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `temperature:${nowMs}`;
     fadeState = mergeFadeState(
       fadeState,
@@ -14427,7 +14427,7 @@ function install() {
    * @param {number} value @param {number} overMs
    */
   function fadeWindSpeedTo(value, overMs) {
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `wind:${nowMs}`;
     // A fade persisted under the old `wind.speed01` key would keep writing the
     // same wind beside this one — two writers, one value. This gesture replaces it.
@@ -14588,7 +14588,7 @@ function install() {
       log.error(`fireCue '${id}': refused to arm — invalid:`, check.errors);
       return { ok: false, reason: check.errors.join('; ') };
     }
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const patch = cueToFadePatch(cue, fadeSourceRegistry.readLive, fadeSourceRegistry.typeOf);
     fadeState = mergeFadeState(fadeState, patch, nowMs);
     void writeFadeState(fadeState);
@@ -14725,7 +14725,7 @@ function install() {
       };
     }
     cueTestSnapshot = snapshot;
-    cueTestPreview = { targets, startedAtMs: wallClockMs() };
+    cueTestPreview = { targets, startedAtMs: worldSimNowMs() };
     return { ok: true, reason: null };
   }
 
@@ -14745,7 +14745,7 @@ function install() {
       };
     }
     cueTestSnapshot = null;
-    cueTestPreview = { targets, startedAtMs: wallClockMs() };
+    cueTestPreview = { targets, startedAtMs: worldSimNowMs() };
     return { ok: true, reason: null };
   }
 
@@ -15138,7 +15138,7 @@ function install() {
    * @param {{cloudCover01?: number, precip01?: number}} patch @param {number} overMs @param {string} label
    */
   function fadeWeatherAxesTo(patch, overMs, label) {
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `look-axes:${nowMs}`;
     const targets = {};
     for (const [axisName, to] of Object.entries(patch)) {
@@ -15165,7 +15165,7 @@ function install() {
   /** The 'sky' light fields, as one gesture persisted by one editSky patch on arrival.
    * @param {Record<string, number>} patch @param {number} overMs @param {string} label */
   function fadeSkyFieldsTo(patch, overMs, label) {
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `look-sky:${nowMs}`;
     const targets = {};
     for (const [field, to] of Object.entries(patch)) {
@@ -15190,7 +15190,7 @@ function install() {
    * @param {Record<string, number|string>} patch @param {number} overMs @param {string} label
    */
   function fadeGradeTo(patch, overMs, label) {
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `look-grade:${nowMs}`;
     const live = (f) => fadeSourceRegistry.readLive(`lookGrade.${f}`);
     const snap = new Set([
@@ -15215,7 +15215,7 @@ function install() {
   /** Bloom, as one gesture: faded through 'lookBloom', persisted once on arrival.
    * @param {Record<string, number|string>} patch @param {number} overMs @param {string} label */
   function fadeBloomTo(patch, overMs, label) {
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `look-bloom:${nowMs}`;
     const targets = {};
     for (const [field, to] of Object.entries(patch)) {
@@ -15235,7 +15235,7 @@ function install() {
   /** Night darkness, persisted to the scene's player-light flag on arrival.
    * @param {number} value @param {number} overMs */
   function fadeNightDarknessTo(value, overMs) {
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     const gestureId = `look-night:${nowMs}`;
     fadeState = mergeFadeState(
       fadeState,
@@ -15295,7 +15295,7 @@ function install() {
     const staged = { weatherAxes: {}, sky: {}, grade: {}, bloom: {}, live: {} };
     for (const { key, value } of apply) LOOK_ADAPTERS[key]?.stage(value, staged);
     commitLookStage(staged, ms, look.name);
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     activeLook = { id: look.id, name: look.name, startedAtMs: nowMs, untilMs: nowMs + ms };
     for (const s of skipped) log.info(`Look "${look.name}": skipped ${s.key} — ${s.reason}`);
     MapShine.__remote?.refreshLooks?.();
@@ -15304,7 +15304,7 @@ function install() {
 
   /** Finish every fade in flight NOW (the Now Playing bar's Snap). @returns {boolean} whether anything was running */
   function snapFadesToEnd() {
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     let any = false;
     const next = {};
     for (const [key, entry] of Object.entries(fadeState)) {
@@ -16085,7 +16085,7 @@ function install() {
     // the temperature restore a few lines down needs the identical "don't
     // stomp a live fade" guard cloud/precip already have, and it runs
     // unconditionally, outside this if/else.
-    const nowMs = wallClockMs();
+    const nowMs = worldSimNowMs();
     if (sky.weatherArchetype && sky.weatherArchetype !== 'custom') {
       setVtPanViewerWeatherArchetype(sky.weatherArchetype, 'sky-settings');
     } else {
@@ -16200,7 +16200,8 @@ function install() {
     const { permissions } = readScenePlayerLightPermissions();
     // A Look fading the night's darkness owns the live value until it arrives.
     const nightEntry = fadeState['night.darkness01'];
-    if (!(nightEntry && !isEntryExpired(nightEntry, wallClockMs()))) setDarknessRealism(permissions.darknessRealism01);
+    if (!(nightEntry && !isEntryExpired(nightEntry, worldSimNowMs())))
+      setDarknessRealism(permissions.darknessRealism01);
     MapShine.__remote?.refreshPlayerLightBoard?.();
     MapShine.__player?.refreshPlayerLightPicker?.();
   };
@@ -16348,15 +16349,19 @@ function install() {
       // (pumpWeatherFades's own doc explains why). Piggybacks this rAF loop
       // rather than a second requestAnimationFrame registration.
       //
-      // ⚠️ WALL CLOCK, NOT `nowMs` (UI test pass, 2026-09-26). Every fade
-      // entry and cue-test preview is stamped `startedAtMs: wallClockMs()`
-      // (epoch ms — it is persisted and shared, so every client must read the
-      // same clock), but these used to be pumped with rAF's page-relative
+      // ⚠️ THE SHARED WORLD CLOCK, NOT `nowMs`. Every fade entry and cue-test
+      // preview is stamped `startedAtMs: worldSimNowMs()` (foundry/world-clock.js
+      // since 2026-11-08 — server-epoch ms that STAND STILL while Foundry is
+      // paused, so a Remote fade of weather, time of day or a Look waits for the
+      // world like everything else: the author's "Everything should pause").
+      // It is persisted and shared, so every client must read the same clock —
+      // and the ledger behind it is one record every client reads. Before that
+      // it was `wallClockMs()`, and before THAT these were pumped with rAF's page-relative
       // timestamp. Progress = (≈1.7e5 − ≈1.8e12) / overMs clamped to 0: every
       // timed fade sat at its `from` value forever and never arrived (only
       // Fade Time = Now worked, since overMs 0 counts as arrived at once), and
       // Now Playing read "Fading to Rain — 1790392589s left".
-      const fadeNowMs = wallClockMs();
+      const fadeNowMs = worldSimNowMs();
       pumpWeatherFades(fadeNowMs);
       // A cue TEST preview (§5.4) rides this same loop too — see
       // pumpCueTestPreview's own doc for why it must never become a second
@@ -16474,8 +16479,8 @@ function install() {
             // for the full story. Riding the same ~10Hz throttle as the dial
             // itself, not a second timer.
             MapShine.__remote?.updateNowPlaying?.({
-              label: buildNowPlayingLabel(payload, wallClockMs()),
-              progress01: nowPlayingProgress(payload, wallClockMs()),
+              label: buildNowPlayingLabel(payload, worldSimNowMs()),
+              progress01: nowPlayingProgress(payload, worldSimNowMs()),
             });
             // The weather board's own Clouds/Rain faders (2026-09-10 fix,
             // author: "the sliders and weather buttons feel like two
@@ -19873,7 +19878,7 @@ function install() {
           // 2026-10-27 "rain jumped to 100% after a reload" bug (see
           // fade-persistence.js#fadeStateFlagValue). Only the LOAD prunes:
           // a watcher echo must keep another GM's instant (`overMs:0`) fade.
-          fadeState = pruneExpired(filterResolvableFadeState(state), wallClockMs());
+          fadeState = pruneExpired(filterResolvableFadeState(state), worldSimNowMs());
           if (reason) log.info(`fade state (canvasReady): ${reason}`); // "no active scene" etc. — benign, not an error
           pendingSkyFadeCompletions.clear();
           baselineWeatherSnapshot = {

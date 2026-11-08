@@ -306,6 +306,8 @@ import {
   readSceneBackground,
   readGamePaused,
   watchGamePaused,
+  // THE SHARED WORLD CLOCK's scale — the frame clock's pause comes from the same ledger (foundry/world-clock.js).
+  sharedFrameScale,
   watchWorldTimeOfDay,
   readGlobalLightConfig,
   readActiveDarknessRegions,
@@ -337,6 +339,8 @@ import {
   // rasterizeSvgToBitmap instead of createImageBitmap. See isSvgUrl's own doc.
   isSvgUrl,
   playTileVideo,
+  // Video tiles slow and pause with the world (tile-video.js#syncTileVideoTimeScale).
+  syncTileVideoTimeScale,
   sceneRectToMinMax,
   // TOKEN ACTIVITY — every placed token's LIVE position, for the mantle's
   // trample stamps (precip-subsystem.js) and critter proximity
@@ -5142,9 +5146,10 @@ async function startVtPanViewerUnserialized({
     /** Real time of the last reveal-fade step (`perfNowMs`, not the game clock: a paused game must
      *  still finish revealing what a token can see). */
     let fogRevealLastMs = 0;
-    /** The ink and mist clock: seconds scaled by the card's `motion`, so a change of speed never jumps. */
+    /** The ink and mist clock: SIM seconds scaled by the card's `motion`, so a change of speed never jumps. */
     let fogDriftSec = 0;
-    let fogDriftLastMs = 0;
+    /** The frame the drift last advanced on — the fog can draw more than once a frame, but its mist moves once. */
+    let fogDriftFrame = -1;
     // ── FOG MEMORY PERSISTENCE (2026-11-02) ─────────────────────────────────────────────────────────
     // The author: a reload forgot every place a token had seen; *"Each scene must carry that memory for each
     // player controlled token."* The explored buffer holds the memory of ONE set of tokens (those whose sight
@@ -12662,10 +12667,12 @@ async function startVtPanViewerUnserialized({
       fogLook.uMemoryGrid.value = look.memoryGrid;
       fogLook.uMemoryDim.value = look.memoryDim;
       {
-        const nowMs = perfNowMs();
-        const dt = fogDriftLastMs > 0 ? Math.min(0.25, Math.max(0, (nowMs - fogDriftLastMs) / 1000)) : 0;
-        fogDriftLastMs = nowMs;
-        fogDriftSec += dt * look.motion;
+        // SIM time (2026-11-08): the mist drifted on its own wall clock and kept moving through a pause.
+        const ft = lastEnvSnapshot?.env?.time;
+        if (ft && ft.frame !== fogDriftFrame) {
+          fogDriftFrame = ft.frame;
+          fogDriftSec += Math.min(0.25, Math.max(0, ft.dtSec ?? 0)) * look.motion;
+        }
         fogLook.uTime.value = fogDriftSec;
       }
       const prevAuto = renderer.autoClearColor;
@@ -13943,7 +13950,10 @@ async function startVtPanViewerUnserialized({
     // called directly, the same way updateCamera()/syncTokenPlacements()
     // already are — genuinely-not-ready work stays hand-wired until the
     // moment it can honestly claim 'live', never faked into the graph early.
-    const frameClock = makeFrameClock();
+    // ONE CLOCK (2026-11-08): the pause scale comes from the shared world clock's ledger when it has caught up with
+    // Foundry's pause, so this per-client clock and the cross-client one (lightning, tiles, the Fade Engine) stop on
+    // one record with one ramp; the pause watch below is only the fall-back.
+    const frameClock = makeFrameClock({ scaleSource: sharedFrameScale });
     /** The env snapshot from the most recent frame, plus where darkness came
      * from — for getEnvSnapshotInfo() / the Diagnostics debug report. */
     let lastEnvSnapshot = null;
@@ -14131,6 +14141,8 @@ async function startVtPanViewerUnserialized({
 
     function updateEnvSnapshot() {
       const time = frameClock.tick();
+      // VIDEO TILES follow the same scale: they slow with the ramp and pause with the world.
+      syncTileVideoTimeScale(time.timeScale);
       // THE DAY CLOCK, ticked on the SIM delta — so time-of-day decelerates
       // with everything else when Foundry pauses, rather than being the one
       // system that carries on regardless. See world/day-clock.js#tick.
@@ -14162,19 +14174,13 @@ async function startVtPanViewerUnserialized({
       const ambient = readSceneAmbient();
       // ⭐ THE WEATHER OWNER, ticked (docs/planning/Weather-Manager.md §4.1).
       //
-      // ⚠️ THE EASE runs on the **REAL** delta — and this is the ONE kind of
-      // wall time the 2026-11-08 pause audit kept on purpose. Two kinds of
-      // time, and the line between them:
-      //   • WORLD MOTION — anything that moves by itself (rain, spray, critters,
-      //     lightning, turning tiles, frost creeping): SIM time, so it eases to
-      //     a stop with Foundry's pause. `time/world-on-sim-clock` enforces it.
-      //   • THE GM'S HAND ON THE CONTROLS — a weather change easing in, the
-      //     Remote's Fade Engine (weather/time/Look fades, wall-clock
-      //     timestamps): WALL time, so a GM prepping a paused scene still sees
-      //     the change land. This ease is that kind; the Remote's own weather
-      //     fades push values through the Fade Engine on the same wall clock,
-      //     so splitting them would make one storm ease two ways.
-      // (Decision bead filed: the author may want GM changes to wait too.)
+      // ⚠️ THE EASE runs on the **SIM** delta (2026-11-08, author, answering
+      // whether GM fades should wait for unpause: "Yes. Everything should
+      // pause. Everything should use the same exact clock"). It used to run on
+      // the REAL delta as presentation pacing; a weather change made while
+      // paused now waits and eases in when the world resumes, together with the
+      // Remote's own fades (the Fade Engine is on the shared world clock too).
+      // Scene setup is unaffected: first applies are `immediate` (a snap).
       //
       // ⭐ THE ALMANAC'S WALK (slice 3) is the opposite and deliberately so —
       // it integrates GAME time, via the observed hour delta computed above
@@ -14186,7 +14192,7 @@ async function startVtPanViewerUnserialized({
       // itself documents.
       const dtGameHours = lastWeatherHour === null ? 0 : shortestHourDelta(lastWeatherHour, todHour);
       lastWeatherHour = todHour;
-      const weatherState = weather.tick(time.realDtSec, { dtGameHours, hour: todHour });
+      const weatherState = weather.tick(time.dtSec, { dtGameHours, hour: todHour });
       // DYNAMIC RANGE adapts on the same real delta (presentation pacing) — see stepDynamicRange.
       dr.lastRealDtSec = time.realDtSec;
       const weatherForSnapshot = weather.toSnapshotWeather();

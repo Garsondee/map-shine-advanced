@@ -110,23 +110,21 @@
  * a configuration change (see `version`'s own doc below).
  *
  * ============================================================================
- * ⚠️ THE CLOCK RULING — EASES RUN ON REAL TIME (Weather-Manager.md §4.1)
+ * ⚠️ THE CLOCK RULING — EASES RUN ON SIM TIME (changed 2026-11-08)
  * ============================================================================
  *
- * `tick(dtRealSec)` takes the WALL delta (`env.time.realDtSec`), not the sim
- * delta every effect reads. Two reasons, and the distinction matters enough
- * that getting it backwards would be a real bug in either direction:
+ * `tick(dtSec)` takes the SIM delta (`env.time.dtSec`), the same delta every
+ * effect reads, so a weather change eases to a stop with Foundry's pause and a
+ * change made while paused waits for the world to resume. It used to take the
+ * WALL delta as "presentation pacing"; the author ruled on 2026-11-08 that
+ * "Everything should pause. Everything should use the same exact clock", and
+ * the only thing that ever slows the sim clock is that pause.
  *
- *   1. An ease is PRESENTATION PACING — the same family as V2's
- *      `SPRITE_FADE_DURATION_SEC = 10`, whose one universally-praised property
- *      was that clouds never popped. Pacing should not stretch because a GM
- *      slowed the world down.
- *   2. It is NOT the `feedback_throttle_on_sim_clock_latches_when_paused` trap.
- *      That bug is a THROTTLE comparing `now - last` against an interval on a
- *      clock that stops. This is an INTEGRATOR consuming a delta; handed a sim
- *      delta of 0 it would simply stop advancing, which is a different (still
- *      wrong) failure. Real time is correct here for reason 1, and stating both
- *      halves stops a future session from "fixing" this into the actual bug.
+ * It is still NOT the `feedback_throttle_on_sim_clock_latches_when_paused` trap:
+ * that bug is a THROTTLE comparing `now - last` on a clock that stops. This is an
+ * INTEGRATOR consuming a delta; handed 0 it holds, and resumes with the world.
+ *
+ * The walk below integrates GAME time, which also holds while paused.
  *
  * ⚠️ THE WALK (slice 3) IS THE OPPOSITE and deliberately so: it integrates GAME
  * time, so a paused session's sky holds still and a GM running the clock at 60
@@ -588,9 +586,10 @@ export function createWeatherManager({
   }
 
   // ── SLICE 4 — EVENTS' OWN STATE ──────────────────────────────────────────
-  /** Real seconds since this manager was created — the events' own clock
-   * (envelopes are presentation pacing, same family as the ease; see this
-   * module's SLICE 4 header for why events use `dtRealSec`, not game time). */
+  /** Seconds of `tick` delta since this manager was created — the events' own
+   * clock. That delta is the SIM delta since 2026-11-08 (see "THE CLOCK
+   * RULING"), so an event's envelope holds while paused like everything else.
+   * The `Real` in the name is historical; the field name is in `getStatus()`. */
   let elapsedRealSec = 0;
   /** id → { spec, startedAtRealSec, releasedAtRealSec }. A `Map` so insertion
    * order is preserved — `applyEventOverrides` folds events in that order. */
@@ -801,9 +800,8 @@ export function createWeatherManager({
     /**
      * Advance one frame.
      *
-     * @param {number} dtRealSec - the WALL delta (`env.time.realDtSec`). See
-     *   this module's header for why it is not the sim delta, and why that is
-     *   not the sim-clock throttle trap.
+     * @param {number} dtSec - the SIM delta (`env.time.dtSec`) — 0 while the
+     *   world is paused. See this module's header, "THE CLOCK RULING".
      * @param {object} [almanacInputs] - present only for a caller that wants
      *   the Almanac to actually walk. Absent entirely, the walk simply never
      *   advances (safe for every Director-only call site, and LAW 5's spirit:
@@ -817,8 +815,8 @@ export function createWeatherManager({
      *   for time-of-day-biased transitions.
      * @returns {Readonly<object>} the same value as {@link read}.
      */
-    tick(dtRealSec, almanacInputs) {
-      const dt = Number.isFinite(dtRealSec) && dtRealSec > 0 ? dtRealSec : 0;
+    tick(dtSec, almanacInputs) {
+      const dt = Number.isFinite(dtSec) && dtSec > 0 ? dtSec : 0;
       const scale = TRANSITION_SPEEDS[speedName];
       elapsedRealSec += dt;
 

@@ -69,6 +69,23 @@ export function worldTimeScale() {
   return ledgerScale(ledger, serverNowMs());
 }
 
+/**
+ * The scale the per-client FRAME clock should run at this frame
+ * (`core/frame-clock.js#makeFrameClock`'s `scaleSource`) — the shared ledger's,
+ * so the frame clock and this clock pause on one record with one ramp. `null`
+ * whenever the ledger does not (yet) agree with Foundry's own pause state — a
+ * player whose copy of the GM's write is still in flight, a world with no GM
+ * connected, or a host with no Foundry at all — so the frame clock falls back
+ * to its own ramp and a missing write can never leave the world running.
+ * @returns {number|null}
+ */
+export function sharedFrameScale() {
+  const paused = typeof game !== 'undefined' ? game?.paused : undefined;
+  if (typeof paused !== 'boolean') return null;
+  if (ledger.toScale !== (paused ? 0 : 1)) return null;
+  return worldTimeScale();
+}
+
 /** @returns {object} the ledger, for diagnostics. */
 export function getWorldClockLedger() {
   return { ...ledger, scaleNow: worldTimeScale() };

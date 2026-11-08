@@ -7,7 +7,14 @@
  * The double is installed on globalThis for this file only and removed after,
  * so the other foundry suites keep their genuine no-Foundry posture.
  */
-import { registerWorldClockSettings, watchWorldClock, worldSimNowMs, worldTimeScale } from '../world-clock.js';
+import {
+  registerWorldClockSettings,
+  watchWorldClock,
+  worldSimNowMs,
+  worldTimeScale,
+  sharedFrameScale,
+} from '../world-clock.js';
+import { playTileVideo, syncTileVideoTimeScale } from '../tile-video.js';
 import { DEFAULT_PAUSE_RAMP_SEC, ledgerSimMs, normalizeWorldClockLedger } from '../../core/frame-clock.js';
 
 export async function run(t) {
@@ -95,6 +102,57 @@ export async function run(t) {
     const a = worldSimNowMs();
     server = resumeAt + 40_000;
     ok('resumed: the world clock runs at full speed again', close(worldSimNowMs() - a, 10_000));
+
+    // THE FRAME CLOCK'S SCALE comes from this same ledger — but only once it agrees with Foundry's pause.
+    globalThis.game.paused = false;
+    ok('running and the ledger agrees: the frame clock gets the ledger scale', sharedFrameScale() === worldTimeScale());
+    globalThis.game.paused = true; // Foundry paused, the GM's write not arrived yet
+    ok(
+      'paused but the ledger still says running: null, so the frame clock uses its own ramp',
+      sharedFrameScale() === null
+    );
+    globalThis.game.paused = false;
+
+    // VIDEO TILES pace to the world's scale and pause with it — resuming only what the world paused.
+    {
+      const makeVideo = () => ({
+        paused: false,
+        playbackRate: 1,
+        plays: 0,
+        getAttribute: (k) => (k === 'src' ? 'water.webm' : null),
+        pause() {
+          this.paused = true;
+        },
+        play() {
+          this.paused = false;
+          this.plays++;
+          return Promise.resolve();
+        },
+      });
+      const v = makeVideo();
+      const gmPaused = makeVideo();
+      globalThis.game.video = { play: () => {} };
+      playTileVideo(v, { video: { autoplay: true } });
+      playTileVideo(gmPaused, { video: { autoplay: true } });
+      gmPaused.paused = true; // someone else (a GM's own control) paused this one
+      syncTileVideoTimeScale(0.5);
+      ok('a slowing world slows its video tiles', v.playbackRate === 0.5);
+      syncTileVideoTimeScale(0);
+      ok('a stopped world pauses them', v.paused === true);
+      syncTileVideoTimeScale(1);
+      ok('…and the resumed world plays them again at full speed', v.paused === false && v.playbackRate === 1);
+      ok(
+        'a video paused by someone else is never resumed by the world',
+        gmPaused.paused === true && gmPaused.plays === 0
+      );
+      const off = makeVideo();
+      playTileVideo(off, { video: { autoplay: false } });
+      off.paused = true;
+      syncTileVideoTimeScale(0);
+      syncTileVideoTimeScale(1);
+      ok('a tile with autoplay off is never touched', off.paused === true && off.plays === 0);
+      delete globalThis.game.video;
+    }
 
     // A player never writes: the ledger stays the GM's.
     globalThis.game.user = { id: 'p1', isGM: false };

@@ -68,10 +68,27 @@ npm run verify          # lint + format:check, the pre-flight combo
 
 Config lives at repo root: `.eslintrc.json`, `.prettierrc.json`, `.prettierignore`. Both exclude `src/vendor/` and other reference/generated trees — they were never meant to touch those.
 
-**No silent scope creep on rules.** If a lint rule is fighting a genuinely idiomatic pattern (this happened with `no-inner-declarations` flagging ordinary nested function declarations, and `eqeqeq` flagging the standard `== null` idiom — both reconfigured, not the code) fix the *rule config* with a comment explaining why, don't sprinkle inline disables through the code. Inline `eslint-disable` comments are a last resort, not a first one, and should say why right there when used.
+**No silent scope creep on rules.** If a lint rule is fighting a genuinely idiomatic pattern (this happened with `no-inner-declarations` flagging ordinary nested function declarations, and `eqeqeq` flagging the standard `== null` idiom — both reconfigured, not the code) fix the _rule config_ with a comment explaining why, don't sprinkle inline disables through the code. Inline `eslint-disable` comments are a last resort, not a first one, and should say why right there when used.
 
 ## 7. Doctrine reminders (from Keyhole.md, worth repeating here)
 
 - Nothing is ever allocated at world resolution — enforced physically by `ThreeAllocator`'s law (`LAW_MAX_WORLD_RES_DIM`), not just documented.
 - An absent feature fails loudly; it never silently routes to a fallback path.
 - A per-frame effect's materials carry `markCompileDeferrable`, read the wind through the baked field (`baked: 'now'`), and stay inside their entry in `src/effects/__tests__/shader-budgets.json`. One synchronous 20 s shader compile kills the GPU process and every context on the page — see `src/GPU-SAFETY.md`.
+
+## 8. Time — one pausing clock for everything that moves
+
+The author, 2026-11-08: _"Everything should pause. Everything should use the same exact clock."_ When Foundry pauses, the
+world eases to a stop over five seconds and back. That only works if every moving thing reads the **same** clock:
+
+| You are writing…                                                                                                                                            | Read this                                                                                                                               | Never this                                                                                                                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| an effect, particle, shader animation, sim step, world model                                                                                                | `env.time.tMs` / `env.time.dtSec`, handed to you each frame (`uGlobalTimeMs` on the GPU side)                                           | `perfNowMs()`, `wallClockMs()`, `env.time.realMs` / `realDtSec`, `game.time.serverTime`, `Date.now()`, a `setTimeout`/`setInterval`/`requestAnimationFrame` of your own |
+| something every client must see at the same instant (lightning strikes, moving tiles, Fade Engine fades, a hand tremor)                                     | `worldSimNowMs()` (`foundry/world-clock.js`) — server time that stands still while paused                                               | raw `game.time.serverTime`                                                                                                                                              |
+| something that is **not** the world moving: a poll throttle, a bake throttle, load/compile timing, decode latency, the camera (Dynamic Range, parallax), UI | wall time (`env.time.realMs`, `perfNowMs()`) — and add your file to `WALL_TIME_BUDGETS` in `tools/verify-structure.mjs` with the reason | —                                                                                                                                                                       |
+
+Both pausing clocks run off one record (the GM's pause ledger, `core/frame-clock.js#ledgerSimMs`) with one ramp
+(`pauseRampScale`), so they can never disagree. **The build enforces this** (`time/world-on-sim-clock`): any wall-time read
+in `src/effects/` or `src/world/`, any timer of their own there, wall time handed to a frame-loop `.sync/.step/.tick`, or one
+more wall-time read than a file's budget fails `npm run verify:structure`. A throttle on the sim clock is the opposite bug
+(it latches when paused) — throttles stay on wall time, by listing them.

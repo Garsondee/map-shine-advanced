@@ -1,6 +1,7 @@
 ---
-sources: src/world/weather-data.js (WEATHER_ARCHETYPES), src/ui/rooms/remote/weather-board.js, src/ui/rooms/remote/shell.js (scope chip, Fade Time), src/effects/precipitation (ground-mist-render.js for fog), src/effects/lightning-storm.js + src/effects/lightning.js (Storm dials, lightning)
+sources: src/world/weather-data.js (WEATHER_ARCHETYPES), src/ui/rooms/remote/weather-board.js, src/ui/rooms/remote/shell.js (scope chip, Fade Time), src/effects/precipitation (ground-mist-render.js for fog), src/effects/lightning-storm.js + src/effects/lightning.js (Storm dials, lightning), src/foundry/world-clock.js (pause)
 ---
+
 Weather in Map Shine is a whole sky: clouds that drift and cast shadows, rain and snow that stop at the roofs, wind that bends trees and smoke, and fog that rolls in.
 
 ::: compare "**Docklands Warehouse**. Drag to compare: a clear afternoon, and the same hour under a thunderstorm sky. Only the weather changed."
@@ -29,6 +30,8 @@ The **Storm** mood brings lightning; the **Lightning** fader sets how often it s
 ### Fade Time
 
 Changes ease in over the **Fade Time** set on the Play tab. **Now** snaps. A minute or two lets the players watch the storm roll in.
+
+When you pause the game, the whole world slows to a stop over a few seconds: rain hangs in the air, lightning waits, clouds and water hold still. A change you make while paused waits too, and eases in once you unpause. **Now** still lands at once.
 
 ### This scene or every scene
 

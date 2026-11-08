@@ -46,7 +46,10 @@
  *     value. `foundry/fade-persistence.js` is the one writer (a scene flag);
  *     nothing here talks to Foundry at all.
  *   - **Reload survival, for free, by construction.** `startedAtMs` is a
- *     WALL-CLOCK timestamp baked into each entry; `computeEasedValue` is a
+ *     SHARED WORLD CLOCK timestamp baked into each entry (`foundry/world-clock.js
+ *     #worldSimNowMs` — server-epoch ms that stand still while Foundry is
+ *     paused, so a fade waits for the world; was wall-clock until 2026-11-08,
+ *     and callers must stamp and evaluate with that one clock); `computeEasedValue` is a
  *     pure function of `(entry, nowMs)` with no other state to lose. There is
  *     no separate "resume" step to forget to call — see this file's own test
  *     suite's "reload mid-fade" case, which proves it by calling nothing

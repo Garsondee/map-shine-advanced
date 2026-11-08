@@ -1,9 +1,10 @@
 ---
 sources: guide/guide.json (page list), src/ui/rooms/guide/guide-actions.js (every button)
 ---
+
 Pick the problem. Each page has buttons that change this scene straight away. Every change says what it did, where to find that control later, and has an **Undo**.
 
-> [!tip] Weather and time buttons ease in over the Remote's **Fade Time**. Set it to **Cut** on the Play tab if you want them instant.
+> [!tip] Weather and time buttons ease in over the Remote's **Fade Time**. Set it to **Cut** on the Play tab if you want them instant. While the game is paused they wait, and ease in when you unpause.
 
 ### The look
 

@@ -83,15 +83,66 @@ export function readSceneDarkness() {
   }
 }
 
+/**
+ * THE SCENE'S AUTHORED DARKNESS (Foundry Parity, mmp-ynr.3, 2026-11-07) — the
+ * value the GM saved on the scene, read from the DOCUMENT SOURCE
+ * (`scene._source.environment.darknessLevel`), never from the live
+ * `scene.environment.darknessLevel` that {@link readSceneDarkness} reads.
+ *
+ * WHY: a map lit for native Foundry at darkness 1 is a night map. MSA used to
+ * ignore that number entirely (its own day clock was the only darkness), so the
+ * Light Matrix at darkness 1 drew as noon daylight (per-cell luminance native
+ * 19-95, MSA 158-201). Foundry Parity means the scene's own darkness drives the
+ * ambient, so this is now an INPUT to `world/environment.js#buildEnvSnapshot`,
+ * folded as `max(MSA night, authored)`: a dark scene stays dark at MSA noon,
+ * and MSA's clock can still take a bright scene into night.
+ *
+ * WHY THIS IS NOT THE READ-BACK LOOP `Environment.md §2.2` FORBIDS. MSA writes
+ * darkness through `canvas.environment.initialize` ({@link
+ * publishSceneDarkness}), which assigns the CLIENT-LOCAL prepared field
+ * (`scene.environment.darknessLevel = dl`, `client/canvas/groups/
+ * environment.mjs#initialize`) and never `_source` (Foundry itself reads the
+ * authored copy back with `scene.toObject()` in `#configureEnvironment`). Only
+ * a document update (Scene Config save, a module's `scene.update`, a camera
+ * path's ramp) moves `_source`, and Scene Config's darkness field shows
+ * `source.environment.darknessLevel` (templates/scene/config/basics.hbs), so a
+ * save never persists MSA's echo. Two different slots, one direction each: MSA
+ * reads the authored slot and writes the live one, so nothing MSA writes can
+ * come back in. `camera-path-player.js#readDarkness01` reads this same authored
+ * slot for the same reason (it restores what it read with a real update).
+ *
+ * @returns {{darkness01: number, source: 'scene'|'default', reason: string|null}}
+ */
+export function readSceneAuthoredDarkness() {
+  try {
+    const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
+    return deriveDarkness(scene?._source?.environment?.darknessLevel, !!scene);
+  } catch (err) {
+    return {
+      darkness01: 0,
+      source: 'default',
+      reason: `reading canvas.scene._source.environment.darknessLevel threw: ${err?.message ?? err}`,
+    };
+  }
+}
+
 /* -------------------------------------------- */
 /*  Darkness WRITE-BACK (2026-08-15)            */
 /* -------------------------------------------- */
 
 /**
  * ============================================================================
- * PUBLISH MSA'S OWN DARKNESS TO FOUNDRY — the only write in this reader, and
- * MSA is now the SOLE authority on `darknessLevel`. It never reads Foundry's
- * copy back into its own computation.
+ * PUBLISH MSA'S OWN DARKNESS TO FOUNDRY — the only write in this reader. It
+ * never reads Foundry's LIVE copy back into its own computation.
+ *
+ * ⚠️ AMENDED 2026-11-07 (mmp-ynr.3, Foundry Parity): MSA is no longer the SOLE
+ * authority. The GM's SAVED darkness (the document source,
+ * {@link readSceneAuthoredDarkness}) is an input again, folded as
+ * `max(MSA night, authored)` — so a map lit for Foundry at darkness 1 is night
+ * in MSA too, and MSA's clock still darkens a bright scene at night and
+ * publishes that here (the 2026-08-15 ask below still holds). The loop below
+ * stays impossible because MSA reads only the saved slot and writes only the
+ * live one; see that function's header.
  * ============================================================================
  *
  * ⚠️ THIS REVERSES A PREVIOUSLY-DOCUMENTED REFUSAL, ON THE AUTHOR'S OWN
@@ -216,7 +267,7 @@ export function publishSceneDarkness(darkness01, globalLightWindow) {
     const environment = { darknessLevel: clamped };
     if (globalLightWindow) {
       environment.globalLight = globalLightWindow.enabled
-        ? { enabled: true, darkness: { min: 0, max: globalLightWindow.max } }
+        ? { enabled: true, darkness: { min: globalLightWindow.min ?? 0, max: globalLightWindow.max } }
         : { enabled: false };
     }
     env.initialize({ environment });
@@ -253,16 +304,26 @@ export const DARKNESS_PUBLISH_MIN_INTERVAL_MS = 250;
  * @param {number} args.darkness01 - MSA's current resolved darkness.
  * @param {number|null} args.lastPublished01 - last successfully published value, or null.
  * @param {number} args.nowMs @param {number} args.lastPublishedAtMs
+ * @param {number} [args.liveDarkness01] - what Foundry holds now (`readSceneDarkness`);
+ *   omit to skip drift repair.
  * @returns {boolean}
  */
-export function shouldPublishDarkness({ darkness01, lastPublished01, nowMs, lastPublishedAtMs }) {
+export function shouldPublishDarkness({ darkness01, lastPublished01, nowMs, lastPublishedAtMs, liveDarkness01 }) {
   if (!Number.isFinite(darkness01)) return false;
   // NEVER PUBLISHED YET ⇒ always publish, ignoring the interval. Otherwise a
   // scene that loads and sits still keeps Foundry on the document's stale value
   // until the author happens to move something — the exact "it's noon and the
   // tokens are in the dark" symptom, just delayed.
   if (!Number.isFinite(lastPublished01)) return true;
-  if (Math.abs(darkness01 - lastPublished01) < DARKNESS_PUBLISH_STEP) return false;
+  const moved = Math.abs(darkness01 - lastPublished01) >= DARKNESS_PUBLISH_STEP;
+  // DRIFT REPAIR (mmp-ynr.3) — the same re-assert `shouldPublishGlobalLightWindow`
+  // does for the window. Any scene update touching `environment` (a Scene Config
+  // save, a darkness edit) ends in Foundry's own `canvas.environment.initialize()`,
+  // which puts the live value back to the document's, while MSA's own value may
+  // not move at all (midnight stays midnight). Observing the live value only to
+  // re-assert ours is not a read-back: it never enters what MSA computes.
+  const drifted = Number.isFinite(liveDarkness01) && Math.abs(liveDarkness01 - darkness01) >= DARKNESS_PUBLISH_STEP;
+  if (!moved && !drifted) return false;
   return nowMs - lastPublishedAtMs >= DARKNESS_PUBLISH_MIN_INTERVAL_MS;
 }
 
@@ -407,11 +468,22 @@ export const GLOBAL_LIGHT_DAYLIGHT_MAX = 0.25;
  * @param {number|null} minRegionFloor - `computeMinimumDarknessFloor`'s
  *   result, or null when no region makes a darkness claim. Only ever narrows
  *   the window; never decides whether there is one.
- * @returns {{enabled: boolean, max: number}} always enabled — the WINDOW,
+ * @param {{enabled: boolean|null, min: number|null, max: number|null}|null} [authored] -
+ *   the scene's OWN Global Illumination as the GM saved it (`readSceneGlobalLightRaw`'s
+ *   document fields). FOUNDRY PARITY (mmp-ynr.3): when the GM turned it ON, their
+ *   window is the answer, unclamped, exactly what native Foundry uses (its own
+ *   per-pixel region darkness still protects interiors). MSA's derived window
+ *   above is only for the schema-default OFF case, where the clock is the reason
+ *   daylight vision exists at all.
+ * @returns {{enabled: boolean, min: number, max: number}} always enabled — the WINDOW,
  *   compared against live darkness, is what turns daylight off at night, so
  *   there is no case where the source itself needs disabling.
  */
-export function deriveGlobalLightWindow(minRegionFloor) {
+export function deriveGlobalLightWindow(minRegionFloor, authored = null) {
+  const clamp01 = (v, fb) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : fb);
+  if (authored?.enabled === true) {
+    return { enabled: true, min: clamp01(authored.min, 0), max: clamp01(authored.max, 1) };
+  }
   let max = GLOBAL_LIGHT_DAYLIGHT_MAX;
   if (Number.isFinite(minRegionFloor)) {
     // Stay strictly under an authored interior, margined by the same step the
@@ -425,7 +497,7 @@ export function deriveGlobalLightWindow(minRegionFloor) {
   // a point whose darkness is 0, which is precisely noon outdoors. The first
   // cut treated `max <= 0` as "give up", which threw away the one case the
   // author was actually testing.
-  return { enabled: true, max: Math.min(1, Math.max(0, max)) };
+  return { enabled: true, min: 0, max: Math.min(1, Math.max(0, max)) };
 }
 
 /**
@@ -531,6 +603,7 @@ export function shouldPublishGlobalLightWindow(next, last, live, nowMs, lastPubl
   if (!last) return true;
   if (next.enabled !== last.enabled) return true;
   if (Math.abs((next.max ?? 0) - (last.max ?? 0)) >= DARKNESS_PUBLISH_STEP) return true;
+  if (Math.abs((next.min ?? 0) - (last.min ?? 0)) >= DARKNESS_PUBLISH_STEP) return true;
 
   if (!live) return false;
   const liveEnabled = live.liveDisabled === null || live.liveDisabled === undefined ? null : !live.liveDisabled;

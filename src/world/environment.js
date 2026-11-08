@@ -27,7 +27,10 @@
  * INPUT, is folded into one number, and is NEVER written back. If the project
  * later decides MSA owns darkness instead, the write happens in `foundry/`
  * and this module still just reads its input — either way there is exactly one
- * home and no read-back loop.
+ * home and no read-back loop. (Live since 2026-11-07, mmp-ynr.3: the input is
+ * the scene's SAVED darkness, `foundry/scene-environment.js#
+ * readSceneAuthoredDarkness`, and `foundry/` publishes the folded result to
+ * Foundry's live copy, a different slot, so the two never meet.)
  *
  * This is the PURE CORE of the `frame.snapshot` pass (graph/passes.js). The
  * pass wiring (who calls this, from what Foundry inputs) lands with the frame

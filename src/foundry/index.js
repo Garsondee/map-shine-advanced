@@ -211,9 +211,11 @@ export { classifyActivation, createActivationGate, installSceneActivationGate } 
 // `ambientInput`, and reads `canvas.scene.environment.darknessLevel` for
 // DIAGNOSTIC comparison only (MSA owns darkness outright — see
 // `publishSceneDarkness`'s own header; `darknessLevel` is no longer a live
-// INPUT to anything MSA computes).
+// INPUT to anything MSA computes). The AUTHORED darkness (the document
+// source, mmp-ynr.3) IS an input: Foundry Parity, see readSceneAuthoredDarkness.
 export {
   readSceneDarkness,
+  readSceneAuthoredDarkness,
   // THE ONE WRITE in the environment adapter (2026-08-15) — client-local,
   // never a document update. `shouldPublishDarkness` is exported alongside it
   // because the write is only safe throttled — `publishSceneDarkness` itself

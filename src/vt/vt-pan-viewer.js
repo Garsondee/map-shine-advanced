@@ -275,6 +275,7 @@ import {
   computeQuadBounds,
   computeItemPlacement,
   readSceneDarkness,
+  readSceneAuthoredDarkness,
   // THE DARKNESS WRITE-BACK (2026-08-15) — MSA's own day/night, published to
   // Foundry so game systems and Foundry's own vision stop reading a frozen
   // number. See `publishSceneDarkness`'s own header.
@@ -13639,6 +13640,8 @@ async function startVtPanViewerUnserialized({
      *  "why is it disabled" (no protective region vs. floor too low) without
      *  a separate investigation. */
     let lastMinDarknessRegionFloor = null;
+    /** The scene's AUTHORED darkness read this frame (mmp-ynr.3), for diagnostics. */
+    let lastAuthoredDarkness = null;
 
     // ── THE SKY ────────────────────────────────────────────────────────────
     // `todHour` HAS a real source as of 2026-07-23: the day clock
@@ -13775,6 +13778,13 @@ async function startVtPanViewerUnserialized({
       // input. That distinction is the whole difference between this and a
       // feedback bus.
       const darkness = readSceneDarkness();
+      // ⭐ FOUNDRY PARITY (mmp-ynr.3): the scene's AUTHORED darkness — the saved
+      // document value, which MSA's own publish never touches (it writes only
+      // the client-local copy read above) — IS an input. A map lit for Foundry
+      // at darkness 1 is a night map, and drew as noon daylight before this.
+      // `readSceneAuthoredDarkness`'s header says why this is not the loop.
+      const authoredDarkness = readSceneAuthoredDarkness();
+      lastAuthoredDarkness = authoredDarkness;
       // The ambient palette Foundry itself renders from (canvas.colors) — read
       // through the ONE adapter so the light pass reproduces Foundry's ladder
       // rather than re-reading a global. `readSceneAmbient` never throws and
@@ -13828,12 +13838,9 @@ async function startVtPanViewerUnserialized({
           speed01: uWindSpeed01.value,
           gustiness01: uWindGustiness01.value,
         },
-        // NO `darknessInput` — see this function's own comment just above.
-        // Omitting the key (rather than passing 0 explicitly) is deliberate:
-        // `buildEnvSnapshot`'s own default IS 0, so a future reader diffing this
-        // call against the function's signature sees "not supplied", not
-        // "supplied as zero", which would read as a considered choice about a
-        // GM input that no longer exists on this path.
+        // The AUTHORED scene darkness (mmp-ynr.3), never the live echo above:
+        // buildEnvSnapshot folds it as max(MSA night, authored).
+        darknessInput: authoredDarkness.darkness01,
         ambientInput: { daylight: ambient.daylight, darkness: ambient.darkness, brightest: ambient.brightest },
         // SUN LATITUDE (mythica-machina-press#170) — the real equinox peak-
         // altitude relationship; see setSunLatitude's own doc. Omitted at
@@ -13892,7 +13899,10 @@ async function startVtPanViewerUnserialized({
       const { regions: allActiveDarknessRegions } = readActiveDarknessRegions();
       const minDarknessRegionFloor = computeMinimumDarknessFloor(allActiveDarknessRegions);
       lastMinDarknessRegionFloor = minDarknessRegionFloor;
-      const nextGlobalLightWindow = deriveGlobalLightWindow(minDarknessRegionFloor);
+      // The GM's own Global Illumination, when they turned it on, is the window
+      // (Foundry Parity, mmp-ynr.3) — read from the document, which MSA never writes.
+      const liveGlobalLight = readSceneGlobalLightRaw();
+      const nextGlobalLightWindow = deriveGlobalLightWindow(minDarknessRegionFloor, liveGlobalLight);
       const darknessNowMs = env.time.realMs;
       // `liveGlobalLight` is read so the throttle can notice that something
       // ELSE re-initialised the environment and wiped our window back to the
@@ -13900,7 +13910,6 @@ async function startVtPanViewerUnserialized({
       // `shouldPublishGlobalLightWindow`'s own header for why a change-only
       // throttle is not sufficient here, and why observing our own output to
       // RE-ASSERT it is not the read-back loop §2.2 forbids.
-      const liveGlobalLight = readSceneGlobalLightRaw();
       lastFoundryGlobalLight = liveGlobalLight;
       // A SYSTEM-OWNED window (PF2e) is never sent or repaired again — see
       // `isGlobalLightSystemOwned`. Darkness still publishes on its own throttle.
@@ -13924,6 +13933,8 @@ async function startVtPanViewerUnserialized({
           lastPublished01: lastPublishedDarkness01,
           nowMs: darknessNowMs,
           lastPublishedAtMs: lastPublishedDarknessAtMs,
+          // Drift repair: a scene update re-initialises Foundry from the document.
+          liveDarkness01: darkness.source === 'scene' ? darkness.darkness01 : undefined,
         }) ||
         globalLightWindowChanged
       ) {
@@ -32446,6 +32457,8 @@ async function startVtPanViewerUnserialized({
           // thinks it wrote), `foundryDarkness01` (what Foundry actually has) —
           // are what turn "darkness isn't working" into one glance.
           foundryDarkness01: readSceneDarkness().darkness01,
+          // The GM-saved value (document source) MSA folds in: max(night, authored).
+          authoredDarkness01: lastAuthoredDarkness?.darkness01 ?? null,
           darknessReason: lastEnvSnapshot.darkness.reason,
           // THE GLOBAL ILLUMINATION WRITE-BACK's own state (2026-08-15) — the
           // SECOND gate behind "token outside at noon is in the dark"; see

@@ -1,5 +1,5 @@
 ---
-sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), boot.js onSweepToHour
+sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), src/foundry/scene-environment.js (readSceneAuthoredDarkness), boot.js onSweepToHour
 ---
 Map Shine lights a scene like a camera would see it: a real sun that moves, shadows that stretch, lamps that glow, and a camera that copes with bright and dark together.
 
@@ -20,7 +20,7 @@ Map Shine lights a scene like a camera would see it: a real sun that moves, shad
 
 Foundry's own lights become Map Shine lights. Their radius, colour and animation are set the same way as always, in the light's settings. **Studio → Effects → Colour Grade** has a **Light level** for every lamp at once.
 
-The scene's own **Environment** settings in Foundry (Base and Darkness: tint, luminosity, saturation, shadows) colour the map art the same way they do in Foundry.
+The scene's own **Environment** settings in Foundry (Base and Darkness: tint, luminosity, saturation, shadows) colour the map art the same way they do in Foundry. So does its **Darkness Level**: a scene set dark in Foundry stays at least that dark, and the clock can only make it darker.
 
 ### Window light
 

@@ -20,6 +20,8 @@ import {
   deriveSceneBackground,
   readSceneBackground,
   FOUNDRY_FALLBACK_BACKGROUND,
+  readSceneAuthoredDarkness,
+  readSceneDarkness,
 } from '../scene-environment.js';
 
 export function run(t) {
@@ -397,5 +399,74 @@ export function run(t) {
     const live = readSceneBackground();
     delete globalThis.canvas;
     ok('the live read follows canvas.colors.sceneBackground', live.source === 'scene' && live.rgb[2] === 0.3);
+  }
+
+  // ---- THE AUTHORED DARKNESS (Foundry Parity, mmp-ynr.3) -------------------
+  // MSA's publish writes the LIVE copy (`scene.environment.darknessLevel`);
+  // the authored read must come from the document SOURCE, or MSA would read
+  // its own echo back (the loop Environment.md 2.2 forbids).
+  {
+    ok('with no canvas the authored read is darkness 0, never a throw', readSceneAuthoredDarkness().darkness01 === 0);
+    globalThis.canvas = {
+      scene: { environment: { darknessLevel: 0.02 }, _source: { environment: { darknessLevel: 0.75 } } },
+    };
+    const authored = readSceneAuthoredDarkness();
+    const live = readSceneDarkness();
+    delete globalThis.canvas;
+    ok('the authored read is the document source, not the live echo', authored.darkness01 === 0.75);
+    ok('the authored read is a real scene value', authored.source === 'scene');
+    ok('the live read still reports the echo, for diagnostics', live.darkness01 === 0.02);
+    globalThis.canvas = { scene: { environment: { darknessLevel: 0.4 } } };
+    const noSource = readSceneAuthoredDarkness();
+    delete globalThis.canvas;
+    ok(
+      'a scene with no _source reads as default 0, not the live copy',
+      noSource.darkness01 === 0 && noSource.source === 'default'
+    );
+  }
+
+  // ---- THE GM'S OWN GLOBAL ILLUMINATION (Foundry Parity, mmp-ynr.3) -------
+  // Turned ON in Scene Config, the GM's window is what native Foundry uses, so it
+  // is what MSA publishes, unclamped by MSA's own daylight rule.
+  {
+    const w = deriveGlobalLightWindow(0.5, { enabled: true, min: 0.1, max: 0.8 });
+    ok('an authored ON window is published as authored', w.enabled && w.min === 0.1 && w.max === 0.8);
+    const def = deriveGlobalLightWindow(null, { enabled: true, min: null, max: null });
+    ok('an authored ON window with no range is the Foundry schema default 0..1', def.min === 0 && def.max === 1);
+    const off = deriveGlobalLightWindow(null, { enabled: false, min: 0, max: 1 });
+    ok('authored OFF keeps the MSA daylight window', off.max === GLOBAL_LIGHT_DAYLIGHT_MAX && off.min === 0);
+    ok(
+      'a change of the window MIN alone republishes',
+      shouldPublishGlobalLightWindow({ enabled: true, min: 0.3, max: 0.8 }, { enabled: true, min: 0, max: 0.8 }) ===
+        true
+    );
+  }
+
+  // ---- DARKNESS DRIFT REPAIR (mmp-ynr.3) ----------------------------------
+  // A scene update re-initialises Foundry from the document; MSA's own value may
+  // not move, so the live value must be compared too, rate-limited.
+  {
+    const base = { darkness01: 1, lastPublished01: 1, lastPublishedAtMs: 1000 };
+    ok(
+      'no movement and no live value: no publish (the old behaviour)',
+      shouldPublishDarkness({ ...base, nowMs: 99999 }) === false
+    );
+    ok(
+      'live value matches ours: no publish',
+      shouldPublishDarkness({ ...base, nowMs: 99999, liveDarkness01: 1 }) === false
+    );
+    ok(
+      'Foundry put the live value back to the document (0.5): re-assert',
+      shouldPublishDarkness({ ...base, nowMs: 99999, liveDarkness01: 0.5 }) === true
+    );
+    ok(
+      'drift repair is rate-limited like any publish',
+      shouldPublishDarkness({ ...base, nowMs: 1000 + DARKNESS_PUBLISH_MIN_INTERVAL_MS - 1, liveDarkness01: 0.5 }) ===
+        false
+    );
+    ok(
+      'a non-finite live value is ignored, never a publish storm',
+      shouldPublishDarkness({ ...base, nowMs: 99999, liveDarkness01: NaN }) === false
+    );
   }
 }

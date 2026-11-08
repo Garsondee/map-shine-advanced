@@ -266,10 +266,14 @@ function restoreLayers(prior) {
   }
 }
 
-/** @returns {number|null} the scene's current `environment.darknessLevel`, or
- *  `null` if unreadable (no scene, or a malformed value — never guessed). */
+/** @returns {number|null} the scene's AUTHORED `environment.darknessLevel`, or
+ *  `null` if unreadable (no scene, or a malformed value — never guessed).
+ *  The document SOURCE, not the live copy (mmp-ynr.3): the live copy holds MSA's
+ *  own published day/night, and restoring THAT with a real `scene.update` would
+ *  save MSA's midnight into the scene, which MSA now reads back as the GM's
+ *  darkness (see `scene-environment.js#readSceneAuthoredDarkness`). */
 function readDarkness01() {
-  const v = typeof canvas !== 'undefined' ? canvas?.scene?.environment?.darknessLevel : undefined;
+  const v = typeof canvas !== 'undefined' ? canvas?.scene?._source?.environment?.darknessLevel : undefined;
   return Number.isFinite(v) ? v : null;
 }
 

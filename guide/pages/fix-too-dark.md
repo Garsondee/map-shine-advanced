@@ -1,5 +1,5 @@
 ---
-sources: src/effects/grade/grade.js (exposure, exposureInside, exposureOutside, lightLevel), Remote Mix tab Night fader (boot.js weatherBoard.onNightDarknessCommit), src/effects/lighting/ambience-filter.js (scene Environment base/dark)
+sources: src/effects/grade/grade.js (exposure, exposureInside, exposureOutside, lightLevel), Remote Mix tab Night fader (boot.js weatherBoard.onNightDarknessCommit), src/effects/lighting/ambience-filter.js (scene Environment base/dark), src/foundry/scene-environment.js (readSceneAuthoredDarkness)
 ---
 Players can't make out the room. Start with the first button, and press it again if you need more.
 
@@ -28,6 +28,10 @@ Night darkness is its own fader. Lift it a little and the moon does more of the 
 [[do: night-lighter, night-darker]]
 
 Is the art itself dim at night, not just the light? Foundry's scene settings have **Environment → Darkness → Luminosity**, which darkens the map as night falls (Foundry's default is -0.25). Map Shine follows it, as Foundry does. Raise it towards 0.
+
+### Dark even at noon
+
+Check the scene's **Darkness Level** in Foundry's scene settings. Map Shine follows it as Foundry does: the scene is never brighter than that level, whatever the clock says. Set it to 0 to let Map Shine's clock decide day and night on its own.
 
 > [!note] Dark on one player's screen only? Their monitor or Foundry's own brightness setting may differ. Ask them to open **Performance & Graphics** from the scene controls on the left.
 

@@ -18818,6 +18818,9 @@ async function startVtPanViewerUnserialized({
         cloudOvercastMinStrengthNode: uWindowOvercastMinStrength,
         cloudNoonBoostNode: uWindowNoonBoostMul,
         weatherGainNode: buildWindowWeatherNode(),
+        // the rain's storm sheet surges with the real gust at each window (mmp-vm1.1.8)
+        windAmbient: windAmbientRef,
+        windTimeMs: uGlobalTimeMs,
         getWindowRenderState,
         // THE DAYLIGHT TINT's own sun read — a GETTER, matching `getSkyHandle`
         // above: `lastEnvSnapshot` is REASSIGNED every `updateEnvSnapshot()`

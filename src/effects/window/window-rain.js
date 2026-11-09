@@ -56,8 +56,20 @@
  */
 
 import { layoutFn, sharedFn } from '../../core/tsl-fn.js';
+import { computeGustEnvelope } from '../../world/index.js';
 
 /** Every tuned constant, shared by the JS twin and the shader. Change one place. */
+/**
+ * THE STORM SHEET IN A REAL GUST (2026-11-09, mmp-vm1.1.8) — the CPU twin of the shader's wired branch: the sheet
+ * swells by `sheetGustLocal` of the gust envelope's excess over its mean (1). A front (~2) swells it ~1.8x, a lull
+ * (~0.7) thins it to ~0.76x, and it is never negative. Each window reads the envelope at its own pixels, so a front
+ * reaches the windows downwind after the ones upwind, instead of every window beating together at 2.3 Hz.
+ * @param {number} sheet @param {number} gust the gust envelope here (mean 1)
+ */
+export function rainSheetInGust(sheet, gust) {
+  return sheet * Math.max(0, 1 + (gust - 1) * RAIN_TUNE.sheetGustLocal);
+}
+
 export const RAIN_TUNE = Object.freeze({
   // splats: FOUR interleaved lattices of world-aligned cells, all nearly the same size (rain on glass is fairly
   // uniform: the author asked for the size of the small drops with a little variation). Slightly different cell sizes
@@ -134,6 +146,8 @@ export const RAIN_TUNE = Object.freeze({
   sheetWobblePx: 3,
   sheetGust: 0.4,
   sheetGustHz: 2.3,
+  // with the wind wired: how far a gust's excess over the mean swells the sheet (crest ~2 -> x1.8, lull 0.7 -> x0.76)
+  sheetGustLocal: 0.8,
   // wind carries the running water: px/s the whole film drifts at full wind
   windDriftPx: 140,
   // how much of a bead's smear follows gravity (toward the wall) against the wind
@@ -940,8 +954,19 @@ export function rainHashNodes(TSL) {
  *   highlight shoulder (a shadow on blown-out light must still show) and its offset without the prism split.
  * @returns {{build: Function, setLook: Function, setFrame: Function, setFlow: Function, flowTexNodeCount: Function}}
  */
-export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewSpanNode = null, snow = null }) {
+export function createWindowRain({
+  THREE,
+  flowDirsTexture,
+  flowAuxTexture,
+  viewSpanNode = null,
+  snow = null,
+  ambientWind = null,
+  gustTimeMs = null,
+}) {
   const TSL = THREE.TSL;
+  // The wind's live ambient (mmp-vm1.1.8): the storm sheet follows the real gusts, on the same clock the window's
+  // storm waves use (`gustTimeMs`, the viewer's sim clock). Absent -> the old pulse.
+  const LOCAL_GUST = !!ambientWind?.advection;
   const {
     float,
     int,
@@ -1048,11 +1073,12 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   // "struct member nodeUniform1 not found"). So the dials are packed in at the call and unpacked under their own
   // names at the top of each body — the body code itself reads exactly as before.
   const RAIN_PACK = { kA: 'vec4', kB: 'vec4', kC: 'vec4', kD: 'vec4', kE: 'float' };
-  const rainPack = () => [
+  // `gust` overrides the gust slot per pixel: the local gust envelope when the wind's ambient is wired.
+  const rainPack = (gust = uGust) => [
     TSL.vec4(uScale, uRefract, uCaustic, uRim),
     TSL.vec4(uTrail, uStretch, uWobble, uStick),
     TSL.vec4(uCover, uRate, uLive, uImpact),
-    TSL.vec4(uSlider, uSheet, uGust, uClock),
+    TSL.vec4(uSlider, uSheet, gust, uClock),
     uSlideClock,
   ];
   const unpackRain = ({ kA, kB, kC, kD, kE }) => ({
@@ -1266,7 +1292,7 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
   /** Everything in one rigid facet frame - `evalFacetFrame`. A layout function (two facets call it), packed (off.xy, gain). */
   const facetFrameFn = layoutFn(
     TSL,
-    'msaRainFacetFrame',
+    LOCAL_GUST ? 'msaRainFacetFrameGust' : 'msaRainFacetFrame',
     { P: 'vec2', dir: 'vec2', paneH: 'float', exposure: 'float', kappa: 'float', pxPerWorld: 'float', ...RAIN_PACK },
     'vec3',
     (a) => {
@@ -1274,8 +1300,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
       return vec3(f.off, f.gain);
     }
   );
-  const facetFrameT = (P, dir, paneH, exposure, kappa, pxPerWorld) => {
-    const r = facetFrameFn(P, dir, paneH, exposure, kappa, pxPerWorld, ...rainPack());
+  const facetFrameT = (P, dir, paneH, exposure, kappa, pxPerWorld, gust) => {
+    const r = facetFrameFn(P, dir, paneH, exposure, kappa, pxPerWorld, ...rainPack(gust));
     return { off: r.xy, gain: r.z };
   };
   const facetFrameBody = (P, dir, paneH, exposure, kappa, pxPerWorld, K) => {
@@ -1453,7 +1479,12 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
           ).mul(0.25)
         );
       const film01 = smoothstep(F(0.25), F(0.85), film);
-      const sheet = uSheet.mul(max(F(0), F(1).add(uGust.mul(T.sheetGust).mul(sin(uClock.mul(T.sheetGustHz))))));
+      // THE REAL GUSTS (mmp-vm1.1.8): with the wind wired, `uGust` carries the gust envelope at this pixel (about 1 on
+      // average, 0.7 in a lull, ~2 in a front), so the sheet surges as a front reaches each window and the windows
+      // downwind follow it. Without it, the old pulse (one 2.3 Hz beat on every window).
+      const sheet = LOCAL_GUST
+        ? uSheet.mul(max(F(0), F(1).add(uGust.sub(1).mul(T.sheetGustLocal))))
+        : uSheet.mul(max(F(0), F(1).add(uGust.mul(T.sheetGust).mul(sin(uClock.mul(T.sheetGustHz))))));
       gain.mulAssign(F(1).sub(sheet.mul(film01).mul(T.sheetDim)));
       const wob = film.sub(0.5).mul(T.sheetWobblePx).mul(sheet);
       off.addAssign(vec2(nX.mul(wob), nY.mul(wob)));
@@ -1498,14 +1529,27 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
         }
 
         const Pw = P.sub(uWindShift);
+        // The gust that is reaching this window now: the same travelling envelope the trees and the rain feel,
+        // free-stream (the glass is outside the room), on the wind's own unwrapped clock.
+        const gustHere = LOCAL_GUST
+          ? computeGustEnvelope(TSL, {
+              centerXY: P,
+              time: gustTimeMs ?? ambientWind.advection.clockMs,
+              directionDeg: ambientWind.directionDeg,
+              gustiness01: ambientWind.gustiness01,
+              speed01: ambientWind.speed01,
+              pixelsPerMetre: ambientWind.pixelsPerMetre,
+              advection: ambientWind.advection,
+            })
+          : undefined;
         const wa = F(1).sub(fl.mix);
         If(fl.mix.lessThan(0.999), () => {
-          const A = facetFrameT(Pw, dirA, paneH, exposure, kappa, pxPerWorld);
+          const A = facetFrameT(Pw, dirA, paneH, exposure, kappa, pxPerWorld, gustHere);
           off.addAssign(A.off.mul(wa));
           gain.mulAssign(F(1).add(A.gain.sub(1).mul(wa)));
         });
         If(fl.mix.greaterThan(0.001), () => {
-          const B = facetFrameT(Pw, dirB, paneH, exposure, kappa, pxPerWorld);
+          const B = facetFrameT(Pw, dirB, paneH, exposure, kappa, pxPerWorld, gustHere);
           off.addAssign(B.off.mul(fl.mix));
           gain.mulAssign(F(1).add(B.gain.sub(1).mul(fl.mix)));
         });
@@ -1635,6 +1679,8 @@ export function createWindowRain({ THREE, flowDirsTexture, flowAuxTexture, viewS
     flowTexNodeCount: () => flowTexNodes.length,
     /** TEST/DIAGNOSTIC: every uniform's current value as plain numbers. */
     snapshot: () => ({
+      // the storm sheet rides the real gust at each pixel (mmp-vm1.1.8) rather than the old 2.3 Hz beat
+      localGust: LOCAL_GUST,
       scale: uScale.value,
       refract: uRefract.value,
       caustic: uCaustic.value,

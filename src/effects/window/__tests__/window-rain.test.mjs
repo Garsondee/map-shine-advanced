@@ -12,6 +12,7 @@
  *   - the numbers the shader can emit are finite and bounded.
  */
 import * as THREE from '../../../vendor/three/three.webgpu.js';
+import { createWindAdvectionUniforms } from '../../../world/wind-field.js';
 import {
   RAIN_TUNE,
   WINDOW_RAIN_DEFAULTS,
@@ -29,6 +30,7 @@ import {
   evalFacetFrame,
   evalWindowRainPixel,
   createWindowRain,
+  rainSheetInGust,
   rainMaskFade,
   RAIN_MASK_FADE_SOFT,
   hashBits,
@@ -714,6 +716,36 @@ export function run(t) {
     t.ok('rain-tsl: build can be called again (the glass cookie is built twice)', rain.build().gain !== undefined);
     const noView = createWindowRain({ THREE, flowDirsTexture: tex(), flowAuxTexture: tex() });
     t.ok('rain-tsl: the view span is optional', noView.build().gain !== undefined);
+    // THE REAL GUSTS (mmp-vm1.1.8): with the wind's ambient wired, the storm sheet reads the gust envelope at each pixel
+    // (the travelling fronts the trees and the window's storm waves ride) instead of one 2.3 Hz beat on every window
+    const T = THREE.TSL;
+    const ambient = {
+      directionDeg: T.uniform(T.float(90)),
+      speed01: T.uniform(T.float(0.15)),
+      gustiness01: T.uniform(T.float(1)),
+      pixelsPerMetre: T.uniform(T.float(98.43)),
+      advection: createWindAdvectionUniforms(T),
+    };
+    const gusty = createWindowRain({
+      THREE,
+      flowDirsTexture: tex(),
+      flowAuxTexture: tex(),
+      viewSpanNode: T.float(2000),
+      ambientWind: ambient,
+      gustTimeMs: T.uniform(T.float(0)),
+    });
+    const ng = gusty.build();
+    t.ok(
+      'rain-tsl: with the wind wired the sheet rides the local gust, and the graph still builds',
+      ng.gain !== undefined && gusty.snapshot().localGust === true && rain.snapshot().localGust === false
+    );
+    t.ok(
+      `rain-sheet: a gust front swells the sheet, a lull thins it, the mean leaves it (front ${rainSheetInGust(1, 2).toFixed(2)}, lull ${rainSheetInGust(1, 0.7).toFixed(2)})`,
+      Math.abs(rainSheetInGust(0.6, 1) - 0.6) < 1e-12 &&
+        rainSheetInGust(1, 2) > 1.6 &&
+        rainSheetInGust(1, 0.7) < 0.85 &&
+        rainSheetInGust(1, -5) === 0
+    );
     const mat = new THREE.NodeMaterial();
     mat.colorNode = THREE.TSL.vec4(n.gain, n.offsetPx.x, n.offsetPx.y, 1);
     t.ok('rain-tsl: the graph attaches to a material', mat.colorNode !== null);

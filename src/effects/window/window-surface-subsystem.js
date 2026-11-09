@@ -258,6 +258,9 @@ const WINDOW_MATERIAL_SIDE_NAMES = Object.freeze({ 0: 'front', 1: 'back', 2: 'do
  *   `endById` (the string form, not vt-pan-viewer.js's own pre-resolved `Z`
  *   table): this subsystem is constructed independently of that table, same
  *   reasoning as `specular-surface-subsystem.js`'s own `profiler` param.
+ * @param {object|null} [args.windAmbient] - the viewer's wind ambient (`directionDeg`, `speed01`, `gustiness01`,
+ *   `pixelsPerMetre`, `advection`): the rain's storm sheet surges with the real gust at each window. Null = the old pulse.
+ * @param {*} [args.windTimeMs] - the sim clock node the window's storm waves use (`uGlobalTimeMs`).
  * @returns {{scene: *, sync: Function, hasContent: Function, getStatus: Function, dispose: Function}}
  */
 export function createWindowSurfaceSubsystem({
@@ -288,6 +291,8 @@ export function createWindowSurfaceSubsystem({
   getEnv,
   getWindowOutdoorsGrid,
   getRoomMap,
+  windAmbient = null,
+  windTimeMs = null,
   profiler = null,
 }) {
   // ⚠️ `seams/viewer-wired` exists because water shipped exactly this shape
@@ -453,6 +458,10 @@ export function createWindowSurfaceSubsystem({
       flowAuxTexture: neutralAux,
       // World px across the view, from the same view-rect uniform the floor gate maps screen UV with.
       viewSpanNode: max(uViewRect.z.sub(uViewRect.x), float(1)),
+      // The storm sheet surges with the real gust reaching each window (mmp-vm1.1.8), on the clock the window's storm
+      // waves ride; without the wind it keeps its old pulse.
+      ambientWind: windAmbient,
+      gustTimeMs: windTimeMs,
     });
   }
 

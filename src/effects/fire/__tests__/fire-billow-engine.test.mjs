@@ -27,6 +27,9 @@ import {
   billowCameraHeight,
   BILLOW_CAMERA_PER_EYE,
   MAX_CLUSTER_RADIUS_M,
+  fireAirEaseSec,
+  FIRE_AIR_EASE_SEC,
+  FIRE_AIR_EASE_MAX_SEC,
 } from '../fire-billow-engine.js';
 import { LOBE_STRIDE, KIND_FLAME, KIND_SMOKE, KIND_COAL, MASS_SMOKE_MAX } from '../fire-billow-geometry.js';
 import { FIRE_PARAMS } from '../fire.js';
@@ -1400,6 +1403,58 @@ export function run(t) {
         open.weather[0].wind > 0.9 &&
         'openness' in open.weather[0] &&
         'stress' in open.weather[0]
+    );
+  }
+
+  // ── WEAK AIR TURNS SLOWLY (mmp-9un.5 follow-up): under a roof the air a fire is in is a fraction of the free stream's
+  // speed, so its eddies turn over seconds apart, not in the free stream's half second. A field whose heading flips
+  // +-40 deg every 1.5 s (the turbulence outside a door) swings an open fire's path, barely a roofed one's. ──
+  {
+    t.ok(
+      `the ease is the eddy turnover time: ${fireAirEaseSec(0.5).toFixed(1)} s at 0.5 m/s, ${fireAirEaseSec(10).toFixed(2)} s at 10 m/s (never under ${FIRE_AIR_EASE_SEC} or over ${FIRE_AIR_EASE_MAX_SEC})`,
+      fireAirEaseSec(10) === FIRE_AIR_EASE_SEC &&
+        fireAirEaseSec(0) === FIRE_AIR_EASE_MAX_SEC &&
+        fireAirEaseSec(0.5) > 3 &&
+        fireAirEaseSec(0.5) < FIRE_AIR_EASE_MAX_SEC
+    );
+    const flipping = ({ sky }) => {
+      let tNow = 0;
+      const handle = {
+        hasBake: true,
+        ambient: { speed01: { value: 0.1 }, directionDeg: { value: 90 } },
+        cpuAt: () => ({ openness: 1, sky }),
+        // 7 m/s, its heading flipping between +40 and -40 deg off +x every 1.5 s
+        cpuFieldAt: (x, y, out) => {
+          const a = ((Math.floor(tNow / 1.5) % 2 ? 40 : -40) * Math.PI) / 180;
+          const o = out ?? {};
+          o.x = 0.1 * Math.cos(a);
+          o.y = 0.1 * Math.sin(a);
+          return o;
+        },
+      };
+      const { engine } = makeEngine({ wind: handle });
+      const base = ctxOf({ params: { ...defaults, windResponse: 1, weatherResponse: 1, rainResponse: 1 } });
+      const heads = [];
+      let now = 0;
+      for (let k = 0; k < 600; k++) {
+        now += 1000 / 15;
+        tNow = now / 1000;
+        engine.update({ ...base, nowMs: now, dtSec: 1 / 15 });
+        const w = engine.getStatus().weather?.[0];
+        if (k >= 150 && w) heads.push((Math.atan2(w.pathDirY, w.pathDirX) * 180) / Math.PI);
+      }
+      const m = heads.reduce((a, v) => a + v, 0) / heads.length;
+      return { mean: m, sd: Math.sqrt(heads.reduce((a, v) => a + (v - m) * (v - m), 0) / heads.length) };
+    };
+    const open = flipping({ sky: 1 });
+    const roofed = flipping({ sky: 0 });
+    t.ok(
+      `an open fire's path swings with the turbulent field (heading sd ${open.sd.toFixed(1)} deg); a roofed one's, in a fifth of the speed, barely (${roofed.sd.toFixed(1)} deg)`,
+      open.sd > 15 && roofed.sd < open.sd / 3
+    );
+    t.ok(
+      `...and both still go the way the air goes on average (${open.mean.toFixed(1)} and ${roofed.mean.toFixed(1)} deg off +x)`,
+      Math.abs(open.mean) < 8 && Math.abs(roofed.mean) < 8
     );
   }
 

@@ -53,6 +53,29 @@ import { windFlowVector, windStrength01ForSpeed01 } from '../../world/index.js';
  */
 export const FIRE_AIR_EASE_SEC = 0.35;
 
+/**
+ * WEAK AIR TURNS SLOWLY (2026-11-09, mmp-9un.5 follow-up). An eddy carried by air at U turns over in about L / U (its
+ * size over the speed carrying it), so a draught of 0.5 m/s under a roof wanders over seconds, not in the fraction of a
+ * second the free stream outside its door does. The fire felt the free stream's direction changes at a twelfth of its
+ * speed: a small vector spinning fast, and the indoor column wandered a metre and a half sideways (Lab · Wind, door
+ * rooms at 10.5 m/s: heading p95 31 deg/s, sideways range 1.5 m, against 0.45 m in a sealed room). The ease on the air a
+ * fire is IN (after its wind response and roof) is therefore the eddy turnover time at that air's own speed, never
+ * quicker than {@link FIRE_AIR_EASE_SEC} and never slower than the cap: outdoors (U > ~5 m/s) nothing changes.
+ */
+export const FIRE_AIR_EDDY_M = 2;
+/** The slowest the air a fire is in may turn (s): a gentle draught still settles within a few seconds. */
+export const FIRE_AIR_EASE_MAX_SEC = 5;
+
+/**
+ * The ease time (s) for the air a fire is in, moving at `mps`: the eddy turnover time `FIRE_AIR_EDDY_M / mps`, clamped
+ * to [`FIRE_AIR_EASE_SEC`, `FIRE_AIR_EASE_MAX_SEC`].
+ * @param {number} mps @returns {number}
+ */
+export function fireAirEaseSec(mps) {
+  const u = Math.max(0, Number(mps) || 0);
+  return Math.min(FIRE_AIR_EASE_MAX_SEC, Math.max(FIRE_AIR_EASE_SEC, FIRE_AIR_EDDY_M / Math.max(u, 1e-3)));
+}
+
 /** The widest a single flame gets, in metres of fuel: past this a painted region is split into several flames. */
 export const MAX_CLUSTER_RADIUS_M = 0.9;
 /** The most spawn points one cluster keeps (an even subsample): the model only needs a footprint, not every texel. */
@@ -849,9 +872,11 @@ export function createBillowEngine({
           motion = { x: rawUx, y: rawUy, lean: draftLean };
           airMotionByFire.set(c.id, motion);
         } else {
-          motion.x += (rawUx - motion.x) * airEase;
-          motion.y += (rawUy - motion.y) * airEase;
-          motion.lean += (draftLean - motion.lean) * airEase;
+          // weak air turns slowly: the eddy turnover time at the speed of the air this fire is in (`fireAirEaseSec`)
+          const ease = 1 - Math.exp(-Math.max(0, Number(dtSec) || 0) / fireAirEaseSec(Math.hypot(rawUx, rawUy)));
+          motion.x += (rawUx - motion.x) * ease;
+          motion.y += (rawUy - motion.y) * ease;
+          motion.lean += (draftLean - motion.lean) * ease;
         }
         const airMps = Math.hypot(motion.x, motion.y);
         const airDirX = airMps > 1e-4 ? motion.x / airMps : windX;

@@ -251,6 +251,9 @@ export function createFluidSurfaceSubsystem({
   const lightScene = new THREE.Scene();
   /** Wall sweeps per tick while an item's footprints are (re)built — a load never stalls on all of them at once. */
   const LIGHT_SWEEPS_PER_TICK = 24;
+  /** Total emitted light (summed over an item's emitters) below which its light mesh adds nothing visible: a pixel
+   * can never receive more than the sum, and 1e-4 linear is under 1/255 even four stops up. */
+  const FLUID_LIGHT_VISIBLE_SUM = 1e-4;
   /** The last tick's light, for the report. */
   let lightStats = { emitters: 0, lit: 0, sum: 0, sweeps: 0, strength: 0 };
   /** The sim clock as of the last tick — a forced reaction is stamped on THIS clock, not the caller's. */
@@ -273,7 +276,10 @@ export function createFluidSurfaceSubsystem({
       const visible = enabled && (e.presented === true || warmUpAll) && !!e.net && e.net.tubeCount > 0;
       if (e.absorbMesh) e.absorbMesh.visible = visible;
       if (e.emitMesh) e.emitMesh.visible = visible;
-      if (e.light?.mesh) e.light.mesh.visible = visible && e.light.ready && lightStats.strength > 0;
+      // Perf sweep 2026-11-08: an item whose emitters all sit dark (empty or calm pipes) adds nothing, yet each
+      // pixel along a pipe is under ~8 additive fans; skip the draw (warm-up still draws it to compile).
+      const adds = warmUpAll || !(e.light?.lastSum >= 0) || e.light.lastSum > FLUID_LIGHT_VISIBLE_SUM;
+      if (e.light?.mesh) e.light.mesh.visible = visible && e.light.ready && lightStats.strength > 0 && adds;
     }
   }
 
@@ -1047,6 +1053,7 @@ export function createFluidSurfaceSubsystem({
             out: L.data,
           });
           L.texture.needsUpdate = true;
+          L.lastSum = r.sum;
           lightStats.emitters += entry.lightEmitters.length;
           lightStats.lit += r.lit;
           lightStats.sum += r.sum;

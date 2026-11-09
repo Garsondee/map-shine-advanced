@@ -407,7 +407,7 @@ export const WINDOW_PARAMS = Object.freeze({
     step: 0.5,
     // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; the author's
     // own dialled-in scene, recorded exactly.
-    default: 3.5, // 2026-11-01 author's export
+    default: 2.5, // 2026-11-09 Ingram: default glass = very low frequency, subtle (the old one mottled every pool) (was 3.5)
     category: 'Glass',
     label: 'Glass thickness',
     help: 'How much the uneven pane bends the light, as a maximum shift in world pixels. 0 = perfectly flat modern glass: no distortion, no prism, no caustics. Raise it for thick, wavy, hand-blown panes.',
@@ -417,7 +417,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1, // 2026-11-01 author's export
+    default: 0.25, // 2026-11-09 Ingram: default glass = very low frequency, subtle (the old one mottled every pool) (was 1)
     category: 'Glass',
     label: 'Prism split',
     help: 'How far apart the red and blue ends of the light are pulled as they refract. 0 = the light distorts but keeps its colour; 1 = a strong rainbow fringe along every edge. Needs some Glass thickness to have anything to split.',
@@ -427,7 +427,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 8,
     max: 400,
     step: 1,
-    default: 249, // 2026-11-01 author's export
+    default: 400, // 2026-11-09 Ingram: default glass = very low frequency, subtle (the old one mottled every pool) (was 249)
     category: 'Glass',
     label: 'Blob size',
     help: 'The size of the lumps in the glass, in world pixels. Small = a fine rippled or seeded pane; large = a few broad rolling waves, like a big crown-glass round.',
@@ -437,7 +437,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    default: 1,
+    default: 0, // 2026-11-09 Ingram: default glass = very low frequency, subtle (the old one mottled every pool) (was 1)
     category: 'Glass',
     label: 'Fine detail',
     help: 'How much fine structure rides on top of the big lumps. 0 = smooth rolling glass; 1 = busy, pitted and seedy. This is the difference between a good pane and a cheap one.',
@@ -467,7 +467,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.01,
-    default: 2, // 2026-10-27 author's Studio export (was 0.25)
+    default: 0.3, // 2026-11-09 Ingram: default glass = very low frequency, subtle (the old one mottled every pool) (was 2)
     category: 'Glass',
     label: 'Caustic highlight',
     help: 'How strongly the thick spots focus light into bright knots, the way a glass of water throws a highlight. 0 = off. The dark bands between knots come with it — they are where that light went.',
@@ -477,7 +477,7 @@ export const WINDOW_PARAMS = Object.freeze({
     min: 0.5,
     max: 6,
     step: 0.1,
-    default: 6,
+    default: 1.5, // 2026-11-09 Ingram: default glass = very low frequency, subtle (the old one mottled every pool) (was 6)
     category: 'Glass',
     label: 'Caustic tightness',
     help: 'Whether the caustics are broad soft swells (low) or tight bright knots with a dark surround (high). Shapes bright and dark alike, so it never dims the whole cookie as you turn it up.',

@@ -154,16 +154,18 @@ export const WINDOW_DEPTH_FLAG_IS_TILE_MIRROR = 16;
 export const WINDOW_DEPTH_FLAG_IS_TOKEN_MIRROR = 64;
 
 /** The glass defaults, mirroring `WINDOW_PARAMS`'s own `Glass` category. */
+// 2026-11-09 Ingram: default glass = very low frequency, subtle (the old one mottled every pool): broad 400 px swells, no fine octave, faint caustic and prism.
+// window.test.mjs asserts these equal WINDOW_PARAMS' defaults.
 // LOWERED 20 → 6.5 (2026-09-21) — new live-tuned default; a change lands in
 // both or neither.
-export const WINDOW_DEFAULT_GLASS_WARP_PX = 3.5; // 2026-11-01 author's export
-export const WINDOW_DEFAULT_GLASS_DISPERSION = 1;
-export const WINDOW_DEFAULT_GLASS_SCALE = 249; // 2026-11-01 author's export
-export const WINDOW_DEFAULT_GLASS_DETAIL = 1;
+export const WINDOW_DEFAULT_GLASS_WARP_PX = 2.5;
+export const WINDOW_DEFAULT_GLASS_DISPERSION = 0.25;
+export const WINDOW_DEFAULT_GLASS_SCALE = 400;
+export const WINDOW_DEFAULT_GLASS_DETAIL = 0;
 export const WINDOW_DEFAULT_GLASS_STRIATION = 0;
 export const WINDOW_DEFAULT_GLASS_STRIATION_ANGLE = 0;
-export const WINDOW_DEFAULT_GLASS_CAUSTIC_STRENGTH = 2; // 2026-11-01 author's export
-export const WINDOW_DEFAULT_GLASS_CAUSTIC_SHARPNESS = 6;
+export const WINDOW_DEFAULT_GLASS_CAUSTIC_STRENGTH = 0.3;
+export const WINDOW_DEFAULT_GLASS_CAUSTIC_SHARPNESS = 1.5;
 
 /**
  * How far the second octave's frequency sits above the first, and how much

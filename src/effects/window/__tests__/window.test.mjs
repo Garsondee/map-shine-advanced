@@ -11,7 +11,17 @@ import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
 import { WINDOW, WINDOW_PARAMS, WINDOW_DEBUG_CHANNELS, WINDOW_DEBUG_BOOST } from '../window.js';
-import { WINDOW_DEFAULT_STRENGTH } from '../window-render.js';
+import {
+  WINDOW_DEFAULT_STRENGTH,
+  WINDOW_DEFAULT_GLASS_WARP_PX,
+  WINDOW_DEFAULT_GLASS_DISPERSION,
+  WINDOW_DEFAULT_GLASS_SCALE,
+  WINDOW_DEFAULT_GLASS_DETAIL,
+  WINDOW_DEFAULT_GLASS_STRIATION,
+  WINDOW_DEFAULT_GLASS_STRIATION_ANGLE,
+  WINDOW_DEFAULT_GLASS_CAUSTIC_STRENGTH,
+  WINDOW_DEFAULT_GLASS_CAUSTIC_SHARPNESS,
+} from '../window-render.js';
 
 export function run(t) {
   const { ok } = t;
@@ -84,6 +94,28 @@ export function run(t) {
   // the author actually sees them" rule.
   ok('the glass master can reach 0 — flat glass is reachable', WINDOW_PARAMS.glassWarpPx.min === 0);
   ok('…and ships on, not silently disabled', WINDOW_PARAMS.glassWarpPx.default > 0);
+  // The glass defaults live twice (the card's params and the shader's fallbacks): they must agree, or a
+  // scene with no saved glass values renders different glass than the card shows. (2026-11-09)
+  const glassPairs = [
+    ['glassWarpPx', WINDOW_DEFAULT_GLASS_WARP_PX],
+    ['glassDispersion', WINDOW_DEFAULT_GLASS_DISPERSION],
+    ['glassScale', WINDOW_DEFAULT_GLASS_SCALE],
+    ['glassDetail', WINDOW_DEFAULT_GLASS_DETAIL],
+    ['glassStriation', WINDOW_DEFAULT_GLASS_STRIATION],
+    ['glassStriationAngle', WINDOW_DEFAULT_GLASS_STRIATION_ANGLE],
+    ['glassCausticStrength', WINDOW_DEFAULT_GLASS_CAUSTIC_STRENGTH],
+    ['glassCausticSharpness', WINDOW_DEFAULT_GLASS_CAUSTIC_SHARPNESS],
+  ];
+  for (const [k, v] of glassPairs)
+    ok(`glass default ${k} agrees in window.js and window-render.js`, WINDOW_PARAMS[k].default === v);
+  // Ingram 2026-11-09: the default glass is very low frequency and subtle — broad swells, no fine octave,
+  // a faint caustic — so it never visibly mottles the light. Guard the intent, not the exact numbers.
+  ok('default glass is low frequency (blob size >= 300 px)', WINDOW_PARAMS.glassScale.default >= 300);
+  ok('default glass has no fine high-frequency detail', WINDOW_PARAMS.glassDetail.default <= 0.1);
+  ok(
+    'default caustic is subtle (<= 0.5) and soft (tightness <= 2)',
+    WINDOW_PARAMS.glassCausticStrength.default <= 0.5 && WINDOW_PARAMS.glassCausticSharpness.default <= 2
+  );
   ok(
     'every param declares a help string an author can act on',
     keys.every((k) => (WINDOW_PARAMS[k].help ?? '').length > 20)

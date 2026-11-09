@@ -9719,14 +9719,18 @@ async function startVtPanViewerUnserialized({
         } catch {
           trailProfile = undefined; // registry not ready — standard density
         }
+        const trailSystem = buildWindTrailsSystem(trailParams ?? {}, trailProfile);
         trailEngine = createGustEngine({
           THREE,
-          system: buildWindTrailsSystem(trailParams ?? {}, trailProfile),
+          system: trailSystem,
           worldRect: windSpawnRect,
           zDepth: 0,
           windHandle,
           // Darkened by building shadows like the ground (lighting/weather-shade.js).
           illumTexture: sceneIllum.texture,
+          // The tracer's wall (gust-runtime.js TRACER MODE): the floor's `_Outdoors` mask, the shared node.
+          outdoorsTexNode: envLight.outdoorsTexNode,
+          uOutdoorsRect: envLight.uOutdoorsRect,
         });
         trailLookParams = trailParams;
       } else if (trailParams !== trailLookParams) {
@@ -33020,6 +33024,9 @@ async function startVtPanViewerUnserialized({
       /** MSA Lab read-back (mmp-vm1.1): the baked wind field as its consumers read it, decoded, stamped with its
        * bake time, plus grid, ambient and cell channels. Console/lab only — it stalls. */
       readWindField: readWindFieldForLab,
+      /** MSA Lab read-back (Wind Trails): every trail's path and gate, from the GPU. Console/lab only — it stalls. */
+      readWindTrails: async () =>
+        trailEngine ? trailEngine.readTrails(renderer) : { skipped: true, reason: 'no trail engine yet' },
       /** LIVING WIND (mmp-vm1.1): `true`/`false` force it for this session, `null` follows `msa.livingWind`. */
       setLivingWind: (on) => {
         windFlowForce = on === null || on === undefined ? null : !!on;
@@ -36472,6 +36479,11 @@ export async function readVtPanViewerPrecipParticles(opts) {
 export async function readVtPanViewerWindField(opts) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.readWindField(opts);
+}
+/** @returns {Promise<object>} the MSA Lab's Wind Trails read-back (every trail's path and gate). */
+export async function readVtPanViewerWindTrails() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.readWindTrails();
 }
 /** @param {boolean|null} on @returns {object} LIVING WIND's switch and stats. */
 export function setVtPanViewerLivingWind(on) {

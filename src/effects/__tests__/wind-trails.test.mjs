@@ -10,6 +10,7 @@ import {
   windTrailsLook,
   windTrailsMeshSegments,
 } from '../wind-trails.js';
+import { TRACER_MIN_RADIUS_M } from '../particles/gust-runtime.js';
 import { validateEffectManifest } from '../effect-manifest.js';
 import { validateParamsSchema } from '../../core/params-schema.js';
 import { validateParticleSystem } from '../particles/particle-system-schema.js';
@@ -110,6 +111,16 @@ export function run(t) {
     const bad = Object.entries(want).filter(([k, x]) => WIND_TRAILS_PARAMS[k].default !== x);
     ok(`the author's 2026-10-31 defaults (${bad.map(([k]) => k).join(', ') || 'all match'})`, bad.length === 0);
   }
+  // 2026-11-09: Wind Trails are TRACERS (ride the 3-D air, turn smoothly, stop at the `_Outdoors` wall, loop only where
+  // there is room), and the smoothest a stroke may turn is a real eddy's.
+  ok(
+    'Wind Trails build the tracer engine (the air they ride is the 3-D air, not the old field)',
+    sys.params.tracer === true
+  );
+  ok(
+    'a tracer turns no tighter than a real eddy (0.3-3 m radius)',
+    TRACER_MIN_RADIUS_M >= 0.3 && TRACER_MIN_RADIUS_M <= 3
+  );
   ok('setLook falls back to defaults', windTrailsLook({}).density === WIND_TRAILS_PARAMS.density.default);
   ok(
     'a malformed colour falls back to white, never NaN',

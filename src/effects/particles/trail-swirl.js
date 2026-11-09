@@ -245,5 +245,6 @@ export function buildTrailSwirlNodes(TSL, { hash, uSwirl, uSwirlVar, lifeMs, age
   );
   const bell = sin(float(Math.PI).mul(u));
   const speed = one.add(surge.mul(bell.mul(bell)));
-  return { theta, speed };
+  // (startMs + turnSec: the tracer decides at the loop's start whether there is room for it — gust-runtime.js)
+  return { theta, speed, startMs, turnSec };
 }

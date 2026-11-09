@@ -164,12 +164,20 @@ import {
   windFieldPxPerSecPerUnit,
   windStrength01ForSpeed01,
   windTravelPxPerSec,
+  windGridUvNode,
 } from '../../world/index.js';
 import { createLogger } from '../../core/log.js';
 import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
 import { buildTrailSwirlNodes, buildTrailSizeNodes } from './trail-swirl.js';
 
 const log = createLogger('gust-runtime');
+
+/**
+ * A tracer's tightest turn, metres of radius (TRACER MODE). The 3-D air is one cell per grid square (~1.5 m) and its
+ * swirl is metres across, so real air at 1-2 m never turns tighter than this; a heading that wants to (a kink in the
+ * field, a wall straight ahead) eases round instead. Loops are drawn on top of it and keep their own size.
+ */
+export const TRACER_MIN_RADIUS_M = 0.8;
 
 /** A bake-less handle — an un-wired engine still gets the organic field rather
  * than dead-still ribbons (see candle-flame-render.js's own identical constant). */
@@ -202,6 +210,9 @@ export function createGustEngine({
   pxPerMeter = WIND_DEFAULT_PIXELS_PER_METRE,
   /** `buf:scene.illum` — ribbons darken in a building's shadow like the ground. Absent ⇒ compiled out. */
   illumTexture = null,
+  /** TRACER mode only: the floor's `_Outdoors` mask node + its world rect (vec4 minX,minY,maxX,maxY) — the wall. */
+  outdoorsTexNode = null,
+  uOutdoorsRect = null,
 }) {
   const TSL = THREE.TSL;
   const {
@@ -379,6 +390,68 @@ export function createGustEngine({
       wallAwayDirY,
       wallProximity,
     };
+  };
+
+  // ── TRACER MODE (Wind Trails, 2026-11-09) ───────────────────────────────────────────────────────────────────────
+  // Ingram: trails "cutting corners of buildings" and "bent at angles rather than smoothly", and "adjust how Wind
+  // Trails work to fit this system" (the 3-D air every other wind effect now reads). Three causes, measured in the
+  // code: (1) the heads steered by the OLD analytic field (ambient × a nearest-cell openness grid), not the air;
+  // (2) at a wall the momentum guard snapped the velocity in one frame and added a RANDOM impact kick — a kink
+  // in the stroke; (3) a loop rotated the move with no idea a wall was there, so it swung through corners.
+  // A tracer is a puff of AIR made visible, so it now behaves like one:
+  //   - it rides the baked wind field (`wind.field.now` — the 3-D air's 1-2 m layer once the solver runs, turbulence
+  //     included), integrated at the step's midpoint (RK2), with no momentum of its own;
+  //   - its heading can turn no tighter than TRACER_MIN_RADIUS_M, so a stroke is always a smooth curve;
+  //   - the floor's `_Outdoors` mask is the wall, at its own pixel size: a look-ahead slides the heading along it,
+  //     and a swept step veto stops a head on the wall, where it fades out (it never crosses a roof);
+  //   - a loop only starts where there is room for it (no wall within the loop's own size).
+  const tracer = p.tracer === true;
+  const fieldGrid =
+    tracer && windHandle?.hasField && windHandle?.fieldTexture && windHandle?.grid ? windHandle.grid : null;
+  let fieldTexture = fieldGrid ? windHandle.fieldTexture : null;
+  const fieldTexNodes = [];
+  /** The air at a point, in field units (× pxPerSecPerFieldUnit = world px/s). */
+  const airAt = (pos) => {
+    if (!fieldGrid) {
+      const f = sampleFlow(pos);
+      return f.flowVec.add(f.turbulenceVec);
+    }
+    const n = TSL.texture(fieldTexture, windGridUvNode(TSL, fieldGrid, pos)).level(float(0));
+    fieldTexNodes.push(n);
+    return n.xy;
+  };
+  const hasOutdoors = tracer && !!(outdoorsTexNode && uOutdoorsRect);
+  /** 1 outdoors, 0 under a roof — a texel LOAD (a wall is where the paint is), as Leaf Shed reads it. */
+  const outdoorsAt = (q) => {
+    if (!hasOutdoors) return float(1);
+    const size = vec2(TSL.textureSize(outdoorsTexNode, int(0)));
+    const uvn = q
+      .sub(uOutdoorsRect.xy)
+      .div(uOutdoorsRect.zw.sub(uOutdoorsRect.xy).max(vec2(1, 1)))
+      .clamp(0, 0.9999);
+    return outdoorsTexNode.load(TSL.ivec2(uvn.mul(size).floor())).r;
+  };
+  /** How much of a step stays outdoors, walked in samples spaced under a mask texel (Leaf Shed's veto). */
+  const TRACER_SWEEP_N = 6;
+  const clearFraction = (from, delta) => {
+    let f = float(1);
+    for (let k = 1; k <= TRACER_SWEEP_N; k++) {
+      const m = outdoorsAt(from.add(delta.mul(k / TRACER_SWEEP_N)));
+      f = f.min(m.lessThan(0.5).select(float((k - 1) / TRACER_SWEEP_N), float(1)));
+    }
+    return f;
+  };
+  const RING8 = [0, 1, 2, 3, 4, 5, 6, 7].map((k) => [Math.cos((k * Math.PI) / 4), Math.sin((k * Math.PI) / 4)]);
+  /** 1 when every tap on a ring of radius `r` round `c` is outdoors. */
+  const ringClear = (c, r) => {
+    let all = float(1);
+    for (const [cx, cy] of RING8)
+      all = all.min(
+        outdoorsAt(c.add(vec2(cx, cy).mul(r)))
+          .greaterThanEqual(0.5)
+          .select(float(1), float(0))
+      );
+    return all;
   };
 
   // Each trail's own lifetime — `lifeJitter` spreads them so a population never
@@ -574,7 +647,131 @@ export function createGustEngine({
       const st = sin(swirlTheta).mul(curl.speed);
       moveVel = vec2(vel.x.mul(ct).sub(vel.y.mul(st)), vel.x.mul(st).add(vel.y.mul(ct)));
     }
-    const next = pos.add(moveVel.mul(uDtSec));
+    let next = pos.add(moveVel.mul(uDtSec));
+
+    // THE TRACER (see "TRACER MODE" above): replaces the heading, the curl and the step for Wind Trails.
+    let tracerGone = null;
+    let tracerFade = null;
+    let tracerLatch = null;
+    if (tracer) {
+      const dt = uDtSec;
+      const ppm = pixelsPerMetreNode;
+      const rMinPx = ppm.mul(float(TRACER_MIN_RADIUS_M));
+      // RK2: the air at the step's midpoint, so a curving stream is followed, not cut across
+      const F0 = airAt(pos).mul(pxPerSecPerFieldUnit).mul(uWindGain);
+      const F = airAt(pos.add(F0.mul(dt.mul(0.5))))
+        .mul(pxPerSecPerFieldUnit)
+        .mul(uWindGain);
+      const fLen = F.length();
+      const speed = fLen.min(ceilingPxPerSec);
+      const want0 = fLen.greaterThan(1e-3).select(F.div(fLen.max(1e-3)), vec2(1, 0));
+      const oldV = velocity.element(i);
+      const oLen = oldV.length();
+      const cur = oLen.greaterThan(1e-3).select(oldV.div(oLen.max(1e-3)), want0);
+      // the wall ahead: slide the wanted heading along it, harder the nearer it is (three taps down the heading)
+      let want = want0;
+      if (hasOutdoors) {
+        const L = rMinPx.mul(2.5).max(speed.mul(dt).mul(3));
+        const m0 = outdoorsAt(pos);
+        let g = vec2(0, 0);
+        for (const [cx, cy] of RING8) {
+          const dir = vec2(cx, cy);
+          g = g.add(dir.mul(outdoorsAt(pos.add(dir.mul(L.mul(0.6)))).sub(m0)));
+        }
+        const gl = g.length();
+        const nOut = gl.greaterThan(0.05).select(g.div(gl.max(1e-4)), cur.negate());
+        const blockW = float(1)
+          .sub(outdoorsAt(pos.add(cur.mul(L.div(3)))))
+          .add(
+            float(1)
+              .sub(outdoorsAt(pos.add(cur.mul(L.mul(2 / 3)))))
+              .mul(0.6)
+          )
+          .add(
+            float(1)
+              .sub(outdoorsAt(pos.add(cur.mul(L))))
+              .mul(0.35)
+          )
+          .clamp(0, 1);
+        const into = want0.dot(nOut).negate().max(0);
+        // slide along the wall, and stand a little off it: a gentle push out while any tap is under a roof, so a trail
+        // that has been turned to run with a wall runs beside it (not grazing the paint line, a pixel either way)
+        const near = smoothstep(float(0), float(2), gl);
+        const slid = want0.add(nOut.mul(into.mul(blockW))).add(nOut.mul(near.mul(0.35)));
+        const tan = vec2(nOut.y.negate(), nOut.x);
+        const tanS = cur.dot(tan).greaterThanEqual(0).select(tan, tan.negate());
+        const sl = slid.length();
+        want = sl.greaterThan(0.2).select(slid.div(sl.max(1e-3)), tanS);
+      }
+      if (windOpennessBuffer) {
+        // THE WALL CELLS TOO (Foundry's own walls, incl. a courtyard's or a fence's, where the `_Outdoors` mask is
+        // outdoors on BOTH sides and so cannot stop a trail): a wide, gentle turn along the wall, eased by the turn
+        // limit below and WITHOUT the random impact kick (that kick was a kink)
+        const flowW = sampleFlow(pos);
+        want = deflectAroundWalls(TSL, {
+          vector: want,
+          awayDirX: flowW.wallAwayDirX,
+          awayDirY: flowW.wallAwayDirY,
+          proximity: smoothstep(float(0.35), float(WALL_MOMENTUM_GUARD_HIGH), flowW.wallProximity),
+          chaosDirX: float(0),
+          chaosDirY: float(0),
+          chaosAmount: float(0),
+        });
+        const wl = want.length();
+        want = wl.greaterThan(0.05).select(want.div(wl.max(1e-4)), cur);
+      }
+      // SMOOTH: the heading turns toward the wanted one at most |v| dt / R_min a step — never a corner
+      const maxTurn = speed.mul(dt).div(rMinPx.max(1e-3)).min(float(Math.PI));
+      const cA = cur.dot(want).clamp(-1, 1);
+      const sA = cur.x.mul(want.y).sub(cur.y.mul(want.x));
+      const cT = cos(maxTurn);
+      const sT = sin(maxTurn).mul(sA.greaterThanEqual(0).select(float(1), float(-1)));
+      const turned = vec2(cur.x.mul(cT).sub(cur.y.mul(sT)), cur.x.mul(sT).add(cur.y.mul(cT)));
+      const heading = cA.greaterThanEqual(cT).select(want, turned);
+      vel = heading.mul(speed);
+      // the curl, only where it has room: decided as the loop starts (θ is still 0 then, so no kink), held after
+      let move = vel;
+      tracerLatch = float(1);
+      if (swirlOn) {
+        const curl = buildTrailSwirlNodes(TSL, {
+          hash: (k) => hash11(s.mul(float(2.71 + 1.913 * k)).add(float(4.1 + 7.37 * k))),
+          uSwirl,
+          uSwirlVar,
+          lifeMs,
+          ageMs: age.element(i),
+          sizeLen: sizeOn ? sizeOf(s).length : float(1),
+        });
+        const latchOld = custom.element(i).z;
+        const started = age.element(i).greaterThanEqual(curl.startMs);
+        const D = speed
+          .mul(curl.turnSec)
+          .mul(1.3 / Math.PI)
+          .clamp(ppm.mul(0.5), ppm.mul(6));
+        const room = hasOutdoors ? ringClear(pos, D).min(ringClear(pos, D.mul(0.5))) : float(1);
+        const latch = started.and(latchOld.greaterThanEqual(0)).select(latchOld, room);
+        // store -1 ("not decided") until the loop starts, then the decision
+        tracerLatch = started.select(latch, float(-1));
+        const th = curl.theta.mul(latch);
+        const sp = float(1).add(curl.speed.sub(1).mul(latch));
+        const ct = cos(th).mul(sp);
+        const st = sin(th).mul(sp);
+        move = vec2(vel.x.mul(ct).sub(vel.y.mul(st)), vel.x.mul(st).add(vel.y.mul(ct)));
+        swirlTheta = th;
+      }
+      // THE WALL IS A WALL: the step stops on it, and the trail fades out there
+      const delta = move.mul(dt);
+      const frac = hasOutdoors
+        ? outdoorsAt(pos).greaterThanEqual(0.5).select(clearFraction(pos, delta), float(1))
+        : float(1);
+      next = pos.add(delta.mul(frac));
+      const hit = frac.lessThan(0.9999);
+      const fadeOld = custom.element(i).y;
+      tracerFade = hit
+        .or(fadeOld.greaterThan(0))
+        .select(fadeOld.add(dt.mul(1000).div(uFadeMs.max(1))), float(0))
+        .min(1);
+      tracerGone = tracerFade.greaterThanEqual(1);
+    }
 
     // Respawn on leaving the rect OR ageing out (same visual: fresh random spot).
     const outOfBounds = next.x
@@ -583,7 +780,7 @@ export function createGustEngine({
       .or(next.y.lessThan(uRectMin.y))
       .or(next.y.greaterThan(uRectMin.y.add(uRectSize.y)));
     const ageExpired = age.element(i).greaterThanEqual(lifeMs);
-    const shouldRespawn = outOfBounds.or(ageExpired);
+    const shouldRespawn = tracerGone ? outOfBounds.or(ageExpired).or(tracerGone) : outOfBounds.or(ageExpired);
 
     // BIASED reseed: pick the windiest of `respawnCandidates` random points, so
     // the few trails concentrate into fast air. Bounded, position+seed-hashed
@@ -610,6 +807,29 @@ export function createGustEngine({
       bestPos = better.select(cand, bestPos);
       bestMag = better.select(mag, bestMag);
     }
+    // a tracer is reborn OUTDOORS: the first of four random points that is not under a roof (a trail born indoors
+    // would sit out its life invisible, a slot wasted)
+    if (hasOutdoors) {
+      let pick = bestPos;
+      let pickOk = outdoorsAt(bestPos).greaterThanEqual(0.5);
+      for (let c = 1; c < 4; c++) {
+        const cand = randPointInRect(
+          s
+            .mul(0.53)
+            .add(next.y.mul(0.021))
+            .add(83.0 + c * 5.17),
+          s
+            .mul(0.37)
+            .add(next.x.mul(0.023))
+            .add(97.0 + c * 2.93)
+        );
+        const ok = outdoorsAt(cand).greaterThanEqual(0.5);
+        const take = pickOk.not().and(ok);
+        pick = take.select(cand, pick);
+        pickOk = pickOk.or(ok);
+      }
+      bestPos = pick;
+    }
     const finalPos = shouldRespawn.select(bestPos, next);
 
     position.element(i).assign(finalPos);
@@ -630,13 +850,28 @@ export function createGustEngine({
     const finalFlow = sampleFlow(finalPos);
     // In REAL m/s of local flow (2026-10-27) — was `flowMag × windSpeed01`,
     // which squared the dial and meant nothing physical.
-    const gate = smoothstep(uGateLoMps, uGateHiMps, finalFlow.flowMag.mul(float(MPS_PER_FIELD_UNIT)));
+    let gate = smoothstep(uGateLoMps, uGateHiMps, finalFlow.flowMag.mul(float(MPS_PER_FIELD_UNIT)));
+    if (tracer) {
+      // the air it rides (not the old field), never under a roof, and fading out once it has met a wall
+      gate = smoothstep(uGateLoMps, uGateHiMps, airAt(finalPos).length().mul(float(MPS_PER_FIELD_UNIT)))
+        .mul(outdoorsAt(finalPos).greaterThanEqual(0.5).select(float(1), float(0)))
+        .mul(shouldRespawn.select(float(1), float(1).sub(tracerFade)));
+    }
     // x = gate (READ BY THE DRAW's opacityNode below — must stay this exact
     // slot); y/z/w are diagnostic-only (flowMag, openness, head speed).
     // w = the curl's heading offset for a swirling engine (0 on respawn), the
     // head speed otherwise.
     const wSlot = swirlOn ? shouldRespawn.select(float(0), swirlTheta) : vel.length();
-    custom.element(i).assign(vec4(gate, finalFlow.flowMag, finalFlow.openness, wSlot));
+    // (a tracer keeps its own state in y/z: y = how far through its fade-out at a wall, z = loop room -1|0|1)
+    if (tracer) {
+      custom
+        .element(i)
+        .assign(
+          vec4(gate, shouldRespawn.select(float(0), tracerFade), shouldRespawn.select(float(-1), tracerLatch), wSlot)
+        );
+    } else {
+      custom.element(i).assign(vec4(gate, finalFlow.flowMag, finalFlow.openness, wSlot));
+    }
 
     // APPEND to the ring: write finalPos to the head slot; on respawn overwrite
     // EVERY slot (collapse the ribbon onto the new spawn point). One branchless
@@ -960,6 +1195,11 @@ export function createGustEngine({
      * @param {object|null} nextHandle
      */
     updateWind(nextHandle) {
+      // a tracer's air texture is re-allocated with its grid: same grid → rebind in place
+      if (fieldGrid && nextHandle?.hasField && nextHandle.fieldTexture && nextHandle.fieldTexture !== fieldTexture) {
+        fieldTexture = nextHandle.fieldTexture;
+        for (const n of fieldTexNodes) n.value = fieldTexture;
+      }
       if (!windOpennessBuffer || !nextHandle?.grid || !nextHandle?.cells) return;
       if (nextHandle.version === windHandleVersion) return; // nothing changed
       const { cols, rows } = nextHandle.grid;
@@ -999,6 +1239,29 @@ export function createGustEngine({
       if (Array.isArray(look.colorRGB) && look.colorRGB.length === 3) color.value.setRGB(...look.colorRGB);
       // Trail LENGTH in seconds of path — only for a fixed-clock engine.
       if (Number.isFinite(look.lengthSec) && look.lengthSec > 0 && segmentSec > 0) segmentSec = look.lengthSec / SEG;
+    },
+
+    /**
+     * The MSA Lab's meter: every trail's remembered path (oldest to newest, world px) and its visibility gate, read
+     * back from the GPU. Stalls the queue for a frame: console and lab only.
+     * @param {*} renderer
+     * @returns {Promise<{trails: {gate:number, fade:number, loop:number, pts:number[][]}[], seg:number, headSlot:number}>}
+     */
+    async readTrails(renderer) {
+      const hist = new Float32Array(await renderer.getArrayBufferAsync(trailHistory.value));
+      const cus = new Float32Array(await renderer.getArrayBufferAsync(custom.value));
+      const trails = [];
+      for (let t = 0; t < capacity; t++) {
+        const pts = [];
+        // the ring's oldest slot is the one after the head
+        for (let k = 1; k <= SEG; k++) {
+          const slot = (headSlot + k) % SEG;
+          const o = (t * SEG + slot) * 2;
+          pts.push([hist[o], hist[o + 1]]);
+        }
+        trails.push({ gate: cus[t * 4], fade: cus[t * 4 + 1], loop: cus[t * 4 + 2], pts });
+      }
+      return { trails, seg: SEG, headSlot, tracer };
     },
 
     /** For the debug panel: prove the engine is alive without a screenshot. */

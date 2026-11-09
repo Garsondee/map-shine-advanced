@@ -417,6 +417,7 @@ import {
   getVtPanViewerPrecipitationStatus,
   readVtPanViewerPrecipParticles,
   readVtPanViewerWindField,
+  readVtPanViewerWindTrails,
   setVtPanViewerLivingWind,
   vtPanViewerAir,
   getVtPanViewerLivingWind,
@@ -1640,6 +1641,8 @@ MapShine.readPrecipParticles = readVtPanViewerPrecipParticles;
  * factors, spectra and correlation lengths. Stalls the GPU queue for a frame — console and lab only.
  */
 MapShine.readWindField = readVtPanViewerWindField;
+/** The MSA Lab's Wind Trails read-back: every trail's remembered path and visibility gate. Console and lab only. */
+MapShine.readWindTrails = readVtPanViewerWindTrails;
 /**
  * LIVING WIND (mmp-vm1.1): the flow solver that writes the wind field (wakes, door jets, yards, gusts that carry
  * momentum and fade). `MapShine.setLivingWind(true|false)` forces it for this session, `null` follows the stored

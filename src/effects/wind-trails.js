@@ -17,6 +17,14 @@
  * geometry, they stream around buildings and into open doorways rather than
  * through walls.
  *
+ * ⭐ 2026-11-09, TRACERS (author: trails "cutting corners of buildings", "bent at angles rather than smoothly"):
+ * a trail is a puff of the 3-D air (`vt/air-runtime.js`) made visible. Its head rides the baked wind field every other
+ * effect reads, integrated at the step's midpoint; its heading turns no tighter than a real eddy
+ * (`TRACER_MIN_RADIUS_M`); the floor's `_Outdoors` mask is a hard wall (a swept step veto: it stops on the roof's edge and
+ * fades out) and Foundry's wall cells steer it along walls, standing a little off them; a loop only starts where it has
+ * room. Measured on the lab rig against the same wind: 15.7% of trail points inside roofs before, 1.9% after (the rest are
+ * the stop pixel on the edge). See `particles/gust-runtime.js`, "TRACER MODE".
+ *
  * THE LOOK IS ANIME WIND LINES (author, 2026-10-27, after the first lab cut:
  * *"Those lines aren't tapered at both ends, they are overlapping, we need much
  * more sparse. Think anime wind lines."*): a FEW thin strokes on screen at once,
@@ -239,7 +247,9 @@ export function buildWindTrailsSystem(params = {}, profile) {
       widthPx: v('widthPx'),
       opacityMax: v('opacity'),
       colorRGB: hexToRgb01(params.color ?? WIND_TRAILS_PARAMS.color.default),
-      // The air's own velocity, followed closely — a trail is that air.
+      // The air's own velocity, followed exactly — a trail is that air (TRACER mode, gust-runtime.js, 2026-11-09:
+      // rides the 3-D air, turns smoothly, stops at the `_Outdoors` wall, loops only where there is room).
+      tracer: true,
       windGain: 1,
       accelToMaxSeconds: 0.25,
       lifeMs,

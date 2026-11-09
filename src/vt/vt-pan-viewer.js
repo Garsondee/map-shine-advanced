@@ -8289,18 +8289,15 @@ async function startVtPanViewerUnserialized({
           windFieldBake = null;
           windFieldNowRT = allocator.create('wind.field.now', describeWindSimRT());
           windFieldLagRT = allocator.create('wind.field.lag', describeWindSimRT());
-          // LIVING WIND's own targets — same grid, same lifetime; a regrid restarts the solver from the bake.
+          // LIVING WIND's own targets belong to the old grid: drop them; `ensureWindFlow` allocates new ones the
+          // first time the solver runs on this grid (a scene that never turns it on never pays for them).
           for (const rt of [windFlowStateA, windFlowStateB, windFlowPressA, windFlowPressB, windFlowDivRT]) {
             allocator.dispose(rt);
           }
+          windFlowStateA = windFlowStateB = windFlowPressA = windFlowPressB = windFlowDivRT = null;
           windFlow?.materials?.dispose?.();
           windFlow = null;
           windFlowPrimed = false;
-          windFlowStateA = allocator.create('wind.flow.stateA', describeWindSimRT());
-          windFlowStateB = allocator.create('wind.flow.stateB', describeWindSimRT());
-          windFlowPressA = allocator.create('wind.flow.pressA', describeWindSimRT());
-          windFlowPressB = allocator.create('wind.flow.pressB', describeWindSimRT());
-          windFlowDivRT = allocator.create('wind.flow.div', describeWindSimRT());
           // THE RECORDED GUST HISTORY: a one-tile target the bake draws into, and the 4x4-tile atlas
           // consumers read. Single-channel half float — the atlas is the biggest of these, and at the
           // 512-cell cap it is 2048 px square (the allocator's own limit) at 2 bytes a texel.
@@ -8337,11 +8334,6 @@ async function startVtPanViewerUnserialized({
             windFieldLagRT,
             windGustSlotRT,
             windGustAtlasRT,
-            windFlowStateA,
-            windFlowStateB,
-            windFlowPressA,
-            windFlowPressB,
-            windFlowDivRT,
           ]) {
             renderer.setRenderTarget(rt);
             renderer.clear(true, false, false);
@@ -8842,9 +8834,46 @@ async function startVtPanViewerUnserialized({
       }
     }
 
+    /** LIVING WIND's five grid-sized targets, allocated (and cleared) the first time the solver runs on a grid. */
+    function ensureWindFlowTargets() {
+      if (windFlowStateA) return true;
+      const g = windHandle.grid;
+      if (!g || !windFieldNowRT) return false;
+      const describe = () => ({
+        resolvedW: g.cols,
+        resolvedH: g.rows,
+        type: THREE.HalfFloatType,
+        format: THREE.RGBAFormat,
+        colorSpace: THREE.NoColorSpace,
+        filter: 'linear',
+        depth: false,
+      });
+      windFlowStateA = allocator.create('wind.flow.stateA', describe());
+      windFlowStateB = allocator.create('wind.flow.stateB', describe());
+      windFlowPressA = allocator.create('wind.flow.pressA', describe());
+      windFlowPressB = allocator.create('wind.flow.pressB', describe());
+      windFlowDivRT = allocator.create('wind.flow.div', describe());
+      // Fresh GPU memory is undefined: zero the pressures and the divergence (the state is seeded from the bake).
+      const prevRT = renderer.getRenderTarget();
+      const prevClearColor = renderer.getClearColor(new THREE.Color());
+      const prevClearAlpha = renderer.getClearAlpha();
+      renderer.setClearColor(0x000000, 0);
+      for (const rt of [windFlowStateA, windFlowStateB, windFlowPressA, windFlowPressB, windFlowDivRT]) {
+        renderer.setRenderTarget(rt);
+        renderer.clear(true, false, false);
+      }
+      renderer.setRenderTarget(prevRT);
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
+      windFlowStateIsA = true;
+      windFlowPressIsA = true;
+      windFlowPrimed = false;
+      return true;
+    }
+
     /** The solver's materials for the CURRENT layout and performance profile, built lazily. */
     function ensureWindFlow() {
-      if (!windHandle.hasBake || !windGrid.structure || !windFlowStateA || !windFieldNowRT) return null;
+      if (!windHandle.hasBake || !windGrid.structure || !windFieldNowRT) return null;
+      if (!ensureWindFlowTargets()) return null;
       const tier = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile) ?? 'standard';
       if (windFlow && windFlow.layoutVersion === windLayoutVersion && windFlow.tier === tier) return windFlow;
       windFlow?.materials?.dispose?.();
@@ -8859,6 +8888,7 @@ async function startVtPanViewerUnserialized({
         divTexture: windFlowDivRT.texture,
         solidMaskTexture,
         opennessTexture,
+        wallAvoidTexture: windGrid.wallAvoidTexture,
         ambient: windAmbientRef,
         grid: windHandle.grid,
         tier,

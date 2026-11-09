@@ -84,12 +84,13 @@ export function buildWindFlowForceMaterial({
   velTexture,
   solidMaskTexture,
   opennessTexture,
+  wallAvoidTexture = null,
   ambient,
   grid,
   opts = {},
 }) {
   const TSL = THREE.TSL;
-  const { texture, vec2, vec4, float, uniform, clamp, max, exp, length, select, min } = TSL;
+  const { texture, vec2, vec4, float, uniform, clamp, max, exp, length, select, min, mix } = TSL;
   const o = { ...WIND_FLOW_DEFAULTS, ...opts };
   const { uv0, tx, ty } = gridHelpers(TSL, grid);
   const uDtSec = uniform(float(0));
@@ -132,10 +133,13 @@ export function buildWindFlowForceMaterial({
 
   // FORCE. Open sky relaxes toward the driver at |driver| / L (m/s ÷ m), roofed air is damped.
   const open = clamp(texture(opennessTexture, uv0).w, float(0), float(1));
-  const kRelax = max(
-    float(o.minRelaxPerSec),
-    length(driver).mul(float(WIND_DIAL_MAX_METRES_PER_SECOND / Math.max(o.relaxLengthM, 1e-3)))
-  );
+  // Clear air follows the driver closely; air beside a wall or in its shadow is left to the solver (the reference's
+  // `shelter` blend). Shelter = the larger of the baked wall proximity and upwind shadow.
+  const wa = wallAvoidTexture ? texture(wallAvoidTexture, uv0) : null;
+  const shelter = wa ? clamp(max(wa.z, wa.w), float(0), float(1)).sqrt() : float(1);
+  const relaxLen = mix(float(o.clearRelaxLengthM), float(o.relaxLengthM), shelter);
+  const relaxFloor = mix(float(o.minRelaxClearPerSec), float(o.minRelaxPerSec), shelter);
+  const kRelax = max(relaxFloor, length(driver).mul(float(WIND_DIAL_MAX_METRES_PER_SECOND)).div(relaxLen));
   const relax = float(1)
     .sub(exp(kRelax.mul(uDtSec).negate()))
     .mul(open);
@@ -384,6 +388,7 @@ export function buildWindFlowMaterials({
   divTexture,
   solidMaskTexture,
   opennessTexture,
+  wallAvoidTexture = null,
   ambient,
   grid,
   tier,
@@ -401,6 +406,7 @@ export function buildWindFlowMaterials({
     velTexture: stateTexture,
     solidMaskTexture,
     opennessTexture,
+    wallAvoidTexture,
     ambient,
     grid,
     opts: o,

@@ -45,6 +45,14 @@ export const WIND_FLOW_DEFAULTS = Object.freeze({
   relaxLengthM: 18,
   /** A floor on the relax rate (1/s), so a light breeze's lee still refills in seconds, not minutes. */
   minRelaxPerSec: 0.25,
+  /**
+   * A KNOB FOR CLEAR AIR, set equal to the sheltered values (no effect) as measured and shipped. Shorter here would make
+   * open ground follow the driver's gust fronts more closely (sharper, stronger gusts) while walls and their shadows
+   * keep the solver's own wakes (`relaxLengthM`); the blend reads the baked shelter (wall proximity, upwind shadow).
+   * Measured on Lab · Wind with 18 m everywhere: open-field σ/U 0.13-0.29, 3-s gust factor 1.25-1.5, σθ 5-9°.
+   */
+  clearRelaxLengthM: 18,
+  minRelaxClearPerSec: 0.25,
   /** Momentum lost per second by ROOFED air (indoor friction: furniture, walls, no driver). */
   indoorDampPerSec: 1.2,
   /** Vorticity confinement strength (dimensionless, in cells). 0 = laminar. */
@@ -120,6 +128,9 @@ export function flowAdvect({ vx, vy, cols, rows, solid = null, dt }) {
  * @param {number} a.cols @param {number} a.rows @param {number} a.dt
  * @param {number} a.relaxCells - `relaxLengthM` in cells.
  * @param {number} [a.minRelaxPerSec] @param {number} [a.indoorDampPerSec]
+ * @param {Float32Array} [a.shelter] - 0..1 per cell (1 = beside a wall or deep in its wind shadow). With it, clear air
+ *   (shelter 0) relaxes over `clearRelaxCells` with floor `minRelaxClearPerSec`; sheltered air over `relaxCells`.
+ * @param {number} [a.clearRelaxCells] @param {number} [a.minRelaxClearPerSec]
  */
 export function flowForce({
   vx,
@@ -134,6 +145,9 @@ export function flowForce({
   relaxCells,
   minRelaxPerSec = WIND_FLOW_DEFAULTS.minRelaxPerSec,
   indoorDampPerSec = WIND_FLOW_DEFAULTS.indoorDampPerSec,
+  shelter = null,
+  clearRelaxCells = relaxCells,
+  minRelaxClearPerSec = WIND_FLOW_DEFAULTS.minRelaxClearPerSec,
 }) {
   const damp = 1 - Math.exp(-indoorDampPerSec * dt);
   for (let r = 0; r < rows; r++) {
@@ -150,7 +164,10 @@ export function flowForce({
         continue;
       }
       const open = sky ? Math.min(1, Math.max(0, sky[i])) : 1;
-      const k = Math.max(minRelaxPerSec, Math.hypot(tx[i], ty[i]) / Math.max(relaxCells, 1e-6));
+      const sh = shelter ? Math.sqrt(Math.min(1, Math.max(0, shelter[i]))) : 1;
+      const len = clearRelaxCells + (relaxCells - clearRelaxCells) * sh;
+      const floor = minRelaxClearPerSec + (minRelaxPerSec - minRelaxClearPerSec) * sh;
+      const k = Math.max(floor, Math.hypot(tx[i], ty[i]) / Math.max(len, 1e-6));
       const relax = (1 - Math.exp(-k * dt)) * open;
       const d = damp * (1 - open);
       vx[i] += (tx[i] - vx[i]) * relax - vx[i] * d;

@@ -1102,6 +1102,7 @@ export function buildEnvironmentalLightMaterials({
   /** The scene environment last derived, and the key it was derived from (re-derived only when it changes). */
   let ambienceKey = null;
   let ambienceDerived = deriveAmbienceUniforms(null);
+  let ambienceDarkness = NaN;
   /**
    * Push this frame's environment filter: the scene's `environment` ({cycle, base, dark}) at MSA's darkness.
    * @param {*} environment - `canvas.scene.environment`, or null (filter off). @param {number} darkness01
@@ -1113,7 +1114,12 @@ export function buildEnvironmentalLightMaterials({
     if (key !== ambienceKey) {
       ambienceKey = key;
       ambienceDerived = deriveAmbienceUniforms(environment);
+      ambienceDarkness = NaN;
     }
+    // Perf sweep 2026-11-08: same environment, same darkness → the uniforms already hold this (skips the per-frame
+    // interpolation and its small arrays).
+    if (darkness01 === ambienceDarkness) return;
+    ambienceDarkness = darkness01;
     setAmbienceUniforms(uAmbience, ambienceDerived, darkness01);
   }
 

@@ -149,6 +149,9 @@ import { createLogger } from '../core/log.js';
 // "Two floors on screen" detector (loading audit §6.7) — armed at each floor commit,
 // checked once per frame afterwards. Reports only; see the module's header.
 import { createPresentationMonitor } from '../diag/presentation-monitor.js';
+import { createAirView } from '../diag/air-view.js';
+import { createAirRuntime } from './air-runtime.js';
+import { AIR_GRID_DEFAULTS } from '../world/index.js';
 import { buildViewerDiagnostics, describeParallelShaderCompile } from './vt-pan-viewer-diagnostics.js';
 import { loadMaskImageTexture } from './mask-image.js';
 import { createPostFrameScanner, readUiWindowRects } from './ui-shadow-scan.js';
@@ -332,6 +335,7 @@ import {
   readMouseHoverPoint,
   getActiveSceneFloors,
   readSceneWallSegments,
+  readSceneAirFacts,
   readSetting,
   resolveTileMotionFrame,
   getTileMotionConfig,
@@ -7807,6 +7811,15 @@ async function startVtPanViewerUnserialized({
     let windFlowPrimed = false;
     /** Runtime switch (MapShine.setLivingWind); `null` = follow the stored flag / default. */
     let windFlowForce = null;
+    // THE 3-D AIR (vt/air-runtime.js + world/air-*.js, Lab · Air 2026-11-09) — a coarse 3-D flow with turbulence
+    // energy, run in a worker; when it is on, its 1-2 m layer IS the baked wind field every effect reads. `airForce`:
+    // MapShine.air.on(true|false|null); null follows `msa.air` (localStorage), then the scene's `air` flag.
+    let airForce = null;
+    let airRuntime = null;
+    let airView = null;
+    let airGeometry = null;
+    /** DRAFTINESS this session (MapShine.air.draftiness); null follows the scene's `airDraftiness`, then the default. */
+    let airDraftiness = null;
     const windFlowStats = { steps: 0, lastSteps: 0, lastJacobi: 0, tier: null };
     // THE WIND ON THE CPU (world/wind-cpu-field.js, mmp-vm1.1.15) — a 4×-smaller copy of the `now` slice, read back
     // asynchronously every few frames (one in flight), for effects that decide on the CPU. `windCpuField` is the
@@ -8258,6 +8271,9 @@ async function startVtPanViewerUnserialized({
           outdoorsForWind = null;
         }
         windBakedOutdoorsSignature = outdoorsGridSignature(outdoorsForWind);
+        // THE 3-D AIR takes the same walls and sky; the worker rebuilds only when they changed.
+        airGeometry = buildAirGeometry(walls, outdoorsForWind, gridSizePixels);
+        if (airEnabled()) ensureAirConfigured();
         // MEMOISED PER FLOOR (loading audit P-06): floor PREPARE
         // (`warmWindStructureForFloor`) runs this same bake for the TARGET floor
         // while the old one is on screen, so on the commit frame it is a lookup.
@@ -8839,6 +8855,179 @@ async function startVtPanViewerUnserialized({
       windFieldBakeStamp.frames += 1;
     }
 
+    /**
+     * Is the 3-D AIR on? ON BY DEFAULT (Ingram, 2026-11-09: "we don't make awesome things and then leave them off by
+     * default"). MapShine.air.on wins, then localStorage `msa.air` ('1' / '0'), then the scene's `air` flag (false = off).
+     */
+    function airEnabled() {
+      if (airForce !== null) return airForce;
+      try {
+        const v = globalThis.localStorage?.getItem('msa.air');
+        if (v === '1') return true;
+        if (v === '0') return false;
+      } catch {
+        // storage blocked: follow the scene
+      }
+      return readSceneAirFacts().enabled !== false;
+    }
+
+    /** The air's geometry from one wind bake's inputs (walls, the painted sky, the scene's authored roof heights). */
+    function buildAirGeometry(walls, outdoors, gridSizePixels) {
+      const s = outdoors?.spec;
+      const sky =
+        s && outdoors.data
+          ? { x: s.x, y: s.y, width: s.width, height: s.height, w: s.w, h: s.h, data: outdoors.data }
+          : null;
+      return {
+        walls: (walls ?? []).map((w) => ({
+          x1: w.x1,
+          y1: w.y1,
+          x2: w.x2,
+          y2: w.y2,
+          solid: !!w.solid,
+          blocksExterior: !!w.blocksExterior,
+          door: !!w.door,
+          window: !!w.reachWindow,
+        })),
+        rect: { x: dimensions.sceneX, y: dimensions.sceneY, w: dimensions.sceneWidth, h: dimensions.sceneHeight },
+        cellPx: gridSizePixels,
+        pxPerMetre: uWindPixelsPerMetre.value,
+        sky,
+        roofs: readSceneAirFacts().roofs,
+        gridOpts: { draftiness01: airDraftiness ?? readSceneAirFacts().draftiness01 ?? AIR_GRID_DEFAULTS.draftiness01 },
+      };
+    }
+
+    function ensureAirRuntime() {
+      if (!airRuntime) airRuntime = createAirRuntime({ THREE, log });
+      return airRuntime;
+    }
+
+    /** Hand the worker the latest geometry (a no-op when it has not changed). */
+    function ensureAirConfigured() {
+      if (!airGeometry) return false;
+      ensureAirRuntime().configure(airGeometry);
+      return true;
+    }
+
+    /** The weather the air is pushed by, now. */
+    function airWindNow() {
+      return {
+        directionDeg: uWindDirectionDeg.value,
+        speedMps: metresPerSecondForSpeed01(uWindSpeed01.value),
+        gustiness01: uWindGustiness01.value,
+      };
+    }
+
+    /**
+     * THE 3-D AIR, one frame: step the worker on the sim clock and compose its ground layer into both field slices.
+     * False until the first field arrives (the caller falls back to Living Wind or the analytic bake meanwhile).
+     * @param {number} tMs @param {number} dtSec
+     */
+    function tickAir(tMs, dtSec) {
+      if (!ensureAirConfigured() || !Number.isFinite(tMs)) return false;
+      const rt = airRuntime;
+      rt.tick(tMs / 1000, dtSec, airWindNow());
+      if (!rt.ready || !windFieldNowRT || !windFieldLagRT || !windHandle.grid) return false;
+      const entry = rt.compose(windHandle.grid, windAmbientRef);
+      if (!entry) return false;
+      const lagSec = Math.max(0, getVegetationRenderState()?.params?.groundLagSec ?? 0);
+      const prevRT = renderer.getRenderTarget();
+      rt.prepareCompose(entry, tMs / 1000, tMs, 0);
+      renderer.setRenderTarget(windFieldNowRT);
+      entry.quad.render(renderer);
+      entry.uLagSec.value = lagSec;
+      renderer.setRenderTarget(windFieldLagRT);
+      entry.quad.render(renderer);
+      renderer.setRenderTarget(prevRT);
+      windFieldBakeStamp.nowMs = tMs;
+      windFieldBakeStamp.lagMs = tMs - lagSec * 1000;
+      windFieldBakeStamp.frames += 1;
+      return true;
+    }
+
+    /** The wind view (diag/air-view.js), built on first use. */
+    function ensureAirView() {
+      if (airView) return airView;
+      airView = createAirView({
+        host: mount.host,
+        worldRect: () => (view ? viewToWorldRect(view, canvasW / canvasH) : null),
+        air: () => airRuntime,
+        wind: () => airWindNow(),
+        wantLayers: (on) => ensureAirRuntime().setWantLayers(on),
+      });
+      return airView;
+    }
+
+    /** MapShine.air: one door for the 3-D air (switch, view, read-outs). */
+    function airApi(method, ...args) {
+      switch (method) {
+        case 'on': {
+          const v = args[0];
+          airForce = v === null || v === undefined ? null : !!v;
+          if (airEnabled()) ensureAirConfigured();
+          return { enabled: airEnabled(), ...(airRuntime?.stats() ?? {}) };
+        }
+        case 'status':
+          return {
+            enabled: airEnabled(),
+            ready: !!airRuntime?.ready,
+            hasGeometry: !!airGeometry,
+            view: airView?.on ?? false,
+            ...(airRuntime?.stats() ?? {}),
+          };
+        case 'view': {
+          const opts = args[0] ?? true;
+          if (opts !== false && !(opts && opts.on === false) && airEnabled()) ensureAirConfigured();
+          return ensureAirView().set(opts);
+        }
+        case 'at': {
+          // The air at a world point (px) and height (m) from the latest snapshot: m/s, σ, indoor.
+          const [x, y, z = 1.5] = args;
+          const g = airRuntime?.grid;
+          const snap = airRuntime?.latest?.();
+          if (!g || !snap) return null;
+          const i = Math.floor((x - g.originX) / g.cellPx);
+          const j = Math.floor((y - g.originY) / g.cellPx);
+          if (i < 0 || j < 0 || i >= g.nx || j >= g.ny) return null;
+          let k = 0;
+          while (k < g.nz - 1 && z >= g.zb[k + 1]) k++;
+          const arr = snap.all ?? (k === 1 ? snap.ground : null);
+          if (!arr) return { reason: 'only the 1-2 m layer is sent while the wind view is off', layer: k };
+          const base = (snap.all ? k * g.nx * g.ny : 0) + j * g.nx + i;
+          const [vx, vy, vz, kk] = [arr[base * 4], arr[base * 4 + 1], arr[base * 4 + 2], arr[base * 4 + 3]];
+          return {
+            vx,
+            vy,
+            vz,
+            speed: Math.hypot(vx, vy),
+            sigma: Math.sqrt(Math.max(0, (2 * kk) / 3)),
+            layer: k,
+            simTimeSec: snap.simTimeSec,
+          };
+        }
+        case 'draftiness': {
+          // How much shut doors and closed windows leak, 0..1; null follows the scene. Rebuilds the air's walls.
+          const v = args[0];
+          airDraftiness = v === null || v === undefined ? null : Math.min(1, Math.max(0, Number(v) || 0));
+          if (airGeometry) {
+            airGeometry = {
+              ...airGeometry,
+              gridOpts: {
+                draftiness01: airDraftiness ?? readSceneAirFacts().draftiness01 ?? AIR_GRID_DEFAULTS.draftiness01,
+              },
+            };
+            if (airEnabled()) ensureAirConfigured();
+          }
+          return { draftiness01: airGeometry?.gridOpts?.draftiness01 ?? null };
+        }
+        case 'snapshot':
+          return { grid: airRuntime?.grid ?? null, ...(airRuntime?.latest?.() ?? {}) };
+        default:
+          return { error: `unknown air method ${method}` };
+      }
+    }
+
     /** Is LIVING WIND on? MapShine.setLivingWind wins, then localStorage `msa.livingWind` ('1' / '0'), then off. */
     function windFlowEnabled() {
       if (windFlowForce !== null) return windFlowForce;
@@ -8985,6 +9174,7 @@ async function startVtPanViewerUnserialized({
 
     /** The frame's wind field: LIVING WIND when it is on and can run, else the analytic bake. */
     function tickWindFieldOrFlow(tMs, dtSec) {
+      if (airEnabled() && tickAir(tMs, dtSec)) return;
       if (windFlowEnabled() && tickWindFlow(tMs, dtSec)) return;
       windFlowPrimed = false;
       tickWindFieldBake(tMs);
@@ -9848,6 +10038,10 @@ async function startVtPanViewerUnserialized({
         }
         windCpuPass?.material?.dispose?.();
         allocator.dispose(windCpuRT);
+        airView?.dispose?.();
+        airRuntime?.dispose?.();
+        airView = null;
+        airRuntime = null;
         windGrid.dispose();
       } catch (err) {
         log.error('wind sim dispose failed — GPU buffers may leak until renderer.dispose():', err);
@@ -32832,6 +33026,8 @@ async function startVtPanViewerUnserialized({
         if (!windFlowEnabled()) windFlowPrimed = false;
         return { enabled: windFlowEnabled(), ...windFlowStats };
       },
+      /** THE 3-D AIR (Lab · Air): `air('on', true|false|null)`, `air('view', opts)`, `air('at', x, y, z)`, `air('status')`. */
+      air: airApi,
       getLivingWind: () => ({
         enabled: windFlowEnabled(),
         primed: windFlowPrimed,
@@ -36281,6 +36477,15 @@ export async function readVtPanViewerWindField(opts) {
 export function setVtPanViewerLivingWind(on) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setLivingWind(on);
+}
+/**
+ * THE 3-D AIR's one door (Lab · Air, 2026-11-09). `method`: 'on' (true|false|null), 'status', 'view' (true|false|{on,
+ * layer, mode: 'speed'|'lift'|'churn', tracers, slice, followCursor}), 'at' (x px, y px, z m), 'snapshot'.
+ * @param {string} method @param {...*} args
+ */
+export function vtPanViewerAir(method, ...args) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.air(method, ...args);
 }
 /** @returns {object} LIVING WIND's switch and stats. */
 export function getVtPanViewerLivingWind() {

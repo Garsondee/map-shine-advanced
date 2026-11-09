@@ -231,6 +231,10 @@ export {
   windFlowCellsPerSecPerUnit,
 } from './wind-flow.js';
 export { buildWindFlowMaterials, windFlowTierPlan, WIND_FLOW_TIERS } from './wind-flow-gpu.js';
+// THE 3-D AIR (Lab · Air, 2026-11-09): geometry, weather, solver (the worker imports these files directly).
+export { buildAirGrid, AIR_GRID_DEFAULTS, AIR_LAYER_BOUNDS_M } from './air-grid.js';
+export { AIR_DRIVER_DEFAULTS, airProfile } from './air-driver.js';
+export { createAirState, stepAir, airAt, airLayer, AIR_SOLVER_DEFAULTS } from './air-solver.js';
 // THE WIND ON THE CPU (mmp-vm1.1.15) — the read-back copy CPU-side effects sample.
 export {
   WIND_CPU_FIELD_DOWNSAMPLE,

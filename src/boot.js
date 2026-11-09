@@ -418,6 +418,7 @@ import {
   readVtPanViewerPrecipParticles,
   readVtPanViewerWindField,
   setVtPanViewerLivingWind,
+  vtPanViewerAir,
   getVtPanViewerLivingWind,
   setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,
@@ -1646,6 +1647,22 @@ MapShine.readWindField = readVtPanViewerWindField;
  */
 MapShine.setLivingWind = setVtPanViewerLivingWind;
 MapShine.getLivingWind = getVtPanViewerLivingWind;
+/**
+ * THE 3-D AIR (Lab · Air, 2026-11-09): a coarse 3-D flow (walls with height, roofs as lids, doors as holes in the
+ * bottom two metres) with turbulence energy, run in a worker; when on, its 1-2 m layer is the wind every effect reads.
+ *   MapShine.air.on(true|false|null)   force it for this session (null: follow `msa.air`, then the scene's `air` flag)
+ *   MapShine.air.view(true|false|{layer, mode: 'speed'|'lift'|'churn', tracers, slice, followCursor})   the wind view
+ *   MapShine.air.at(x, y, zMetres)      the air at a world point;  MapShine.air.status()
+ *   MapShine.air.draftiness(0..1|null)  how much shut doors and closed windows leak (null: the scene's `airDraftiness`)
+ */
+MapShine.air = Object.freeze({
+  on: (v) => vtPanViewerAir('on', v),
+  status: () => vtPanViewerAir('status'),
+  view: (o) => vtPanViewerAir('view', o),
+  at: (x, y, z) => vtPanViewerAir('at', x, y, z),
+  snapshot: () => vtPanViewerAir('snapshot'),
+  draftiness: (v) => vtPanViewerAir('draftiness', v),
+});
 
 MapShine.addWeatherEvent = addVtPanViewerWeatherEvent;
 MapShine.releaseWeatherEvent = releaseVtPanViewerWeatherEvent;

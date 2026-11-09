@@ -306,6 +306,8 @@ export function readSceneWallSegments(levelId = null) {
         blocksLight: deriveWallBlocksLight({ light: wall.light, door: wall.door, ds: wall.ds }),
         // Divides rooms (`scene/room-map.js`) — see deriveWallRoomBarrier.
         roomBarrier: deriveWallRoomBarrier({ light: wall.light, sight: wall.sight, door: wall.door }),
+        // A door (open or shut): the 3-D air lets a SHUT one leak by its draftiness (world/air-grid.js).
+        door: Number.isFinite(wall.door) && wall.door !== WALL_DOOR_NONE,
       });
     }
     return out;

@@ -391,6 +391,7 @@ export {
   watchSceneWallStructure,
   watchDoorOpenings,
 } from './scene-walls.js';
+export { parseSceneAirFacts, readSceneAirFacts } from './scene-air.js';
 
 // THE DOOR READER — the one place a wall's DOOR GRAPHIC fields (texture,
 // animation type/double/direction/strength/flip, open state) are read, for the

@@ -1,7 +1,7 @@
 ---
-sources: src/scene/mask-catalog.js (outdoors: required, transparent = unpainted), src/ui/rooms/remote/readiness-card.js, src/ui/paint-mode.js
+sources: src/scene/mask-catalog.js (outdoors: required, transparent = unpainted), src/world/air-grid.js (roofs, doors), src/ui/rooms/remote/readiness-card.js, src/ui/paint-mode.js
 ---
-Rain, snow, cloud shadows and wind all stop at the edge of a roof. Map Shine finds roofs on the map's `_Outdoors` mask: **white is open sky, black is under a roof.** Weather indoors means that room is white, or not painted, on the mask.
+Rain, snow and cloud shadows stop at the edge of a roof, and wind only comes in through open doors. Map Shine finds roofs on the map's `_Outdoors` mask: **white is open sky, black is under a roof.** Weather indoors means that room is white, or not painted, on the mask.
 
 ### Right now, mid-session
 

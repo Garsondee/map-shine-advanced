@@ -99,6 +99,7 @@ export {
   readVtPanViewerPrecipParticles,
   readVtPanViewerWindField,
   setVtPanViewerLivingWind,
+  vtPanViewerAir,
   getVtPanViewerLivingWind,
   setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,

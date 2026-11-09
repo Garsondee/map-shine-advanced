@@ -1,5 +1,5 @@
 ---
-sources: src/world/weather-data.js (WEATHER_ARCHETYPES), src/ui/rooms/remote/weather-board.js, src/ui/rooms/remote/shell.js (scope chip, Fade Time), src/effects/precipitation (ground-mist-render.js for fog), src/effects/lightning-storm.js + src/effects/lightning.js (Storm dials, lightning), src/foundry/world-clock.js (pause)
+sources: src/world/weather-data.js (WEATHER_ARCHETYPES), src/ui/rooms/remote/weather-board.js, src/ui/rooms/remote/shell.js (scope chip, Fade Time), src/effects/precipitation (ground-mist-render.js for fog), src/effects/lightning-storm.js + src/effects/lightning.js (Storm dials, lightning), src/foundry/world-clock.js (pause), src/world/air-grid.js + air-solver.js (wind round buildings)
 ---
 
 Weather in Map Shine is a whole sky: clouds that drift and cast shadows, rain and snow that stop at the roofs, wind that bends trees and smoke, and fog that rolls in.
@@ -22,6 +22,10 @@ The Remote's **Mix** tab holds the weather:
 ### Fog
 
 The **Fog** mood, or the **Fog** fader, lays ground mist over the outdoors. It comes in soft banks with clear gaps, fills in as you raise it, and thins toward walls. It never goes indoors. Wind thins it and moves it along. It takes the light of the hour: white at noon, gold at dusk, and lamps glow in it at night. It never shortens a token's sight; it only makes the map harder to read.
+
+### Wind round buildings
+
+Wind flows round and over buildings like real air. It slows in front of a wall, speeds up past corners and through narrow gaps, and leaves a sheltered, swirling patch behind a building. Taller buildings leave a longer one. Through an open door it makes a short, gusty draught that dies away inside. A room with doors on both sides gets a real draught through it. A shut room stays still. Map Shine reads walls, doors and the roofs on `_Outdoors`; buildings count as about two storeys tall.
 
 ### Lightning
 

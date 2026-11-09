@@ -911,6 +911,28 @@ export function run(t) {
       `a billow's age never follows the wind (${tc.length} billows at the same ages in calm air and in a gale)`,
       tc.length > 10 && tc.length === tg.length && tc.every((v, i) => Math.abs(v - tg[i]) < 1e-6)
     );
+    // (1b) wind disperses smoke (Ingram 2026-11-09): the smoke on show (strength x area) falls with the wind, and a gale
+    // leaves a fraction of a breeze's; the dial at 0 gives the old wind-proof smoke
+    const body = (U, tune) => {
+      const e = emit(
+        { windMotion01: Math.min(1, U / 20), windX: 1, windY: 0, windMps: U, lean01: 0.6 },
+        { tSec: 5000, ...flat },
+        tune
+      );
+      return smokeOf(e.smoke, e.r.smoke).reduce((s, l) => s + l.w * l.r * l.r, 0);
+    };
+    const bCalm = body(0);
+    const bBreeze = body(5);
+    const bGale = body(20);
+    t.ok(
+      `wind disperses smoke: calm ${bCalm.toFixed(0)} > breeze ${bBreeze.toFixed(0)} > gale ${bGale.toFixed(0)}, gale under 60% of calm`,
+      bCalm > bBreeze && bBreeze > bGale && bGale < 0.6 * bCalm
+    );
+    t.ok(
+      'wind dispersal at 0 leaves the smoke as it was (no thinning from wind)',
+      Math.abs(body(20, { ...BILLOW_TUNE, smokeWindDisperse: 0 }) - body(0, { ...BILLOW_TUNE, smokeWindDisperse: 0 })) <
+        0.35 * bCalm
+    );
     // (2) a turn of the air bends the newest smoke, not the whole column: two paths agree until 1 s ago, then one turns north
     const pathOf = (turnAt) => {
       const p = createAirPath();

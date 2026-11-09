@@ -196,6 +196,7 @@ export const BILLOW_TUNE = Object.freeze({
   smokeWave: 0.55, // × plume radius: how far the whole column meanders as one ribbon in still air (the puffs share one wave)
   // (v3) how much wider an old billow spreads as it dies, thinning as it goes: smoke DISSOLVES, it does not go out puff by puff
   smokeSpread: 2.8,
+  smokeWindDisperse: 1, // × how hard the wind mixes smoke away (0 = the old, wind-proof smoke; see `windDisperse`)
   massRise: 6, // × the mass's radius: how far a burning building's column climbs
   // THE SMOKE'S CAMERA (v3, author: "no real perspective... at 0 wind it's still flat and heading north, not UPWARDS"). Smoke is
   // seen from the 3/4 view the painted art is drawn in, AND by a real perspective camera: it climbs up the page (`smokeLift` per
@@ -345,6 +346,20 @@ export function plumeRiseRate(windMps, riseMps = FIRE_PLUME_RISE_MPS) {
  * atan(U / FIRE_PLUME_RISE_MPS)").
  */
 const PLUME_DRIFT_CAL = 1.3;
+
+/**
+ * HOW HARD THE WIND MIXES SMOKE AWAY, 0..1 (2026-11-09, Ingram: "at a certain wind speed smoke from fires would be rapidly
+ * dispersed"). A plume's concentration downwind falls as 1 / (U sigma_y sigma_z) (Gaussian plume), and mechanical turbulence
+ * grows with the wind (friction velocity ~ U/10 over open ground), so the mixing RATE grows with U while the plume is also
+ * stretched thin along the wind. In a light breeze (< ~3 m/s) a campfire's column leans but stays whole; by a fresh breeze
+ * (~8 m/s) it is stringy and ragged within a few flame heights; in a gale (> ~14 m/s) it is gone almost at once.
+ * @param {number} meanMps the mean air speed the billow has been carried at, m/s
+ */
+export function windDisperse(meanMps) {
+  const u = Math.max(0, Number(meanMps) || 0);
+  // (the air a smoke path keeps is already slowed by the plume's rise rate, `plumeRiseRate`: a 15 m/s wind arrives here as ~8)
+  return smoothstep(2, 9, u);
+}
 
 /**
  * THE FLAME'S TILT IN A WIND, deg from upright (2026-11-09, mmp-vm1.1.6): the AGA flame-tilt correlation (SFPE Handbook,
@@ -1129,7 +1144,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     const envGrow = smoothstep(0.0, 0.14, a);
     const envS = envGrow * (1 - smoothstep(0.72, 1, a));
     if (envS < 0.01) continue;
-    const spread = 1 + tune.smokeSpread * Math.pow(smoothstep(0.3, 1, a), 1.4);
+    let spread = 1 + tune.smokeSpread * Math.pow(smoothstep(0.3, 1, a), 1.4);
     basePoint(f, R, r1, r2, r3, 0.75, base);
     // smoke is born ABOVE the flame body and climbs from there, thin at first
     // (a gale blows smoke along the ground rather than up: at full wind it climbs half as high and drifts the whole way)
@@ -1142,6 +1157,12 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     const birth = air.at(t - a * P);
     const dWx = nowWx - birth.wx;
     const dWy = nowWy - birth.wy;
+    // the wind it has been carried in mixes it away: wider and thinner, and gone sooner, the stronger that wind has blown
+    // (mean speed over its own life, so a gust thins the smoke it is carrying and a lull lets the next puff stand up)
+    const disp = windDisperse(Math.hypot(dWx, dWy) / Math.max(0.5, a * P)) * (tune.smokeWindDisperse ?? 1);
+    const dispAge = smoothstep(0.1, 0.85, a);
+    spread *= 1 + 2.4 * disp * dispAge;
+    const dispFade = 1 - Math.min(0.95, 0.8 * disp) * dispAge;
     const ar = clamp01((nowR - birth.R) / P);
     // (v2: born at 55% of the flame's height, not 75%, so the column grows out of the fire instead of floating above it)
     const z = height * 0.55 + zTop * Math.pow(ar, 0.9);
@@ -1182,7 +1203,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       y,
       z,
       rad,
-      ((0.62 + 0.5 * smokeAmt) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3)) / (spread * spread),
+      ((0.62 + 0.5 * smokeAmt) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3) * dispFade) / (spread * spread),
       wet - soot,
       1 + tune.smokeStreak * leanG * Math.pow(a, 0.7),
       wdx,
@@ -1317,6 +1338,13 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
   const frameX = pxPerAirM * nowWx;
   const frameY = pxPerAirM * nowWy - vLiftR * nowR;
   const massGrainS = Rm * 0.5 * (tune.smokeGrainScale ?? 2.2);
+  // a burning building's column is a far bigger, hotter plume: the same wind mixes it away, but only about half as hard
+  const massDisp =
+    0.5 *
+    windDisperse(
+      Number.isFinite(m.windMps) ? Math.max(0, m.windMps) : clamp01(m.windMotion01 ?? 0) * LEGACY_FULL_WIND_MPS
+    ) *
+    (tune.smokeWindDisperse ?? 1);
   let n = start;
   for (let i = 0; i < count; i++) {
     const id = seed * 131 + i * 29 + 41000;
@@ -1333,7 +1361,9 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     const envS = smoothstep(0.04, 0.3, a) * (1 - smoothstep(0.72, 1, a));
     if (envS < 0.01) continue;
     // (v3: the column dissolves the way a campfire's does, each billow spreading and thinning as it dies)
-    const spread = 1 + tune.smokeSpread * 0.7 * Math.pow(smoothstep(0.3, 1, a), 1.4);
+    const spread =
+      (1 + tune.smokeSpread * 0.7 * Math.pow(smoothstep(0.3, 1, a), 1.4)) *
+      (1 + 2.4 * massDisp * smoothstep(0.1, 0.85, a));
     const ang = r1 * TAU;
     // (smoke comes off the whole roof and gathers into one column as it climbs)
     const rho = Rm * 0.4 * Math.sqrt(r2) * (1 - 0.5 * a);

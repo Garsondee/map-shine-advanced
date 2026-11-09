@@ -129,8 +129,8 @@ export const BILLOW_LOOK = Object.freeze({
   /** How much greyer the smoke goes in a fully bright scene (so it stands off a pale floor). */
   smokeDayDark: 0.69,
   /** Smoke is drawn OVER the flame: how far up its life it fades in, and how opaque it is where it crosses the flame. */
-  smokeFadeIn: 0.12, // (v2 0.3 -> 0.12: a clear young billow left a gap between the flame and its column)
-  smokeOverFlame: 0.55,
+  smokeFadeIn: 0.05, // (v2 0.3 -> 0.12: a clear young billow left a gap between the flame and its column)
+  smokeOverFlame: 0.85, // (2026-11-09, Ingram: the smoke "looks like it's below" the fire: 0.55 -> 0.85, and a faster fade-in)
   /**
    * THE FIRE LIGHTS ITS OWN SMOKE FROM BELOW (2026-11-03, author: "Fires should illuminate their smoke from the base upwards
    * and the smoke should be immune to being lit by the point light it creates"). `smokeFireLight` is how strongly the fire

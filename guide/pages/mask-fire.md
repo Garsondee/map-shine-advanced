@@ -24,7 +24,7 @@ So paint the fire the size you want it. One wide shape gives one big fire, and a
 
 - **Paint it bright.** Very faint paint is ignored. Pure white is safest.
 - Put the dot **where the flames start**, at the base of the fire, not over the whole flame in the art.
-- Fires under open sky (white on `_Outdoors`) react to the weather. Each feels the wind where it stands, so a wall or building upwind shelters it. In a breeze the flames lean over and the smoke streams away downwind. Heavy rain puts them out until a dry spell.
+- Fires under open sky (white on `_Outdoors`) react to the weather. Each feels the wind where it stands, so a wall or building upwind shelters it. In a breeze the flames lean over and the smoke streams away downwind; in a fresh breeze it shreds and thins, and in a gale it is blown out within a few flame heights (**Wind disperses smoke** sets how much). Heavy rain puts them out until a dry spell.
 - Fires under a roof keep burning whatever the weather, and their smoke rises.
 
 ### Adjusting

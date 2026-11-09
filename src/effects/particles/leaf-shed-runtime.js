@@ -84,6 +84,7 @@ import {
   writeBirth,
 } from '../leaf-shed-birth.js';
 import { buildShedLook, shedCoverage, SHAPE_KNOB_DEFAULTS, BROAD_FORM_KNOBS } from '../leaf-shed-shape.js';
+import { LEAF_SHADOW } from '../leaf-shed-shadow.js';
 import { BROAD_FORM_PARAMS } from '../leaf-shed-sources.js';
 import { OVER_PROPOSE } from '../leaf-shed-sources.js';
 import { litLinear, occlusionGate } from '../critters/critter-surface.js';
@@ -645,9 +646,20 @@ export function createLeafShedEngine({
   const throwPx = uShadowThrow.mul(h);
   const throwLen = throwPx.length();
   const shadowCentre = iPos.add(throwPx.mul(min(float(1), half.mul(4).div(max(throwLen, 1e-3)))));
-  const pad = half.mul(1.15).add(2);
-  const lo = min(leafCentre, shadowCentre).sub(pad);
-  const hi = max(leafCentre, shadowCentre).add(pad);
+  // The shadow's softness grows with height; it gets fainter as it widens and is gone high up, and the
+  // quad reaches far enough to hold its whole blur (mmp-y9q: a blur cut off by the quad's edges drew
+  // grey rectangles). Same law and constants as the CPU twin `leafShadowLaw` (leaf-shed-shape.js).
+  const shSoftRaw = h.mul(float(LEAF_SHADOW.SOFT_PER_HEIGHT)).div(max(half, 0.5)).add(float(LEAF_SHADOW.SOFT_BASE));
+  const shSoft = min(shSoftRaw, float(LEAF_SHADOW.FADE_TO));
+  const shGain = float(1)
+    .sub(smoothstep(float(LEAF_SHADOW.FADE_FROM), float(LEAF_SHADOW.FADE_TO), shSoftRaw))
+    .div(float(1).add(shSoft.mul(shSoft).mul(float(LEAF_SHADOW.ENERGY_K))));
+  const pad = half.mul(float(LEAF_SHADOW.QUAD_PAD)).add(2);
+  const shadowOn = shGain.greaterThan(0);
+  const padS = select(shadowOn, half.mul(shSoft.add(float(LEAF_SHADOW.QUAD_PAD))).add(2), pad);
+  const shadowAt = select(shadowOn, shadowCentre, leafCentre);
+  const lo = min(leafCentre.sub(pad), shadowAt.sub(padS));
+  const hi = max(leafCentre.add(pad), shadowAt.add(padS));
   const quadCentre = lo.add(hi).mul(0.5);
   const quadHalf = hi
     .sub(lo)
@@ -666,7 +678,8 @@ export function createLeafShedEngine({
   })().toVarying('vLeafRnd');
   const vWorld = Fn(() => world)().toVarying('vLeafWorld');
   // How soft the cast shadow is: a high leaf's is a blur, a landed one's is crisp (in leaf units).
-  const vShadowSoft = Fn(() => h.mul(0.06).div(max(half, 0.5)).add(0.04))().toVarying('vLeafShadowSoft');
+  // (x = edge softness in leaf units, y = the shadow's gain — see LEAF_SHADOW above.)
+  const vShadow = Fn(() => vec2(shSoft, shGain))().toVarying('vLeafShadow');
   // Which half of the leaf faces the light (up-left, the art's own light): the
   // sign of the leaf's across-axis against it, decided per leaf, not per pixel.
   const vLight = Fn(() => {
@@ -701,7 +714,8 @@ export function createLeafShedEngine({
     knobs: uKnobs,
   });
   const ps = toLeaf(vS, vInfo.x);
-  const shadowA = shedCoverage(TSL, ps, vInfo.z, vInfo.y, max(aa.mul(1.5), vShadowSoft), vRnd, uKnobs)
+  const shadowA = shedCoverage(TSL, ps, vInfo.z, vInfo.y, max(aa.mul(1.5), vShadow.x), vRnd, uKnobs)
+    .mul(vShadow.y)
     .mul(uShadow)
     .mul(uShadowDay);
   const leafA = look.alpha.mul(vInfo.w);

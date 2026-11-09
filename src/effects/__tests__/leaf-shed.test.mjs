@@ -25,6 +25,7 @@ import {
 import { createLeafShedSubsystem } from '../leaf-shed-subsystem.js';
 import { SHED_DESIGNS, renderShedPreview } from '../leaf-shed-preview.js';
 import { pickKind, BROAD_FORM_PARAMS } from '../leaf-shed-sources.js';
+import { LEAF_SHADOW, leafShadowLaw } from '../leaf-shed-shadow.js';
 import { readFileSync } from 'node:fs';
 import { validateEffectManifest } from '../effect-manifest.js';
 import { validateParamsSchema } from '../../core/params-schema.js';
@@ -671,6 +672,67 @@ export function run(t) {
       "followTrees: the Vegetation card's Gust turbulence reaches the engine",
       /treeGustTurbulence: state\.gustTurbulence/.test(sub) &&
         /gustTurbulence: Number\.isFinite\(Number\(veg\?\.gustTurbulence\)\)/.test(boot)
+    );
+  }
+
+  // ── the cast shadow (mmp-y9q, 2026-11-09) ──────────────────────────────
+  // The author, 2026-11-07: leaf/twig shadows in high wind were "rectangles with darker edges and
+  // brighter centres". A silhouette blurred by `soft` reaches 1 + soft leaf units from its centre (the
+  // shape spans ±1); the old quad stopped at 1.15 whatever the height, so the blur was cut off by it.
+  {
+    const oldSoft = (h, half) => (h * 0.06) / half + 0.04;
+    ok(
+      'leaf shadow: the OLD 1.15-unit quad cut off the blur of a 20 px leaf 4.5 m up (the bug pinned here)',
+      1 + oldSoft(450, 10) > 1.15
+    );
+    // area of the blurred coverage of a unit disk (shedCoverage's smoothstep across ±soft)
+    const ss = (a, b, x) => {
+      const u = Math.min(1, Math.max(0, (x - a) / (b - a)));
+      return u * u * (3 - 2 * u);
+    };
+    const area = (s) => {
+      let A = 0;
+      for (let r = 0; r < 1 + s + 0.01; r += 0.002) A += 2 * Math.PI * r * (1 - ss(-s, s, r - 1)) * 0.002;
+      return A;
+    };
+    const crisp = area(LEAF_SHADOW.SOFT_BASE);
+    let fits = '';
+    let inRange = true;
+    let monotone = true;
+    let energy = '';
+    for (const half of [3, 6, 10, 18, 30]) {
+      let prev = Infinity;
+      for (let h = 0; h <= 3000; h += 10) {
+        const s = leafShadowLaw(h, half);
+        if (s.gain > 0 && 1 + s.soft > s.padLeafUnits + 1e-9) fits ||= `h ${h} half ${half}`;
+        if (!(s.gain >= 0 && s.gain <= 1)) inRange = false;
+        if (s.gain > prev + 1e-12) monotone = false;
+        prev = s.gain;
+        if (h % 50 === 0 && s.gain * area(s.soft) > crisp * 1.03) energy ||= `h ${h} half ${half}`;
+      }
+    }
+    ok(`⭐ leaf shadow: the quad always holds the whole blur (${fits || 'every height'})`, !fits);
+    ok('leaf shadow: its gain stays in 0..1', inRange);
+    ok('⭐ leaf shadow: a rising leaf only loses its shadow, never gains it back', monotone);
+    ok(`⭐ leaf shadow: a blur spreads the same blocked light, never more (${energy || 'every height'})`, !energy);
+    const landed = leafShadowLaw(0, 10);
+    ok('leaf shadow: a landed leaf casts its full, crisp shadow', landed.gain > 0.99 && landed.soft < 0.05);
+    ok(
+      "⭐ leaf shadow: high up there is none at all (the author's own mmp-y9q proposal)",
+      leafShadowLaw(600, 10).gain === 0 && leafShadowLaw(3000, 30).gain === 0
+    );
+    ok(
+      'leaf shadow: a bigger piece (a twig) keeps its shadow higher than a small leaf',
+      leafShadowLaw(300, 18).gain > leafShadowLaw(300, 10).gain
+    );
+    const rt = readFileSync(new URL('../particles/leaf-shed-runtime.js', new URL('.', import.meta.url)), 'utf8');
+    ok(
+      '⭐ leaf shadow: the shader uses the shared law (pad, fade, energy) and applies its gain',
+      /LEAF_SHADOW\.QUAD_PAD/.test(rt) &&
+        /LEAF_SHADOW\.FADE_TO/.test(rt) &&
+        /LEAF_SHADOW\.ENERGY_K/.test(rt) &&
+        /\.mul\(vShadow\.y\)/.test(rt) &&
+        !/half\.mul\(1\.15\)/.test(rt)
     );
   }
 }

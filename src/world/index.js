@@ -231,6 +231,15 @@ export {
   windFlowCellsPerSecPerUnit,
 } from './wind-flow.js';
 export { buildWindFlowMaterials, windFlowTierPlan, WIND_FLOW_TIERS } from './wind-flow-gpu.js';
+// THE WIND ON THE CPU (mmp-vm1.1.15) — the read-back copy CPU-side effects sample.
+export {
+  WIND_CPU_FIELD_DOWNSAMPLE,
+  WIND_CPU_FIELD_EVERY_FRAMES,
+  windCpuFieldGrid,
+  decodeWindCpuField,
+  sampleWindCpuField,
+  buildWindCpuFieldDownsample,
+} from './wind-cpu-field.js';
 // THE BAKE, SPLIT BY WHAT EACH PIECE DEPENDS ON (2026-10-07) — structure (walls)
 // vs openness (speed) vs shadow (direction), plus the in-place texture writers.
 // See wind-structure.js's own header for why a dial change must not redo (1).

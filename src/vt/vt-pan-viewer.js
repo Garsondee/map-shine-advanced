@@ -760,6 +760,11 @@ import {
   buildWindSimMaterials,
   buildWindFlowMaterials,
   planWindFlowSteps,
+  WIND_CPU_FIELD_EVERY_FRAMES,
+  windCpuFieldGrid,
+  decodeWindCpuField,
+  sampleWindCpuField,
+  buildWindCpuFieldDownsample,
   doorwayImpulseFromWallSegment,
   gatherActiveImpulseSlots,
   computeThawWindowMs,
@@ -7803,6 +7808,15 @@ async function startVtPanViewerUnserialized({
     /** Runtime switch (MapShine.setLivingWind); `null` = follow the stored flag / default. */
     let windFlowForce = null;
     const windFlowStats = { steps: 0, lastSteps: 0, lastJacobi: 0, tier: null };
+    // THE WIND ON THE CPU (world/wind-cpu-field.js, mmp-vm1.1.15) — a 4×-smaller copy of the `now` slice, read back
+    // asynchronously every few frames (one in flight), for effects that decide on the CPU. `windCpuField` is the
+    // latest decoded copy (grid + fx/fy, dial units) or null; `windHandle.cpuFieldAt` samples it.
+    let windCpuRT = null;
+    let windCpuPass = null; // { material, quad, sourceNodes, layoutVersion }
+    let windCpuField = null;
+    let windCpuPending = false;
+    let windCpuFrames = 0;
+    let windCpuCopies = 0;
     // THE WIND'S RECORDED PAST (world/wind-gust-history.js, epic mmp-fpu) — a ring of 16 gust-magnitude grids,
     // one per 0.6 s moment, in one atlas; each is drawn into the one-tile target and copied into its tile.
     // `uWindGustGridIndex` is the latest recorded moment: the baker's decision, read by every shader.
@@ -8066,6 +8080,7 @@ async function startVtPanViewerUnserialized({
         gustHistoryGridIndex: gustHistoryTexture ? uWindGustGridIndex : null,
         cells: windGrid.cells,
         cpuExposureAt: sampleWindExposureAt,
+        cpuFieldAt: (x, y, out) => sampleWindCpuField(windCpuField, x, y, out),
       });
     }
 
@@ -8976,6 +8991,60 @@ async function startVtPanViewerUnserialized({
     }
 
     /**
+     * THE WIND ON THE CPU (mmp-vm1.1.15): every `WIND_CPU_FIELD_EVERY_FRAMES` frames, draw the `now` slice 4× smaller
+     * and read it back asynchronously; never more than one read-back in flight, never a wait inside a frame. Frame
+     * counts, not a clock (time/one-clock). A paused world keeps re-reading the same frozen field, which is harmless.
+     */
+    function tickWindCpuField() {
+      windCpuFrames += 1;
+      if (windCpuPending || windCpuFrames % WIND_CPU_FIELD_EVERY_FRAMES !== 0) return;
+      const g = windHandle.grid;
+      if (!g || !windFieldNowRT) return;
+      const small = windCpuFieldGrid(g);
+      if (!windCpuRT || windCpuRT.width !== small.cols || windCpuRT.height !== small.rows) {
+        allocator.dispose(windCpuRT);
+        windCpuRT = allocator.create('wind.cpu.copy', {
+          resolvedW: small.cols,
+          resolvedH: small.rows,
+          type: THREE.HalfFloatType,
+          format: THREE.RGBAFormat,
+          colorSpace: THREE.NoColorSpace,
+          filter: 'nearest',
+          depth: false,
+        });
+        windCpuPass?.material?.dispose?.();
+        windCpuPass = null;
+      }
+      if (!windCpuPass || windCpuPass.layoutVersion !== windLayoutVersion) {
+        windCpuPass?.material?.dispose?.();
+        windCpuPass = {
+          ...buildWindCpuFieldDownsample(THREE, { fieldTexture: windFieldNowRT.texture, cols: g.cols, rows: g.rows }),
+          layoutVersion: windLayoutVersion,
+        };
+      }
+      for (const n of windCpuPass.sourceNodes) n.value = windFieldNowRT.texture;
+      const prevRT = renderer.getRenderTarget();
+      renderer.setRenderTarget(windCpuRT);
+      windCpuPass.quad.render(renderer);
+      renderer.setRenderTarget(prevRT);
+      const bakedAtMs = windFieldBakeStamp.nowMs;
+      const rt = windCpuRT;
+      windCpuPending = true;
+      renderer
+        .readRenderTargetPixelsAsync(rt, 0, 0, small.cols, small.rows)
+        .then((raw) => {
+          if (rt !== windCpuRT) return; // regridded while in flight
+          const { fx, fy } = decodeWindCpuField(raw, small, (h) => THREE.DataUtils.fromHalfFloat(h));
+          windCpuField = { ...small, fx, fy, bakedAtMs };
+          windCpuCopies += 1;
+        })
+        .catch((err) => log.debug?.('wind CPU copy failed (kept the previous one):', err))
+        .finally(() => {
+          windCpuPending = false;
+        });
+    }
+
+    /**
      * THE MSA LAB'S WIND READ-BACK (mmp-vm1.1) — the baked field exactly as every `baked: 'now'|'lagged'`
      * consumer reads it, copied back from the GPU and decoded to numbers, stamped with the sim time it was baked
      * at, with the grid, the live ambient and the CPU cell channels beside it. Field values are in `sampleWind`'s
@@ -9777,6 +9846,8 @@ async function startVtPanViewerUnserialized({
         for (const rt of [windFlowStateA, windFlowStateB, windFlowPressA, windFlowPressB, windFlowDivRT]) {
           allocator.dispose(rt);
         }
+        windCpuPass?.material?.dispose?.();
+        allocator.dispose(windCpuRT);
         windGrid.dispose();
       } catch (err) {
         log.error('wind sim dispose failed — GPU buffers may leak until renderer.dispose():', err);
@@ -9799,6 +9870,9 @@ async function startVtPanViewerUnserialized({
       windFlowPressB = null;
       windFlowDivRT = null;
       windFlowPrimed = false;
+      windCpuPass = null;
+      windCpuRT = null;
+      windCpuField = null;
       windSimGridKey = null;
       windActiveImpulses = [];
       windThawUntilMs = 0;
@@ -25416,6 +25490,7 @@ async function startVtPanViewerUnserialized({
         lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
         lastEnvSnapshot?.env?.time?.dtSec ?? 0
       );
+      tickWindCpuField();
       tickGustHistory(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value);
       profiler?.end(Z.simsWind);
       // FLUID's own sim tick — same clock, same "inside the gpuProbe bracket"
@@ -32746,7 +32821,13 @@ async function startVtPanViewerUnserialized({
         if (!windFlowEnabled()) windFlowPrimed = false;
         return { enabled: windFlowEnabled(), ...windFlowStats };
       },
-      getLivingWind: () => ({ enabled: windFlowEnabled(), primed: windFlowPrimed, ...windFlowStats }),
+      getLivingWind: () => ({
+        enabled: windFlowEnabled(),
+        primed: windFlowPrimed,
+        ...windFlowStats,
+        cpuCopies: windCpuCopies,
+        cpuCopyBakedAtMs: windCpuField?.bakedAtMs ?? null,
+      }),
       /** Live look tuning (fallSlant01, parallaxStreak01, streakScale, ...). */
       setPrecipitationTuning: (t) => {
         precipitationSubsystem.setTuning(t);

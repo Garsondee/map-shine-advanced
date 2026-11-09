@@ -191,6 +191,9 @@ import { GUST_HISTORY_STEP_S, GUST_HISTORY_TAPS, sampleGustHistoryTap } from './
  *   (`world/wind-gust-history.js`): the wind's recent past, one tile per 0.6 s moment.
  * @param {*} [spec.gustHistoryGridIndex] - float uniform NODE: the latest recorded moment, decided by the baker.
  * @param {WindCellArrays} [spec.cells]
+ * @param {(x: number, y: number, out?: {x:number, y:number}) => ({x:number, y:number}|null)} [spec.cpuFieldAt] - the
+ *   WIND ITSELF on the CPU (mmp-vm1.1.15): the baked field (or Living Wind's) at a world point, in dial units, from the
+ *   viewer's few-frames-old read-back (`world/wind-cpu-field.js`). Null until the first copy lands.
  * @param {(x: number, y: number) => number} [spec.cpuExposureAt] - the CPU
  *   point query for sky/shelter exposure at a world position.
  * @returns {Readonly<object>} the handle.
@@ -209,6 +212,7 @@ export function createWindHandle({
   gustHistoryGridIndex = null,
   cells = null,
   cpuExposureAt = null,
+  cpuFieldAt = null,
 } = {}) {
   // The `sampleWind`-shaped ref objects, assembled HERE and nowhere else.
   // `undefined` (not null) when absent — `sampleWind` branches on presence at
@@ -711,6 +715,14 @@ export function createWindHandle({
     buildGustHistoryBake,
     kernel,
     cpuAt,
+    /**
+     * THE LOCAL WIND ON THE CPU (mmp-vm1.1.15) — `{x, y}` in dial units at a world point (× 70 = m/s), the same air the
+     * GPU readers see, a few frames old; `null` before the first read-back (or with no viewer behind the handle), so a
+     * caller falls back to the dial. `out` is filled and returned when given (no allocation).
+     * @param {number} x @param {number} y @param {{x:number, y:number}} [out]
+     * @returns {{x:number, y:number}|null}
+     */
+    cpuFieldAt: (x, y, out) => (cpuFieldAt ? cpuFieldAt(x, y, out) : null),
   });
 }
 

@@ -33,6 +33,7 @@ import { run as runWindAdvection } from './wind-advection.test.mjs';
 import { run as runWindFieldBake } from './wind-field-bake.test.mjs';
 import { run as runWindGustHistory } from './wind-gust-history.test.mjs';
 import { run as runWindFlow } from './wind-flow.test.mjs';
+import { run as runWindCpuField } from './wind-cpu-field.test.mjs';
 import { run as runAlmanac } from './almanac.test.mjs';
 import { run as runFadeEngine } from './fade-engine.test.mjs';
 import { run as runFadeRegistry } from './fade-registry.test.mjs';
@@ -91,6 +92,7 @@ const suites = [
   ['wind-field-bake', runWindFieldBake],
   ['wind-gust-history', runWindGustHistory],
   ['wind-flow', runWindFlow],
+  ['wind-cpu-field', runWindCpuField],
   ['almanac', runAlmanac],
   ['fade-engine', runFadeEngine],
   ['fade-registry', runFadeRegistry],

@@ -11,6 +11,7 @@ Ops (all coordinates in image pixels, colours as byte lists):
     clear   {x, y, w, h}                 alpha 0 (a hole in the floor)
     text    {x, y, text, size, rgba}
     checker {x, y, w, h, cell, a, b}
+    ellipse {cx, cy, rx, ry, rgba}       ~1 px anti-aliased edge (canopy cut-outs for _Tree/_Bush)
 
 Encoding copies the author's maps: lossy WebP for everything, alpha kept exact.
 After writing, each image is decoded again and its op regions are checked, so a codec
@@ -89,11 +90,38 @@ def op_checker(img, o):
     img.paste(Image.fromarray(block, "RGBA"), (x, y))
 
 
+def op_ellipse(img, o):
+    """A filled ellipse with a ~1 px anti-aliased edge (drawn at 4x, box-downsampled).
+
+    For _Tree/_Bush canopies: the author's cut-outs have hard 1-2 px alpha edges and keep the
+    leaf colour under partial alpha, so the colour is written wherever coverage > 0 and the
+    alpha takes the coverage (no dark fringe from premultiplying onto transparent black).
+    """
+    cx, cy, rx, ry = (float(o[k]) for k in ("cx", "cy", "rx", "ry"))
+    col = rgba4(o["rgba"])
+    ss = 4
+    X0, Y0 = max(0, int(cx - rx) - 2), max(0, int(cy - ry) - 2)
+    X1, Y1 = min(img.width, int(cx + rx) + 3), min(img.height, int(cy + ry) + 3)
+    m = Image.new("L", ((X1 - X0) * ss, (Y1 - Y0) * ss), 0)
+    ImageDraw.Draw(m).ellipse(
+        [(cx - rx - X0) * ss, (cy - ry - Y0) * ss, (cx + rx - X0) * ss, (cy + ry - Y0) * ss], fill=255
+    )
+    m = np.asarray(m.resize((X1 - X0, Y1 - Y0), Image.BOX)).astype(np.float32) / 255.0
+    region = np.asarray(img.crop((X0, Y0, X1, Y1))).astype(np.float32)
+    cover = m * (col[3] / 255.0)
+    inside = cover > 0
+    out = region.copy()
+    out[inside, 0:3] = col[0:3]
+    out[..., 3] = np.maximum(region[..., 3], cover * 255.0)
+    img.paste(Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8), "RGBA"), (X0, Y0))
+
+
 OPS = {
     "rect": op_rect,
     "clear": op_clear,
     "text": op_text,
     "checker": op_checker,
+    "ellipse": op_ellipse,
 }
 
 

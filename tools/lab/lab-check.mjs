@@ -1,5 +1,11 @@
 /**
- * tools/lab/lab-check.mjs — `lab.mjs check --family walls`: measure every claim in walls-claims.mjs (mmp-78u).
+ * tools/lab/lab-check.mjs — `lab.mjs check --family <family>`: measure every claim of a lab family (mmp-78u).
+ *
+ * FAMILIES (the registry at the end of this file): `walls` (walls-claims.mjs on Lab · Walls & Windows, run
+ * here) and `interiors` (interiors-claims.mjs on Lab · Interiors & Regions, run by interiors-check.mjs, which
+ * loops over lighting conditions). Each family has `run(opts)` and `offline(opts)`; `printCheck` prints any.
+ *
+ * THE WALLS FAMILY:
  *
  * The "expectations first" loop as one command. For every Lab · Walls & Windows cell a claim needs:
  * pan to it (scale ~0.8 keeps all its points on screen), wait for MSA's ready signal, probe ALL the
@@ -20,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { WALLS_IDS } from './walls-spec.mjs';
 import { WALLS_CLAIMS, wallsCheckCells, evaluateWallsClaims, claimSourceCounts } from './walls-claims.mjs';
 import { MEASURE_OFF } from './lab-look.mjs';
+import { checkInteriors, recheckInteriorsOffline } from './interiors-check.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -311,8 +318,8 @@ export function recheckWallsOffline({ view = 'shipped', only = null } = {}) {
   return { view: `${view}, re-judged offline`, file: OUT_JSON, block };
 }
 
-/** The short console table for a run. */
-export function printCheck({ view, file, block }) {
+/** The short console table for a run (any family). */
+export function printCheck({ family = 'walls', view, file, block }) {
   const rows = Object.entries(block.summary).map(([id, s]) => ({
     claim: id,
     source: s.source,
@@ -322,11 +329,24 @@ export function printCheck({ view, file, block }) {
     known: s.known ?? '',
   }));
   console.log(
-    `walls check (${view}): ${block.totals.claims} claims, ${block.totals.instances} instances — ` +
+    `${family} check (${view}): ${block.totals.claims} claims, ${block.totals.instances} instances — ` +
       `${block.totals.pass} pass, ${block.totals.fail} fail, ${block.totals.skip} skip (${block.seconds} s) -> ${file}`
   );
   console.table(rows.filter((r) => r.fail || r.skip));
   for (const r of block.results.filter((x) => x.pass === false)) {
-    console.log(`FAIL ${r.id} ${r.cell}${r.known ? ` [known ${r.known}]` : ''}: got ${r.got} | want ${r.want}`);
+    const where = r.cell ?? (r.refs ?? []).join(',');
+    console.log(`FAIL ${r.id} ${where}${r.known ? ` [known ${r.known}]` : ''}: got ${r.got} | want ${r.want}`);
+  }
+  for (const r of block.results.filter((x) => x.pass === null && x.cell === undefined)) {
+    console.log(`SKIP ${r.id}: ${r.got}`);
   }
 }
+
+/**
+ * The family registry: `lab.mjs check --family <key>` runs `run(opts)` under the rig lock, `--offline`
+ * runs `offline(opts)` on the last run's saved probe data. Options a family does not use are ignored.
+ */
+export const FAMILIES = Object.freeze({
+  walls: { run: checkWalls, offline: recheckWallsOffline, claims: 'walls-claims.mjs' },
+  interiors: { run: checkInteriors, offline: recheckInteriorsOffline, claims: 'interiors-claims.mjs' },
+});

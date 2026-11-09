@@ -2,15 +2,18 @@
 /**
  * tools/lab/lab.mjs — drive the MSA Lab (mmp-78u).
  *
- *   node tools/lab/lab.mjs paint  [--out <dir>]            paint every floor image + mask (python)
+ *   node tools/lab/lab.mjs paint  [--out <dir>] [--only interiors]   paint every floor image + mask (python)
  *   node tools/lab/lab.mjs deploy-rig --rig <dataPath>      copy the painted set into a private rig
  *   node tools/lab/lab.mjs seed   --name <cdp client>       build/replace the lab scenes as GM
  *   node tools/lab/lab.mjs look --name <client> --plot C1 [--level ground] [--view shipped|measure] [--scale 0.45]
  *        one look at one plot: pan, settle, clean shot, probe its named points, print a table
- *   node tools/lab/lab.mjs check --name <client> --family walls [--view shipped|measure] [--only A03,B02]
- *        [--walls window5,torch] [--lights torch] [--no-shots] [--settle 1200] [--scale 0.8] [--keep] [--offline]
+ *   node tools/lab/lab.mjs check --name <client> --family walls|interiors [--view shipped|measure] [--only A03,B02]
+ *        [--walls window5,torch] [--lights torch]            (walls)
+ *        [--conditions noon,half] [--groups R1,R2] [--merge] (interiors; --merge folds the re-measured
+ *        conditions into the last full run of that view and re-judges every claim)
+ *        [--no-shots] [--settle 1200] [--scale 0.8] [--keep] [--offline]
  *        (--offline re-judges the claims on the last run's saved probe data: no rig, no lock, no shots)
- *        measure every claim of a family (walls-claims.mjs) under the rig lock: out/check-walls.json,
+ *        measure every claim of a family (lab-check.mjs FAMILIES) under the rig lock: out/check-<family>.json,
  *        a console table, and a clean shot per failing cell in out/shots/discrepancies/
  *   node tools/lab/lab.mjs manifest                         print the manifest (debugging)
  *
@@ -25,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { LAB_VERSION } from './lab-spec.mjs';
 import { labManifestAll as labManifest, labPaintJobAll as labPaintJob } from './lab-index.mjs';
 import { look } from './lab-look.mjs';
-import { checkWalls, printCheck, recheckWallsOffline } from './lab-check.mjs';
+import { FAMILIES, printCheck } from './lab-check.mjs';
 import { withRigLock } from './rig-lock.mjs';
 
 /** Who holds the rig lock: --owner, else LAB_OWNER, else 'lab.mjs'. */
@@ -53,7 +56,13 @@ function run(cmd, args) {
 function paint() {
   fs.mkdirSync(outDir, { recursive: true });
   const jobPath = path.join(outDir, 'paint-job.json');
-  fs.writeFileSync(jobPath, JSON.stringify(labPaintJob(version)));
+  // --only <text>: paint just the images whose name contains it (e.g. --only interiors); the
+  // full set takes minutes at real-map size, and an unchanged scene's files are already there.
+  const job = labPaintJob(version);
+  const only = opt('only');
+  if (only) job.images = job.images.filter((i) => i.name.includes(only));
+  if (!job.images.length) throw new Error(`paint: no image name contains '${only}'`);
+  fs.writeFileSync(jobPath, JSON.stringify(job));
   const extra = argv.includes('--lossless-art') ? ['--lossless-art'] : [];
   run('python', ['-I', path.join(HERE, 'paint.py'), jobPath, outDir, ...extra]);
 }
@@ -105,17 +114,18 @@ const COMMANDS = {
   },
   check: async () => {
     const family = opt('family', 'walls');
-    if (family !== 'walls') throw new Error(`check: no claims for family '${family}' yet (walls only)`);
+    const fam = FAMILIES[family];
+    if (!fam) throw new Error(`check: no family '${family}' (have: ${Object.keys(FAMILIES).join(', ')})`);
     const list = (k) => (opt(k) ? opt(k).split(',') : null);
     if (argv.includes('--offline')) {
       // re-judge the claims on the last run's saved probe data (no rig, no lock)
-      printCheck(recheckWallsOffline({ view: opt('view', 'shipped'), only: list('only') }));
+      printCheck({ family, ...fam.offline({ view: opt('view', 'shipped'), only: list('only') }) });
       return;
     }
     const r = await withRigLock(
       OWNER,
       () =>
-        checkWalls({
+        fam.run({
           name: opt('name'),
           view: opt('view', 'shipped'),
           scale: Number(opt('scale', 0.8)),
@@ -124,12 +134,15 @@ const COMMANDS = {
           only: list('only'),
           walls: list('walls'),
           lights: list('lights'),
+          conditions: list('conditions'),
+          groups: list('groups'),
+          merge: argv.includes('--merge'),
           shots: !argv.includes('--no-shots'),
           keep: argv.includes('--keep'),
         }),
       { waitMin: 60 }
     );
-    printCheck(r);
+    printCheck({ family, ...r });
   },
   manifest: () => console.log(JSON.stringify(labManifest({ assetDir, version }), null, 2)),
 };

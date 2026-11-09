@@ -22,6 +22,7 @@ import { run as runFireBillowState } from './fire-billow-state.test.mjs';
 import { run as runFireBillowParams } from './fire-billow-params.test.mjs';
 import { run as runFireBillowEngine } from './fire-billow-engine.test.mjs';
 import { run as runFireBillowBloom } from './fire-billow-bloom.test.mjs';
+import { run as runFireAirPath } from './fire-air-path.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -63,6 +64,7 @@ const suites = [
   ['fire-billow-params', runFireBillowParams],
   ['fire-billow-engine', runFireBillowEngine],
   ['fire-billow-bloom', runFireBillowBloom],
+  ['fire-air-path', runFireAirPath],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

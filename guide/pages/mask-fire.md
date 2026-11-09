@@ -1,5 +1,5 @@
 ---
-sources: src/scene/mask-catalog.js (fire: width sets diameter), src/effects/fire/fire-mask.js, src/effects/fire/fire.js (FIRE_PARAMS, maskSensitivity, rain response)
+sources: src/scene/mask-catalog.js (fire: width sets diameter), src/effects/fire/fire-mask.js, src/effects/fire/fire.js (FIRE_PARAMS, maskSensitivity, rain response), src/effects/fire/fire-billow-engine.js (the wind at each fire, roof shelter), src/effects/fire/fire-billow-geometry.js (flame tilt, smoke carried by the wind)
 ---
 `_Fire` says **where something burns**. Map Shine grows a flame, rising smoke, embers and flickering firelight from each painted shape.
 
@@ -24,8 +24,8 @@ So paint the fire the size you want it. One wide shape gives one big fire, and a
 
 - **Paint it bright.** Very faint paint is ignored. Pure white is safest.
 - Put the dot **where the flames start**, at the base of the fire, not over the whole flame in the art.
-- Fires under open sky (white on `_Outdoors`) react to the weather: wind bends them, and heavy rain puts them out until a dry spell.
-- Fires under a roof keep burning whatever the weather.
+- Fires under open sky (white on `_Outdoors`) react to the weather. Each feels the wind where it stands, so a wall or building upwind shelters it. In a breeze the flames lean over and the smoke streams away downwind. Heavy rain puts them out until a dry spell.
+- Fires under a roof keep burning whatever the weather, and their smoke rises.
 
 ### Adjusting
 

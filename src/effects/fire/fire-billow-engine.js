@@ -4,9 +4,12 @@
  * is returned as a job list for the viewer to run (see `fire-billow-render.js`).
  *
  * Each frame, for every fire:
- *   1. WEATHER AT THE FIRE — the wind bake's openness and sky at its own position (`windHandle.cpuAt`), the ambient
- *      wind's speed and direction, the scene's rain, folded into the numbers the model wants (local wind push, the one
- *      stress number, rain reaching it) with the SAME functions the light and the embers use, so they cannot disagree.
+ *   1. WEATHER AT THE FIRE — the AIR AT ITS OWN POSITION (`windHandle.cpuFieldAt`, mmp-vm1.1.6: the same wind texture
+ *      the trees and candles read, so a plume surges in a gust, goes still in a building's lee and blows out of the
+ *      doorway it stands in), eased per fire; the dial's speed and direction with the bake's openness only until the
+ *      first read-back lands. The sky at its position (`windHandle.cpuAt`) and the scene's rain, folded into the numbers
+ *      the model wants (local wind push, the one stress number, rain reaching it) with the SAME functions the light
+ *      and the embers use, so they cannot disagree.
  *   2. ITS LIFE — `fire-billow-state.js` steps the fire's wetness, vitality and coals (rain puts it out, the coals
  *      smoulder, the ash goes cold, a long dry spell relights it).
  *   3. ITS BILLOWS — `emitFireLobes` writes the fire's lobes into the renderer's two buffers.
@@ -21,13 +24,20 @@
  */
 import { createBillowRenderer, billowSmokeScale } from './fire-billow-render.js';
 import {
+  billowDraft,
+  billowLeanGain,
   emitFireLobes,
   emitMassSmoke,
+  flameTiltDeg,
   hash01,
+  KIND_FLAME,
+  leanForTilt,
   LOBE_STRIDE,
   maxLobesPerFire,
   MASS_SMOKE_MAX,
+  plumeRiseRate,
 } from './fire-billow-geometry.js';
+import { createAirPath } from './fire-air-path.js';
 import { createFireLifeBook } from './fire-billow-state.js';
 import { billowRuntimeFromParams } from './fire-billow-params.js';
 import { bloomCounterParams, bloomCounterUniforms, regionFill } from './fire-billow-bloom.js';
@@ -35,6 +45,13 @@ import { fireScaleChain, fireWindMotion01, FIRE_FUELS, deriveFireSeed } from './
 import { SPAWN_POINT_STRIDE, labelAtWorldPoint } from './fire-spawn-points.js';
 import { buildDepthHeightGateNode } from '../lighting/point-light-illumination.js';
 import { windFlowVector, windStrength01ForSpeed01 } from '../../world/index.js';
+
+/**
+ * How long a fire takes to feel a change in the air, seconds (mmp-vm1.1.6). The wind texture reaches the CPU as a
+ * read-back every few frames, so the air a fire feels is eased: a gust still arrives within a fraction of a second,
+ * but the plume swings, it does not step.
+ */
+export const FIRE_AIR_EASE_SEC = 0.35;
 
 /** The widest a single flame gets, in metres of fuel: past this a painted region is split into several flames. */
 export const MAX_CLUSTER_RADIUS_M = 0.9;
@@ -74,6 +91,44 @@ const OWN_REACH = 3;
  *
  * @param {number} parentRadius the whole fire's radius (px) @param {number} maxRadius one flame's widest (px)
  */
+/**
+ * THE PLUME METER (mmp-vm1.1.6, the Wind lab): the middle of the lobes `[from, to)` of `buf` in the picture's own frame
+ * (lifted up the page, swollen by the camera, exactly where they are drawn), each weighted by strength x area. `kind`
+ * keeps only that kind (the flame buffer also holds the coal bed). Cheap: one pass over lobes just written.
+ * @param {Float32Array} buf @param {number} from @param {number} to @param {number|null} [kind]
+ * @returns {{x:number, y:number, w:number}|null}
+ */
+export function lobeCentroid(buf, from, to, kind = null) {
+  let sx = 0;
+  let sy = 0;
+  let sw = 0;
+  for (let i = from; i < to; i++) {
+    const o = i * LOBE_STRIDE;
+    if (kind !== null && buf[o + 8] !== kind) continue;
+    const w = Math.max(0, buf[o + 3]) * buf[o + 2] * buf[o + 2];
+    sx += buf[o] * w;
+    sy += buf[o + 1] * w;
+    sw += w;
+  }
+  return sw > 0 ? { x: sx / sw, y: sy / sw, w: sw } : null;
+}
+
+/**
+ * The strongest sealed-room draft, m/s (2026-11-09). The draft used to be a "wind motion" that re-aimed the whole column
+ * every few seconds (mmp-9un.5); it is now air, carried like any other: a gentle drift a little over half a metre a second.
+ */
+export const FIRE_DRAFT_MPS = 0.6;
+
+/**
+ * How much of the air a fire under a roof feels (2026-11-09): `0.15 + 0.85 x sky`. The guide promises smoke under a roof
+ * stays still (`guide/pages/mask-outdoors.md`), and today's wind field floods a room through its doorway (Lab · Wind:
+ * 7-18 m/s in a door room at a 10.5 m/s dial; Living Wind gives ~1). A roof keeps a draft, not a gale.
+ */
+export function fireRoofShelter(sky01) {
+  const s = Number.isFinite(sky01) ? Math.min(1, Math.max(0, sky01)) : 1;
+  return 0.15 + 0.85 * s;
+}
+
 export function infernoHeightGain(parentRadius, maxRadius) {
   const ratio = Math.max(1, (parentRadius || 0) / Math.max(1e-3, maxRadius || 1));
   return clamp(1 + 0.3 * Math.log2(ratio), 1, 1.7);
@@ -544,6 +599,15 @@ export function createBillowEngine({
   const spread = new Map();
   /** per fire: the weather this frame felt (for `getStatus`: why a fire does or does not react) */
   const weatherDiag = new Map();
+  /** per fire: the local air it feels, eased (dial units) — the wind texture read back on the CPU moves in steps */
+  const airByFire = new Map();
+  const airScratch = { x: 0, y: 0 };
+  /**
+   * per fire: the path its air has taken (`fire-air-path.js`, mmp-9un.5) — smoke rides it, spit embers are thrown with it —
+   * and the eased air itself in m/s (the field's local air x the author's response x a roof's shelter, plus a draft)
+   */
+  const airPathByFire = new Map();
+  const airMotionByFire = new Map();
   /** the heat sources of the last frame (see `getHeatSources`) */
   let heatSources = [];
   /** @type {{cloud:*, fires:*, mPerPx:number, labelGrid:*, clusters:Array<object>}} */
@@ -632,6 +696,8 @@ export function createBillowEngine({
       const windDirDeg = Number.isFinite(ambient?.directionDeg?.value) ? ambient.directionDeg.value : 0;
       const wdir = windFlowVector(windDirDeg);
       const canAsk = !!(windHandle?.hasBake && typeof windHandle.cpuAt === 'function');
+      const canFeelAir = typeof windHandle?.cpuFieldAt === 'function';
+      const airEase = 1 - Math.exp(-Math.max(0, Number(dtSec) || 0) / FIRE_AIR_EASE_SEC);
       const snuffable = runtime?.canBeSnuffed !== false;
       const weatherResponse = clamp(Number(runtime?.weatherResponse ?? params?.weatherResponse ?? 1), 0, 1);
       const rainResponse = clamp(Number(runtime?.rainResponse ?? params?.rainResponse ?? 1), 0, 2);
@@ -672,6 +738,8 @@ export function createBillowEngine({
       const heatByFire = new Map();
       const stepped = new Set();
       const advanced = new Set();
+      const pathed = new Set();
+      const dialMps = Number.isFinite(ambient?.speed01?.value) ? Math.max(0, ambient.speed01.value) * 70 : 0;
       /** per fire: how much of it burns (the spread front), and what its mass smoke column needs */
       const litStats = new Map();
       const masses = new Map();
@@ -713,16 +781,35 @@ export function createBillowEngine({
           1
         );
         const outdoor01 = clamp(0.5 * sky + 0.5 * openness, 0, 1);
+        // THE AIR HERE (mmp-vm1.1.6): the local wind already carries every shelter (openness, wakes, doors) and every
+        // gust, so with it the exposure is 1 and the strength is the local speed's; without a read-back yet, the dial
+        // through openness exactly as before.
+        const air = canFeelAir ? windHandle.cpuFieldAt(c.x, c.y, airScratch) : null;
+        let felt = airByFire.get(c.id);
+        if (air) {
+          if (!felt) {
+            felt = { x: air.x, y: air.y };
+            airByFire.set(c.id, felt);
+          } else {
+            felt.x += (air.x - felt.x) * airEase;
+            felt.y += (air.y - felt.y) * airEase;
+          }
+        }
+        const airSpeed01 = felt ? Math.hypot(felt.x, felt.y) : 0;
+        const fireWindSpeed01 = felt ? windStrength01ForSpeed01(airSpeed01) : windSpeed01;
+        const exposure01 = felt ? 1 : openness;
+        const windX = felt && airSpeed01 > 1e-5 ? felt.x / airSpeed01 : wdir.x;
+        const windY = felt && airSpeed01 > 1e-5 ? felt.y / airSpeed01 : wdir.y;
         const push = fireWindMotion01({
-          windSpeed01,
-          windExposure01: openness,
+          windSpeed01: fireWindSpeed01,
+          windExposure01: exposure01,
           windResponseGain: windGain,
           weatherResponse01: 1,
           snuffWind: chain.snuffWind,
         });
         const gated = fireWindMotion01({
-          windSpeed01,
-          windExposure01: openness,
+          windSpeed01: fireWindSpeed01,
+          windExposure01: exposure01,
           windResponseGain: windGain,
           weatherResponse01: weatherResponse,
           snuffWind: chain.snuffWind,
@@ -737,12 +824,69 @@ export function createBillowEngine({
         );
         // a gale on an exposed fire starts to blow it out (a hurricane does it in about the time rain does); `windSnuff` is the dial
         const wind01 = clamp(((gated - 0.72) / 0.28) * clamp(Number(params?.windSnuff ?? 1), 0, 2), 0, 1);
+
+        // THE AIR THE FIRE IS IN, m/s (2026-11-09, mmp-9un.5 + mmp-vm1.1.6): the local air (or, before the first read-back,
+        // the dial through openness), the author's wind response, a roof's shelter, and in still air under a roof a draft —
+        // eased, then carried along this fire's air path once a frame (the smoke rides the path: a puff keeps the way it
+        // was blown). The flame leans by the AGA flame-tilt rule for this air and this fire's size.
+        const roof = fireRoofShelter(sky);
+        const fieldMps = (felt ? airSpeed01 * 70 : dialMps * openness) * windGain * roof;
+        let rawUx = windX * fieldMps;
+        let rawUy = windY * fieldMps;
+        let draftLean = 0;
+        const draftAmp = 0.22 * clamp(Number(br.drafts ?? 1), 0, 3) * (1 - outdoor01) * (1 - push);
+        if (draftAmp > 1e-3) {
+          const d = billowDraft(timeSec, (c.seed | 0) >>> 0, draftAmp);
+          if (d.motion01 > 1e-3) {
+            const du = (d.motion01 / 0.22) * FIRE_DRAFT_MPS;
+            rawUx += Math.cos(d.angle) * du;
+            rawUy += Math.sin(d.angle) * du;
+            draftLean = billowLeanGain(d.motion01);
+          }
+        }
+        let motion = airMotionByFire.get(c.id);
+        if (!motion) {
+          motion = { x: rawUx, y: rawUy, lean: draftLean };
+          airMotionByFire.set(c.id, motion);
+        } else {
+          motion.x += (rawUx - motion.x) * airEase;
+          motion.y += (rawUy - motion.y) * airEase;
+          motion.lean += (draftLean - motion.lean) * airEase;
+        }
+        const airMps = Math.hypot(motion.x, motion.y);
+        const airDirX = airMps > 1e-4 ? motion.x / airMps : windX;
+        const airDirY = airMps > 1e-4 ? motion.y / airMps : windY;
+        const diameterM = Math.max(0.02, (f.diameterPx ?? c.radius * 2) * mPerPx);
+        const lean01 = Math.max(leanForTilt(flameTiltDeg(airMps, diameterM)), motion.lean);
+        let airPath = airPathByFire.get(c.id);
+        if (!airPath) {
+          airPath = createAirPath();
+          airPathByFire.set(c.id, airPath);
+        }
+        if (!pathed.has(c.id)) {
+          pathed.add(c.id);
+          airPath.advance(timeSec, motion.x, motion.y, plumeRiseRate(airMps), lean01);
+        }
         weatherDiag.set(c.id, {
+          x: Math.round(c.x),
+          y: Math.round(c.y),
+          air: felt ? 'local' : 'dial',
+          airMps: +(airSpeed01 * 70).toFixed(2),
+          dirX: +windX.toFixed(3),
+          dirY: +windY.toFixed(3),
+          push: +push.toFixed(3),
           openness: +openness.toFixed(2),
           sky: +sky.toFixed(2),
           wind: +gated.toFixed(2),
           rain: +rainFelt.toFixed(2),
           stress: +stress01.toFixed(2),
+          windMps: +airMps.toFixed(2),
+          // the eased air the smoke's path integrates (its heading), and the page lift per unit of height (to undo it)
+          pathDirX: +airDirX.toFixed(3),
+          pathDirY: +airDirY.toFixed(3),
+          lean: +lean01.toFixed(3),
+          roof: +roof.toFixed(2),
+          heightTilt: +(br.tilt ?? 0.45).toFixed(3),
         });
 
         // its life (once per fire, however many flames it is split into)
@@ -822,6 +966,11 @@ export function createBillowEngine({
             stress01,
             rain01: rainHere,
             windMotion01: push,
+            windX: airDirX,
+            windY: airDirY,
+            windMps: airMps,
+            lean01,
+            airPath,
             sootiness01: massSootiness(c.siblings),
             lf,
           });
@@ -840,9 +989,12 @@ export function createBillowEngine({
           puffHz: chain.puffHz,
           flickerAmp: chain.flickerAmp,
           heightGain: br.heightGain * infernoHeightGain(c.parentRadius, c.maxRadius),
-          windX: wdir.x,
-          windY: wdir.y,
+          windX: airDirX,
+          windY: airDirY,
           windMotion01: push,
+          windMps: airMps,
+          lean01,
+          airPath,
           stress01,
           vitality01: lf.vitality * ign,
           coal01: lf.coal * ign,
@@ -851,7 +1003,8 @@ export function createBillowEngine({
           smokeMul: br.smokeMul * massSmokeKeep(c.siblings),
           sootiness01: massSootiness(c.siblings),
           spitMul: br.spitMul,
-          draft: br.drafts,
+          // the draft is already in the air path (above)
+          draft: 0,
           spawn: c.points,
           spawnCount: c.count,
           spawnStride: SPAWN_POINT_STRIDE,
@@ -862,6 +1015,25 @@ export function createBillowEngine({
         nf += res.count;
         ns += res.smoke;
         coalTotal += res.coal;
+        // where its smoke and flame are drawn, from its fuel bed (world px; +x right, +y down the page): the Wind lab's plume lean
+        const meterRow = weatherDiag.get(c.id);
+        if (meterRow) {
+          const sm = lobeCentroid(renderer.smokeLobes, s0, ns);
+          const fl = lobeCentroid(renderer.flameLobes, f0, nf, KIND_FLAME);
+          meterRow.smokeDx = sm ? Math.round(sm.x - c.x) : null;
+          meterRow.smokeDy = sm ? Math.round(sm.y - c.y) : null;
+          meterRow.flameDx = fl ? Math.round(fl.x - c.x) : null;
+          meterRow.flameDy = fl ? Math.round(fl.y - c.y) : null;
+          meterRow.r = Math.round(c.radius);
+          // the smoke's drift on the ground (before the camera) and where its shared grain frame sits (mmp-9un.5)
+          meterRow.smokeGx = Number.isFinite(res.smokeGX) ? Math.round(res.smokeGX) : null;
+          meterRow.smokeGy = Number.isFinite(res.smokeGY) ? Math.round(res.smokeGY) : null;
+          meterRow.smokeZ = Number.isFinite(res.smokeZ) ? Math.round(res.smokeZ) : null;
+          meterRow.flameH = Number.isFinite(res.flameH) ? Math.round(res.flameH) : null;
+          meterRow.grainX = Number.isFinite(res.grainX) ? Math.round(res.grainX * 10) / 10 : null;
+          meterRow.grainY = Number.isFinite(res.grainY) ? Math.round(res.grainY * 10) / 10 : null;
+          meterRow.tSec = Math.round(timeSec * 1000) / 1000;
+        }
 
         // the contour box: round every lobe this flame wrote
         let minX = Infinity;
@@ -894,6 +1066,13 @@ export function createBillowEngine({
         }
       }
 
+      // the eased air of fires that no longer exist (a re-planned scene) is dropped now and then, never per frame
+      if (airByFire.size > clusters.length * 2 + 16) airByFire.clear();
+      if (airPathByFire.size > clusters.length * 2 + 16) {
+        airPathByFire.clear();
+        airMotionByFire.clear();
+      }
+
       // THE COLUMN OF A BURNING MASS: one plume for the whole roof, from the middle of what burns, in the same smoke field
       for (const m of masses.values()) {
         const stat = litStats.get(m.id);
@@ -916,9 +1095,12 @@ export function createBillowEngine({
             stress01: m.stress01,
             rain01: m.rain01,
             outdoor01: m.outdoor01,
-            windX: wdir.x,
-            windY: wdir.y,
+            windX: m.windX,
+            windY: m.windY,
             windMotion01: m.windMotion01,
+            windMps: m.windMps,
+            lean01: m.lean01,
+            airPath: m.airPath,
             smokeMul: br.smokeMul,
             sootiness01: m.sootiness01,
           },

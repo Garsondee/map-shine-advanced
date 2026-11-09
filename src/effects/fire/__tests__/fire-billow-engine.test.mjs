@@ -723,14 +723,16 @@ export function run(t) {
       return n ? sum / n : 0;
     };
     const calm = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 0, dirDeg }));
+    // 0.036 = 2.5 m/s, a light breeze: a real flame already leans ~55 deg in it (AGA flame tilt, 2026-11-09)
+    const breeze = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 0.036, dirDeg }));
     // 0.25 = 17.5 m/s, a Beaufort 8 gale on the linear-to-70 dial (2026-10-27).
     const gale = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 0.25, dirDeg }));
     const hurricane = centroidAlongWind(makeWind({ openness: 1, sky: 1, speed01: 1, dirDeg }));
     const sealed = centroidAlongWind(makeWind({ openness: 0, sky: 0, speed01: 1, dirDeg }));
     const doorway = centroidAlongWind(makeWind({ openness: 0.5, sky: 0, speed01: 1, dirDeg }));
     t.ok(
-      `wind pushes an open fire’s flame downwind, and harder the stronger it blows (calm ${calm.toFixed(1)}, gale ${gale.toFixed(1)}, hurricane ${hurricane.toFixed(1)} px)`,
-      gale > calm + 2 && hurricane > gale + 2
+      `wind pushes an open fire’s flame downwind, and harder the stronger it blows (calm ${calm.toFixed(1)}, breeze ${breeze.toFixed(1)}, gale ${gale.toFixed(1)}, hurricane ${hurricane.toFixed(1)} px; a hurricane beats the flame smaller, so it reaches no further than a gale's)`,
+      breeze > calm + 2 && gale > breeze + 2 && hurricane > gale * 0.75
     );
     t.ok(
       `a room sealed against a hurricane hardly feels it (${sealed.toFixed(1)} px vs ${hurricane.toFixed(1)} outdoors)`,

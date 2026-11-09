@@ -194,7 +194,6 @@ export const BILLOW_TUNE = Object.freeze({
   smokeStart: 1.2, // a billow is born this fraction of its full width...
   smokeGrow: 1.6, // ...and grows by this much more as it climbs (a plume SHOULD outgrow its fire)
   smokeWave: 0.55, // × plume radius: how far the whole column meanders as one ribbon in still air (the puffs share one wave)
-  smokeWindLife: 0.5, // a gale stretches a billow's life by this much (the trail is longer when it is blown)
   // (v3) how much wider an old billow spreads as it dies, thinning as it goes: smoke DISSOLVES, it does not go out puff by puff
   smokeSpread: 2.8,
   massRise: 6, // × the mass's radius: how far a burning building's column climbs
@@ -205,7 +204,7 @@ export const BILLOW_TUNE = Object.freeze({
   // `smokePerspective` brings it down to the scene's own eye at 2.2 (what walls and canopies use). Higher = a nearer camera.
   smokePerspective: 1.5,
   smokeLift: 2.4,
-  smokeDrift: 9.0, // × R of downwind drift at a full gale
+  smokeDrift: 9.0, // the author's "Smoke wind drift x" dial rides on this: the drift is the bent-over plume's x (smokeDrift / 9)
   // ── wind ──
   leanLength: 2.6, // × plume radius, at full lean
   leanCurve: 1.05,
@@ -316,6 +315,97 @@ export const LOBE = Object.freeze({
 // FIRE-LEVEL QUANTITIES
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * THE PLUME'S OWN RISE SPEED, m/s (2026-11-09, mmp-vm1.1.6). A buoyant plume bends over until its slope is its rise speed
+ * over the wind (Briggs, *Plume Rise*, 1969: the bent-over plume), and a ~1 m campfire's plume climbs ~2.5-3.7 m/s a few
+ * metres up (McCaffrey 1979). The drawn plume climbs in slow motion (`smokeRise` over `smokeLife`), so it drifts in the SAME
+ * slow motion: its angle from upright is atan(U / FIRE_PLUME_RISE_MPS) whatever the stylised speeds (Ingram, live,
+ * 2026-11-09: the smoke "doesn't respond to wind very accurately" — at 10.5 m/s it rose almost straight up the page).
+ */
+export const FIRE_PLUME_RISE_MPS = 3;
+/** The same for a burning building's column: megawatts, a much stiffer plume. */
+export const MASS_PLUME_RISE_MPS = 6;
+/** With no air speed given (old callers, tests), a wind push of 1 is read as this many m/s (a gale). */
+export const LEGACY_FULL_WIND_MPS = 20;
+
+/**
+ * How fast a plume climbs in a wind, against still air (0..1): a bent-over plume's rise in time goes as U^-1/3 (Briggs's
+ * "2/3 law", dh = 1.6 F^(1/3) x^(2/3) / U with x = U t). A gale lays the smoke along the ground; it does not stop it rising.
+ * @param {number} windMps @param {number} [riseMps]
+ */
+export function plumeRiseRate(windMps, riseMps = FIRE_PLUME_RISE_MPS) {
+  const u = Math.max(0, Number(windMps) || 0);
+  return Math.pow(1 + u / Math.max(0.1, riseMps), -1 / 3);
+}
+
+/**
+ * The drawn plume's middle sits lower and nearer the fire than its mean billow's path (the young billows by the base are
+ * the densest), so steady air leaned it atan(U / 3.9 m/s), not atan(U / 3): measured offline over 200 frames of a 45 px fire
+ * at 2.5-17.5 m/s (1.25-1.4x). This brings the drawn plume onto the bent-over plume (`__tests__`: "the smoke leans
+ * atan(U / FIRE_PLUME_RISE_MPS)").
+ */
+const PLUME_DRIFT_CAL = 1.3;
+
+/**
+ * THE FLAME'S TILT IN A WIND, deg from upright (2026-11-09, mmp-vm1.1.6): the AGA flame-tilt correlation (SFPE Handbook,
+ * pool fires), cos(tilt) = sqrt(u_c / U) above the fire's own characteristic speed u_c, upright below it. u_c grows as the
+ * cube root of the fire's size (u_c = (g Q / (rho c_p T D))^(1/3) with Q ~ D^2): ~0.8 m/s for a 0.9 m campfire, ~0.3 for a
+ * candle, ~1.2 for a 3 m bonfire. Ingram, live: flames "don't respond to wind very well" — they tilted 16 deg at 10.5 m/s.
+ * @param {number} windMps @param {number} [diameterM=0.9]
+ */
+export function flameTiltDeg(windMps, diameterM = 0.9) {
+  const u = Math.max(0, Number(windMps) || 0);
+  const uc = 0.8 * Math.cbrt(Math.max(0.02, Number(diameterM) || 0.9) / 0.9);
+  if (u <= uc) return 0;
+  return (Math.acos(Math.sqrt(uc / u)) * 180) / Math.PI;
+}
+
+/**
+ * The billow flame's drawn tilt (deg from upright: its flame lobes' weighted middle with the 3/4 lift undone) at
+ * lean01 = 0, 0.1, ... 1 — measured on a 45 px fire; `__tests__/fire-billow-geometry.test.mjs` re-measures it, so a change
+ * to the flame's shape that moves it fails a test instead of quietly mis-leaning every fire.
+ */
+export const FLAME_TILT_AT_LEAN = Object.freeze([0, 12.4, 24.9, 36.1, 45.8, 54.2, 61.4, 67.3, 72.2, 76.1, 79.3]);
+
+/** The lean01 that draws a tilt of `deg` ({@link FLAME_TILT_AT_LEAN} inverted; past its last row, full lean). */
+export function leanForTilt(deg) {
+  const d = Math.max(0, Number(deg) || 0);
+  const T = FLAME_TILT_AT_LEAN;
+  for (let i = 1; i < T.length; i++) {
+    if (d <= T[i]) return (i - 1 + (d - T[i - 1]) / (T[i] - T[i - 1])) / (T.length - 1);
+  }
+  return 1;
+}
+
+/** Scratch samples for the air path (one thread; never held across calls). */
+const AIR_A = { t: 0, wx: 0, wy: 0, R: 0, dirX: 0, dirY: 0, lean01: 0 };
+const AIR_B = { t: 0, wx: 0, wy: 0, R: 0, dirX: 0, dirY: 0, lean01: 0 };
+
+/**
+ * The air a fire's smoke rides: its path (`fire-air-path.js`: each puff reads where its own air went since it was born) or,
+ * for callers without one, steady air `U` m/s along `(dx, dy)`, slowed by the plume's rise rate. Returns `{now, at(tb)}`.
+ * @param {object|null} airPath @param {number} U @param {number} dx @param {number} dy @param {number} riseMps @param {number} t
+ */
+function smokeAir(airPath, U, dx, dy, riseMps, t) {
+  if (airPath) {
+    return { now: airPath.head, at: (tb) => airPath.at(tb, AIR_A) };
+  }
+  const r = plumeRiseRate(U, riseMps);
+  const vx = dx * U * r;
+  const vy = dy * U * r;
+  const steady = (tq, o) => {
+    o.t = tq;
+    o.wx = vx * tq;
+    o.wy = vy * tq;
+    o.R = r * tq;
+    o.dirX = dx;
+    o.dirY = dy;
+    o.lean01 = 0;
+    return o;
+  };
+  return { now: steady(t, AIR_B), at: (tb) => steady(tb, AIR_A) };
+}
+
 /** Lean gain: quiet at the bottom of the wind dial, decisive at the top (the shape `fireLeanGain01` uses). */
 export function billowLeanGain(motion01) {
   const m = clamp01(motion01);
@@ -402,6 +492,10 @@ export function billowPower(vitality01, stress01) {
  * @property {number} [heightGain=1] fuel's `heightGain`
  * @property {number} [windX=0] @property {number} [windY=0] unit vector the wind blows TOWARD (world px, +y down).
  * @property {number} [windMotion01=0] the local push, 0..1, openness already applied.
+ * @property {number} [windMps] the air at the fire, m/s (with no `airPath`: steady air; absent: `windMotion01` x 20).
+ * @property {number} [lean01] the flame's lean 0..1 from the air's real speed (the engine's); absent: the push's curve.
+ * @property {object|null} [airPath] the air's path at this fire (`fire-air-path.js`): smoke rides it, spit embers are thrown
+ *   with it. The engine folds its draft into it, so with a path the draft below is off.
  * @property {number} [stress01=0] weather stress (`fireWeatherStress01`).
  * @property {number} [vitality01=1] the fire's slow state (1 burning, 0 out).
  * @property {number} [smokeMul=1] smoke amount (the author's dial × fuel).
@@ -515,22 +609,16 @@ function project(env, x, y, z, out, D = env.cameraHeight ?? BILLOW_TUNE.cameraHe
  * @param {Float32Array} buf @param {number} o the lobe's first float
  * @param {number} gx @param {number} gy the puff's ground position with the column's shared sway taken out, world px
  * @param {number} tiltZ the height the tilt lifts it by (as `project` is given it) @param {number} tilt `env.tilt`
- * @param {number} vx @param {number} vy the column's mean speed in the same frame, world px per second of `t`
- * @param {number} t the emitter's clock (seconds) @param {number} scale world px per pattern unit (> 0)
+ * @param {number} frameX @param {number} frameY where the column's frame has moved to by now, world px: the air's travel and
+ *   the mean billow's lift up the page over its rise time (2026-11-09: it was a mean speed x the clock, so any change in the
+ *   wind re-dealt the whole pattern at once and the grain slid against the wind — mmp-9un.5)
+ * @param {number} scale world px per pattern unit (> 0)
  */
-function stampSmokeGrain(buf, o, gx, gy, tiltZ, tilt, vx, vy, t, scale) {
+function stampSmokeGrain(buf, o, gx, gy, tiltZ, tilt, frameX, frameY, scale) {
   const s = Math.max(1, scale);
   buf[o + 12] = s;
-  buf[o + 14] = (gx - vx * t) / s;
-  buf[o + 15] = (gy - tiltZ * tilt - vy * t) / s;
-}
-
-/** The column's mean speed in the camera-free frame: the mean billow's path `at(a)` -> [x, y, tiltZ], differenced over its life. */
-function smokeColumnSpeed(at, lifeSec, tilt) {
-  const p0 = at(0.2);
-  const p1 = at(0.7);
-  const dt = Math.max(0.05, 0.5 * lifeSec);
-  return [(p1[0] - p0[0]) / dt, (p1[1] - p1[2] * tilt - (p0[1] - p0[2] * tilt)) / dt];
+  buf[o + 14] = (gx - frameX) / s;
+  buf[o + 15] = (gy - tiltZ * tilt - frameY) / s;
 }
 
 /** The smoke's camera height: the billow camera brought down to the scene's eye (see `smokePerspective`). */
@@ -582,10 +670,12 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   const pulse = billowPulse(t, (f.puffHz ?? 1.6) * (0.8 + 0.5 * outdoor), (f.flickerAmp ?? 0.3) * 0.55, seed);
 
   // ── wind: the real wind, plus a draft in still air ──
+  // (with an air path the engine has already folded its draft into the air and the lean; this draft is the old callers')
+  const airPath = f.airPath ?? null;
   let wx = f.windX ?? 0;
   let wy = f.windY ?? 0;
   let m = clamp01(f.windMotion01 ?? 0);
-  const draftAmp = 0.22 * (f.draft ?? 1) * (1 - outdoor) * (1 - m);
+  const draftAmp = airPath ? 0 : 0.22 * (f.draft ?? 1) * (1 - outdoor) * (1 - m);
   if (draftAmp > 1e-3) {
     const d = billowDraft(t, seed, draftAmp);
     if (d.motion01 > 1e-3) {
@@ -605,7 +695,8 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       }
     }
   }
-  const leanG = billowLeanGain(m);
+  // the lean: the engine's physical one (`lean01`: the flame's tilt in this air), or the push's own curve for old callers
+  const leanG = Number.isFinite(f.lean01) ? clamp01(f.lean01) : billowLeanGain(m);
   const windLen = Math.hypot(wx, wy) || 1;
   const wdx = wx / windLen;
   const wdy = wy / windLen;
@@ -768,13 +859,15 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   // their own while they fade. The heading the stream is thrown at wanders with time (a slow double sine), so billows
   // thrown a moment apart fly different ways: the tongue snakes and re-forms instead of keeping one shape.
   // tongue 0 is the flame's own TIP: always there, standing tallest, reaching little sideways.
-  const nTongue =
-    1 + Math.round(lerp(tune.tongueMin, tune.tongueMax, clamp01(turb * (0.15 + 0.5 * outdoor) + 0.9 * leanG)) * q);
+  // (fractional, 2026-11-09: the newest tongue fades in and out as the air changes instead of popping in whole — mmp-9un.5)
+  const nTongueF = 1 + lerp(tune.tongueMin, tune.tongueMax, clamp01(turb * (0.15 + 0.5 * outdoor) + 0.9 * leanG)) * q;
+  const nTongue = Math.ceil(nTongueF - 1e-6);
   const M = tune.tongueLobes;
   for (let k = 0; k < nTongue; k++) {
     const id = seed * 131 + k * 13 + 5000;
     if (hash01(id, 3, 92) > thin) continue;
     const primary = k === 0;
+    const kFade = primary ? 1 : clamp01(nTongueF - k);
     // the root hops slowly; the stream keeps its place meanwhile
     const ur = t / (5 + 4 * hash01(id, 0, 1)) + hash01(id, 1, 2);
     const rc = Math.floor(ur);
@@ -824,7 +917,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
         y,
         z,
         rad,
-        0.95 * (1 - 0.3 * a),
+        0.95 * (1 - 0.3 * a) * kFade,
         heat,
         1 + 1.8 * Math.pow(1 - a, 1.5),
         hx,
@@ -849,7 +942,7 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
               fy,
               fz,
               fr,
-              0.9 * (1 - 0.6 * bk),
+              0.9 * (1 - 0.6 * bk) * kFade,
               (0.5 - 0.3 * bk) * cool,
               1 + 1.2 * (1 - bk),
               hx,
@@ -867,7 +960,8 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   for (let i = 0; i < nFleck; i++) {
     const id = seed * 131 + i * 11 + 9000;
     if (hash01(id, 3, 93) > thin) continue;
-    const P = (tune.fleckLife * (0.55 + 0.9 * hash01(id, 0, 1))) / (1 + 0.5 * m);
+    // (a FIXED life: one that followed the wind re-dealt every fleck's age whenever the wind changed — mmp-9un.5)
+    const P = tune.fleckLife * (0.55 + 0.9 * hash01(id, 0, 1));
     const u = t / P + hash01(id, 1, 2);
     const cyc = Math.floor(u);
     const a = u - cyc;
@@ -929,8 +1023,16 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     const flightT = 0.45 + 0.5 * r1;
     const sec = a * P;
     const fa = sec / flightT; // 0..1 in the air, past 1 once down
-    const th = lerp(r2 * TAU, windAng, clamp01(0.5 * leanG * 1.6));
-    const range = plume * tune.spitRange * (0.45 + 0.9 * r3) * (1 + 1.1 * leanG);
+    // thrown with the air AT ITS THROW (mmp-9un.5): an ember lying on the ground stays where it fell when the wind turns
+    let throwAng = windAng;
+    let throwLean = leanG;
+    if (airPath) {
+      const sa = airPath.at(t - sec, AIR_B);
+      if (sa.dirX !== 0 || sa.dirY !== 0) throwAng = Math.atan2(sa.dirY, sa.dirX);
+      throwLean = clamp01(sa.lean01);
+    }
+    const th = lerp(r2 * TAU, throwAng, clamp01(0.5 * throwLean * 1.6));
+    const range = plume * tune.spitRange * (0.45 + 0.9 * r3) * (1 + 1.1 * throwLean);
     const flown = fa < 1 ? 1 - (1 - fa) * (1 - fa) : 1;
     const skid = fa > 1 ? 0.08 * (1 - Math.exp(-(sec - flightT) / 1.4)) : 0;
     const dist = range * (flown + skid);
@@ -966,22 +1068,49 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   // THE COLUMN'S MEAN PATH (2026-11-08): the frame the smoke's shared grain scrolls in (`stampSmokeGrain`). The mean billow:
   // the loop's own climb, drift and life with every per-billow random at its middle, and no S-wave (taken out per billow).
   const RsG = Math.sqrt(Math.max(R, 1) * 50);
-  const zTopMean = RsG * tune.smokeRise * (0.35 + 0.65 * outdoor) * (0.6 + 0.4 * sz.iPow) * (1 - 0.5 * leanG);
-  const smokeTiltZ = (z) => Math.min(z, height) + Math.max(0, z - height) * tune.smokeLift;
-  const smokeV = smokeColumnSpeed(
-    (a) => {
-      const d = RsG * tune.smokeDrift * (0.15 + 0.85 * leanG) * (0.04 + Math.pow(a, 1.3));
-      return [wdx * d, wdy * d, smokeTiltZ(height * 0.55 + zTopMean * Math.pow(a, 0.9))];
-    },
-    tune.smokeLife * 1.05 * (0.55 + 0.45 * outdoor) * (1 + tune.smokeWindLife * leanG),
-    env.tilt ?? 0.45
+  // ⚠️ THE SMOKE IS CARRIED BY ITS AIR (2026-11-09, mmp-9un.5 + mmp-vm1.1.6). Each billow used to be placed from the wind of
+  // THIS frame times its age, its life stretched with the wind, and the column's grain scrolled at "this frame's speed x the
+  // clock": so any change in the air (a gust, the local air turning, a sealed room's draft coming and going) swung the whole
+  // column round its base at once, re-dealt every billow's age (the smoke raced up and down its own path) and jumped the
+  // grain (Ingram, live: smoke "rushes back and forth", "reversing direction", its noise "moves in a way that doesn't match
+  // the wind"). Now a billow's life is fixed, its drift is how far ITS air has travelled since it was born (`airPath`, kept
+  // by the engine), its climb runs on rise time (a plume climbs slower in a wind), and the grain rides the same air: a gust
+  // bends the newest smoke and the column curls. The drawn plume climbs `zTopMean` in `PMean` (slow motion), so it drifts in
+  // the same slow motion, `pxPerAirM` world px per metre of air: it leans atan(U / FIRE_PLUME_RISE_MPS) from upright.
+  const zTopMean = RsG * tune.smokeRise * (0.35 + 0.65 * outdoor) * (0.6 + 0.4 * sz.iPow);
+  const PMean = tune.smokeLife * 1.05 * (0.55 + 0.45 * outdoor);
+  // (x the author's "Smoke wind drift" dial: 1 = the bent-over plume, 0 = the smoke stands up in any wind)
+  const pxPerAirM =
+    (zTopMean / PMean / FIRE_PLUME_RISE_MPS) * PLUME_DRIFT_CAL * Math.max(0, tune.smokeDrift / BILLOW_TUNE.smokeDrift);
+  const calmAir = wx === 0 && wy === 0;
+  const air = smokeAir(
+    airPath,
+    Number.isFinite(f.windMps) ? Math.max(0, f.windMps) : m * LEGACY_FULL_WIND_MPS,
+    calmAir ? 0 : wdx,
+    calmAir ? 0 : wdy,
+    FIRE_PLUME_RISE_MPS,
+    t
   );
+  const nowWx = air.now.wx;
+  const nowWy = air.now.wy;
+  const nowR = air.now.R;
+  const smokeTiltZ = (z) => Math.min(z, height) + Math.max(0, z - height) * tune.smokeLift;
+  // the column's frame for its shared grain: carried by the air, and lifted up the page at the mean billow's rate per second of
+  // rise time — so a puff keeps its own patch of the pattern for its whole life, whatever the air does
+  const liftAt = (ar) => smokeTiltZ(height * 0.55 + zTopMean * Math.pow(ar, 0.9)) * (env.tilt ?? 0.45);
+  const vLiftR = (liftAt(0.7) - liftAt(0.2)) / (0.5 * PMean);
+  const frameX = pxPerAirM * nowWx;
+  const frameY = pxPerAirM * nowWy - vLiftR * nowR;
   const smokeGrainS = plume * (tune.smokeGrainScale ?? 2.2);
+  // the Wind lab's smoke meter: the drift's weighted middle on the ground (before the camera), from the fuel bed
+  let smokeGX = 0;
+  let smokeGY = 0;
+  let smokeGW = 0;
+  let smokeGZ = 0;
   for (let i = 0; i < nSmoke; i++) {
     const id = seed * 131 + i * 17 + 14000;
-    // (a blown billow lives longer: the trail downwind is what a gale adds)
-    const P =
-      tune.smokeLife * (0.7 + 0.7 * hash01(id, 0, 1)) * (0.55 + 0.45 * outdoor) * (1 + tune.smokeWindLife * leanG);
+    // (a FIXED life: see above. The longer trail in a gale is the air carrying it further, not a longer life.)
+    const P = tune.smokeLife * (0.7 + 0.7 * hash01(id, 0, 1)) * (0.55 + 0.45 * outdoor);
     const u = t / P + hash01(id, 1, 2);
     const cyc = Math.floor(u);
     const a = u - cyc;
@@ -1008,10 +1137,14 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     // with the square root of the fire's size, so a small brazier still sends up a column several flames tall and a bonfire's
     // does not reach off the map. `Rs` = R for a 50 px fire.
     const Rs = Math.sqrt(Math.max(R, 1) * 50);
-    const zTop =
-      Rs * tune.smokeRise * (0.35 + 0.65 * outdoor) * (0.75 + 0.5 * r4) * (0.6 + 0.4 * sz.iPow) * (1 - 0.5 * leanG);
+    const zTop = Rs * tune.smokeRise * (0.35 + 0.65 * outdoor) * (0.75 + 0.5 * r4) * (0.6 + 0.4 * sz.iPow);
+    // where its air has carried it since it was born, and how long it has had to climb (rise time: slower in a wind)
+    const birth = air.at(t - a * P);
+    const dWx = nowWx - birth.wx;
+    const dWy = nowWy - birth.wy;
+    const ar = clamp01((nowR - birth.R) / P);
     // (v2: born at 55% of the flame's height, not 75%, so the column grows out of the fire instead of floating above it)
-    const z = height * 0.55 + zTop * Math.pow(a, 0.9);
+    const z = height * 0.55 + zTop * Math.pow(ar, 0.9);
     // THE COLUMN IS ONE RIBBON (2026-11-03): every billow shares one travelling wave (its phase is the climb, `a`, and the clock),
     // so the whole column S-curves and meanders together instead of each puff wobbling alone into a fuzzy cloud. The wave
     // swings across the wind in a breeze (a streamer flutters sideways) and round a slowly turning bearing in still air. Each
@@ -1027,11 +1160,10 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       Math.sin(t * 0.55 - a * 3.4 + (seed % 628) * 0.01);
     const sway = wvx * wave + plume * 0.5 * (r6 - 0.5) * a;
     const swayY = wvy * wave + plume * 0.5 * (r7 - 0.5) * a;
-    const drift = Rs * tune.smokeDrift * (0.15 + 0.85 * leanG) * (0.04 + Math.pow(a, 1.3));
     // a sealed room's smoke goes nowhere in particular: it just rises and fades
-    // (v3: the lift and the swell both happen in `put`'s camera, so the billow's ground position is just the fire's and the wind's)
-    const x = base[0] + sway + wdx * drift;
-    const y = base[1] + swayY + wdy * drift;
+    // (v3: the lift and the swell both happen in `put`'s camera, so the billow's ground position is just the fire's and the air's)
+    const x = base[0] + sway + dWx * pxPerAirM;
+    const y = base[1] + swayY + dWy * pxPerAirM;
     // a plume SHOULD outgrow its fire: small and dense at the base, billowing wide as it climbs, and wider still as it dies
     const rad =
       plume *
@@ -1069,14 +1201,32 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
       y - wvy * wave,
       smokeTiltZ(z),
       env.tilt ?? 0.45,
-      smokeV[0],
-      smokeV[1],
-      t,
+      frameX,
+      frameY,
       smokeGrainS
     );
+    const sbuf = outSmoke !== null ? outSmoke : out;
+    const so = ((outSmoke !== null ? ns : n) - 1) * LOBE_STRIDE;
+    const sw = Math.max(0, sbuf[so + 3]) * sbuf[so + 2] * sbuf[so + 2];
+    smokeGX += (x - f.x) * sw;
+    smokeGY += (y - f.y) * sw;
+    smokeGZ += z * sw;
+    smokeGW += sw;
   }
 
-  return { count: n - start, flame: flameCount, smoke: smokeCount, coal: coalCount };
+  return {
+    count: n - start,
+    flame: flameCount,
+    smoke: smokeCount,
+    coal: coalCount,
+    // the Wind lab's smoke meter (mmp-9un.5): where the drift sits, and where the column's grain frame has moved to
+    smokeGX: smokeGW > 0 ? smokeGX / smokeGW : null,
+    smokeGY: smokeGW > 0 ? smokeGY / smokeGW : null,
+    smokeZ: smokeGW > 0 ? smokeGZ / smokeGW : null,
+    flameH: height,
+    grainX: frameX,
+    grainY: frameY,
+  };
 }
 
 /** The most billows one burning mass's column ever writes (the engine reserves this many before it asks for one). */
@@ -1091,6 +1241,7 @@ export const MASS_SMOKE_MAX = 48;
  * @property {number} [lit01=1] the fraction of the mass that is burning (a spreading fire is partly lit).
  * @property {number} [vitality01=1] @property {number} [coal01] @property {number} [stress01=0] @property {number} [rain01=0]
  * @property {number} [outdoor01=1] @property {number} [windX=0] @property {number} [windY=0] @property {number} [windMotion01=0]
+ * @property {number} [windMps] @property {number} [lean01] @property {object|null} [airPath] as a fire's (see `BillowFire`)
  * @property {number} [smokeMul=1] @property {number} [sootiness01=0.5]
  */
 
@@ -1134,27 +1285,34 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
   const wl = Math.hypot(wx, wy) || 1;
   const wdx = wx / wl;
   const wdy = wy / wl;
-  const leanG = billowLeanGain(clamp01(m.windMotion01 ?? 0));
+  const leanG = Number.isFinite(m.lean01) ? clamp01(m.lean01) : billowLeanGain(clamp01(m.windMotion01 ?? 0));
   const baseZ = m.baseZ ?? 0;
   const soot = clamp01(m.sootiness01 ?? 0.5) * (1 - wet);
   const smokeD = smokeCameraHeight(env, tune);
   const proj = [0, 0, 1];
-  // the column's mean path and speed, for its shared grain (`stampSmokeGrain`): the loop's climb and drift, randoms at middle
-  const massV = smokeColumnSpeed(
-    (a) => {
-      const climb =
-        Rm *
-        (tune.massRise ?? 1.6) *
-        (0.35 + 0.65 * outdoor) *
-        Math.pow(a, 0.9) *
-        (1 - 0.5 * leanG) *
-        (0.6 + 0.4 * weak);
-      const d = Rm * tune.smokeDrift * 0.35 * (0.15 + 0.85 * leanG) * (0.12 + Math.pow(a, 1.3));
-      return [wdx * d, wdy * d, climb * tune.smokeLift];
-    },
-    tune.smokeLife * 1.7 * (0.55 + 0.45 * outdoor),
-    env.tilt ?? 0.45
+  // THE COLUMN RIDES ITS AIR, like a campfire's (see `emitFireLobes`, mmp-9un.5): fixed lives, drift = how far its air has gone
+  // since each billow was born, climb on rise time; a building's plume is stiffer (MASS_PLUME_RISE_MPS)
+  const PMass = tune.smokeLife * 1.7 * (0.55 + 0.45 * outdoor);
+  const climbMean = Rm * (tune.massRise ?? 1.6) * (0.35 + 0.65 * outdoor) * (0.6 + 0.4 * weak);
+  const pxPerAirM =
+    (climbMean / PMass / MASS_PLUME_RISE_MPS) * PLUME_DRIFT_CAL * Math.max(0, tune.smokeDrift / BILLOW_TUNE.smokeDrift);
+  const calmAir = wx === 0 && wy === 0;
+  const air = smokeAir(
+    m.airPath ?? null,
+    Number.isFinite(m.windMps) ? Math.max(0, m.windMps) : clamp01(m.windMotion01 ?? 0) * LEGACY_FULL_WIND_MPS,
+    calmAir ? 0 : wdx,
+    calmAir ? 0 : wdy,
+    MASS_PLUME_RISE_MPS,
+    t
   );
+  const nowWx = air.now.wx;
+  const nowWy = air.now.wy;
+  const nowR = air.now.R;
+  // the column's frame for its shared grain (`stampSmokeGrain`): carried by the air, lifted at the mean billow's rate
+  const vLiftR =
+    (climbMean * (Math.pow(0.7, 0.9) - Math.pow(0.2, 0.9)) * tune.smokeLift * (env.tilt ?? 0.45)) / (0.5 * PMass);
+  const frameX = pxPerAirM * nowWx;
+  const frameY = pxPerAirM * nowWy - vLiftR * nowR;
   const massGrainS = Rm * 0.5 * (tune.smokeGrainScale ?? 2.2);
   let n = start;
   for (let i = 0; i < count; i++) {
@@ -1176,21 +1334,23 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
     const ang = r1 * TAU;
     // (smoke comes off the whole roof and gathers into one column as it climbs)
     const rho = Rm * 0.4 * Math.sqrt(r2) * (1 - 0.5 * a);
-    // (a gale flattens the column too: it climbs half as high and drifts the whole way)
+    // (a gale flattens the column too: it climbs slower on rise time and drifts the whole way)
+    const birth = air.at(t - a * P);
+    const ar = clamp01((nowR - birth.R) / P);
     const climb =
       Rm *
       (tune.massRise ?? 1.6) *
       (0.35 + 0.65 * outdoor) *
       (0.82 + 0.36 * r4) *
-      Math.pow(a, 0.9) *
-      (1 - 0.5 * leanG) *
+      Math.pow(ar, 0.9) *
       (0.6 + 0.4 * weak);
     const z = baseZ + climb;
-    const drift = Rm * tune.smokeDrift * 0.35 * (0.15 + 0.85 * leanG) * (0.12 + Math.pow(a, 1.3));
+    const driftX = (nowWx - birth.wx) * pxPerAirM;
+    const driftY = (nowWy - birth.wy) * pxPerAirM;
     // (the column is an S, not a pole: it sways more the higher it is, slowly, whatever the wind)
     const bend = Math.sin(t * 0.27 + a * 2.6 + hash01(seed, 9, 9) * TAU) * Rm * 0.16 * Math.pow(a, 0.8);
-    const x = m.x + Math.cos(ang) * rho + Math.sin(t * 0.5 + r3 * TAU) * Rm * 0.05 * a + bend + wdx * drift;
-    const y = m.y + Math.sin(ang) * rho + Math.cos(t * 0.4 + r4 * TAU) * Rm * 0.04 * a + wdy * drift;
+    const x = m.x + Math.cos(ang) * rho + Math.sin(t * 0.5 + r3 * TAU) * Rm * 0.05 * a + bend + driftX;
+    const y = m.y + Math.sin(ang) * rho + Math.cos(t * 0.4 + r4 * TAU) * Rm * 0.04 * a + driftY;
     // (0.2 -> 0.5 -> 0.62, 2026-11-03: the campfire's smoke grew 1.6x and 2.5x the climb; the burning roof's column stays the bigger of the two)
     const rad = Rm * 0.62 * sizeK * (0.4 + 1.5 * Math.pow(a, 0.8)) * Math.pow(envS, 0.5) * spread * (0.8 + 0.45 * r3);
     const strength = ((0.55 + 0.45 * Math.min(1, amt)) * Math.pow(envS, 0.55) * (0.85 + 0.3 * r3)) / (spread * spread);
@@ -1220,9 +1380,8 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
       y,
       Math.min(z, baseZ) + Math.max(0, z - baseZ) * tune.smokeLift,
       env.tilt ?? 0.45,
-      massV[0],
-      massV[1],
-      t,
+      frameX,
+      frameY,
       massGrainS
     );
     n++;

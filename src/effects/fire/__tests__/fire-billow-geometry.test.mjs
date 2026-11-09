@@ -33,7 +33,13 @@ import {
   BILLOW_TUNE,
   BILLOW_FLAME_RAMP,
   BILLOW_SMOKE_RAMP,
+  FIRE_PLUME_RISE_MPS,
+  FLAME_TILT_AT_LEAN,
+  flameTiltDeg,
+  leanForTilt,
+  plumeRiseRate,
 } from '../fire-billow-geometry.js';
+import { createAirPath } from '../fire-air-path.js';
 
 const FIRE = Object.freeze({
   x: 2000,
@@ -887,6 +893,150 @@ export function run(t) {
       mga.length > 5 &&
         mga.length === mgb.length &&
         mga.every((l, i) => l.s > 20 && l.kx === mgb[i].kx && l.ky === mgb[i].ky && Math.abs(l.x - mgb[i].x) > 1e-3)
+    );
+  }
+  // ── THE SMOKE RIDES ITS AIR (2026-11-09, mmp-9un.5 + mmp-vm1.1.6) ─────────────────────────────────────────────────────
+  // Ingram, live: smoke "rushes back and forth", "reversing direction", its grain "moves in a way that doesn't match the
+  // wind", and fire "doesn't respond to wind very accurately". A billow's age, path and grain must survive a change in the
+  // air; steady air must lean the plume like a real one (Briggs's bent-over plume) and the flame like a real one (AGA).
+  {
+    const smokeOf = (buf, n) => lobesOf(buf, n).filter((l) => l.kind === KIND_SMOKE);
+    const flat = { parallax: 0, tilt: 0 };
+    // (1) a billow's age never follows the wind (its life x (1 + 0.5 lean) re-dealt every age on every gust)
+    const calmE = emit({ windMotion01: 0, windX: 1, windY: 0 }, { tSec: 5000 });
+    const galeE = emit({ windMotion01: 0.8, windX: 1, windY: 0, windMps: 15, lean01: 0.8 }, { tSec: 5000 });
+    const tc = smokeOf(calmE.smoke, calmE.r.smoke).map((l) => l.tone);
+    const tg = smokeOf(galeE.smoke, galeE.r.smoke).map((l) => l.tone);
+    t.ok(
+      `a billow's age never follows the wind (${tc.length} billows at the same ages in calm air and in a gale)`,
+      tc.length > 10 && tc.length === tg.length && tc.every((v, i) => Math.abs(v - tg[i]) < 1e-6)
+    );
+    // (2) a turn of the air bends the newest smoke, not the whole column: two paths agree until 1 s ago, then one turns north
+    const pathOf = (turnAt) => {
+      const p = createAirPath();
+      for (let k = 0; k <= 400; k++) {
+        const tt = 4960 + k * 0.1;
+        const turned = turnAt !== null && tt > turnAt;
+        p.advance(tt, turned ? 0 : 10, turned ? -10 : 0, plumeRiseRate(10), 0.7);
+      }
+      return p;
+    };
+    const steadyP = pathOf(null);
+    const turnP = pathOf(4999);
+    const common = { windMotion01: 0.5, windMps: 10, lean01: 0.7 };
+    const eA = emit({ ...common, windX: 1, windY: 0, airPath: steadyP }, { tSec: 5000, ...flat }, { smokeWave: 0 });
+    const eB = emit({ ...common, windX: 0, windY: -1, airPath: turnP }, { tSec: 5000, ...flat }, { smokeWave: 0 });
+    const sA = smokeOf(eA.smoke, eA.r.smoke);
+    const sB = smokeOf(eB.smoke, eB.r.smoke);
+    const reach = Math.max(...sA.map((l) => l.x - FIRE.x));
+    const moved = sA.map((l, i) => Math.hypot(l.x - sB[i].x, l.y - sB[i].y));
+    t.ok(
+      `a turn of the air bends the newest smoke, not the whole column (column ${reach.toFixed(0)} px long; no billow moved more than ${Math.max(...moved).toFixed(0)} px)`,
+      sA.length === sB.length && reach > 300 && Math.max(...moved) < 0.15 * reach
+    );
+    // (3) the grain rides the air: every billow born before the turn keeps its own patch of the pattern exactly
+    const grainKeep = (a, b) => {
+      let same = 0;
+      let n = 0;
+      for (let i = 0; i < a.r.smoke; i++) {
+        const o = i * LOBE_STRIDE;
+        n++;
+        if (Math.abs(a.smoke[o + 14] - b.smoke[o + 14]) < 1e-3 && Math.abs(a.smoke[o + 15] - b.smoke[o + 15]) < 1e-3)
+          same++;
+      }
+      return { same, n };
+    };
+    const gk = grainKeep(eA, eB);
+    t.ok(
+      `the smoke's grain rides its air: a turn leaves every older billow's patch of the pattern alone (${gk.same} of ${gk.n})`,
+      gk.n > 10 && gk.same >= 0.8 * gk.n
+    );
+    // and a gust of the same direction does not slide the pattern of a billow along the column between two frames
+    const gustP = createAirPath();
+    for (let k = 0; k <= 400; k++) {
+      const tt = 4960 + k * 0.1;
+      const u = tt > 4999.5 ? 25 : 10;
+      gustP.advance(tt, u, 0, plumeRiseRate(u), 0.7);
+    }
+    const g1 = emit({ ...common, windX: 1, windY: 0, airPath: steadyP }, { tSec: 5000, ...flat });
+    const g2 = emit({ ...common, windX: 1, windY: 0, windMps: 25, airPath: gustP }, { tSec: 5000, ...flat });
+    const gg = grainKeep(g1, g2);
+    t.ok(
+      `a gust does not slide the grain against the smoke (${gg.same} of ${gg.n} billows keep their patch)`,
+      gg.n > 10 && gg.same >= 0.8 * gg.n
+    );
+    // (4) steady air leans the plume like a real one: angle from upright = atan(U / FIRE_PLUME_RISE_MPS)
+    const plumeAngle = (U) => {
+      let gx = 0;
+      let gz = 0;
+      let n = 0;
+      for (let k = 0; k < 60; k++) {
+        const e = emit(
+          { windMotion01: 0.3, windX: 1, windY: 0, windMps: U, lean01: 0 },
+          { tSec: 3000 + k * 0.53, ...flat }
+        );
+        if (e.r.smokeGX === null) continue;
+        gx += e.r.smokeGX;
+        gz += e.r.smokeZ;
+        n++;
+      }
+      return (Math.atan2(gx / n, gz / n) * 180) / Math.PI;
+    };
+    const lean = [2.5, 5, 10.5].map((U) => [U, plumeAngle(U), (Math.atan2(U, FIRE_PLUME_RISE_MPS) * 180) / Math.PI]);
+    t.ok(
+      `steady air leans the smoke like a bent-over plume (${lean.map(([U, a, w]) => `${U} m/s: ${a.toFixed(0)} vs ${w.toFixed(0)} deg`).join(', ')})`,
+      lean.every(([, a, w]) => Math.abs(a - w) < 6) && Math.abs(plumeAngle(0)) < 1
+    );
+    // (5) the flame's drawn tilt is the table the engine aims with (re-measured: a change to the flame's shape fails here)
+    const flameTilt = (L) => {
+      let fx = 0;
+      let fy = 0;
+      let fw = 0;
+      for (let k = 0; k < 120; k++) {
+        const e = emit(
+          { radius: 45, windMotion01: 0.3, windX: 1, windY: 0, windMps: 0, lean01: L },
+          { tSec: 1000 + k * 0.37, camX: FIRE.x, camY: FIRE.y, cameraHeight: 1000, tilt: 0.45 }
+        );
+        for (const l of lobesOf(e.flame, e.r.count)) {
+          if (l.kind !== KIND_FLAME) continue;
+          const w = Math.max(0, l.w) * l.r * l.r;
+          fx += (l.x - FIRE.x) * w;
+          fy += (l.y - FIRE.y) * w;
+          fw += w;
+        }
+      }
+      return (Math.atan2(fx / fw, -fy / fw / 0.45) * 180) / Math.PI;
+    };
+    const tilts = [0.2, 0.5, 0.8].map((L) => [L, flameTilt(L), FLAME_TILT_AT_LEAN[Math.round(L * 10)]]);
+    t.ok(
+      `the flame draws the tilt the engine aims for (${tilts.map(([L, a, w]) => `lean ${L}: ${a.toFixed(1)} vs ${w}`).join(', ')} deg)`,
+      tilts.every(([, a, w]) => Math.abs(a - w) < 3)
+    );
+    // (6) the AGA tilt: upright below the fire's own speed, ~56 deg at 2.5 m/s for a 0.9 m fire, stiffer when bigger
+    t.ok(
+      `a flame tilts like a real one in a wind (0.5 m/s: ${flameTiltDeg(0.5).toFixed(0)}, 2.5: ${flameTiltDeg(2.5).toFixed(1)}, 10.5: ${flameTiltDeg(10.5).toFixed(1)} deg)`,
+      flameTiltDeg(0.5) === 0 &&
+        Math.abs(flameTiltDeg(2.5) - 55.6) < 1 &&
+        Math.abs(flameTiltDeg(10.5) - 73.9) < 1 &&
+        flameTiltDeg(2.5, 3) < flameTiltDeg(2.5, 0.9) &&
+        flameTiltDeg(2.5, 0.05) > flameTiltDeg(2.5, 0.9)
+    );
+    t.ok(
+      'the lean that draws a tilt inverts the table, and rises with it',
+      FLAME_TILT_AT_LEAN.every((d, i) => Math.abs(leanForTilt(d) - i / 10) < 1e-9) &&
+        leanForTilt(0) === 0 &&
+        leanForTilt(200) === 1 &&
+        leanForTilt(30) < leanForTilt(60)
+    );
+    // (7) a spit ember is thrown with the air at its throw: one lying on the ground stays put when the air turns
+    const spitOf = (e) =>
+      lobesOf(e.flame, e.r.count).filter((l) => l.kind === KIND_FLAME && Math.abs(l.w - 1.35) < 1e-6 && l.tone === 0.5);
+    const pA = spitOf(eA);
+    const pB = spitOf(eB);
+    const lay = pA.filter((l, i) => pB[i] && Math.hypot(l.x - pB[i].x, l.y - pB[i].y) < 1e-3).length;
+    t.ok(
+      `a spit ember thrown before the air turned lies where it fell (${lay} of ${pA.length} unmoved)`,
+      pA.length > 0 && pA.length === pB.length && lay >= 0.6 * pA.length
     );
   }
 }

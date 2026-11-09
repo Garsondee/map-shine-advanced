@@ -237,6 +237,11 @@ async function pageProbeGroup({ g, scale, settleMs, mode, extra, forces, measure
   const readyCap = mode === 'samples' || mode === 'series' || mode === 'strike' ? 8000 : 120000;
   const t0 = Date.now();
   while (Date.now() - t0 < readyCap && !MapShine.getSceneReady?.()?.ready) await sleep(300);
+  // The probe reads the buffers at the wrong pixel when the render-scale governor is below 1 (mmp-78u.41):
+  // wait up to 30 s for full resolution; a row still read below it is recorded and SKIPped by the claims.
+  const rs = () => MapShine.getRenderScaleState?.()?.resolvedInternalScale ?? 1;
+  const t1 = Date.now();
+  while (rs() < 1 && Date.now() - t1 < 30000) await sleep(500);
   const world = g.pts.map((p) => ({ name: p.name, x: p.x + d.sceneX, y: p.y + d.sceneY }));
   const f4 = (a) => (Array.isArray(a) ? a.slice(0, 3).map((v) => Number(Number(v).toFixed(4))) : null);
   const fd = (p, e) => {

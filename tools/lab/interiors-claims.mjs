@@ -20,11 +20,12 @@
  * each condition on the lab scene (hour via MapShine.setTimeOfDay, sky/wind flags, scene darkness, Global
  * Illumination, Night fader, transient effect overrides) and restores everything after.
  *
- * THE REGION DARKNESS OVERRIDE. MSA ships a world setting (regionDarknessOverrideEnabled, ON by default; this
- * rig's world 0.9) that REWRITES every darkening behaviour of the viewed scene to OVERRIDE <value> on view
+ * THE REGION DARKNESS OVERRIDE. MSA has a world setting (regionDarknessOverrideEnabled; ON by default when this
+ * was measured, value 0.9 on the rig; the manager decided 2026-11-09 that it defaults OFF from now on, mmp-6pc.3)
+ * that REWRITES every darkening behaviour of the viewed scene to OVERRIDE <value> on view
  * (src/foundry/region-darkness-override.js). With it on, the lab's authored modes cannot survive a view, so
- * the region-math claims are measured with it OFF (the checker switches it off on the private rig and repairs
- * the lab Regions from the spec), and IR-63 measures the override itself, as shipped.
+ * the region-math claims are measured with it OFF (the checker switches it off on the private rig if needed
+ * and repairs the lab Regions from the spec), and IR-63 measures the override itself, switched on just for it.
  *
  * Pure: data and small functions, no IO.
  *
@@ -271,6 +272,10 @@ function reader(D) {
     const row = D?.[cond]?.[group]?.[point];
     if (!row) throw new Missing(`no ${cond}/${group}.${point}`);
     if (row.onScreen === false) throw new Missing(`off-screen ${cond}/${group}.${point}`);
+    // buffers read below render scale 1 come from the wrong pixel (mmp-78u.41): never judge them
+    if (row.env?.renderScale != null && row.env.renderScale < 1) {
+      throw new Missing(`${cond}/${group} read at render scale ${row.env.renderScale} (probe bug mmp-78u.41)`);
+    }
     return row;
   };
   return { P, refs };
@@ -1293,7 +1298,13 @@ export const INTERIORS_CLAIMS = [
         const ref = P('noon', g, REF[g]);
         abs = toSrgb(mean3(ref.albedo));
         for (const p of allGroups()[g].pts) {
-          const r = P('noon', g, p.name);
+          // a point added to the spec after this run was taken is simply not judged here
+          let r;
+          try {
+            r = P('noon', g, p.name);
+          } catch {
+            continue;
+          }
           if (!Array.isArray(r.albedo)) continue;
           n++;
           const worst = Math.max(...r.albedo.map((v, i) => Math.abs(toSrgb(v) - toSrgb(ref.albedo[i]))));
@@ -1312,9 +1323,10 @@ export const INTERIORS_CLAIMS = [
   {
     id: 'IR-63',
     source: 'msa',
-    cite: 'src/foundry/region-darkness-override.js header (world setting regionDarknessOverrideEnabled, ON by default, author 2026-09-09)',
+    cite: 'src/foundry/region-darkness-override.js header (world setting regionDarknessOverrideEnabled; ON by default since author 2026-09-09, OFF by default per the manager 2026-11-09, mmp-6pc.3)',
     claim:
-      "With MSA's Region darkness override ON (this world's value v), viewing the scene rewrites every darkening behaviour (DARKEN, OVERRIDE > 0) to OVERRIDE v and keeps the original in a flag; BRIGHTEN and OVERRIDE 0 are untouched. R1.e (DARKEN .5) and D1.ov01 (OVERRIDE .1) then read A(v); R1.d and R1.c keep 0.933.",
+      "When a GM switches MSA's Region darkness override ON (value v), viewing the scene rewrites every darkening behaviour (DARKEN, OVERRIDE > 0) to OVERRIDE v and keeps the original in a flag; BRIGHTEN and OVERRIDE 0 are untouched. R1.e (DARKEN .5) and D1.ov01 (OVERRIDE .1) then read A(v); R1.d and R1.c keep 0.933.",
+    note: '(c) 2026-11-09: worded for the new default (OFF, mmp-6pc.3); the checker switches it on only for this measurement and restores what it found. Its scope (outdoor, OVERRIDE 0.1 and Level-scoped Regions, first behaviour only) is decision mmp-78u.23.',
     needs: needs('override', 'R1', 'D1'),
     check: (P) => {
       const env = P('override', 'R1', 'e').env ?? {};

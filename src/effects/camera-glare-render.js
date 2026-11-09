@@ -108,6 +108,7 @@ export function buildCameraGlareMaterial({
   features = [],
   uniforms,
   uvGuard = null,
+  starTaps = STAR_TAPS,
 }) {
   const TSL = THREE.TSL;
   const { uv, vec2, vec3, vec4, float, Fn, dot, clamp, smoothstep, length, texture } = TSL;
@@ -159,13 +160,21 @@ export function buildCameraGlareMaterial({
       // Diffraction spikes from a hexagonal aperture: each spoke picks up the extreme light it points back at.
       const rot = U.c.w;
       let star = vec3(0, 0, 0);
+      // Fewer taps (the lens's low rung) keep the spoke's reach and energy: wider steps, weights renormalised.
+      const taps = Math.max(2, Math.min(STAR_TAPS, Math.floor(starTaps)));
+      const stepTexels = (1.2 * STAR_TAPS) / taps;
+      let full = 0;
+      let mine = 0;
+      for (let i = 1; i <= STAR_TAPS; i++) full += Math.exp((-3 * i) / STAR_TAPS);
+      for (let i = 1; i <= taps; i++) mine += Math.exp((-3 * i) / taps);
+      const norm = full / mine;
       for (let k = 0; k < STAR_LINES; k++) {
         const ang = rot.add((k * Math.PI) / STAR_LINES);
         const dir = vec2(TSL.cos(ang), TSL.sin(ang).mul(aspect));
-        for (let i = 1; i <= STAR_TAPS; i++) {
+        for (let i = 1; i <= taps; i++) {
           // Contiguous taps (1.2 fine-mip texels apart, inside the mip's own blur) so a spike is a line, not beads.
-          const fall = Math.exp((-3 * i) / STAR_TAPS);
-          const off = dir.mul(texel).mul(i * 1.2);
+          const fall = Math.exp((-3 * i) / taps) * norm;
+          const off = dir.mul(texel).mul(i * stepTexels);
           const a = over(fineTexNode.sample(w.add(off)).rgb, U.a.w);
           const b = over(fineTexNode.sample(w.sub(off)).rgb, U.a.w);
           star = star.add(a.add(b).mul(fall));

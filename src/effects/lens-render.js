@@ -149,6 +149,10 @@ export function lensTierPlan(tier) {
   return {
     tier: t,
     motionEnabled: t >= 1,
+    // Rung 0 (`low`) keeps the fringe but with V2's 3-tap red/green/blue split, not the 5-tap spectral one, and
+    // a 6-tap starburst spoke (same reach and energy) instead of 12 (perf sweep 2026-11-08).
+    spectralChromatic: t >= 1,
+    starTaps: t >= 1 ? 12 : 6,
     lightBurnEnabled: t >= 2,
     overlayEnabled: t >= 3,
   };
@@ -428,6 +432,13 @@ export function buildLensCompositeMaterial({
     [-0.5, [0, 0.25, 0.35]],
     [-1, [0, 0, 0.5]],
   ];
+  const CA_TAPS = plan.spectralChromatic
+    ? SPECTRAL_TAPS
+    : [
+        [1, [1, 0, 0]],
+        [0, [0, 1, 0]],
+        [-1, [0, 0, 1]],
+      ];
   function sampleSceneWithCA(sampleUv) {
     const clampedUv = clamp(sampleUv, vec2(0, 0), vec2(1, 1));
     const toCenter = clampedUv.sub(distortCenter);
@@ -436,7 +447,7 @@ export function buildLensCompositeMaterial({
     const caEdge = clamp(edgeR.mul(1.9), 0, 1).pow(maxNode(uChromaticEdgePower, float(0.01)));
     const caDelta = caDir.mul(uChromaticAmountPx).mul(caEdge).mul(texelSize);
     let sum = vec3(0, 0, 0);
-    for (const [t, w] of SPECTRAL_TAPS) {
+    for (const [t, w] of CA_TAPS) {
       const at = t === 0 ? clampedUv : clamp(clampedUv.add(caDelta.mul(t)), vec2(0, 0), vec2(1, 1));
       sum = sum.add(sceneTexNode.sample(at).rgb.mul(vec3(w[0], w[1], w[2])));
     }

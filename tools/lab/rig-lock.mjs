@@ -15,6 +15,9 @@
  * The lock is a file (tools/lab/out/rig.lock) created atomically ('wx'). It is stale when its
  * process is gone or it is older than its TTL (default 45 min); a stale lock is taken over.
  * lab.mjs seed/look take it themselves (withRigLock), so a bare `lab.mjs look` is safe too.
+ *
+ * Several rigs: set LAB_RIG=<name> (e.g. LAB_RIG=b for the second rig on port 30091) and the lock
+ * becomes tools/lab/out/rig.<name>.lock, so each rig has its own single owner. Unset = rig A.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,7 +25,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const LOCK_FILE = path.join(HERE, 'out', 'rig.lock');
+const RIG = (process.env.LAB_RIG ?? '').replace(/[^a-z0-9-]/gi, '');
+export const LOCK_FILE = path.join(HERE, 'out', RIG ? `rig.${RIG}.lock` : 'rig.lock');
 
 function alive(pid) {
   try {

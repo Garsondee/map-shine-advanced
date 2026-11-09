@@ -25,7 +25,21 @@ export function run(t) {
   t.ok('cloud rain: the ramp rises monotonically', cloudRainLinkWeight(0.03, 1) < cloudRainLinkWeight(0.08, 1));
   t.ok(
     'cloud rain: heavy overcast eases the link (no dry views)',
-    cloudRainLinkWeight(0.85, 1) <= 0.21 && cloudRainLinkWeight(0.85, 1) > 0
+    cloudRainLinkWeight(0.58, 1, 0.95) <= 0.21 && cloudRainLinkWeight(0.58, 1, 0.95) > 0
+  );
+  // ⭐ THE REGRESSION (MSA Lab 2026-11-09): the ease must engage at the fill the main deck can REALLY reach. It was
+  // keyed on fill 0.55..0.85 while `storybookDensity` caps the main deck at 0.58, so 100% cloud left 36% of the
+  // view dry. Tie the test to the deck's own resolver, not to a hand-picked fill.
+  const overcastFill = resolveStorybookDeck({ cover01: 1, scalePx: 1100, eyeHeight: 1000 }).fill;
+  t.ok(
+    'cloud rain: Steady Rain (cover 1) at the main deck s real fill eases to a fifth',
+    cloudRainLinkWeight(overcastFill, 1, 1) <= 0.21
+  );
+  t.ok(
+    'cloud rain: a thunderstorm (cover 0.8) keeps its shower shafts (full link)',
+    Math.abs(
+      cloudRainLinkWeight(resolveStorybookDeck({ cover01: 0.8, scalePx: 1100, eyeHeight: 1000 }).fill, 1, 0.8) - 1
+    ) < 1e-9
   );
   t.ok('cloud rain: mid cover keeps the full link', Math.abs(cloudRainLinkWeight(0.5, 1) - 1) < 1e-9);
   t.ok('cloud rain: junk in => 0, never NaN', cloudRainLinkWeight(NaN, undefined) === 0);

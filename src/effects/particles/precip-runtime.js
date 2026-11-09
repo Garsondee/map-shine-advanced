@@ -125,7 +125,12 @@ import {
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
 import { buildSquallField } from '../precipitation/squall-field.js';
-import { CLOUD_RAIN_CANDIDATES, createCloudDeckUniforms, sampleCloudRainNode } from '../precipitation/cloud-rain.js';
+import {
+  CLOUD_RAIN_CANDIDATES,
+  CLOUD_RAIN_SPAWN_CORE_EXP,
+  createCloudDeckUniforms,
+  sampleCloudRainNode,
+} from '../precipitation/cloud-rain.js';
 import { storybookDeckHeightNode } from '../clouds/storybook-clouds.js';
 import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
 import {
@@ -691,6 +696,16 @@ export function createPrecipEngine({
   /** How much rain falls from over `p`, 0..1 — `mix(1, field, link)`, so link 0 is exactly "everywhere". */
   const cloudGateAt = (texNode, p) =>
     texNode ? mix(float(1), sampleCloudRainNode(TSL, { texNode, rect: uRainRect, worldXY: p }), uDeck2.z) : float(1);
+  /** A birthplace's weight in the weighted draw (`spawnUnderCloud`): the field raised to
+   * `CLOUD_RAIN_SPAWN_CORE_EXP`, so the deep cores win (a storm keeps its shafts and gaps), eased toward 1 by the link. */
+  const spawnWeightAt = (texNode, p) =>
+    texNode
+      ? mix(
+          float(1),
+          sampleCloudRainNode(TSL, { texNode, rect: uRainRect, worldXY: p }).pow(float(CLOUD_RAIN_SPAWN_CORE_EXP)),
+          uDeck2.z
+        )
+      : float(1);
 
   /**
    * ⭐ THE ENGINE'S **OWN** WIND UNIFORMS, PUSHED PER FRAME — not the wind
@@ -837,6 +852,15 @@ export function createPrecipEngine({
   const windPxPerSec = float(pxPerMeter * 3.2);
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
+  /**
+   * ⭐ A BIRTHPLACE HASH ON THE FLOAT'S BITS (MSA Lab 2026-11-09). The sine hash above aliases at the large
+   * arguments a spawn hands it (`entropy` reaches ~9000), so rain was BORN ON A LATTICE of rows and columns: seen
+   * in the lab rig as dotted lines of drops, measured in a float32 CPU twin as an x-column spread of 0.94 where
+   * uniform random gives 0.25. PCG over the input's own bits (`TSL.hash` of `floatBitsToUint`) measures 0.246 and
+   * costs a few integer ops. Positions only: sizes, speeds and phases keep their own streams.
+   * @param {*} x - any float node. @param {number} salt - a u32 that decorrelates two draws of one input.
+   */
+  const bitHash11 = (x, salt) => TSL.hash(TSL.floatBitsToUint(x).bitXor(TSL.uint(salt >>> 0)));
 
   // ⭐ THE DIRECTION THE WIND PUSHES THINGS now comes from the ONE shared
   // helper, `world/wind-field.js#windFlowVectorNode` — see its CPU twin
@@ -898,7 +922,10 @@ export function createPrecipEngine({
     // where its cloud is, outside it.
     const origin = uRectMin.sub(margin).add(uSpawnExt.min(vec2(0, 0)));
     const span = uRectSize.add(margin.mul(float(2))).add(uSpawnExt.abs());
-    return vec2(origin.x.add(hash11(h1).mul(span.x)), origin.y.add(hash11(h2).mul(span.y)));
+    return vec2(
+      origin.x.add(bitHash11(h1, 0x9e3779b9).mul(span.x)),
+      origin.y.add(bitHash11(h2, 0x85ebca77).mul(span.y))
+    );
   };
 
   /**
@@ -909,20 +936,27 @@ export function createPrecipEngine({
    * Compute stage: the texture read is a `level(0)` sample (no derivatives exist here).
    * @param {*} h1 @param {*} h2
    */
+  // ⚠️ A WEIGHTED DRAW, NOT AN ARGMAX (MSA Lab 2026-11-09). The pick was `max(weight)`, and a weight is
+  // `mix(1, field, link)`: under cloud 1, in the open 1 - link. ANY link above 0 then made a cloud candidate win
+  // outright (1 beats 0.8), so the link's STRENGTH never reached the birthplaces — the "Rain follows clouds" dial
+  // was a switch, and the overcast ease (link to a fifth, `cloudRainLinkWeight`) could not thin the dry gaps
+  // (measured: 36% of the view dry at 100% rain under 100% cloud). Reservoir sampling picks each candidate with
+  // probability weight / sum: link 1 still gathers the rain under the clouds (open candidates weigh 0), link 0.2
+  // is nearly uniform, and all-zero weights keep the first candidate, as before.
   const spawnUnderCloud = (h1, h2) => {
     const first = spawnAt(h1, h2);
     if (!rainTexCompute) return first;
     const best = vec2(first).toVar();
-    const bestW = cloudGateAt(rainTexCompute, first).toVar();
+    const sumW = spawnWeightAt(rainTexCompute, first).toVar();
     for (let k = 1; k < CLOUD_RAIN_CANDIDATES; k++) {
       const cand = spawnAt(
         h1.mul(float(1.37 + 0.11 * k)).add(float(7.3 * k)),
         h2.mul(float(0.89 + 0.07 * k)).add(float(3.1 * k))
       );
-      const w = cloudGateAt(rainTexCompute, cand);
-      const better = w.greaterThan(bestW.add(float(1e-3)));
-      best.assign(better.select(cand, best));
-      bestW.assign(better.select(w, bestW));
+      const w = spawnWeightAt(rainTexCompute, cand);
+      sumW.addAssign(w);
+      const u = bitHash11(h1.mul(float(2.17 + 0.13 * k)).add(h2.mul(float(0.71))), 0x27d4eb2f + 0x632be5ab * k);
+      best.assign(u.mul(sumW).lessThan(w).select(cand, best));
     }
     return best;
   };

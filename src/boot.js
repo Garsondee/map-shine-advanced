@@ -415,6 +415,7 @@ import {
   setVtPanViewerWeatherTargets,
   setVtPanViewerPrecipKind,
   getVtPanViewerPrecipitationStatus,
+  readVtPanViewerPrecipParticles,
   setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
@@ -1621,6 +1622,13 @@ MapShine.getPrecipitation = () => ({
 });
 /** Live look dials — the ones the shader lab sweeps. */
 MapShine.setPrecipitationTuning = setVtPanViewerPrecipitationTuning;
+/**
+ * The MSA Lab's precipitation read-back: every fall and splash body's GPU state (position, lateral velocity,
+ * size, terminal speed, height, age) plus the sim time of the frame it follows. Measure, don't eyeball:
+ * `tools/lab/weather-probe.js` reads it twice and reports fall speed in m/s, drift vs wind, spread.
+ * Stalls the GPU queue for a frame or two — console and lab only.
+ */
+MapShine.readPrecipParticles = readVtPanViewerPrecipParticles;
 
 MapShine.addWeatherEvent = addVtPanViewerWeatherEvent;
 MapShine.releaseWeatherEvent = releaseVtPanViewerWeatherEvent;

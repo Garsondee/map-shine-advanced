@@ -4808,7 +4808,8 @@ async function startVtPanViewerUnserialized({
       const sb = cloudStyleStorybook && lastStorybookDeck ? lastStorybookDeck : null;
       const deck = sb ?? virtualRainDeck(eye.height, board);
       // The card's "Rain follows clouds" dial is applied by the subsystem (it holds the tuning).
-      const linkWeight = sb ? cloudRainLinkWeight(sb.fill, 1) : 0;
+      // The overcast ease reads the weather's COVER (the main deck's fill is capped at 0.58; cloud-rain.js).
+      const linkWeight = sb ? cloudRainLinkWeight(sb.fill, 1, lastEnvSnapshot?.env?.weather?.cloudCover01 ?? 0) : 0;
       let rect = null;
       if (linkWeight > 0 && precip01 > 0) {
         const mx = (spawnRect.maxX - spawnRect.minX) * CLOUD_RAIN_FIELD_PAD;
@@ -32341,6 +32342,13 @@ async function startVtPanViewerUnserialized({
         ...precipitationSubsystem.getStatus(),
         skyReachBake: lastPrecipSkyReachBake,
       }),
+      /** MSA Lab read-back: every precipitation body's GPU state, stamped with the sim time of the frame the
+       * copies follow (they are queued synchronously inside `readParticles`). Console/lab only — it stalls. */
+      readPrecipParticles: async (opts) => {
+        const simMs = lastEnvSnapshot?.env?.time?.tMs ?? null;
+        const r = await precipitationSubsystem.readParticles(renderer, opts);
+        return { simMs, pxPerMetre: windAmbientRef?.pixelsPerMetre?.value ?? null, ...r };
+      },
       /** Live look tuning (fallSlant01, parallaxStreak01, streakScale, ...). */
       setPrecipitationTuning: (t) => {
         precipitationSubsystem.setTuning(t);
@@ -35768,6 +35776,11 @@ export function setVtPanViewerPrecipKind(kind) {
 export function getVtPanViewerPrecipitationStatus() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getPrecipitationStatus();
+}
+/** @param {{maxBodies?: number}} [opts] @returns {Promise<object>} the MSA Lab's precipitation read-back. */
+export async function readVtPanViewerPrecipParticles(opts) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.readPrecipParticles(opts);
 }
 /** @param {object} t @returns {object} */
 export function setVtPanViewerPrecipitationTuning(t) {

@@ -120,7 +120,7 @@ import {
 import { createLogger } from '../../core/log.js';
 import { resolveSpecies } from '../precipitation/precip-species.js';
 import { buildSquallField } from '../precipitation/squall-field.js';
-import { CLOUD_RAIN_CANDIDATES, sampleCloudRainNode } from '../precipitation/cloud-rain.js';
+import { CLOUD_RAIN_CANDIDATES, CLOUD_RAIN_SPAWN_CORE_EXP, sampleCloudRainNode } from '../precipitation/cloud-rain.js';
 import { buildWeatherShadeNode } from '../lighting/weather-shade.js';
 
 const log = createLogger('precip-splash');
@@ -408,6 +408,17 @@ export function createPrecipSplashEngine({
     texNode
       ? mix(float(1), sampleCloudRainNode(TSL, { texNode, rect: uRainRect, worldXY: p.sub(uLandShift) }), uRainLink)
       : float(1);
+  /** The weighted draw's weight: the landing field to `CLOUD_RAIN_SPAWN_CORE_EXP`, eased toward 1 by the link (the fall's rule). */
+  const landSpawnWeightAt = (texNode, p) =>
+    texNode
+      ? mix(
+          float(1),
+          sampleCloudRainNode(TSL, { texNode, rect: uRainRect, worldXY: p.sub(uLandShift) }).pow(
+            float(CLOUD_RAIN_SPAWN_CORE_EXP)
+          ),
+          uRainLink
+        )
+      : float(1);
 
   /**
    * ⭐ STRIKE HEIGHT — a splash is drawn at the SCALE OF WHAT IT HITS.
@@ -455,6 +466,15 @@ export function createPrecipSplashEngine({
   };
 
   const hash11 = (x) => fract(sin(x.mul(12.9898)).mul(43758.5453));
+  /**
+   * ⭐ A BIRTHPLACE HASH ON THE FLOAT'S BITS (MSA Lab 2026-11-09). The sine hash above aliases at the large
+   * arguments a spawn hands it (the fall's `entropy`), so rain was BORN ON A LATTICE of rows and columns: seen
+   * in the lab rig as dotted lines of drops, measured in a float32 CPU twin as an x-column spread of 0.94 where
+   * uniform random gives 0.25. PCG over the input's own bits (`TSL.hash` of `floatBitsToUint`) measures 0.246 and
+   * costs a few integer ops. Positions only: sizes, speeds and phases keep their own streams.
+   * @param {*} x - any float node. @param {number} salt - a u32 that decorrelates two draws of one input.
+   */
+  const bitHash11 = (x, salt) => TSL.hash(TSL.floatBitsToUint(x).bitXor(TSL.uint(salt >>> 0)));
 
   /**
    * ⭐ THE DIRECTION THE WIND PUSHES THINGS — `(−sin, cos)`, a +90° rotation of
@@ -522,24 +542,31 @@ export function createPrecipSplashEngine({
     const margin = uRectSize.mul(float(SPAWN_MARGIN_FRAC));
     const origin = uRectMin.sub(margin);
     const span = uRectSize.add(margin.mul(float(2)));
-    return vec2(origin.x.add(hash11(h1).mul(span.x)), origin.y.add(hash11(h2).mul(span.y)));
+    return vec2(
+      origin.x.add(bitHash11(h1, 0x9e3779b9).mul(span.x)),
+      origin.y.add(bitHash11(h2, 0x85ebca77).mul(span.y))
+    );
   };
 
-  /** The best of `CLOUD_RAIN_CANDIDATES` birthplaces by where the rain lands — the fall's own rule. */
+  /**
+   * One of `CLOUD_RAIN_CANDIDATES` birthplaces, drawn with probability weight / sum by where the rain lands — the
+   * fall's own rule (`precip-runtime.js#spawnUnderCloud`: a weighted draw, not an argmax, so the link's strength
+   * reaches the birthplaces).
+   */
   const spawnWhereRainLands = (h1, h2) => {
     const first = spawnAt(h1, h2);
     if (!rainTexCompute) return first;
     const best = vec2(first).toVar();
-    const bestW = landGateAt(rainTexCompute, first).toVar();
+    const sumW = landSpawnWeightAt(rainTexCompute, first).toVar();
     for (let k = 1; k < CLOUD_RAIN_CANDIDATES; k++) {
       const cand = spawnAt(
         h1.mul(float(1.29 + 0.13 * k)).add(float(5.7 * k)),
         h2.mul(float(0.83 + 0.09 * k)).add(float(2.3 * k))
       );
-      const w = landGateAt(rainTexCompute, cand);
-      const better = w.greaterThan(bestW.add(float(1e-3)));
-      best.assign(better.select(cand, best));
-      bestW.assign(better.select(w, bestW));
+      const w = landSpawnWeightAt(rainTexCompute, cand);
+      sumW.addAssign(w);
+      const u = bitHash11(h1.mul(float(2.41 + 0.17 * k)).add(h2.mul(float(0.67))), 0x165667b1 + 0x632be5ab * k);
+      best.assign(u.mul(sumW).lessThan(w).select(cand, best));
     }
     return best;
   };
@@ -1254,6 +1281,8 @@ export function createPrecipSplashEngine({
     scene,
     /** FED mode: the two buffers the fall's kernel writes a landing into (`precip-runtime.js#splashSink`). */
     sink: fed && splashes ? { position, age, capacity } : null,
+    /** The arena's storage nodes, for the MSA Lab's read-back only (`precip-subsystem.js#readParticles`). */
+    labBuffers: buffers,
     capacity,
     speciesId,
     /** False when the species does not splash — the caller can skip it whole. */

@@ -56,22 +56,45 @@ export const CLOUD_RAIN_DEPTH_HI = 0.4;
  */
 export const CLOUD_RAIN_CANDIDATES = 4;
 
+/**
+ * The birthplace draw weighs a candidate by the rain field raised to this power (2026-11-09). The draw is random
+ * (weight / sum), not an argmax, so the link's strength reaches the birthplaces; the power keeps what the argmax
+ * gave a storm: the rain gathers under the thick cores and the gaps between showers stay dry.
+ */
+export const CLOUD_RAIN_SPAWN_CORE_EXP = 3;
+
 /** The flat virtual deck's height as a share of the eye — the storybook deck's own base-plus-half-dome. */
 export const VIRTUAL_DECK_SHARE = 0.21;
 
 /**
- * How strongly the rain follows the clouds this frame, 0..1: the card's link dial, ramped in by how much cloud the
- * deck holds (so a clear sky rains everywhere — see the module header).
- * @param {number} fill01 - the deck's coverage share (`resolveStorybookDeck(...).fill`).
- * @param {number} link01 - the card's "Rain follows clouds" dial.
+ * The cloud COVER (the weather's own axis, all three decks together) across which the link eases off under a heavy
+ * overcast: full shower structure up to a thunderstorm's 0.8, a fifth of it from 0.95 (Overcast, Sleet; Drizzle
+ * and Steady Rain run at 1).
  */
-export function cloudRainLinkWeight(fill01, link01) {
+export const CLOUD_RAIN_OVERCAST_FROM = 0.8;
+export const CLOUD_RAIN_OVERCAST_TO = 0.95;
+
+/**
+ * How strongly the rain follows the clouds this frame, 0..1: the card's link dial, ramped in by how much cloud the
+ * deck holds (so a clear sky rains everywhere — see the module header), eased off under a heavy overcast.
+ *
+ * ⚠️ THE OVERCAST EASE READS THE COVER, NOT THE DECK'S FILL. It used to ease from 55% to 85% FILL, but the main
+ * deck's fill is capped at 0.58 (`storybookDensity`, so the low and high decks show at high cover), so the ease
+ * could never engage: measured on the MSA Lab (2026-11-09), 36% of the view stayed dry at 100% rain under 100%
+ * cloud — Steady Rain and Drizzle left a third of the map dry, the "weather stopped" read this ease exists to stop.
+ * @param {number} fill01 - the main deck's coverage share (`resolveStorybookDeck(...).fill`).
+ * @param {number} link01 - the card's "Rain follows clouds" dial.
+ * @param {number} [cover01] - the weather's cloud cover, 0..1 (absent: no overcast ease).
+ */
+export function cloudRainLinkWeight(fill01, link01, cover01 = 0) {
   const f = Number.isFinite(fill01) ? Math.max(0, Math.min(1, fill01)) : 0;
   const l = Number.isFinite(link01) ? Math.max(0, Math.min(1, link01)) : 0;
+  const c = Number.isFinite(cover01) ? Math.max(0, Math.min(1, cover01)) : 0;
   const t = Math.min(1, f / 0.12);
   // Under a heavy overcast the sky is one cloud: dry gaps would read as "the weather stopped". The link eases off
-  // from 55% to 85% fill, to a fifth of itself (some shower structure stays, never a dry view).
-  const o = Math.min(1, Math.max(0, (f - 0.55) / 0.3));
+  // to a fifth of itself (some shower structure stays, never a dry view).
+  const span = CLOUD_RAIN_OVERCAST_TO - CLOUD_RAIN_OVERCAST_FROM;
+  const o = Math.min(1, Math.max(0, (c - CLOUD_RAIN_OVERCAST_FROM) / span));
   return l * t * t * (3 - 2 * t) * (1 - 0.8 * o * o * (3 - 2 * o));
 }
 

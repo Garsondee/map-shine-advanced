@@ -1434,6 +1434,51 @@ export function createPrecipitationSubsystem({
     },
 
     /**
+     * ⭐ THE LAB READ-BACK (MSA Lab, weather family, 2026-11-09) — a CPU copy of every built fall engine's and
+     * splash engine's live slots, so the lab can MEASURE fall speeds, heights, drift and spread instead of judging
+     * streaks by eye (`MapShine.readPrecipParticles`, analysed by `tools/lab/weather-probe.js`).
+     *
+     * ⚠️ NEVER FROM THE FRAME LOOP: a GPU→CPU copy stalls the queue. Every copy is QUEUED SYNCHRONOUSLY, before the
+     * first await, so all buffers describe the same frame — the caller stamps that frame's sim time.
+     * Fall slot layout (`precip-runtime.js`): position = world xy, velocity = lateral world px/s,
+     * custom = (brightness, sizePx, terminal speed px/s, height px). Splash (fed): age -1 = just born, 1e9 = dead.
+     * @param {*} renderer - the viewer's WebGPU renderer.
+     * @param {{maxBodies?: number}} [opts] - cap per engine (slots `[0, min(live, cap))`).
+     * @returns {Promise<{fall: object, splash: object}>}
+     */
+    async readParticles(renderer, { maxBodies = 20000 } = {}) {
+      if (typeof renderer?.getArrayBufferAsync !== 'function') return { fall: {}, splash: {}, reason: 'no renderer' };
+      const read = (node) => (node ? renderer.getArrayBufferAsync(node.value).then((b) => new Float32Array(b)) : null);
+      const jobs = [];
+      const queue = (kind, id, e, names) => {
+        const st = e.debugState();
+        const live = Math.max(0, Math.floor(st.liveCount ?? 0));
+        const b = e.labBuffers;
+        if (!b || !live) {
+          jobs.push(Promise.resolve({ kind, id, st, n: 0, data: {} }));
+          return;
+        }
+        const n = Math.min(live, e.capacity ?? live, maxBodies);
+        const pending = names.map((k) => read(b[k]));
+        jobs.push(
+          Promise.all(pending).then((arrs) => ({
+            kind,
+            id,
+            st,
+            n,
+            data: Object.fromEntries(names.map((k, i) => [k, arrs[i]])),
+          }))
+        );
+      };
+      for (const [id, e] of engines) queue('fall', id, e, ['position', 'velocity', 'custom', 'age']);
+      for (const [id, e] of splashEngines) if (e.ok) queue('splash', id, e, ['position', 'custom', 'age']);
+      const done = await Promise.all(jobs);
+      const out = { fall: {}, splash: {} };
+      for (const r of done) out[r.kind][r.id] = { n: r.n, state: r.st, ...r.data };
+      return out;
+    },
+
+    /**
      * What the debug panel and the perf report print. Every factor separately
      * (`feedback_count_silent_preconditions`) — "no rain is visible" has half a
      * dozen possible causes and a single boolean would name none of them.

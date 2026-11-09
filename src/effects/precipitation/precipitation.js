@@ -128,7 +128,7 @@ export const PRECIPITATION_PARAMS = Object.freeze({
     default: 1,
     category: 'Fall',
     label: 'Rain follows clouds',
-    help: 'How strongly rain and snow gather under the clouds: 1 = showers fall from the clouds and land downwind of them, with dry gaps between; 0 = an even fall everywhere. A clear sky always rains everywhere.',
+    help: 'How strongly rain and snow gather under the clouds: 1 = showers fall from the thick clouds and land downwind of them, with dry gaps between; in between, the gaps get some rain; 0 = an even fall everywhere. A clear sky always rains everywhere, and so does a full overcast (from about 80% cloud the showers merge into steady rain).',
   }),
 
   // ── FALL — the falling body itself (precip-runtime.js) ───────────────────

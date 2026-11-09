@@ -5,7 +5,7 @@
  *   node tools/lab/lab.mjs paint  [--out <dir>] [--only interiors] [--art-root <folder holding maps/>]
  *        paint every floor image + mask (python); Lab · Vegetation pastes crops of the author's art
  *   node tools/lab/lab.mjs deploy-rig --rig <dataPath>      copy the painted set into a private rig
- *   node tools/lab/lab.mjs seed   --name <cdp client>       build/replace the lab scenes as GM
+ *   node tools/lab/lab.mjs seed   --name <cdp client> [--scenes weather]  build/replace the lab scenes (or only those) as GM
  *   node tools/lab/lab.mjs look --name <client> --plot C1 [--level ground] [--view shipped|measure] [--scale 0.45]
  *        one look at one plot: pan, settle, clean shot, probe its named points, print a table
  *   node tools/lab/lab.mjs check --name <client> --family walls|interiors [--view shipped|measure] [--only A03,B02]
@@ -91,7 +91,9 @@ function seed() {
   const name = opt('name');
   if (!name) throw new Error('seed needs --name <cdp client>');
   const builder = fs.readFileSync(path.join(HERE, 'build-in-foundry.js'), 'utf8');
-  const manifest = labManifest({ assetDir, version });
+  // --scenes weather[,walls]: rebuild only those lab scenes (and activate the first), leaving the rest alone
+  const only = opt('scenes') ? opt('scenes').split(',') : null;
+  const manifest = labManifest({ assetDir, version, only });
   const body = `${builder}\nconst manifest = ${JSON.stringify(manifest)};\nreturn await buildLab(manifest);\n`;
   const tmp = path.join(outDir, 'seed-script.js');
   fs.mkdirSync(outDir, { recursive: true });

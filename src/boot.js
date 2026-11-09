@@ -417,6 +417,8 @@ import {
   getVtPanViewerPrecipitationStatus,
   readVtPanViewerPrecipParticles,
   readVtPanViewerWindField,
+  setVtPanViewerLivingWind,
+  getVtPanViewerLivingWind,
   setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
@@ -1637,6 +1639,13 @@ MapShine.readPrecipParticles = readVtPanViewerPrecipParticles;
  * factors, spectra and correlation lengths. Stalls the GPU queue for a frame — console and lab only.
  */
 MapShine.readWindField = readVtPanViewerWindField;
+/**
+ * LIVING WIND (mmp-vm1.1): the flow solver that writes the wind field (wakes, door jets, yards, gusts that carry
+ * momentum and fade). `MapShine.setLivingWind(true|false)` forces it for this session, `null` follows the stored
+ * `msa.livingWind` flag; `getLivingWind()` reports the switch, the tier and the steps taken.
+ */
+MapShine.setLivingWind = setVtPanViewerLivingWind;
+MapShine.getLivingWind = getVtPanViewerLivingWind;
 
 MapShine.addWeatherEvent = addVtPanViewerWeatherEvent;
 MapShine.releaseWeatherEvent = releaseVtPanViewerWeatherEvent;

@@ -758,6 +758,8 @@ import {
   ambientVectorFromWind,
   windFlowVector,
   buildWindSimMaterials,
+  buildWindFlowMaterials,
+  planWindFlowSteps,
   doorwayImpulseFromWallSegment,
   gatherActiveImpulseSlots,
   computeThawWindowMs,
@@ -7783,6 +7785,24 @@ async function startVtPanViewerUnserialized({
     let windFieldBake = null;
     /** The sim times the two slices above were last baked at (the MSA Lab read-back stamps its copy with them). */
     const windFieldBakeStamp = { nowMs: null, lagMs: null, frames: 0 };
+    // LIVING WIND (world/wind-flow.js + wind-flow-gpu.js, mmp-vm1.1) — a small incompressible flow solver on the
+    // wind grid that WRITES the two slices above instead of the analytic bake: wakes, door jets that conserve mass,
+    // yards, gusts that carry momentum and fade. Two velocity states (ping-pong), two pressures (the warm start
+    // survives between frames) and one divergence target, all grid-sized RGBA16F, allocated with the slices.
+    let windFlowStateA = null;
+    let windFlowStateB = null;
+    let windFlowPressA = null;
+    let windFlowPressB = null;
+    let windFlowDivRT = null;
+    /** { materials, layoutVersion, tier } for the CURRENT layout and profile; rebuilt lazily. */
+    let windFlow = null;
+    let windFlowStateIsA = true;
+    let windFlowPressIsA = true;
+    /** The first step seeds the state from the analytic bake, so the solver never starts from still air. */
+    let windFlowPrimed = false;
+    /** Runtime switch (MapShine.setLivingWind); `null` = follow the stored flag / default. */
+    let windFlowForce = null;
+    const windFlowStats = { steps: 0, lastSteps: 0, lastJacobi: 0, tier: null };
     // THE WIND'S RECORDED PAST (world/wind-gust-history.js, epic mmp-fpu) — a ring of 16 gust-magnitude grids,
     // one per 0.6 s moment, in one atlas; each is drawn into the one-tile target and copied into its tile.
     // `uWindGustGridIndex` is the latest recorded moment: the baker's decision, read by every shader.
@@ -8269,6 +8289,18 @@ async function startVtPanViewerUnserialized({
           windFieldBake = null;
           windFieldNowRT = allocator.create('wind.field.now', describeWindSimRT());
           windFieldLagRT = allocator.create('wind.field.lag', describeWindSimRT());
+          // LIVING WIND's own targets — same grid, same lifetime; a regrid restarts the solver from the bake.
+          for (const rt of [windFlowStateA, windFlowStateB, windFlowPressA, windFlowPressB, windFlowDivRT]) {
+            allocator.dispose(rt);
+          }
+          windFlow?.materials?.dispose?.();
+          windFlow = null;
+          windFlowPrimed = false;
+          windFlowStateA = allocator.create('wind.flow.stateA', describeWindSimRT());
+          windFlowStateB = allocator.create('wind.flow.stateB', describeWindSimRT());
+          windFlowPressA = allocator.create('wind.flow.pressA', describeWindSimRT());
+          windFlowPressB = allocator.create('wind.flow.pressB', describeWindSimRT());
+          windFlowDivRT = allocator.create('wind.flow.div', describeWindSimRT());
           // THE RECORDED GUST HISTORY: a one-tile target the bake draws into, and the 4x4-tile atlas
           // consumers read. Single-channel half float — the atlas is the biggest of these, and at the
           // 512-cell cap it is 2048 px square (the allocator's own limit) at 2 bytes a texel.
@@ -8305,6 +8337,11 @@ async function startVtPanViewerUnserialized({
             windFieldLagRT,
             windGustSlotRT,
             windGustAtlasRT,
+            windFlowStateA,
+            windFlowStateB,
+            windFlowPressA,
+            windFlowPressB,
+            windFlowDivRT,
           ]) {
             renderer.setRenderTarget(rt);
             renderer.clear(true, false, false);
@@ -8793,6 +8830,119 @@ async function startVtPanViewerUnserialized({
       windFieldBakeStamp.nowMs = tMs;
       windFieldBakeStamp.lagMs = tMs - lagMs;
       windFieldBakeStamp.frames += 1;
+    }
+
+    /** Is LIVING WIND on? MapShine.setLivingWind wins, then localStorage `msa.livingWind` ('1' / '0'), then off. */
+    function windFlowEnabled() {
+      if (windFlowForce !== null) return windFlowForce;
+      try {
+        return globalThis.localStorage?.getItem('msa.livingWind') === '1';
+      } catch {
+        return false;
+      }
+    }
+
+    /** The solver's materials for the CURRENT layout and performance profile, built lazily. */
+    function ensureWindFlow() {
+      if (!windHandle.hasBake || !windGrid.structure || !windFlowStateA || !windFieldNowRT) return null;
+      const tier = readSetting(MODULE_ID, GLOBAL_SETTING_KEYS.profile) ?? 'standard';
+      if (windFlow && windFlow.layoutVersion === windLayoutVersion && windFlow.tier === tier) return windFlow;
+      windFlow?.materials?.dispose?.();
+      windFlow = null;
+      const solidMaskTexture = windGrid.solidMaskTexture;
+      const opennessTexture = windGrid.opennessTexture;
+      if (!solidMaskTexture || !opennessTexture) return null;
+      const materials = buildWindFlowMaterials({
+        THREE,
+        stateTexture: windFlowStateA.texture,
+        pressTexture: windFlowPressA.texture,
+        divTexture: windFlowDivRT.texture,
+        solidMaskTexture,
+        opennessTexture,
+        ambient: windAmbientRef,
+        grid: windHandle.grid,
+        tier,
+      });
+      if (!materials) return null;
+      windFlow = { materials, layoutVersion: windLayoutVersion, tier };
+      windFlowStats.tier = tier;
+      return windFlow;
+    }
+
+    /**
+     * LIVING WIND, one frame (mmp-vm1.1): step the flow solver by the sim clock's dt and compose the two field slices
+     * every consumer reads. A dt of 0 (a paused world) leaves both slices exactly as they were. The first frame seeds
+     * the state from the analytic bake. Returns false when the solver cannot run (no bake yet, the `low` profile) so
+     * the caller falls back to the analytic bake.
+     * @param {number} tMs @param {number} dtSec
+     */
+    function tickWindFlow(tMs, dtSec) {
+      const flow = ensureWindFlow();
+      if (!flow || !Number.isFinite(tMs)) return false;
+      const m = flow.materials;
+      const prevRT = renderer.getRenderTarget();
+      const cur = () => (windFlowStateIsA ? windFlowStateA : windFlowStateB);
+      const other = () => (windFlowStateIsA ? windFlowStateB : windFlowStateA);
+      const pCur = () => (windFlowPressIsA ? windFlowPressA : windFlowPressB);
+      const pOther = () => (windFlowPressIsA ? windFlowPressB : windFlowPressA);
+      const run = (pass, nodes, src, dst) => {
+        for (const n of nodes) n.value = src.texture;
+        renderer.setRenderTarget(dst);
+        pass.quad.render(renderer);
+      };
+      if (!windFlowPrimed) {
+        // Seed from the analytic field (the bake draws it into the `now` slice), so the first frame is not still air.
+        tickWindFieldBake(tMs);
+        renderer.copyTextureToTexture(windFieldNowRT.texture, cur().texture);
+        windFlowPrimed = true;
+      }
+      // Integrate the WHOLE dt every frame (a slow frame must not slow the wind down), in at most the tier's step
+      // count: longer steps are still stable (semi-Lagrangian advection, exponential forcing). A stalled tab is
+      // capped at a quarter second.
+      const dtTotal = Math.min(0.25, Math.max(0, dtSec || 0));
+      const nSteps = Math.min(planWindFlowSteps(dtTotal).steps, m.plan.maxSteps);
+      const stepSec = nSteps > 0 ? dtTotal / nSteps : 0;
+      for (let s = 0; s < nSteps; s++) {
+        m.force.uDtSec.value = stepSec;
+        m.force.uTimeMs.value = tMs - (nSteps - 1 - s) * stepSec * 1000;
+        run(m.force, m.force.velNodes, cur(), other());
+        windFlowStateIsA = !windFlowStateIsA;
+        if (m.swirl) {
+          m.swirl.uDtSec.value = stepSec;
+          run(m.swirl, m.swirl.velNodes, cur(), other());
+          windFlowStateIsA = !windFlowStateIsA;
+        }
+        run(m.divergence, m.divergence.velNodes, cur(), windFlowDivRT);
+        for (let it = 0; it < m.plan.jacobi; it++) {
+          run(m.jacobi, m.jacobi.pressNodes, pCur(), pOther());
+          windFlowPressIsA = !windFlowPressIsA;
+        }
+        for (const n of m.project.pressNodes) n.value = pCur().texture;
+        run(m.project, m.project.velNodes, cur(), other());
+        windFlowStateIsA = !windFlowStateIsA;
+      }
+      if (nSteps > 0 || windFlowStats.steps === 0) {
+        const lagSec = Math.max(0, getVegetationRenderState()?.params?.groundLagSec ?? 0);
+        m.compose.uLagSec.value = 0;
+        run(m.compose, m.compose.velNodes, cur(), windFieldNowRT);
+        m.compose.uLagSec.value = lagSec;
+        run(m.compose, m.compose.velNodes, cur(), windFieldLagRT);
+        windFieldBakeStamp.nowMs = tMs;
+        windFieldBakeStamp.lagMs = tMs - lagSec * 1000;
+        windFieldBakeStamp.frames += 1;
+      }
+      renderer.setRenderTarget(prevRT);
+      windFlowStats.steps += nSteps;
+      windFlowStats.lastSteps = nSteps;
+      windFlowStats.lastJacobi = m.plan.jacobi;
+      return true;
+    }
+
+    /** The frame's wind field: LIVING WIND when it is on and can run, else the analytic bake. */
+    function tickWindFieldOrFlow(tMs, dtSec) {
+      if (windFlowEnabled() && tickWindFlow(tMs, dtSec)) return;
+      windFlowPrimed = false;
+      tickWindFieldBake(tMs);
     }
 
     /**
@@ -9593,6 +9743,10 @@ async function startVtPanViewerUnserialized({
         allocator.dispose(windPublishRT);
         allocator.dispose(windFieldNowRT);
         allocator.dispose(windFieldLagRT);
+        windFlow?.materials?.dispose?.();
+        for (const rt of [windFlowStateA, windFlowStateB, windFlowPressA, windFlowPressB, windFlowDivRT]) {
+          allocator.dispose(rt);
+        }
         windGrid.dispose();
       } catch (err) {
         log.error('wind sim dispose failed — GPU buffers may leak until renderer.dispose():', err);
@@ -9608,6 +9762,13 @@ async function startVtPanViewerUnserialized({
       windPublishRT = null;
       windFieldNowRT = null;
       windFieldLagRT = null;
+      windFlow = null;
+      windFlowStateA = null;
+      windFlowStateB = null;
+      windFlowPressA = null;
+      windFlowPressB = null;
+      windFlowDivRT = null;
+      windFlowPrimed = false;
       windSimGridKey = null;
       windActiveImpulses = [];
       windThawUntilMs = 0;
@@ -25187,7 +25348,11 @@ async function startVtPanViewerUnserialized({
       tickWindSim(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value, lastEnvSnapshot?.env?.time?.dtSec ?? 0);
       // The wind FIELD for this frame, baked once for every consumer to read (epic mmp-fpu) — after the
       // wind sim (its transient gusts are part of the field) and before anything below samples it.
-      tickWindFieldBake(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value);
+      // LIVING WIND (mmp-vm1.1), when on, solves the flow and writes the same two slices instead.
+      tickWindFieldOrFlow(
+        lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value,
+        lastEnvSnapshot?.env?.time?.dtSec ?? 0
+      );
       tickGustHistory(lastEnvSnapshot?.env?.time?.tMs ?? uGlobalTimeMs.value);
       profiler?.end(Z.simsWind);
       // FLUID's own sim tick — same clock, same "inside the gpuProbe bracket"
@@ -26737,6 +26902,8 @@ async function startVtPanViewerUnserialized({
       // The wind-field bake's own pipeline compiles HERE, behind the curtain (it is the one place the
       // noise still lives), and the targets hold a real field before the first consumer draws.
       tickWindFieldBake(tMs);
+      // LIVING WIND's passes compile here too (one small step), behind the same curtain.
+      if (windFlowEnabled()) tickWindFlow(tMs, WARM_UP_SIM_DT_SEC);
       tickGustHistory(tMs);
       if (windParticlesEnabled && particleEngine) {
         particleEngine.step(renderer, { dtSec: WARM_UP_SIM_DT_SEC, tMs, worldRect: windSpawnRect });
@@ -32510,6 +32677,13 @@ async function startVtPanViewerUnserialized({
       /** MSA Lab read-back (mmp-vm1.1): the baked wind field as its consumers read it, decoded, stamped with its
        * bake time, plus grid, ambient and cell channels. Console/lab only — it stalls. */
       readWindField: readWindFieldForLab,
+      /** LIVING WIND (mmp-vm1.1): `true`/`false` force it for this session, `null` follows `msa.livingWind`. */
+      setLivingWind: (on) => {
+        windFlowForce = on === null || on === undefined ? null : !!on;
+        if (!windFlowEnabled()) windFlowPrimed = false;
+        return { enabled: windFlowEnabled(), ...windFlowStats };
+      },
+      getLivingWind: () => ({ enabled: windFlowEnabled(), primed: windFlowPrimed, ...windFlowStats }),
       /** Live look tuning (fallSlant01, parallaxStreak01, streakScale, ...). */
       setPrecipitationTuning: (t) => {
         precipitationSubsystem.setTuning(t);
@@ -35947,6 +36121,16 @@ export async function readVtPanViewerPrecipParticles(opts) {
 export async function readVtPanViewerWindField(opts) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.readWindField(opts);
+}
+/** @param {boolean|null} on @returns {object} LIVING WIND's switch and stats. */
+export function setVtPanViewerLivingWind(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setLivingWind(on);
+}
+/** @returns {object} LIVING WIND's switch and stats. */
+export function getVtPanViewerLivingWind() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.getLivingWind();
 }
 /** @param {object} t @returns {object} */
 export function setVtPanViewerPrecipitationTuning(t) {

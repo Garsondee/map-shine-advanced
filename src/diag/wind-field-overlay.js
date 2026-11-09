@@ -399,10 +399,13 @@ export function buildWindArrowMaterial({ THREE, uGlobalTimeMs, windHandle }) {
   // deleted with the spectrum rewrite — mythica-machina-press#499. The
   // geometry still bakes it; retiring that is a small follow-up, not a
   // correctness issue.)
+  // READS THE BAKED FIELD (mmp-vm1.1): the overlay shows exactly the texture every effect reads — the analytic bake,
+  // or LIVING WIND's solver when that is on. With no baked field yet the handle falls back to the analytic one.
   const sampleAt = (pos) =>
     windHandle.node(THREE.TSL, {
       centerXY: pos,
       time: uGlobalTimeMs,
+      baked: 'now',
     });
 
   // THE PRIMARY SAMPLE — this cell's own anchor, the SAME field every other
@@ -531,6 +534,7 @@ export function buildWindHeatmapMaterial({ THREE, uGlobalTimeMs, windHandle }) {
   const gust = windHandle.node(THREE.TSL, {
     centerXY,
     time: uGlobalTimeMs,
+    baked: 'now',
   });
 
   // The SAME magnitude measure the arrow uses (see this function's own doc for

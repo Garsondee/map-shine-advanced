@@ -223,6 +223,14 @@ export {
   DOOR_IMPULSE_MIN_RADIUS_PX,
 } from './wind-sim.js';
 export { buildWindSimMaterials } from './wind-sim-gpu.js';
+// LIVING WIND (mmp-vm1.1) — the flow solver: the Node-tested reference and its TSL port.
+export {
+  WIND_FLOW_DEFAULTS,
+  stepWindFlowReference,
+  planWindFlowSteps,
+  windFlowCellsPerSecPerUnit,
+} from './wind-flow.js';
+export { buildWindFlowMaterials, windFlowTierPlan, WIND_FLOW_TIERS } from './wind-flow-gpu.js';
 // THE BAKE, SPLIT BY WHAT EACH PIECE DEPENDS ON (2026-10-07) — structure (walls)
 // vs openness (speed) vs shadow (direction), plus the in-place texture writers.
 // See wind-structure.js's own header for why a dial change must not redo (1).

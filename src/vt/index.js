@@ -98,6 +98,8 @@ export {
   getVtPanViewerPrecipitationStatus,
   readVtPanViewerPrecipParticles,
   readVtPanViewerWindField,
+  setVtPanViewerLivingWind,
+  getVtPanViewerLivingWind,
   setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,

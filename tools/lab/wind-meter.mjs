@@ -4,6 +4,7 @@
  *
  *   node tools/lab/wind-meter.mjs --name labe [--speeds 0.05,0.15,0.3,0.5] [--seconds 60] [--hz 10]
  *        [--snap 5] [--direction 90] [--settle 4] [--points all|WN1,WN2] [--tag run1] [--out <dir>]
+ *        [--living 1|0]   (LIVING WIND on / off for the run; absent leaves the client as it is)
  *
  * For each dial speed: unpause, set the wind (direction + speed), let the baked openness/shadow settle, then
  * read the BAKED field back for `--seconds` (`tools/lab/wind-meter-page.js`). One JSON per speed lands in
@@ -35,6 +36,7 @@ const snap = Number(opt('snap', 5));
 const direction = Number(opt('direction', 90));
 const settle = Number(opt('settle', 4));
 const plotsWanted = opt('points', 'all');
+const living = opt('living', null); // '1' on, '0' off, absent = leave as is
 const tag = opt('tag', new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19));
 const outDir = path.resolve(opt('out', path.join(HERE, 'out', 'wind', tag)));
 fs.mkdirSync(outDir, { recursive: true });
@@ -51,6 +53,7 @@ for (const s of speeds) {
     setWind: { directionDeg: direction, speed01: s },
     settleSec: settle,
     unpause: true,
+    ...(living === null ? {} : { livingWind: living === '1' }),
   };
   const t0 = Date.now();
   const r = spawnSync(
@@ -93,6 +96,7 @@ for (const s of speeds) {
       repeats: data.repeats,
       wallSec: data.wallSec,
       renderScale: data.renderScale,
+      livingWind: data.livingWind?.enabled ?? null,
       grid: `${data.grid.cols}x${data.grid.rows}@${Math.round(data.grid.cellSize)}`,
       ppm: data.ambient.pixelsPerMetre,
       file: path.relative(REPO, file),

@@ -10,7 +10,7 @@
  * repeats and a slow frame does not smear the series. A copy whose bake has not advanced is skipped.
  *
  * args: { points: [{name, x, y}] in SCENE px, seconds, hz, snapEverySec, setWind?: {directionDeg, speed01},
- *         settleSec?, unpause?: boolean }
+ *         settleSec?, unpause?: boolean, livingWind?: boolean|null (LIVING WIND on/off for the run) }
  */
 const a = args ?? {};
 const seconds = Number(a.seconds ?? 30);
@@ -23,6 +23,9 @@ if (typeof MapShine?.readWindField !== 'function')
   return { ok: false, reason: 'MapShine.readWindField missing (old build?)' };
 const renderScale = game.settings.get('map-shine-advanced', 'renderScale');
 if (a.unpause && game.paused) game.togglePause(false, { broadcast: true });
+if (a.livingWind !== undefined && typeof MapShine?.setLivingWind === 'function') {
+  MapShine.setLivingWind(a.livingWind);
+}
 if (a.setWind) {
   await MapShine.setWind(a.setWind);
 }
@@ -95,6 +98,7 @@ return {
   sceneOffset: { x: ox, y: oy },
   grid: g,
   ambient: first.ambient,
+  livingWind: typeof MapShine?.getLivingWind === 'function' ? MapShine.getLivingWind() : null,
   cells: first.cells,
   points,
   t,

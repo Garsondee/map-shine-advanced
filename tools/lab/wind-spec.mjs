@@ -54,6 +54,9 @@ export const WIND_SIZE = Object.freeze({ w: sq(80), h: sq(56) });
 /** Her maps' scale: 150 px per 5 ft square. */
 export const WIND_PX_PER_METRE = GRID / (5 * 0.3048);
 
+/** Bumped whenever a mask changes, so the files get new names and no browser serves a cached copy. */
+export const WIND_IMAGE_REV = 2;
+
 /** The lab's wind blows toward +x; the meter sets the speed. */
 export const WIND_LAB_WIND = Object.freeze({ directionDeg: 90, speed01: 0 });
 
@@ -137,6 +140,7 @@ export function windPlots() {
       title: 'open field (wind blows left to right)',
       label: { x: sq(1), y: sq(0.3) },
       art: [rect({ x: sq(1), y: sq(10.95), w: sq(31), h: 6 }, [INK, INK, INK, 255])],
+      fire: [{ cx: sq(12), cy: sq(6), r: 45, key: 'fireField' }],
       plants: [
         plant('openTree', 't550', 9, 17),
         plant('openBush', 'b220', 14, 18.2),
@@ -158,6 +162,7 @@ export function windPlots() {
       walls: boxWalls(b),
       regions: [{ key: 'WN2', rect: b }],
       plants: [plant('leeTree', 't550', 52.5, 13.2), plant('leeBush', 'b220', 50.2, 9)],
+      fire: [{ cx: sq(51.5), cy: sq(10.6), r: 45, key: 'fireLee' }],
       probes: [
         P('up6m', 36, 11),
         P('up3m', 38, 11),
@@ -188,6 +193,7 @@ export function windPlots() {
       art: wallInk(c),
       walls: boxWalls(c),
       plants: [plant('yardBush', 'b143', 11, 33.5)],
+      fire: [{ cx: sq(11), cy: sq(29), r: 45, key: 'fireYard' }],
       probes: [
         P('yardRef', 3, 31),
         P('yardUp', 7.5, 31),
@@ -214,6 +220,7 @@ export function windPlots() {
         { key: 'WN4n', rect: n },
         { key: 'WN4s', rect: s },
       ],
+      fire: [{ cx: sq(38), cy: sq(30.5), r: 35, key: 'fireAlley' }],
       probes: [P('alleyRef', 21, 30.5), P('alleyIn', 25, 30.5), P('alleyMid', 34, 30.5), P('alleyOut', 43, 30.5)],
     });
   }
@@ -251,6 +258,7 @@ export function windPlots() {
         { side: 's', from: 10, to: 12, seg: WINDOW },
       ]),
       regions: [{ key: 'WN6', rect: r }],
+      fire: [{ cx: sq(9), cy: sq(47.2), r: 45, key: 'fireDoorRoom' }],
       probes: [
         P('doorOut', 4, 46),
         P('door0', 6.35, 46),
@@ -277,7 +285,7 @@ export function windPlots() {
         { side: 's', from: 25, to: 26, seg: SHUT_DOOR },
       ]),
       regions: [{ key: 'WN7', rect: r }],
-      fire: [{ cx: sq(26.5), cy: sq(46), r: 45 }],
+      fire: [{ cx: sq(26.5), cy: sq(46), r: 45, key: 'fireSealed' }],
       flies: [{ cx: sq(24), cy: sq(47.6), r: 70 }],
       probes: [P('sealedWin', 22.5, 46), P('sealedMid', 26.5, 45.5), P('sealedFlies', 24, 47.6)],
     });
@@ -294,6 +302,7 @@ export function windPlots() {
       art: wallInk(r),
       walls: boxWalls(r, [{ side: 'e', from: 45.5, to: 46.5, seg: OPEN_DOOR }]),
       regions: [{ key: 'WN8', rect: r }],
+      fire: [{ cx: sq(40), cy: sq(47.2), r: 45, key: 'fireLeeDoorRoom' }],
       probes: [P('leeDoorOut', 46, 46), P('leeDoorIn', 43.5, 46), P('leeDoorMid', 40, 46), P('leeDoorBack', 37, 46)],
     });
   }
@@ -316,7 +325,7 @@ export function windPlots() {
     code: 'WN10',
     title: 'open-air fire and flies',
     label: { x: sq(60), y: sq(42.2) },
-    fire: [{ cx: sq(62), cy: sq(46), r: 45 }],
+    fire: [{ cx: sq(62), cy: sq(46), r: 45, key: 'fireOpen' }],
     flies: [{ cx: sq(65.5), cy: sq(47), r: 70 }],
     probes: [P('fireOpen', 62, 46), P('fliesOpen', 65.5, 47)],
   });
@@ -352,6 +361,13 @@ export function windProbes() {
   return windPlots().flatMap((p) => (p.probes ?? []).map((q) => ({ plot: p.code, ...q })));
 }
 
+/** Every painted fire, flat: key and centre (scene px) — the fire meter names each plume by it. */
+export function windFires() {
+  return windPlots().flatMap((p) =>
+    (p.fire ?? []).map((f) => ({ plot: p.code, key: f.key, x: f.cx, y: f.cy, r: f.r }))
+  );
+}
+
 /** Every plant, flat. */
 export function windPlants() {
   return windPlots().flatMap((p) => p.plants ?? []);
@@ -361,7 +377,7 @@ export function windPlants() {
 export function windImages(version = LAB_VERSION) {
   const W = WIND_SIZE;
   const plots = windPlots();
-  const base = `msa-lab-v${version}-wind`;
+  const base = `msa-lab-v${version}-wind${WIND_IMAGE_REV}`;
   const img = (suffix, mode, ops) => ({
     name: `${base}-Ground${suffix}.webp`,
     role: suffix || 'art',

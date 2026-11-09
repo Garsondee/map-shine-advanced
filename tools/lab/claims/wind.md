@@ -166,3 +166,28 @@ Physics gives the baseline; beauty wins a tie ("real numbers make a good baselin
 | WD-J1 | At 50% (35 m/s) the overlay reads as a storm: most of the open field is in a gust at any moment, not "single waves alone in a sea of inactivity". | Author 2026-10-27 | grid snapshot: fraction above U | |
 | WD-J2 | Energy a gust puts into an effect dissipates over seconds after it passes (no snap back). | Author 2026-11-06 (water) | consumer readback | |
 | WD-J3 | Waves of wind are visible crossing the map at the wind's pace (fronts, sheets). | Author 2026-10-27 | overlay frames | |
+
+## K. Fire in the wind (round 2, written 2026-11-09 before measuring)
+
+Ingram, live on rig E (2026-11-09): smoke and fire "don't respond to wind very accurately", and indoor smoke still
+"acts extremely strange" (mmp-9un.5: it rushes back and forth along its path every 4-5 s with no wind, doors shut).
+Physics for a campfire (~1 m across, 30-100 kW): a buoyant plume bends over until its slope is its rise speed over the
+wind (Briggs, *Plume Rise*, USAEC TID-25075, 1969; Briggs 1975, the "2/3 law" dh = 1.6 F^(1/3) x^(2/3) / U), and a
+campfire's plume rises at ~2.5-3.7 m/s a few metres up (McCaffrey, *Purely Buoyant Diffusion Flames*, NBSIR 79-1910,
+1979: u = 1.1 Q^(1/5) (z / Q^(2/5))^(-1/3)). So the smoke's angle from upright is about atan(U / 3 m/s). Flames:
+the AGA flame-tilt correlation (SFPE Handbook, pool fires): cos(tilt) = (U / u_c)^(-1/2) above u_c, u_c ~0.5-1.3 m/s
+for a ~1 m wood fire. Measured with the plume meter (`smokeDx/Dy`, `flameDx/Dy` on the billow engine's weather rows:
+the drawn lobes' strength x area weighted middle) by `tools/lab/wind-plume.mjs` + `wind-plume.py`, each fire centred
+in the view. Smoke is lifted ~1 px up the page per px of height (`smokeLift` x `tilt`), so its page angle is its angle
+in the air; flames are lifted 0.45 px per px, so flame tilt = atan(downwind / (up / 0.45)).
+
+| ID | Claim | Source | How | Result |
+|---|---|---|---|---|
+| WD-K1 | Calm (0 m/s): the smoke's middle is within 15 deg of upright and < 0.5 m to the side. | Physics; Author 2026-11-03 ("at wind 0 ... upwards") | plume meter || Model test: 0.1 deg at 0 m/s (steady air). Rig, before: 3.9 deg (a 0.55 m base offset). Rig sweep after the fix pending a free GPU. |
+| WD-K2 | Smoke leans downwind by the air at the fire, about atan(U / 3 m/s) from upright: 2.5 m/s 30-55, 5 m/s 50-72, 10.5 m/s 65-85, 17.5 m/s 72-88 deg. | Physics (Briggs; McCaffrey) | plume meter || **Broken before** (all 8 fires, 0-17.5 m/s: 0-14 deg in the air; the page read 10-25 deg, mostly the camera's lean-out). **Held after** (rig, 10.5 m/s dial, the fire feeling 55% of it by her Wind response 0.55): open field 64 deg at ~5.5 m/s (physics 61), behind the house 50 at ~3.5 (49). Model test: 39/57/72 vs 40/59/74 at 2.5/5/10.5 m/s. Full rig sweep pending. |
+| WD-K3 | Flames tilt with the air: 2.5 m/s 40-65, 5 m/s 55-75, 10.5 m/s 65-82, 17.5 m/s 70-85 deg from upright. | Physics (AGA tilt) | plume meter || **Broken before** (open field 13 deg at 10.5 m/s). **Still short after**: 42 deg at ~5.5 m/s against ~68 (AGA). Gap, not a cap: the aim table was measured with the default dials; her dials (Wind lean x4, flame height, tongues, heightTilt 0.3) draw ~40 deg where the table expects 61 (bead filed). |
+| WD-K4 | Shelter: a fire leans by the air IT feels; the lee, the yard and the door rooms lean less than the open field at the same dial. | Author 2026-10-27; Physics | plume meter + air at the fire || **Held after**: at 10.5 m/s, open field 64 deg, behind the house 50, behind the house with Living Wind 6 (sheltered). |
+| WD-K5 | The smoke goes where the air goes: its heading within 20 deg of the local air's wherever it leans past 30 deg. | Physics | plume meter || **Held** in today's field: the smoke's heading is within 2-3 deg of the wind on average (behind the house too). With Living Wind the air in the wake curls back; the smoke follows the air it was carried by, smoothly (7 slow drifts toward the building in 60 s). |
+| WD-K6 | Smoke never swings: in steady air its middle moves < 0.3 m/s frame to frame (95th percentile), and a puff keeps the path it was blown along (a gust bends the new smoke, not the whole column at once). | Author 2026-11-06 (mmp-9un.5); Physics | plume meter jitter || **Broken before, held after**: one-frame swings over 15 deg behind the house with Living Wind 51 -> 0 per minute; the heading's turn rate (p95) 20 -> 3.3 deg/s in the open field; the grain ran against the wind 45-49% of the time, now 0% (today's field). |
+| WD-K7 | Indoors, no wind, doors shut: smoke rises and fades, with no 4-6 s beat in its middle (no rushing back and forth). | Author 2026-11-06, 2026-11-09 | plume meter, 30 s at 15 Hz || **Broken before**: no wind, doors shut: the smoke's middle snapped ~1.2 m sideways and back every 5-6 s; its grain jumped at up to 600 m/s (p95 33). **Held after**: no snaps, grain p95 0.3 m/s (that run was at ~1 fps while the GPU was busy; the property is also a unit test). Re-run at full rate pending. |
+| WD-K8 | Still painterly and soft, with a long trail in wind (she asked for longer trails, 2026-11-03). | Author | frames || Open-field strip (12c): the smoke lies down and streams away as one soft ribbon; flames lean over. Hers to judge live. |

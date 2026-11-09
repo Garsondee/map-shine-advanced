@@ -145,4 +145,41 @@ export function run(t) {
     }
     ok('a warm frame with no render state, and endWarm twice, are harmless', !threw && sub.scenes.length === 0);
   }
+  // ⭐ THE CARD REACHES THE ENGINES (mmp-78u.34.3, MSA Lab 2026-11-09). Only the rain-glint keys used to come through
+  // the frame state, so every other saved or default dial was dropped on reload and the engines ran their own
+  // built-in numbers (Turbulence 8 where the card said 1.1; wind push 2250 against 6000). A sync must hand the
+  // card's WHOLE resolved params to the engines, and a console tune must hold until the card itself changes.
+  {
+    const card = Object.fromEntries(Object.entries(PRECIPITATION_PARAMS).map(([k, v]) => [k, v.default]));
+    const state = { enabled: true, weather: { precip01: 0 }, cascadeTuning: card };
+    const sub = createPrecipitationSubsystem({ THREE: {}, getPrecipRenderState: () => state });
+    try {
+      sub.sync(null, 1 / 60, 0, null, null, null, null);
+    } catch {
+      // the frame may stop later without a GPU; the hand-over happens first
+    }
+    const t = sub.getTuning();
+    ok(
+      'a sync hands the card s resolved values to the engines (every key)',
+      Object.keys(card).every((k) => t[k] === card[k])
+    );
+    ok(
+      '...Turbulence is the card s 1.1, not an engine built-in',
+      t.chaosScale === PRECIPITATION_PARAMS.chaosScale.default
+    );
+    sub.setTuning({ chaosScale: 5 });
+    try {
+      sub.sync(null, 1 / 60, 16, null, null, null, null);
+    } catch {
+      // as above
+    }
+    ok('a console tune holds while the card is unchanged', sub.getTuning().chaosScale === 5);
+    state.cascadeTuning = { ...card, chaosScale: 2 };
+    try {
+      sub.sync(null, 1 / 60, 32, null, null, null, null);
+    } catch {
+      // as above
+    }
+    ok('a card change reaches the engines again', sub.getTuning().chaosScale === 2);
+  }
 }

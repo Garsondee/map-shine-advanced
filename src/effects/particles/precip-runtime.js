@@ -269,6 +269,13 @@ const EDDY_RATE = 0.22;
  * eye's persistence (and a film camera's shutter). A drop moving 10 m/s across the view draws ~26 px; the old
  * constant was ~1/93 s, tuned against the too-fast fall. */
 const DECK_STREAK_EXPOSURE_SEC = 0.018;
+/**
+ * The narrowest a body is ever DRAWN, in screen pixels (MSA Lab 2026-11-09). A quad thinner than one pixel covers
+ * pixel centres only every so often along its length, so a fine streak rasterised as a DOTTED line (measured on the
+ * rig with the card's drop size 0.55: drops 0.4-1.2 px wide). Thinner bodies are drawn one pixel wide and fade by the
+ * same ratio (`subPixelCoverage`), so they keep their light and lose the dots.
+ */
+const MIN_BODY_SCREEN_PX = 1;
 
 /** A body's response time to the air is tau = v_t / g (Stokes-Newton drag at terminal speed). */
 const GRAVITY_MPS2 = 9.81;
@@ -1568,6 +1575,19 @@ export function createPrecipEngine({
    * and a clump needs a per-flake constant to build its shape from. `y` cannot be it: brightness is multiplied by
    * the torch pickup, so a shape built from `y` re-rolled itself every time a flake crossed lamplight.
    */
+  /** World px per screen pixel of the target being drawn (`screenSize` follows the active render target). */
+  const worldPerScreenPx = () => uViewRect.z.sub(uViewRect.x).div(TSL.screenSize.x.max(float(1)));
+  /** A body's drawn width in world px before the one-pixel floor: size x dials x view pace x parallax. */
+  const rawBodyWidth = (c, persp) => {
+    const w = c.y.mul(uSizeScale).mul(uViewScale).mul(persp);
+    return hasStormSize ? w.mul(uStormSizeMul) : w;
+  };
+  /** The share of a one-pixel-wide quad a sub-pixel body really covers: 1 from a pixel up (`MIN_BODY_SCREEN_PX`). */
+  const subPixelCoverage = (c, persp) =>
+    rawBodyWidth(c, persp)
+      .div(worldPerScreenPx().mul(float(MIN_BODY_SCREEN_PX)).max(float(1e-6)))
+      .clamp(float(0), float(1));
+
   const vBody = Fn(() => {
     const i = instanceIndex;
     const c = custom.element(i);
@@ -1607,7 +1627,7 @@ export function createPrecipEngine({
     // a viewer with no gate armed (the ordinary case on an un-ingested floor)
     // silently lost its scene clip too — one absent input disabling an
     // unrelated guarantee.
-    const pDrawn = parallaxOf(position.element(i), c.w).xy;
+    const { xy: pDrawn, persp: drawnPersp } = parallaxOf(position.element(i), c.w);
     const hasBounds = uSceneRect.z.sub(uSceneRect.x).greaterThan(float(0));
     const edgeBand = float(64);
     const inX = pDrawn.x
@@ -1662,7 +1682,8 @@ export function createPrecipEngine({
     const bornAt = position.element(i).sub(velocity.element(i).sub(uCloudVel).mul(fellSec).mul(uDeckOn));
     const cloudGate = mix(float(1), cloudGateAt(rainTexDraw, bornAt), uDeckOn);
 
-    const visible = alive.mul(birthEase).mul(sceneClip).mul(squall).mul(cloudGate);
+    // A sub-pixel body is drawn a pixel wide (`streakAxisOf`) and fades by the same ratio here.
+    const visible = alive.mul(birthEase).mul(sceneClip).mul(squall).mul(cloudGate).mul(subPixelCoverage(c, drawnPersp));
 
     // ⭐ THE SKY-REACH GATE, sampled at the body's DRAWN (parallaxed) position.
     // Computed HERE because `position.element(i)` is a storage read and storage
@@ -1775,8 +1796,10 @@ export function createPrecipEngine({
     // miss 61% of the rain it should have stopped.
     const { xy: parallaxed, persp } = parallaxOf(centre, c.w);
 
-    let width = c.y.mul(uSizeScale).mul(uViewScale).mul(alive).mul(persp);
-    if (hasStormSize) width = width.mul(uStormSizeMul);
+    // Never thinner than a screen pixel: `vBody` fades a widened body by the same ratio (`subPixelCoverage`).
+    const width = rawBodyWidth(c, persp)
+      .max(worldPerScreenPx().mul(float(MIN_BODY_SCREEN_PX)))
+      .mul(alive);
 
     // ⭐⭐ WIND SHIFTS THE VANISHING POINT — IT DOES NOT ADD A SECOND VELOCITY.
     //

@@ -331,24 +331,44 @@ export function createPrecipitationSubsystem({
     });
     mantleInstance.setStamps(stamps);
   }
-  /** mmp-row — the last saved glint settings handed to the fall engines (JSON, to spot a change). */
-  let lastGlintKey = null;
   /**
-   * The rain-glint settings (`rainLightEnabled`, `rainLightStrength`,
-   * `rainGlint`) from the cascade — so a SAVED Studio value reaches the fall
-   * engines, not only the live override. Pushed to the engines only when it
-   * changes, so a console `setPrecipitationTuning` is not trampled every frame.
-   * @param {object|null|undefined} g
+   * Hand look tuning to every engine family; each picks out the keys it owns. One body for the console
+   * (`setTuning`) and the card (`syncCascadeTuning`), so the two can never reach different engines.
+   * @param {object} t
    */
-  function syncGlintTuning(g) {
-    if (!g) return;
+  function applyTuning(t) {
+    lastTuning = { ...(lastTuning ?? {}), ...(t ?? {}) };
+    for (const engine of engines.values()) engine.setTuning(t);
+    for (const engine of splashEngines.values()) engine.setTuning(t);
+    mantle?.setTuning(t);
+    drips?.setTuning(t);
+    authoredDrips?.setTuning(t);
+    for (const curtain of curtains.values()) curtain.setTuning(t);
+    stormFog?.setTuning(t);
+    torrent?.setTuning(t);
+  }
+  /** The last card values handed to the engines (identity, then JSON, to spot a change). */
+  let lastCascadeRef = null;
+  let lastCascadeKey = null;
+  /**
+   * ⭐ THE PRECIPITATION CARD'S RESOLVED VALUES — defaults, saved Studio values and the live override — handed to
+   * every engine whenever they change (mmp-78u.34.3, 2026-11-09).
+   *
+   * ⚠️ UNTIL THEN ONLY THE RAIN-GLINT KEYS CAME THIS WAY. Every other dial reached the engines only WHILE a slider
+   * moved (`MapShine.setPrecipitation`), so a reload dropped a GM's saved tuning and the engines ran their own
+   * built-in numbers instead of the card's: Turbulence 8 where the card said 1.1, wind push 2250 px/s against 6000
+   * (rain drifted at ~0.4x the wind), streaks 1.35 against 3, drop size 1.1 against 0.55. The card defaults are the
+   * author's own pasted values (2026-10-27) and what the rain lab judged; measured on the MSA Lab, rig C.
+   * Pushed only on change, so a console `setPrecipitationTuning` holds until the card itself moves.
+   * @param {object|null|undefined} g - the cascade's resolved params (`PRECIPITATION_PARAMS` keys).
+   */
+  function syncCascadeTuning(g) {
+    if (!g || g === lastCascadeRef) return;
+    lastCascadeRef = g;
     const key = JSON.stringify(g);
-    if (key === lastGlintKey) return;
-    lastGlintKey = key;
-    lastTuning = { ...(lastTuning ?? {}), ...g };
-    for (const engine of engines.values()) engine.setTuning(g);
-    // The torrent's saved strength rides the same door (`torrentStrength`).
-    torrent?.setTuning(g);
+    if (key === lastCascadeKey) return;
+    lastCascadeKey = key;
+    applyTuning(g);
   }
   /** ONE mantle, for the floor currently in view. Built lazily on the first
    * frame that has real scene bounds — the buffer is sized from them, so
@@ -895,7 +915,7 @@ export function createPrecipitationSubsystem({
       const st = warm ? { ...real, weather: warmWeatherFor(real.weather, warm.kind) } : real;
       const weather = st.weather ?? {};
       const precip01 = Number.isFinite(weather.precip01) ? weather.precip01 : 0;
-      syncGlintTuning(st.glintTuning);
+      syncCascadeTuning(st.cascadeTuning);
 
       // ⭐ THE MANTLE STEPS FIRST, AND **BEFORE** THE CLEAR-DAY EARLY-OUT BELOW.
       //
@@ -1422,15 +1442,12 @@ export function createPrecipitationSubsystem({
     /** Live look tuning, for the debug panel and the console. Both engine
      * families read the same object; each picks out the keys it owns. */
     setTuning(t) {
-      lastTuning = { ...(lastTuning ?? {}), ...(t ?? {}) };
-      for (const engine of engines.values()) engine.setTuning(t);
-      for (const engine of splashEngines.values()) engine.setTuning(t);
-      mantle?.setTuning(t);
-      drips?.setTuning(t);
-      authoredDrips?.setTuning(t);
-      for (const curtain of curtains.values()) curtain.setTuning(t);
-      stormFog?.setTuning(t);
-      torrent?.setTuning(t);
+      applyTuning(t);
+    },
+
+    /** What every engine was last handed (the card's values, then any console tuning on top), as a copy. */
+    getTuning() {
+      return { ...(lastTuning ?? {}) };
     },
 
     /**

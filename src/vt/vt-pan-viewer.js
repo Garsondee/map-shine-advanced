@@ -6818,18 +6818,10 @@ async function startVtPanViewerUnserialized({
             golden01: skyHandle?.golden01,
             outdoors01: 1,
           }),
-          // mmp-row — the SAVED rain-glint settings (switch, strength, variation),
-          // so a Studio value reaches the fall engines; the subsystem forwards
-          // them only when they change. `undefined` keys are skipped.
-          glintTuning: cascade.params
-            ? {
-                rainLightEnabled: cascade.params.rainLightEnabled,
-                rainLightStrength: cascade.params.rainLightStrength,
-                rainGlint: cascade.params.rainGlint,
-                // The torrent's saved strength rides the same door.
-                torrentStrength: cascade.params.torrentStrength,
-              }
-            : undefined,
+          // ⭐ THE CARD'S RESOLVED VALUES (defaults, saved Studio values, the live override), every key, so a
+          // saved dial survives a reload and the card's defaults are what renders (mmp-78u.34.3). The subsystem
+          // forwards them only when they change (`precip-subsystem.js#syncCascadeTuning`).
+          cascadeTuning: cascade.params ?? undefined,
           // THE STORM FLASH (mmp-63o.2): rain and snow catch it (each species' own flash response); the scene
           // light above already includes the flash's light, so this is the extra glint, not the whole lift.
           // Weighted by the flash's share of the light: by day rain is already sunlit, and the full x4 glint turned

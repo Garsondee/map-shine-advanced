@@ -19767,6 +19767,22 @@ async function startVtPanViewerUnserialized({
      * return a denormal rather than exact 0, and treating that as "foliage"
      * would silently disable the gate everywhere. */
     const VEG_FLUTTER_GATE_ALPHA_EPS = 0.002;
+    /**
+     * EDGE HOLD (mmp-78u.33.4, 2026-11-09). The author: "there is a problematic line around them which
+     * isn't intentional ... The problem appears during distortion from wind." The flutter and shimmer UV
+     * shuffles below moved the canopy's OUTLINE by up to ~3.5 world px, but the scene-depth proxy that
+     * cuts every ground shadow out from under the canopy (so a canopy is never darkened by shadows meant
+     * for the ground) is rasterized from the UNWARPED art. Where the warp pulled the outline in, the
+     * cut-out was left uncovered: lit ground showed as a bright line round the plant (orange at golden
+     * hour); where it pushed out, the canopy's rim was shadowed (black specks). Measured on Deep Forest at
+     * 17.5 m/s: the exposed sliver went from 0.30% of the outline band (calm) to 4.76%.
+     * So the shuffle fades to nothing at the silhouette: it is scaled by the canopy's own alpha blurred
+     * over ~2^LOD texels, which is ~0.5 on the outline and 1 inside. Leaves still shimmer inside the plant;
+     * the outline stays exactly where the proxy (and the shadow cut-out) is.
+     */
+    const VEG_EDGE_HOLD_LOD = 3;
+    const VEG_EDGE_HOLD_LO = 0.6;
+    const VEG_EDGE_HOLD_HI = 0.95;
     /** Asymmetric gale damping for flutter ONLY — V2's own approach: fine
      * per-pixel flutter is DAMPED as wind approaches gale, opposite of
      * scaling it up alongside everything else. `flutterGaleFrequency` (the
@@ -21008,7 +21024,14 @@ async function startVtPanViewerUnserialized({
             const flutterCapScale = min(float(1), flutterLimitUv.div(max(flutterMag, float(1e-5))));
             // addAssign, not `sampleUv = ...`: a shader-run-time write into the
             // var, so it happens only on the taken branch. See the gate header.
-            gatedUv.addAssign(rawFlutterDisplacement.mul(flutterCapScale));
+            // EDGE HOLD (VEG_EDGE_HOLD_*): no shuffle on the outline, so the canopy's silhouette stays
+            // the depth proxy's silhouette and no ground-shadow cut-out is ever left uncovered.
+            const edgeHold = smoothstep(
+              float(VEG_EDGE_HOLD_LO),
+              float(VEG_EDGE_HOLD_HI),
+              texture(tex).sample(sampleUv).level(float(VEG_EDGE_HOLD_LOD)).a
+            );
+            gatedUv.addAssign(rawFlutterDisplacement.mul(flutterCapScale).mul(edgeHold));
 
             // ── LEAF SHIMMER IN LIGHT AIR (2026-11-01, author: "Improve the fluttering of vegetation in
             // lower winds") ───────────────────────────────────────────────────────────────────────────
@@ -21057,7 +21080,7 @@ async function startVtPanViewerUnserialized({
               shimmerFoldFreePx
             );
             const shimmerDir = shimmerVec.div(max(length(shimmerVec), float(1))); // |v| <= 1
-            gatedUv.addAssign(shimmerDir.mul(shimmerPx.mul(shimmer01)).mul(uUvPerWorldPx));
+            gatedUv.addAssign(shimmerDir.mul(shimmerPx.mul(shimmer01)).mul(uUvPerWorldPx).mul(edgeHold));
             shimmerLight.assign(shimmerDir.x.mul(shimmer01));
           });
           sampleUv = gatedUv;

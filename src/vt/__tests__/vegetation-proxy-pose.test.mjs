@@ -52,4 +52,28 @@ export function run(t) {
 
   // The canopy's own call keeps passing its pivot through the args bag.
   ok("the canopy's sway args carry its pivot", /rotationLiftEnabled,\s*pivot,\s*\};/.test(src));
+
+  // EDGE HOLD (mmp-78u.33.4, 2026-11-09, author: "a problematic line around them ... during distortion
+  // from wind"). The flutter and shimmer UV shuffles are per-FRAGMENT: the proxy (an alpha-tested depth
+  // writer of the unwarped art) cannot follow them, so they must vanish on the outline, or the shadow
+  // cut-out under the canopy is left uncovered and lit ground shows as a bright line round the plant.
+  ok(
+    'edge hold: a finer coarse-alpha mip fades the shuffles out on the outline',
+    /const VEG_EDGE_HOLD_LOD = [1-4];/.test(src) &&
+      /texture\(tex\)\.sample\(sampleUv\)\.level\(float\(VEG_EDGE_HOLD_LOD\)\)\.a/.test(src)
+  );
+  ok(
+    '⭐ edge hold: the flutter shuffle is scaled by it',
+    /gatedUv\.addAssign\(rawFlutterDisplacement\.mul\(flutterCapScale\)\.mul\(edgeHold\)\)/.test(src)
+  );
+  ok(
+    '⭐ edge hold: the shimmer shuffle is scaled by it',
+    /gatedUv\.addAssign\(shimmerDir\.mul\(shimmerPx\.mul\(shimmer01\)\)\.mul\(uUvPerWorldPx\)\.mul\(edgeHold\)\)/.test(
+      src
+    )
+  );
+  ok(
+    'edge hold: no other UV shuffle reaches the canopy sample unheld',
+    (src.match(/gatedUv\.addAssign\(/g) ?? []).length === 2
+  );
 }

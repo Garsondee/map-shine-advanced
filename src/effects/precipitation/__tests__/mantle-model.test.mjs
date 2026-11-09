@@ -24,6 +24,8 @@ import {
   dryPerHour,
   seedMantleDepth,
   gameHourDelta,
+  mantleStepHours,
+  MANTLE_MIN_GAME_HOURS_PER_WORLD_SEC,
   SNOW_RATE_PER_HOUR,
 } from '../mantle-model.js';
 import { PRECIP_SLEET_BAND } from '../../../world/index.js';
@@ -68,6 +70,21 @@ export function run(t) {
     t.ok('a standing clock integrates nothing', gameHourDelta(7, 7) === 0);
     t.ok('the first call after a seed integrates nothing', gameHourDelta(null, 12) === 0);
     t.ok('a non-finite reading integrates nothing', gameHourDelta(NaN, 5) === 0 && gameHourDelta(5, NaN) === 0);
+    // ⭐ A STOPPED TIME-OF-DAY CLOCK IS NOT A PAUSE (mmp-78u.34.6): the world keeps running, so the mantle follows the
+    // world clock at its visual pace. It used to integrate nothing, so rain never wetted the ground and snow never
+    // settled until a reload seeded it.
+    const pace = MANTLE_MIN_GAME_HOURS_PER_WORLD_SEC;
+    t.ok(
+      'a stopped sky clock still integrates the world s time at the pace',
+      near(mantleStepHours(0, 0.25), 0.25 * pace)
+    );
+    t.ok('a paused world integrates nothing', mantleStepHours(0, 0) === 0);
+    t.ok('a sky clock faster than the pace drives it', near(mantleStepHours(0.5, 0.25), 0.5));
+    t.ok('a slow sky clock is lifted to the pace', near(mantleStepHours(1e-5, 0.25), 0.25 * pace));
+    t.ok('junk integrates nothing, never NaN', mantleStepHours(NaN, undefined) === 0);
+    // At the pace a hard snowfall whitens the ground in under a minute of world time, not never.
+    const snowHours = 1 / SNOW_RATE_PER_HOUR;
+    t.ok('at the pace, full snow cover takes under a minute of world time', snowHours / pace < 60);
     // Never negative, at any pair of hours — the mantle integrates forward only.
     const hours = [0, 0.1, 5.5, 11.9, 12, 12.1, 18, 23.9];
     t.ok(

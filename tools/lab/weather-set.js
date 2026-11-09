@@ -14,7 +14,7 @@
 const a = typeof args === 'object' && args ? args : {};
 const M = 'map-shine-advanced';
 const scene = canvas.scene;
-if (scene?.getFlag(M, 'lab') !== 'scene:weather') return { refused: 'not on Lab · Weather', scene: scene?.name };
+if (!a.anyScene && scene?.getFlag(M, 'lab') !== 'scene:weather') return { refused: 'not on Lab · Weather (pass anyScene: true for a real map on a private rig)', scene: scene?.name };
 const sky = { ...(scene.getFlag(M, 'sky') ?? {}) };
 const set = (k, v) => {
   if (v !== undefined) sky[k] = v;

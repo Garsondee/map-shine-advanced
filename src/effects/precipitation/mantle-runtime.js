@@ -84,7 +84,7 @@
  * @module effects/precipitation/mantle-runtime
  */
 import { createLogger } from '../../core/log.js';
-import { resolveMantleStep, seedMantleDepth, gameHourDelta } from './mantle-model.js';
+import { resolveMantleStep, seedMantleDepth, gameHourDelta, mantleStepHours } from './mantle-model.js';
 import { MAX_TRAMPLE_STAMPS } from '../../world/index.js';
 
 const log = createLogger('precip-mantle');
@@ -566,6 +566,7 @@ export function createMantleRuntime({
       if (!seeded) this.seed(inputs);
       sinceStepSec += Math.max(0, dtRealSec || 0);
       if (sinceStepSec < STEP_INTERVAL_SEC) return null;
+      const worldSec = sinceStepSec;
       sinceStepSec = 0;
 
       const now = Number.isFinite(todHour) ? todHour : (lastGameHours ?? 0);
@@ -573,7 +574,9 @@ export function createMantleRuntime({
       // zero" — the first delta after a seed or a floor change would otherwise
       // be the whole clock reading and deposit a geological age of snow.
       // `gameHourDelta` owns the midnight wrap and the backward-clock case.
-      const dtGameHours = gameHourDelta(lastGameHours, now);
+      // The world clock carries it when the time-of-day clock is stopped or slow (`mantleStepHours`, mmp-78u.34.6):
+      // `dtRealSec` is the subsystem's SIM delta, so a paused world still integrates nothing.
+      const dtGameHours = mantleStepHours(gameHourDelta(lastGameHours, now), worldSec);
       lastGameHours = now;
 
       const stepValues = resolveMantleStep({ ...inputs, dtGameHours });

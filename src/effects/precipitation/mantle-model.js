@@ -173,6 +173,34 @@ const BURY_RATE_MUL = 2.5;
  * @param {number} nowHour
  * @returns {number} game hours elapsed, never negative.
  */
+/**
+ * ⭐ THE MANTLE'S SLOWEST PACE: one game hour per 30 seconds of WORLD time (MSA Lab 2026-11-09, mmp-78u.34.6).
+ *
+ * ⚠️ A STOPPED TIME-OF-DAY CLOCK IS NOT A PAUSE. Most scenes run the sky with its clock stopped
+ * (`rateHoursPerMinute: 0`, her maps included) while the world itself runs: rain falls, splashes, drifts. Keyed on
+ * game hours alone, the mantle integrated NOTHING there — rain never wetted the ground and snow never settled, until
+ * a reload SEEDED it at three hours' worth (`seedMantleDepth`), so the same weather looked dry or wet depending on
+ * whether the GM had reloaded. Measured on the lab rig and on Docklands: `dtGameHours: 0` every step at 100% rain.
+ *
+ * So a step integrates the LARGER of the game hours that passed and the world seconds that passed at this pace. A
+ * paused world still freezes the mantle (world seconds stop with the pause — CONVENTIONS §8); a time-of-day clock
+ * running faster than the pace still drives it; at the pace, snow whitens open ground in about 40 s and a downpour
+ * wets it in about a minute — "this weather has been going a while", following the sky's own ease.
+ */
+export const MANTLE_MIN_GAME_HOURS_PER_WORLD_SEC = 1 / 30;
+
+/**
+ * Game hours one mantle step integrates. PURE.
+ * @param {number} dtGameHours - from {@link gameHourDelta} (0 with the clock stopped).
+ * @param {number} dtWorldSec - world (sim) seconds since the last step: 0 while paused.
+ * @returns {number} >= 0
+ */
+export function mantleStepHours(dtGameHours, dtWorldSec) {
+  const game = Number.isFinite(dtGameHours) ? Math.max(0, dtGameHours) : 0;
+  const world = Number.isFinite(dtWorldSec) ? Math.max(0, dtWorldSec) : 0;
+  return Math.max(game, world * MANTLE_MIN_GAME_HOURS_PER_WORLD_SEC);
+}
+
 export function gameHourDelta(prevHour, nowHour) {
   if (prevHour === null || !Number.isFinite(prevHour) || !Number.isFinite(nowHour)) return 0;
   // ⚠️ `+ 24`, AND THE FIRST CUT WROTE `+ 36`, WHICH SILENTLY RETURNED ZERO

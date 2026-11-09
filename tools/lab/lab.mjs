@@ -7,6 +7,11 @@
  *   node tools/lab/lab.mjs seed   --name <cdp client>       build/replace the lab scenes as GM
  *   node tools/lab/lab.mjs look --name <client> --plot C1 [--level ground] [--view shipped|measure] [--scale 0.45]
  *        one look at one plot: pan, settle, clean shot, probe its named points, print a table
+ *   node tools/lab/lab.mjs check --name <client> --family walls [--view shipped|measure] [--only A03,B02]
+ *        [--walls window5,torch] [--lights torch] [--no-shots] [--settle 1200] [--scale 0.8] [--keep] [--offline]
+ *        (--offline re-judges the claims on the last run's saved probe data: no rig, no lock, no shots)
+ *        measure every claim of a family (walls-claims.mjs) under the rig lock: out/check-walls.json,
+ *        a console table, and a clean shot per failing cell in out/shots/discrepancies/
  *   node tools/lab/lab.mjs manifest                         print the manifest (debugging)
  *
  * The painted set lives in tools/lab/out/v<N>/ (git-ignored, regenerable). In Foundry it is
@@ -20,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { LAB_VERSION } from './lab-spec.mjs';
 import { labManifestAll as labManifest, labPaintJobAll as labPaintJob } from './lab-index.mjs';
 import { look } from './lab-look.mjs';
+import { checkWalls, printCheck, recheckWallsOffline } from './lab-check.mjs';
 import { withRigLock } from './rig-lock.mjs';
 
 /** Who holds the rig lock: --owner, else LAB_OWNER, else 'lab.mjs'. */
@@ -96,6 +102,34 @@ const COMMANDS = {
     );
     console.log(`${r.plot} on ${r.level} (${r.view}) settled=${r.settled} verdict=${r.verdict} -> ${r.shot}`);
     console.table(r.table);
+  },
+  check: async () => {
+    const family = opt('family', 'walls');
+    if (family !== 'walls') throw new Error(`check: no claims for family '${family}' yet (walls only)`);
+    const list = (k) => (opt(k) ? opt(k).split(',') : null);
+    if (argv.includes('--offline')) {
+      // re-judge the claims on the last run's saved probe data (no rig, no lock)
+      printCheck(recheckWallsOffline({ view: opt('view', 'shipped'), only: list('only') }));
+      return;
+    }
+    const r = await withRigLock(
+      OWNER,
+      () =>
+        checkWalls({
+          name: opt('name'),
+          view: opt('view', 'shipped'),
+          scale: Number(opt('scale', 0.8)),
+          settleMs: Number(opt('settle', 1200)),
+          waitMs: Number(opt('wait', 6000)),
+          only: list('only'),
+          walls: list('walls'),
+          lights: list('lights'),
+          shots: !argv.includes('--no-shots'),
+          keep: argv.includes('--keep'),
+        }),
+      { waitMin: 60 }
+    );
+    printCheck(r);
   },
   manifest: () => console.log(JSON.stringify(labManifest({ assetDir, version }), null, 2)),
 };

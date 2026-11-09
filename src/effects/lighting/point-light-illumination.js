@@ -653,11 +653,13 @@ export function inverseSquareFalloff(TSL, dist, steepness = INVERSE_SQUARE_STEEP
  * Illumination is `floor + (lit - floor) × falloff`, MAX-blended over the ambient fill. Two
  * parts with two different jobs:
  *
- *  - the FLOOR (`backgroundFloor`, the light's own copy of the ambient) — where the real
- *    ambient at a pixel is darker than that copy (an indoor lamp's untinted floor spilling
- *    onto golden-hour grass, a darkness Region), the floor shows as a pale fan cut off at the
- *    polygon. It fades to black (= "adds nothing" under MAX) over the outer
- *    {@link LIGHT_FLOOR_FADE_WIDTH} of the radius. Same trick `window-reach.js` plays.
+ *  - the FLOOR (`backgroundFloor`) — since mmp-78u.45 (2026-11-09) the REAL ambient at the pixel
+ *    (`buf:scene.roomLight`, see `buildIlluminationShadingCore`), so it matches the fill exactly.
+ *    Without that copy (rigs, benches) it is the light's own CPU copy of the ambient, and where
+ *    the real ambient is darker than that copy (an indoor lamp's untinted floor spilling onto
+ *    golden-hour grass, a darkness Region, a cave under the floors above) the floor shows as a
+ *    pale fan cut off at the polygon. Either way it fades to black (= "adds nothing" under MAX)
+ *    over the outer {@link LIGHT_FLOOR_FADE_WIDTH} of the radius. Same trick `window-reach.js` plays.
  *  - the EXCESS (`(lit - floor) × falloff`, the light itself) — its falloff reads a distance
  *    stretched in the tail ({@link stretchToReach01}), so it has eased to exactly 0 (zero slope)
  *    at {@link LIGHT_EXCESS_REACH}, where the floor fade starts. The inner half is within ~1%.
@@ -673,6 +675,19 @@ export function inverseSquareFalloff(TSL, dist, steepness = INVERSE_SQUARE_STEEP
  */
 export const LIGHT_FLOOR_FADE_WIDTH = 0.06;
 export const LIGHT_EXCESS_REACH = 1 - LIGHT_FLOOR_FADE_WIDTH;
+
+/**
+ * THE LADDER FOLLOWS THE LOCAL AMBIENT (mmp-78u.20, 2026-11-09). Foundry builds a light's dim colour
+ * per FRAGMENT, `dim = mix(background, bright, weightDim)`, from its per-pixel darkness texture, so a
+ * lamp just outside a dark Region lights the Region's floor with the Region's dim colour. MSA computes
+ * dim/bright on the CPU at the light's ORIGIN; with the real ambient at the pixel (`buf:scene.roomLight`)
+ * the shader moves the origin's dim colour by how far the local background sits from the origin's:
+ * `dimHere = dim + (floorHere - background) x (1 - weightDim)`, which is exactly Foundry's mix evaluated
+ * at the local background (bright's weight is 1, so bright never moves). This is that `1 - weightDim`;
+ * it must equal `1 - environmental-light.js#FOUNDRY_LIGHT_WEIGHTS.dim` (a test pins it — not imported,
+ * to keep this module off the environmental pass's import graph).
+ */
+export const LIGHT_DIM_BACKGROUND_SHARE = 0.75;
 
 /**
  * The distance the excess's falloff reads: `d × (1 + k d⁴)`, with `k` putting `reach` at 1. Not a plain
@@ -1695,6 +1710,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     cloudStreakSpread,
     cloudStrengthNode,
     cloudBlurNode,
+    roomLightTexNode = null,
   } = shared;
   const {
     animation,
@@ -1729,6 +1745,12 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   // drawn spot otherwise. Every map-registered read below (sun-shadow field, cloud field, and through
   // the shared terms the gobo and the window reach) takes it.
   const worldXY = mapXY ?? positionWorld.xy;
+  // THE ROOM'S REAL LIGHT at this pixel (mmp-78u.45, see "THE FLOOR IS THE ROOM'S REAL LIGHT" below), and
+  // the dim colour moved onto the local ambient's ladder ({@link LIGHT_DIM_BACKGROUND_SHARE}, mmp-78u.20).
+  const roomFloorHere = roomLightTexNode ? roomLightTexNode.sample(screenUV).rgb : null;
+  const dimHere = roomFloorHere
+    ? uDimColor.add(roomFloorHere.sub(uBackgroundColor).mul(float(LIGHT_DIM_BACKGROUND_SHARE)))
+    : uDimColor;
 
   /**
    * ============================================================================
@@ -1832,7 +1854,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
       hi = mix(upperEdge, clamp(ratio.mul(float(2.2)), upperEdge, float(1.0)), soft);
     }
     const t = smoothstep(lo, hi, dist);
-    return mix(uBrightColor, uDimColor, t);
+    return mix(uBrightColor, dimHere, t);
   };
   const defaultSeed = computeSwitchColorBand(uRatio);
 
@@ -1883,7 +1905,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
     const seeded = animation.buildIlluminationSeed({
       THREE,
       uBrightColor,
-      uDimColor,
+      uDimColor: dimHere,
       uRatio,
       uAttenuationEased,
       dist,
@@ -2016,10 +2038,25 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   // A JS-time branch, not a uniform gate (`tsl/no-uniform-gates`): with no
   // slots supplied the lookup is absent from the compiled shader entirely and
   // this material is byte-identical to what it was before cast shadows existed.
-  let backgroundFloor = uBackgroundColor;
+  //
+  // ⭐ THE FLOOR IS THE ROOM'S REAL LIGHT (mmp-78u.45, 2026-11-09) — when the pool hands over
+  // `roomLightTexNode` (`buf:scene.roomLight`: `buf:scene.illum` copied after the ambient fill, sun
+  // and cloud shadow, darkness Regions and tree shadows, BEFORE any lamp), the floor IS that copy at
+  // this pixel, and the sun/cloud blocks below are skipped (the copy already carries both). The
+  // uniform floor is one CPU number per light: the scene ambient at the light's ORIGIN, Region-
+  // adjusted there, with only the sun/cloud terms re-derived here. Everything else the fill draws
+  // (the sky multiplier, moonlight, cover from the floors above, a Region's soft edge, tree shadows)
+  // it never saw, so wherever the real ambient sat below it the floor showed as a flat pale disc that
+  // dropped to the ambient at the rim (measured, Monastery Underdepths 22:00 in a 0.70 Region: floor
+  // 0.41-0.42 held to 0.94 R, ambient 0.188 on her Oracle settings, 0.345 on rig A). Read from the
+  // copy, the floor equals the ambient by construction, so `floor + (lit - floor) x falloff` meets it
+  // tangentially in every room, open ground included (the mmp-3kb shape is unchanged where the two
+  // already agreed). Gamma space, 8 bits, sampled at `screenUV` — the same read the windows make
+  // (`window-render.js` `roomLightTexture`). Null (rigs, benches) ⇒ the uniform floor, as before.
+  let backgroundFloor = roomFloorHere ?? uBackgroundColor;
   // Kept for the shared sun+cloud rule below (`light-visibility.js#buildSunAndCloudVisNode`).
   let sunVisHere = null;
-  if (sunShadowSlotNodes && sunShadowSlotNodes.length > 0) {
+  if (!roomFloorHere && sunShadowSlotNodes && sunShadowSlotNodes.length > 0) {
     // Clamped, never wrapped — a light overhanging a field's edge reads the
     // nearest edge value rather than a caster from the far side of the map.
     const sampleSlot = (slot) => {
@@ -2057,7 +2094,7 @@ export function buildIlluminationShadingCore({ THREE, inputs, shared, flags }) {
   // `outputColor = mix(backgroundFloor, finalColorExposed, ...)` below), so
   // a light sitting in a cloud's shadow now fades OUT into that same shadow
   // rather than into an un-shadowed flat colour the field never knew about.
-  if (buildCloudField && buildCloudGroundVis && cloudUniforms) {
+  if (!roomFloorHere && buildCloudField && buildCloudGroundVis && cloudUniforms) {
     const cloudVis = buildCloudGroundVis(THREE.TSL, {
       worldXY,
       uniforms: cloudUniforms,
@@ -2472,6 +2509,7 @@ export function buildPointLightIlluminationMaterial({
   cloudStreakSpread,
   cloudStrengthNode,
   cloudBlurNode,
+  roomLightTexNode = null,
   penumbra = false,
 }) {
   const { uniform, uniformArray, float, int, vec2, vec4, positionLocal } = THREE.TSL;
@@ -2573,6 +2611,7 @@ export function buildPointLightIlluminationMaterial({
         cloudStreakSpread,
         cloudStrengthNode,
         cloudBlurNode,
+        roomLightTexNode,
       },
       flags: {
         animation,

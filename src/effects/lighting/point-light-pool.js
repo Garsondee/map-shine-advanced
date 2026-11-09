@@ -533,6 +533,7 @@ function createLightEntry({
   windowReachCount = 0,
   windowReachTexture = null,
   flashlightCookieTexture,
+  roomLightTexNode = null,
 }) {
   const geometry = new THREE.BufferGeometry();
   // Pre-allocate ONCE, sized generously — see INITIAL_LIGHT_FAN_VERTICES
@@ -648,6 +649,8 @@ function createLightEntry({
     cloudStreakSpread: envLight.cloudStreakSpread,
     cloudStrengthNode: envLight.cloudStrengthNode,
     cloudBlurNode: envLight.cloudBlurNode,
+    // THE FLOOR IS THE ROOM'S REAL LIGHT (mmp-78u.45) — see the pool's own `roomLightTexture` param.
+    roomLightTexNode,
     // THE HEIGHT/ELEVATION GATE — STAGE 2 (2026-08-04). See point-light-
     // illumination.js's own "STAGE 2" header. `attrTexNode` just above stays
     // wired for the SEPARATE sun-shadow floor blend it also feeds; it no
@@ -1004,7 +1007,17 @@ export function createPointLightPool({
   // reasoning as `specular-surface-subsystem.js`'s own `profiler` param:
   // this pool is constructed independently of that table.
   profiler = null,
+  /**
+   * `buf:scene.roomLight`'s texture (mmp-78u.45): `buf:scene.illum` copied after the ambient fill, sun
+   * and cloud shadow, darkness Regions and tree shadows, before any lamp. Every light's FLOOR reads it
+   * at its own pixel (`point-light-illumination.js#buildIlluminationShadingCore`), so a light inside a
+   * dark Region, a cave or a moonlit yard fades into exactly the ambient around it instead of painting
+   * its origin's ambient as a pale disc. Null (rigs, benches) ⇒ the per-light uniform floor, as before.
+   */
+  roomLightTexture = null,
 }) {
+  /** Built once; every light material shares this one node (rebinding a texture never rebuilds). */
+  const roomLightTexNode = roomLightTexture ? THREE.TSL.texture(roomLightTexture) : null;
   /** A tiny dedicated Scene for point-light meshes — kept separate from the
    * world scene so a MAX-blended accumulate pass never has to filter out
    * ordinary drawables. */
@@ -1503,6 +1516,7 @@ export function createPointLightPool({
       cloudStreakSpread: envLight.cloudStreakSpread,
       cloudStrengthNode: envLight.cloudStrengthNode,
       cloudBlurNode: envLight.cloudBlurNode,
+      roomLightTexNode,
     };
     const colorSharedResources = {
       albedoTexture: sceneColor.texture,
@@ -2467,6 +2481,7 @@ export function createPointLightPool({
           windowReachCount,
           windowReachTexture,
           flashlightCookieTexture,
+          roomLightTexNode,
         });
         lightMeshes.set(light.sourceId, entry);
       } else {

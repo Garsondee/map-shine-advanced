@@ -6843,6 +6843,9 @@ async function startVtPanViewerUnserialized({
 
     const pointLights = createPointLightPool({
       THREE,
+      // THE FLOOR IS THE ROOM'S REAL LIGHT (mmp-78u.45): every light fades into the ambient actually drawn at
+      // its pixel (Regions, moon, cover, tree shadows), not its origin's CPU copy of it. Same copy the windows read.
+      roomLightTexture: sceneRoomLight.texture,
       getWindHandle: () => windHandle,
       // Read lazily (`skyHandle` is reassigned; this runs from the frame loop, after it exists).
       getLightSkyTint: (x, y) =>

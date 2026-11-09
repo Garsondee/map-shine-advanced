@@ -47,7 +47,12 @@
  */
 import { buildAnimationTimeNode } from './animations/light-animation-clock.js';
 import { getSafeProfile } from '../../core/safe-mode.js';
-import { buildPointLightSharedTerms, shapeIlluminationOutput, LIGHT_EXCESS_REACH } from './point-light-illumination.js';
+import {
+  buildPointLightSharedTerms,
+  shapeIlluminationOutput,
+  LIGHT_EXCESS_REACH,
+  LIGHT_DIM_BACKGROUND_SHARE,
+} from './point-light-illumination.js';
 import { buildSunAndCloudVisNode } from './light-visibility.js';
 
 /**
@@ -112,6 +117,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     cloudStreakSpread,
     cloudStrengthNode,
     cloudBlurNode,
+    roomLightTexNode = null,
   } = shared;
   const { animation, animationQuality = 0, falloffModel = 'foundry' } = flags;
   const {
@@ -161,12 +167,17 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
   // (point-light-illumination.js) — see that function's own comments for the
   // full "why" behind each term.
   // ============================================================================
+  // The room's real light here and the local-ladder dim colour (mmp-78u.45/.20) — as in that core.
+  const roomFloorHere = roomLightTexNode ? roomLightTexNode.sample(screenUV).rgb : null;
+  const dimHere = roomFloorHere
+    ? uDimColor.add(roomFloorHere.sub(uBackgroundColor).mul(float(LIGHT_DIM_BACKGROUND_SHARE)))
+    : uDimColor;
   const computeSwitchColorBand = (ratio) => {
     const attenuationStrength = uAttenuationEased.mul(float(0.7));
     const lowerEdge = ratio.mul(float(0.99).sub(attenuationStrength));
     const upperEdge = clamp(ratio.mul(float(1.01).add(attenuationStrength)), float(0.0001), float(1.0));
     const t = smoothstep(lowerEdge, upperEdge, dist);
-    return mix(uBrightColor, uDimColor, t);
+    return mix(uBrightColor, dimHere, t);
   };
   const illumDefaultSeed = computeSwitchColorBand(uRatio);
 
@@ -198,7 +209,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     const seeded = animation.buildIlluminationSeed({
       THREE,
       uBrightColor,
-      uDimColor,
+      uDimColor: dimHere,
       uRatio,
       uAttenuationEased,
       dist,
@@ -236,10 +247,12 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
     illumFinalColorExposed = illumFinalColor.mul(exposureFactor);
   }
 
+  // THE FLOOR IS THE ROOM'S REAL LIGHT (mmp-78u.45) — identical to buildIlluminationShadingCore's own:
+  // `buf:scene.roomLight` at this pixel when the pool supplies it, and then the sun/cloud blocks are skipped.
   // SUN-SHADOW ATTENUATION — identical to buildIlluminationShadingCore's own.
-  let backgroundFloor = uBackgroundColor;
+  let backgroundFloor = roomFloorHere ?? uBackgroundColor;
   let sunVisHere = null; // for the shared sun+cloud rule (light-visibility.js#buildSunAndCloudVisNode)
-  if (sunShadowSlotNodes && sunShadowSlotNodes.length > 0) {
+  if (!roomFloorHere && sunShadowSlotNodes && sunShadowSlotNodes.length > 0) {
     const sampleSlot = (slot) => {
       const u = positionWorld.x.sub(slot.uRect.x).div(slot.uRect.z.sub(slot.uRect.x));
       const v = positionWorld.y.sub(slot.uRect.y).div(slot.uRect.w.sub(slot.uRect.y));
@@ -264,7 +277,7 @@ export function buildMergedPointLightShadingCore({ THREE, inputs, shared, flags 
   // (point-light-pool.js never calls createBatchedLightMesh with
   // channel:'merged') — added anyway so it does not become a silent trap the
   // day S2.15 turns it on.
-  if (buildCloudField && buildCloudGroundVis && cloudUniforms) {
+  if (!roomFloorHere && buildCloudField && buildCloudGroundVis && cloudUniforms) {
     const cloudVis = buildCloudGroundVis(THREE.TSL, {
       worldXY: positionWorld.xy,
       uniforms: cloudUniforms,

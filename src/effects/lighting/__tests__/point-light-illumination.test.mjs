@@ -34,7 +34,9 @@ import {
   computeDepthHeightGate,
   DEPTH_FLAG_RESTRICTS_LIGHT_MIRROR,
   DEPTH_FLAG_IS_TILE_MIRROR,
+  LIGHT_DIM_BACKGROUND_SHARE,
 } from '../point-light-illumination.js';
+import { computeAmbientColors, FOUNDRY_LIGHT_WEIGHTS } from '../environmental-light.js';
 import {
   RECEIVER_ELEVATION_LEVELS,
   RECEIVER_ELEVATION_RANGE_UNITS,
@@ -780,6 +782,56 @@ export function run(t) {
       '...and STILL returns the uniform (so a caller can set it without checking which branch built)',
       !!unwired?.uLightExpectedDepth
     );
+  }
+
+  // ======================================================================
+  // THE ROOM'S REAL LIGHT (mmp-78u.45 / mmp-78u.20) — the floor and the dim
+  // colour follow `buf:scene.roomLight` at the pixel when it is supplied.
+  // ======================================================================
+  {
+    ok(
+      "LIGHT_DIM_BACKGROUND_SHARE is 1 - Foundry's dim weight (the ladder's background share)",
+      near(LIGHT_DIM_BACKGROUND_SHARE, 1 - FOUNDRY_LIGHT_WEIGHTS.dim)
+    );
+    // The shader's shift, `dim + (floorHere - background) x share`, IS Foundry's ladder evaluated at the
+    // local darkness: a lamp at darkness 0 seen inside an OVERRIDE 0.9 Region (IR-55) reads that Region's dim.
+    const env = { ambient: { daylight: [0.93, 0.93, 0.93], darkness: [0.14, 0.14, 0.28] } };
+    let worst = 0;
+    for (const [dOrigin, dHere] of [
+      [0, 0.9],
+      [0.7, 1],
+      [1, 0.3],
+      [0.5, 0.5],
+    ]) {
+      const o = computeAmbientColors({ ...env, darkness01: dOrigin });
+      const h = computeAmbientColors({ ...env, darkness01: dHere });
+      for (let c = 0; c < 3; c++) {
+        const shifted = o.dim[c] + (h.background[c] - o.background[c]) * LIGHT_DIM_BACKGROUND_SHARE;
+        worst = Math.max(worst, Math.abs(shifted - h.dim[c]));
+      }
+    }
+    ok(
+      `the shifted dim colour equals Foundry's dim at the local darkness (worst ${worst.toExponential(1)})`,
+      worst < 1e-12
+    );
+
+    const { uniform: u3, vec3: v3, texture } = THREE.TSL;
+    const room = new THREE.DataTexture(new Uint8Array([60, 60, 60, 255]), 1, 1, THREE.RGBAFormat);
+    room.needsUpdate = true;
+    const uBg = u3(v3(0.9, 0.9, 0.9));
+    const args = { THREE, uBackgroundColor: uBg, uDimColor: u3(v3(0.9, 0.9, 0.9)), uBrightColor: u3(v3(1, 1, 1)) };
+    let withRoom = null;
+    let without = null;
+    let err = null;
+    try {
+      withRoom = buildPointLightIlluminationMaterial({ ...args, roomLightTexNode: texture(room) });
+      without = buildPointLightIlluminationMaterial(args);
+    } catch (e) {
+      err = e;
+    }
+    ok(`a light built with roomLightTexNode constructs cleanly (${err ? err.message : 'clean'})`, err === null);
+    ok('...its floor is the room-light read, not the uniform copy of the ambient', withRoom?.backgroundFloor !== uBg);
+    ok('...and without it the floor is the uniform, exactly as before', without?.backgroundFloor === uBg);
   }
 
   // ======================================================================

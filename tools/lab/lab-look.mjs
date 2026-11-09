@@ -154,7 +154,8 @@ export async function look({
             illum: x.illum,
             lit: x.lit,
             presented: x.presented,
-            drift: x.drift ? `${x.drift.maxAbs} ${x.drift.verdict}` : '-',
+            // Probe v2.1: luma drift (v2 reported the worst channel as maxAbs).
+            drift: x.drift ? `${x.drift.lumaDrift ?? x.drift.maxAbs} ${x.drift.verdict}` : '-',
             dark: x.foundry?.darkness ?? null,
             regions: (x.foundry?.regions ?? []).map((g) => g.behaviors.join('+')).join('; '),
             lights: x.foundry?.lights?.length ?? 0,

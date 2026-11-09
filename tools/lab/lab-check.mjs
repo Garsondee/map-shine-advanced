@@ -66,7 +66,10 @@ async function probeCell(page, cell, { scale, settleMs }) {
           lit: f4(x.lit),
           coloration: f4(x.coloration),
           presented: x.presented ? x.presented.slice(0, 3) : null,
-          drift: x.drift ? { maxAbs: x.drift.maxAbs, verdict: x.drift.verdict } : null,
+          // Probe v2.1 judges drift on luma; the worst single channel rides along.
+          drift: x.drift
+            ? { lumaDrift: x.drift.lumaDrift, channelMaxAbs: x.drift.channelMaxAbs, verdict: x.drift.verdict }
+            : null,
           outdoors01: x.outdoors01,
           foundry: x.foundry
             ? {

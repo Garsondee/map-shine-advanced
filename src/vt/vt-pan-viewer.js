@@ -229,7 +229,7 @@ import {
   decodeByteRgba,
   diffProbeBuffers,
   decodeCanvasPixel,
-  judgePresentedDrift,
+  buildProbeRow,
   buffersAgree,
 } from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
@@ -30102,8 +30102,10 @@ async function startVtPanViewerUnserialized({
      * silently` with a fuse attached; measuring it is four lines.
      *
      * @param {number} worldX @param {number} worldY
+     * @param {{skipOffScreen?: boolean}} [opts] - probe v2.1: read nothing for a
+     *   point off the view (or before there is a view) and say why in `reason`.
      * @returns {Promise<{worldX:number, worldY:number, pixel:{x:number,y:number}|null,
-     *   buffers: object|null, onScreen: boolean}>}
+     *   buffers: object|null, onScreen: boolean, reason?: 'off-screen'|'no view'|'bad point'}>}
      */
     /**
      * WHICH ITEM(S) ARE ACTUALLY HERE — a CPU-side companion to
@@ -30216,19 +30218,26 @@ async function startVtPanViewerUnserialized({
       return hits;
     }
 
-    async function sampleOnePixel(worldX, worldY) {
-      if (!view)
-        return {
-          worldX,
-          worldY,
-          pixel: null,
-          buffers: null,
-          onScreen: false,
-          itemsAtPoint: itemsCoveringWorldPoint(worldX, worldY),
-        };
+    async function sampleOnePixel(worldX, worldY, { skipOffScreen = false } = {}) {
+      // Nothing read at all. PROBE v2.1 (`skipOffScreen`, FRICTION #19): an off-screen point used to be
+      // read at the CLAMPED edge pixel (ndcToPixel clamps) and came back as a confident wrong number; now
+      // it is not read, and `reason` says why. v1 (`probePixels`, `sampleIllumPixel`) keeps its old shape.
+      const unread = (reason) => ({
+        worldX,
+        worldY,
+        pixel: null,
+        buffers: null,
+        onScreen: false,
+        ...(skipOffScreen ? { reason } : null),
+        itemsAtPoint: itemsCoveringWorldPoint(worldX, worldY),
+      });
+      if (!view) return unread('no view');
       const worldRect = viewToWorldRect(view, canvasW / canvasH);
       const ndc = worldToNdc({ x: worldX, y: worldY }, worldRect);
       const onScreen = ndc.x >= -1 && ndc.x <= 1 && ndc.y >= -1 && ndc.y <= 1;
+      if (skipOffScreen && !onScreen) {
+        return unread(Number.isFinite(worldX) && Number.isFinite(worldY) ? 'off-screen' : 'bad point');
+      }
       // Device pixels, not canvasW/H — these buffers are now sized in DEVICE
       // pixels (the pixel-ratio-parity fix), and readRenderTargetPixelsAsync
       // indexes into the buffer's own pixel grid, not CSS pixels.
@@ -30684,18 +30693,32 @@ async function startVtPanViewerUnserialized({
       );
 
     /**
-     * Probe v2: any number of world points; waits until the buffers stop moving (a read taken mid-rebuild is
-     * garbage — the lab once read lit 0.488 against a steady 0.184); reads the PRESENTED pixel and judges its
-     * drift from lit; decodes the floor and outdoors attribute; markers only on request.
+     * Probe v2.1: any number of world points (up to 64); waits until the buffers stop moving (a read taken
+     * mid-rebuild is garbage — the lab once read lit 0.488 against a steady 0.184); reads the PRESENTED pixel
+     * and judges its drift from lit on LUMA; decodes the floor and outdoors attribute; markers only on request.
+     *
+     * Each row is diag/pixel-probe.js#buildProbeRow: `{name, worldX, worldY, pixel, onScreen, reason,
+     * floorIndex, outdoors01, albedo, illum, lit, coloration, gain, expectedScreen, presented, drift,
+     * itemsAtPoint}`. An OFF-SCREEN point is not read at all (v2.1, FRICTION #19): its buffer fields and
+     * `pixel` are null and `reason` is 'off-screen'. `gain` is the per-channel light multiplier in gamma
+     * space (FRICTION #22); `expectedScreen` = OETF(lit) bytes (what `drift` compares against).
+     *
+     * `camera` is the view these reads mapped through ({x, y} = world centre, scale = CSS px per world px,
+     * Foundry's stage-scale convention); MapShine.probe folds it into `context`.
+     *
      * @param {Array<{x:number,y:number,name?:string}>} points - world (canvas) px
      * @param {{markers?:boolean, stable?:boolean, presented?:boolean, maxFrames?:number}} [opts]
+     * @returns {Promise<{settled:boolean, framesWaited:number, presented:{ok:boolean, reason:string|null,
+     *   format:string|null}|null, verdict:'ok'|'check'|'suspect'|'unknown', camera:{x:number, y:number,
+     *   scale:number, source:'viewer'}|null, results:object[]}>}
      */
     async function runProbeV2(points, opts = {}) {
       const { markers = false, stable = true, presented = true, maxFrames = 10 } = opts;
       const list = (Array.isArray(points) ? points : []).slice(0, 64);
-      const readAll = () => Promise.all(list.map((p) => sampleOnePixel(p?.x, p?.y)));
+      const readAll = () => Promise.all(list.map((p) => sampleOnePixel(p?.x, p?.y, { skipOffScreen: true })));
       let samples = await readAll();
-      let settled = !stable;
+      // Nothing on screen = nothing read = nothing to wait for.
+      let settled = !stable || samples.every((s) => !s.onScreen);
       let framesWaited = 0;
       while (stable && !settled && framesWaited < maxFrames) {
         await nextAnimationFrame();
@@ -30711,23 +30734,7 @@ async function startVtPanViewerUnserialized({
       const results = samples.map((s, i) => {
         const k = onScreenIdx.indexOf(i);
         const pres = presentedRead?.ok && k >= 0 ? presentedRead.pixels[k] : null;
-        const attr = s.buffers?.attr?.rgba ?? null;
-        return {
-          name: list[i]?.name ?? null,
-          worldX: s.worldX,
-          worldY: s.worldY,
-          pixel: s.pixel,
-          onScreen: s.onScreen,
-          floorIndex: attr ? Math.round(attr[0] * 255) : null,
-          outdoors01: attr ? +attr[1].toFixed(3) : null,
-          albedo: s.buffers?.albedo?.rgba?.slice(0, 3) ?? null,
-          illum: s.buffers?.illum?.rgba?.slice(0, 3) ?? null,
-          lit: s.buffers?.lit?.rgba?.slice(0, 3) ?? null,
-          coloration: s.buffers?.coloration?.rgba?.slice(0, 3) ?? null,
-          presented: pres ? pres.slice(0, 3) : null,
-          drift: pres ? judgePresentedDrift({ lit: s.buffers?.lit?.rgba ?? null, presented: pres }) : null,
-          itemsAtPoint: s.itemsAtPoint,
-        };
+        return buildProbeRow(s, { name: list[i]?.name ?? null, presented: pres });
       });
       if (markers) {
         clearProbeMarkers();
@@ -30754,6 +30761,10 @@ async function startVtPanViewerUnserialized({
           ? { ok: presentedRead.ok, reason: presentedRead.reason ?? null, format: presentedRead.format ?? null }
           : null,
         verdict: presentedRead?.ok ? worst : 'unknown',
+        camera:
+          view && view.halfSpanPx > 0
+            ? { x: view.centerXPx, y: view.centerYPx, scale: canvasH / (2 * view.halfSpanPx), source: 'viewer' }
+            : null,
         results,
       };
     }
@@ -33978,6 +33989,7 @@ async function startVtPanViewerUnserialized({
        *   deltaFromPrev:{perBuffer:object, biggestJump:object}|null}>>}
        */
       probePixels: async (points) => runProbeOnPoints(points),
+      /** PROBE v2.1 — see runProbeV2 (MapShine.probe adds masks, Foundry facts and `context`). */
       probe: async (points, opts) => runProbeV2(points, opts),
       /** DYNAMIC RANGE's live controller state (effects/dynamic-range.js) — `MapShine.dynamicRange()`. */
       getDynamicRangeInfo,
@@ -35846,12 +35858,6 @@ export async function sampleVtPanViewerIllumPixel(worldX, worldY) {
   return _active.sampleIllumPixel(worldX, worldY);
 }
 
-/**
- * Console-callable wrapper for `_active.probePixels` — see that function's
- * own header for the full reasoning. Call as
- * `await MapShine.probePixels([{x, y}, {x, y}, {x, y}])`.
- * @param {Array<{x:number, y:number}>} points - 1..3 world positions.
- */
 /** DYNAMIC RANGE's live state (meter statistics, exposure, curve, bloom threshold) for the console. */
 export function getVtPanViewerDynamicRangeInfo() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
@@ -35874,14 +35880,21 @@ export function rackVtPanViewerFocus() {
 }
 
 /**
- * Probe v2 (mmp-78u.12) — `await MapShine.probe([{x, y, name?}, ...], {markers, stable, presented})`:
- * any number of points, settled reads, the PRESENTED pixel and its drift from lit. See runProbeV2.
+ * Probe v2.1 (mmp-78u.12) — the viewer half of `await MapShine.probe([{x, y, name?}, ...], {markers, stable,
+ * presented})`: up to 64 points, settled reads, the PRESENTED pixel and its luma drift from lit, the gamma
+ * light multiplier, nothing read off-screen, and the camera the reads used. See runProbeV2.
  */
 export async function probeVtPanViewerV2(points, opts) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.probe(points, opts);
 }
 
+/**
+ * Console-callable wrapper for `_active.probePixels` (probe v1) — see that function's
+ * own header for the full reasoning. Call as
+ * `await MapShine.probePixels([{x, y}, {x, y}, {x, y}])`.
+ * @param {Array<{x:number, y:number}>} points - 1..3 world positions.
+ */
 export async function probeVtPanViewerPixels(points) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.probePixels(points);

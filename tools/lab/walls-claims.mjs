@@ -500,7 +500,8 @@ export const WALLS_CLAIMS = [
     check: (P) => {
       const bad = Object.entries(P)
         .filter(([, r]) => r?.drift && r.drift.verdict !== 'ok')
-        .map(([n, r]) => `${n}:${r.drift.maxAbs}`);
+        // Probe v2.1 judges on luma (lumaDrift); runs saved before it carry v2's worst-channel maxAbs.
+        .map(([n, r]) => `${n}:${r.drift.lumaDrift ?? r.drift.maxAbs}`);
       return res(bad.length === 0, bad.length ? bad.join(', ') : 'all ok', 'drift ok (<32)');
     },
   },

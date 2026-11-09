@@ -39,7 +39,7 @@ import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { buildStateDigest, compareDigests } from './diag/state-digest.js';
 import { lightMeterStats } from './diag/light-meter.js';
-import { compactMaskStack } from './diag/pixel-probe.js';
+import { compactMaskStack, buildProbeContext } from './diag/pixel-probe.js';
 import { paintLightMeterOverlay, removeLightMeterOverlay } from './diag/light-meter-overlay.js';
 import { installDebugPanel } from './diag/debug-panel.js';
 import { installFlightRecorder, downloadText } from './diag/flight-recorder.js';
@@ -100,7 +100,7 @@ import { createGpuQueueProbe } from './diag/gpu-queue-probe.js';
 import { runStructuralAB, runEditCascadeStress } from './diag/perf-structural-ab.js';
 import { pickStressTestTile, pingStressTestTile, unpingStressTestTile, readFoundryTestState } from './foundry/index.js';
 import { installSmoothPan } from './foundry/index.js';
-import { readProbeAttribution } from './foundry/index.js';
+import { readProbeAttribution, readProbeFoundryContext } from './foundry/index.js';
 import { registerWorldClockSettings, watchWorldClock, worldSimNowMs, getWorldClockLedger } from './foundry/index.js';
 import { framePacer } from './core/frame-pacer.js';
 // The benchmark route drives the EXISTING camera-path player rather than growing
@@ -7780,6 +7780,9 @@ function install() {
     }
     const layers = deriveEffectLayers(id, (k) => readSetting(MODULE_ID, k));
     layers.playerEnable = enabled ? 'on' : 'off'; // transient override — nothing written
+    // Recorded in the registry's forced ledger until any other resolve of this effect replaces it (a fade, a
+    // Look, a settings change) — MapShine.probe's `context.forcedEffects` reads that ledger (probe v2.1).
+    layers.forced = !!enabled;
     effectRegistry.resolveAndApply(id, layers);
   }
   /**
@@ -12833,24 +12836,68 @@ function install() {
   // rather than at module scope because `maskAuthority` is an `install()`-local
   // `const`; touching it from module scope is a TDZ ReferenceError at import.
   MapShine.probeMasks = (worldX, worldY) => maskAuthority.probeStackAt(worldX, worldY);
-  // PROBE v2 (2026-11-08, mmp-78u.12) — the MSA Lab's main instrument. `await MapShine.probe([{x, y, name}],
-  // {markers, stable, presented})`: any number of world points; settled reads (no mid-rebuild garbage); the
-  // PRESENTED pixel with a drift verdict against lit (catches a stale present, e.g. the Lens freeze
-  // mmp-78u.7); per point the viewed floor's mask bytes + derived products, and the Foundry facts that
-  // explain its light (darkness level, Regions, light sources containing it). Markers off by default.
+  /**
+   * MapShine.probe's `context` (probe v2.1). Each piece is read on its own: one failure nulls one field and
+   * is named in `errors`, never a throw (diag/pixel-probe.js#buildProbeContext shapes and checks it).
+   * @param {{x:number, y:number, scale:number, source:string}|null} viewerCamera - the view the reads used.
+   */
+  const readProbeContext = (viewerCamera) => {
+    const errors = [];
+    const read = (what, fn) => {
+      try {
+        return fn();
+      } catch (err) {
+        errors.push(`${what}: ${err?.message ?? err}`);
+        return null;
+      }
+    };
+    const foundry = read('foundry', () => readProbeFoundryContext());
+    if (Array.isArray(foundry?.errors)) errors.push(...foundry.errors);
+    return buildProbeContext({
+      camera: viewerCamera ?? foundry?.camera ?? null,
+      dynamicRange: read('exposure', () => getVtPanViewerDynamicRangeInfo()),
+      forced: read('forcedEffects', () => effectRegistry.forcedEffects()),
+      todHour: read('todHour', () => getVtPanViewerTodHour()),
+      sceneId: foundry?.sceneId ?? null,
+      levelId: foundry?.levelId ?? null,
+      errors,
+    });
+  };
+  // PROBE v2.1 (2026-11-09; v2 2026-11-08, mmp-78u.12) — the MSA Lab's main instrument:
+  //
+  //   const r = await MapShine.probe([{x, y, name}], {markers, stable, presented});
+  //   // → {settled, framesWaited, presented, verdict, context, results: [...]}
+  //
+  // Up to 64 world points; settled reads (no mid-rebuild garbage); the PRESENTED pixel with a LUMA drift
+  // verdict against lit (catches a stale present, e.g. the Lens freeze mmp-78u.7, without tripping on a
+  // saturated colour whose brightness held). Per point (diag/pixel-probe.js#buildProbeRow): the buffers,
+  // `gain` (the light multiplier in gamma space) and `expectedScreen`, the viewed floor's mask bytes +
+  // derived products, and the Foundry facts that explain its light (darkness level, Regions, `lights` =
+  // emitters only, `otherSources` = MSA vision-only / global light / darkness). An off-screen point is not
+  // read: its buffer fields are null with `reason: 'off-screen'`. `context` = camera, exposure state, forced
+  // effects, hour, scene, level and time, so two readings can be compared. Markers off by default.
   MapShine.probe = async (points, opts = {}) => {
     const r = await probeVtPanViewerV2(points, opts);
     if (!r || r.skipped || !Array.isArray(r.results)) return r;
+    const viewedFloor = activeFloorContext?.floorIndex ?? 0;
     for (const row of r.results) {
       if (!Number.isFinite(row.worldX) || !Number.isFinite(row.worldY)) continue;
       try {
-        row.masks = compactMaskStack(maskAuthority.probeStackAt(row.worldX, row.worldY), row.floorIndex ?? 0);
+        // An off-screen row has no GPU floor (nothing was read there): its masks come from the viewed floor.
+        row.masks = compactMaskStack(maskAuthority.probeStackAt(row.worldX, row.worldY), row.floorIndex ?? viewedFloor);
       } catch {
         row.masks = null;
       }
       row.foundry = readProbeAttribution(row.worldX, row.worldY);
     }
-    return r;
+    return {
+      settled: r.settled,
+      framesWaited: r.framesWaited,
+      presented: r.presented,
+      verdict: r.verdict,
+      context: readProbeContext(r.camera ?? null),
+      results: r.results,
+    };
   };
   MapShine.armMaskProbe = async (maxPoints = 3) => {
     const points = await MapShine.armPixelProbe(maxPoints);

@@ -65,6 +65,7 @@ import { resolveEffectEnabled, resolveEffectParams, resolveEffectTier } from './
  *   get: (id: string) => {manifest: object, apply: Function} | null,
  *   list: () => object[],
  *   resolveAndApply: (id: string, layers?: object) => ResolvedEffect,
+ *   forcedEffects: () => {id: string, enabled: boolean}[],
  * }}
  */
 /**
@@ -84,6 +85,17 @@ function keepPerSceneParams(schema, layers) {
 export function createEffectRegistry({ forceDefaults = () => false } = {}) {
   /** @type {Map<string, {manifest: object, apply: Function}>} */
   const entries = new Map();
+  /**
+   * THE FORCED LEDGER (2026-11-09, probe v2.1): id → the enable a FORCED resolve asked for, kept only
+   * while that forced resolve is the effect's latest. A resolve whose layers carry `forced: true|false`
+   * (boot's forceEffectEnabled — `MapShine.forceEffect`, the price tools) records it; ANY other resolve
+   * of the same id clears it. Kept HERE, at the one door, because the force is that fragile: a weather
+   * fade or a Look re-resolves bloom and grade every frame it runs, a settings change or scene load
+   * re-resolves everything, and each of those silently drops a forced-off. A ledger kept beside
+   * `MapShine.forceEffect` would go on reporting the force; this one cannot.
+   * @type {Map<string, boolean>}
+   */
+  const forced = new Map();
 
   /**
    * Register an effect. Validates the manifest (throws loudly if bad), rejects a
@@ -127,7 +139,9 @@ export function createEffectRegistry({ forceDefaults = () => false } = {}) {
    * and the caller was never told).
    *
    * @param {string} id
-   * @param {object} [layers] - `{ profile, gmEnable, playerEnable, reducePhotosensitive, paramLayers }`
+   * @param {object} [layers] - `{ profile, gmEnable, playerEnable, reducePhotosensitive, paramLayers }`, plus
+   *   `forced: true|false` when this resolve is a transient force (recorded in the forced ledger, not read
+   *   by the cascade).
    * @returns {ResolvedEffect}
    */
   function resolveAndApply(id, layers = {}) {
@@ -159,9 +173,20 @@ export function createEffectRegistry({ forceDefaults = () => false } = {}) {
       maxPerfTier: maxTier,
       perfTierSource: source,
     };
+    if (typeof layers?.forced === 'boolean') forced.set(id, layers.forced);
+    else forced.delete(id);
     entry.apply(resolved);
     return resolved;
   }
 
-  return { register, get, list, resolveAndApply };
+  /**
+   * The effects whose CURRENT state came from a forced resolve, in the order they were forced (see the
+   * forced ledger above). `enabled` is what the force asked for.
+   * @returns {{id: string, enabled: boolean}[]}
+   */
+  function forcedEffects() {
+    return [...forced].map(([id, enabled]) => ({ id, enabled }));
+  }
+
+  return { register, get, list, resolveAndApply, forcedEffects };
 }

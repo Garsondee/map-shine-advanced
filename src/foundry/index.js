@@ -721,4 +721,5 @@ export {
   fogMemorySize,
 } from './fog-memory-persistence.js';
 export { readFoundryTestState } from './test-state.js';
-export { readProbeAttribution } from './probe-attribution.js';
+// PROBE v2.1: the Foundry facts per point (sources split into lights / otherSources) and the run's context.
+export { readProbeAttribution, readProbeFoundryContext } from './probe-attribution.js';

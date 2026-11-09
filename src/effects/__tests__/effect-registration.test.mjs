@@ -385,6 +385,34 @@ export function run(t) {
       () => reg.resolveAndApply('ghost'),
       'only door'
     );
+
+    // THE FORCED LEDGER (2026-11-09, probe v2.1): a forced resolve is remembered only while it is the
+    // effect's latest — the shape boot's forceEffectEnabled hands in (playerEnable + forced).
+    ok('nothing is forced before anyone forces', reg.forcedEffects().length === 0);
+    const forcedOff = reg.resolveAndApply('uiWindowShadow', { profile: 'extreme', playerEnable: 'off', forced: false });
+    ok('a forced-off resolve applies off', forcedOff.enabled === false && applied.enabled === false);
+    ok(
+      'a forced-off resolve is in the ledger',
+      JSON.stringify(reg.forcedEffects()) === JSON.stringify([{ id: 'uiWindowShadow', enabled: false }])
+    );
+    reg.resolveAndApply('uiWindowShadow', { profile: 'extreme' });
+    ok(
+      'ANY later plain resolve (a fade, a Look, a settings change) clears it — the effect really is back on',
+      reg.forcedEffects().length === 0 && applied.enabled === true
+    );
+    reg.resolveAndApply('uiWindowShadow', { profile: 'standard', playerEnable: 'on', forced: true });
+    ok(
+      'a forced-on resolve is recorded as enabled, and applies on',
+      JSON.stringify(reg.forcedEffects()) === JSON.stringify([{ id: 'uiWindowShadow', enabled: true }]) &&
+        applied.enabled === true
+    );
+    throws('an unknown id still throws', () => reg.resolveAndApply('ghost', { forced: false }), 'only door');
+    ok(
+      'a throwing resolve of another id leaves the ledger alone',
+      reg.forcedEffects().length === 1 && reg.forcedEffects()[0].id === 'uiWindowShadow'
+    );
+    reg.resolveAndApply('uiWindowShadow', { profile: 'extreme', forced: 'yes' });
+    ok('only a boolean `forced` is a force (anything else clears it)', reg.forcedEffects().length === 0);
   }
 
   // ======================================================================

@@ -63,6 +63,7 @@ import { run as runPlayerAim } from './player-aim.test.mjs';
 import { run as runPlayerAimChannel } from './player-aim-channel.test.mjs';
 import { run as runFlagKeys } from './flag-keys.test.mjs';
 import { run as runImpulseBroadcast } from './impulse-broadcast.test.mjs';
+import { run as runProbeAttribution } from './probe-attribution.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -154,6 +155,7 @@ const suites = [
   ['player-aim-channel', runPlayerAimChannel],
   ['flag-keys', runFlagKeys],
   ['impulse-broadcast', runImpulseBroadcast],
+  ['probe-attribution', runProbeAttribution],
 ];
 
 for (const [name, fn] of suites) {

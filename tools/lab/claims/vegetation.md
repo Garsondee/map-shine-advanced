@@ -76,7 +76,7 @@ Physics gives the baseline. Beauty wins a tie ("real numbers make a good baselin
 | VEG-08 | A larger tree sways slower than a smaller one (f falls with size) | Physics (DBH/H²) | ladder, A1..A6 | **fail**: one frequency for every size (by construction) |
 | VEG-09 | After a gust passes, a tree rings down over 1-3 cycles (damping 0.05-0.3), then settles | Physics | gust run (MapShine.gustWind), envelope after the gust | pending |
 | VEG-10 | No two plants move in lockstep: clone stamps 1050 px apart correlate < 0.7 | Author ("no clones, no lockstep") | ladder, B1-B5 corr | **pass**: max pair 0.57; mean 0.26 -> -0.08 |
-| VEG-11 | Neighbouring trees in a dense grove (her forest density) are not in lockstep: displacement correlation between crowns < 0.7 at 1 crown spacing | Author | grove plot + tile flow | pending (new plot E) |
+| VEG-11 | Neighbouring trees in a dense grove (her forest density) are not in lockstep: displacement correlation between crowns < 0.7 at 1 crown spacing | Author | Deep Forest, 11 canopy cores, block-matching tracker (scratchpad vg/grovetrack.js) | **pass**: < 450 px apart mean 0.30 (max 0.66 @ 9.3 m/s, 0.73 @ 18.9), no pair > 0.9; but every tree at 0.4 Hz (same tempo, only phase differs) |
 | VEG-12 | Gust fronts cross a grove as travelling waves: correlation peaks at lag ≈ distance / U downwind | Physics, MSA (fronts carried at U) | grove plot | pending |
 | VEG-13 | Mirrored / turned stamps (B6) behave like any other tree (no sign error from flip/rot) | MSA | ladder | **pass** (B6 in the same band as B1-B5) |
 | VEG-14 | Every plant moves as one body: no tearing, folding or blobs at B12 | Author (2026-11-01), Memory (74b2099e) | frames + fold meter | pending |
@@ -90,9 +90,12 @@ Physics gives the baseline. Beauty wins a tie ("real numbers make a good baselin
 | VEG-22 | Lamps cast plant shadows (or decision: they deliberately don't) | Physics, MSA (no lamp shadow by design) | D3 | known: no lamp shadow. Decision pending |
 | VEG-23 | Golden hour: canopies take the warm tint like the ground; shadows lengthen to 1000+ px | Author (all effects take the hour's colour) | 17:45 shots | pending |
 | VEG-24 | Night: canopies are dark but not black; moonlit cool | Author (cool moonlit nights; no near-black) | 23:00 probe | pending |
-| VEG-25 | No bush layer renders pitch black (JHH) | Author, bug mmp-xz5 | JHH crop plot | pending |
+| VEG-25 | No bush layer renders pitch black (JHH) | Author, bug mmp-xz5 | JHH on rig D | **pass** on master dd3b1696 (bushes in colour); mmp-xz5 closed |
 | VEG-26 | Leaf shed starts near B7-B8 (15-19 m/s) and not below 11 m/s | Physics (B8 twigs break), MSA (startsAboveMps 15) | gale run, count births | pending |
 | VEG-27 | Falling leaves descend at 1-5 m/s (MSA ~4.5 at defaults), flutter side to side, tumble | Physics, MSA | getLeafShedStatus / frames | pending |
 | VEG-28 | Leaves land, rest, fade out within ~20 s; nothing piles up forever; cost bounded | MSA (groundSec 20, caps) | long gale run | pending |
 | VEG-29 | First gale costs no shader-compile hitch (compile at load) | Author (no hitches), bug mmp-235 | frame times at first births | pending |
-| VEG-30 | Leaf/twig shadows are soft blobs, not rectangles with dark edges | Author, bug mmp-y9q | gale frames | pending |
+| VEG-30 | Leaf/twig shadows are soft blobs, not rectangles with dark edges | Author, bug mmp-y9q | gale frames | **fail -> fixed** 75c9a7f0 (blur cut by its quad) |
+| VEG-31 | In a storm no leaf vanishes in one frame (the slot ring never laps a visible leaf) | Author (no snaps) | getLeafShedStatus birthRate + rewriteAgeSec | **fail -> fixed** dd3b1696 (Deep Forest 313 births/s, rewrite at 6.5 s) |
+| VEG-32 | In wind the canopy outline never uncovers the ground-shadow cut-out under it (no bright or dark line round a plant) | Author (2026-11-09 report) | holeshot.js pair + sliver.py | **fail -> fixed** 64198c67: 0.34-0.54% -> 0.04-0.27% of the outline band |
+| VEG-33 | On a cold first visit, canopies appear as soon as their art is ready, with the camera still | Author (never fail silently) | cache purge + cold reload + leaf-shed canopy count | **fail -> fixed** b1085763 (once 6+ min missing; with fix ready at 134 s) |

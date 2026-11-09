@@ -14,6 +14,7 @@ import {
   buildLensCompositeMaterial,
   buildLightBurnAccumulateMaterial,
   lensTierPlan,
+  lensOffLitSource,
   LENS_MAX_TIER,
   LENS_DEFAULT_TIER,
 } from '../lens-render.js';
@@ -265,5 +266,30 @@ export function run(t) {
         ['uThreshold', 'uSoftness', 'uResponse', 'uDecayFactor', 'uBurnWriteGain'].every((k) => keys.includes(k))
       );
     }
+  }
+
+  // ── LENS OFF: WHAT PRESENT READS (mmp-78u.7) ─────────────────────────────
+  // The behaviour inside runPostLensPass is pinned by vt/__tests__/lens-off-present.test.mjs; this is the rule.
+  {
+    const sceneLit = { name: 'scene.lit' };
+    const outA = { name: 'lens.outputA' };
+    const outB = { name: 'lens.outputB' };
+    const taa = { name: 'taa.historyA' };
+    ok('present on lens output A -> back to scene.lit', lensOffLitSource(outA, sceneLit, outA, outB) === sceneLit);
+    ok('present on lens output B -> back to scene.lit', lensOffLitSource(outB, sceneLit, outA, outB) === sceneLit);
+    ok('present already on scene.lit -> left alone', lensOffLitSource(sceneLit, sceneLit, outA, outB) === null);
+    ok(
+      "present on TAA's resolved image (TAA re-pointed it this frame) -> left alone",
+      lensOffLitSource(taa, sceneLit, outA, outB) === null
+    );
+    ok(
+      'lens outputs never allocated (Lens never on) -> left alone',
+      lensOffLitSource(sceneLit, sceneLit, null, null) === null && lensOffLitSource(taa, sceneLit, null, null) === null
+    );
+    ok(
+      'no present source at all -> left alone',
+      lensOffLitSource(null, sceneLit, outA, outB) === null &&
+        lensOffLitSource(undefined, sceneLit, null, null) === null
+    );
   }
 }

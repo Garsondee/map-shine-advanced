@@ -659,6 +659,7 @@ import {
   resolveGridLook,
   buildLightBurnAccumulateMaterial,
   lensTierPlan,
+  lensOffLitSource,
   computeAutoFocusAmount,
   pickAutoFocusIntervalSec,
   computeAutoFocusEventDurationSec,
@@ -12983,13 +12984,26 @@ async function startVtPanViewerUnserialized({
      * must be caught and redirected to `sceneLit.texture` instead), writes
      * a distorted copy into WHICHEVER of `lensOutputA`/`B` is not that same
      * texture (see that pair's own declaration for why one buffer is
-     * unsafe), and redirects present at THAT. A true no-op (zero GPU work,
-     * present left pointing at whatever the previous pass already set)
-     * while disabled.
+     * unsafe), and redirects present at THAT. While disabled: zero GPU work,
+     * and present is left pointing at whatever the previous pass already set,
+     * EXCEPT when that is still one of Lens's own outputs (the frame Lens
+     * turns off, with TAA off): then present goes back to `scene.lit`, once.
      */
     function runPostLensPass() {
       const st = getLensRenderState();
-      if (!st.enabled) return;
+      if (!st.enabled) {
+        // LENS OFF (mmp-78u.7): setLitSource is persistent and TAA (off by default) never re-points present, so
+        // returning here alone left present on Lens's last output: the map froze on any pan or change of hour.
+        // A comparison, and one value swap on the frame Lens turns off (effects/lens-render.js#lensOffLitSource).
+        const back = lensOffLitSource(
+          gradePresent.getLitSource?.(),
+          sceneLit.texture,
+          lensOutputA?.texture ?? null,
+          lensOutputB?.texture ?? null
+        );
+        if (back) gradePresent.setLitSource(back);
+        return;
+      }
       const p = st.params || {};
 
       const plan = lensTierPlan(Number.isFinite(st.perfTier) ? st.perfTier : undefined);

@@ -796,6 +796,7 @@ export {
   buildLensCompositeMaterial,
   buildLightBurnAccumulateMaterial,
   lensTierPlan,
+  lensOffLitSource,
   LENS_MAX_TIER,
   LENS_DEFAULT_TIER,
 } from './lens-render.js';

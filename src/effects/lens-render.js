@@ -155,6 +155,31 @@ export function lensTierPlan(tier) {
 }
 
 /**
+ * LENS OFF: WHAT PRESENT READS (mmp-78u.7, 2026-11-09). `grade-present.js#setLitSource` is a persistent
+ * redirect: the texture `post.lens` last handed present stays present's source until something re-points it.
+ * `post.taaResolve` re-points it every frame only while TAA is on, and TAA is off by default. So with Lens
+ * switched off nothing re-pointed present, and it went on showing Lens's last frame: the map froze on any pan or
+ * change of hour while the grid, fog and tone curve (compiled into present) stayed live. The lab's probe caught
+ * it: a black step that should be lit 0 showed 38.
+ *
+ * `runPostLensPass` asks this on every frame it does not draw. If present still reads one of the lens's own
+ * outputs, nothing upstream refreshed the chain this frame: hand present back to `scene.lit`. If something else
+ * re-pointed it (TAA's resolved image, or `scene.lit` already), leave it alone. Pure: identity comparisons only,
+ * no allocation.
+ *
+ * @param {*} litSource - what present reads now (`gradePresent.getLitSource()`).
+ * @param {*} sceneLitTexture - `scene.lit`'s texture.
+ * @param {*} outputA - the lens's first output texture (null before it is allocated).
+ * @param {*} outputB - the lens's second output texture (null before it is allocated).
+ * @returns {*|null} the texture present must read instead, or null to leave present as it is.
+ */
+export function lensOffLitSource(litSource, sceneLitTexture, outputA, outputB) {
+  if (litSource == null || litSource === sceneLitTexture) return null;
+  if (litSource === outputA || litSource === outputB) return sceneLitTexture;
+  return null;
+}
+
+/**
  * Build the light-burn accumulator material — a tiny fullscreen quad drawn
  * into ITS OWN ping-ponged pair (`vt-pan-viewer.js#runPostLensPass` owns the
  * two render targets and the swap), never into `scene.lit`. V2's own EXACT

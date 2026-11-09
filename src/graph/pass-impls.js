@@ -317,7 +317,9 @@ export const PASS_IMPLS = Object.freeze({
       'maths), writes the result into an allocator-owned scratch target, and redirects present at THAT ' +
       '(setLitSource again — a value swap, no rebuild, same mechanism post.taaResolve already uses). ' +
       'Tier 2 (light burn) additionally ticks its own small ping-ponged accumulator, a real extra draw ' +
-      'call. Skips entirely (JS early-return, no GPU work) when the effect is disabled. Same ' +
+      'call. No GPU work when the effect is disabled; if present still reads one of its outputs then ' +
+      '(the frame it turns off, TAA off) it hands present back to scene.lit, or the map would freeze on ' +
+      'its last frame (mmp-78u.7, effects/lens-render.js#lensOffLitSource). Same ' +
       'invocability caveat as geometry.world — the loop lives inside startVtPanViewer.',
   },
 });

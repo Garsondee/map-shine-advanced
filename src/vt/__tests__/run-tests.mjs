@@ -44,6 +44,7 @@ import { run as runPipelineGovernor } from './pipeline-governor.test.mjs';
 import { run as runSinglePassDoubleSide } from './single-pass-double-side.test.mjs';
 import { run as runWeatherWarmPlan } from './weather-warm-plan.test.mjs';
 import { run as runVegetationProxyPose } from './vegetation-proxy-pose.test.mjs';
+import { run as runLensOffPresent } from './lens-off-present.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -116,6 +117,7 @@ const suites = [
   ['single-pass-double-side', runSinglePassDoubleSide],
   ['weather-warm-plan', runWeatherWarmPlan],
   ['vegetation-proxy-pose', runVegetationProxyPose],
+  ['lens-off-present', runLensOffPresent],
 ];
 
 for (const [name, fn] of suites) {

@@ -42,6 +42,11 @@ export const MIST_ALBEDO = Object.freeze([0.86, 0.88, 0.91]);
 export const MIST_WALL_FEATHER_PX = 180;
 /** Screen-UV radius of the illum taps — the halo a lamp makes in the mist. */
 export const MIST_LIGHT_SPREAD_UV = 0.018;
+/**
+ * The illum buffer is a GAMMA-space multiplier (the ground is `painted × illum` in sRGB), so the linear mist takes it to
+ * this power to be lit exactly like the ground beneath it (mmp-78u.34.8).
+ */
+export const MIST_ILLUM_GAMMA = 2.2;
 /** Density below this draws nothing at all (a JS `if`, not a zero uniform: Law 4). */
 export const MIST_MIN_DENSITY = 0.002;
 
@@ -184,13 +189,20 @@ export function createGroundMist({
       const o = vec2(ang.cos(), ang.sin()).mul(float(MIST_LIGHT_SPREAD_UV));
       const o2 = vec2(o.y.negate(), o.x);
       const at = (off) => illumTex.sample(screenUV.add(off)).rgb;
+      // ⚠️ GAMMA SPACE, LIKE THE GROUND (MSA Lab 2026-11-09, mmp-78u.34.8). The map is lit by multiplying
+      // in gamma space (screen ≈ painted × illum), so a linear colour lit the same way is `c × illum^2.2`.
+      // Multiplying the linear mist by illum itself agreed at noon (illum ~0.93) and drifted apart as the
+      // light fell: at midnight the Fog mood lifted open ground from luma ~45 to ~180 (a bright blue-white
+      // sky-cloud look), and inside a 0.9 darkness Region the mist read 13x brighter than the ground under it.
       light = at(vec2(0, 0))
         .mul(float(2))
         .add(at(o))
         .add(at(o.negate()))
         .add(at(o2))
         .add(at(o2.negate()))
-        .mul(float(1 / 6));
+        .mul(float(1 / 6))
+        .max(vec3(0, 0, 0))
+        .pow(vec3(MIST_ILLUM_GAMMA, MIST_ILLUM_GAMMA, MIST_ILLUM_GAMMA));
     }
     return vec4(uAlbedo.mul(cool).mul(tone.mul(lit)).mul(light), opacity);
   })();

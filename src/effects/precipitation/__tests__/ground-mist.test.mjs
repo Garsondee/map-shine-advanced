@@ -14,10 +14,25 @@ import {
   MIST_WIND_DRIFT_PX_PER_SEC,
 } from '../ground-mist-field.js';
 import { buildMistGateGrid } from '../ground-mist-gate.js';
+import { MIST_ILLUM_GAMMA } from '../ground-mist-render.js';
 import { createPrecipitationSubsystem } from '../precip-subsystem.js';
 
 export function run(t) {
   const { ok } = t;
+
+  // ── LIT LIKE THE GROUND (mmp-78u.34.8) ──
+  // The ground is `painted × illum` in GAMMA space, so its LINEAR light falls as illum^2.2. The mist used illum
+  // linearly: equal at noon, 4x too bright at midnight (luma ~45 -> ~180 under the Fog mood on the lab rig).
+  {
+    const groundLinear = (illum) => Math.pow(0.502 * illum, 2.2) / Math.pow(0.502, 2.2); // relative to illum 1
+    const mistLinear = (illum) => Math.pow(illum, MIST_ILLUM_GAMMA);
+    for (const illum of [0.264, 0.33, 0.6, 0.933]) {
+      ok(
+        `the mist's light follows the ground's at illum ${illum}`,
+        Math.abs(mistLinear(illum) / groundLinear(illum) - 1) < 0.02
+      );
+    }
+  }
 
   // ── THE DENSITY CURVE ──
   ok(

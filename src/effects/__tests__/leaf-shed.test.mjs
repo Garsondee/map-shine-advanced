@@ -12,6 +12,10 @@ import {
   packBirthTag,
   unpackBirthTag,
   writeBirth,
+  RING_LAP,
+  secondsUntilRewrite,
+  ringLapFade01,
+  nextBirthRate,
 } from '../leaf-shed-birth.js';
 import {
   DEFAULT_TWIG_SRGB,
@@ -733,6 +737,68 @@ export function run(t) {
         /LEAF_SHADOW\.ENERGY_K/.test(rt) &&
         /\.mul\(vShadow\.y\)/.test(rt) &&
         !/half\.mul\(1\.15\)/.test(rt)
+    );
+  }
+
+  // ── the ring laps live leaves in a storm: fade, never pop (2026-11-09) ───────────────
+  // Measured on the author's Deep Forest (205 canopies, 2048 slots): births hit the subsystem's
+  // budget (capacity / 6 per second) from 28 m/s, so every slot was rewritten 6.5 s after its
+  // birth while a landed leaf rests 14-26 s: resting leaves vanished in one frame.
+  {
+    const FADE_OUT = 1.2; // leaf-shed-runtime.js FADE_OUT_SEC
+    const cap = 2048;
+    const stormRate = cap / 6; // the subsystem's own per-second budget (AVG_BUSY_SEC 6)
+    ok(
+      'ring lap: the storm budget rewrites a slot before a landed leaf has rested its shortest time (the bug pinned here)',
+      cap / stormRate < 20 * 0.7
+    );
+    ok('ring lap: the slot written next is rewritten now', secondsUntilRewrite(5, 5, cap, 100) === 0);
+    ok(
+      'ring lap: the slot written last frame waits a whole lap',
+      Math.abs(secondsUntilRewrite(4, 5, cap, 100) - (cap - 1) / 100) < 1e-9
+    );
+    ok('ring lap: in a calm no slot is ever rewritten', secondsUntilRewrite(4, 5, cap, 0) === Infinity);
+    // Simulate a steady storm: at the frame a slot is rewritten its leaf must already be invisible,
+    // and a full fade-time earlier it must still be untouched (the fade is the usual 1.2 s, not a cut).
+    let worstAtRewrite = 0;
+    let earlyDim = 0;
+    for (let slot = 0; slot < cap; slot += 7) {
+      for (let next = 0; next < cap; next += 61) {
+        const t = secondsUntilRewrite(slot, next, cap, stormRate);
+        const a = ringLapFade01(t, FADE_OUT);
+        if (t < 1 / 60) worstAtRewrite = Math.max(worstAtRewrite, a);
+        if (t > FADE_OUT + RING_LAP.MARGIN_SEC + 1e-9 && a < 1) earlyDim++;
+      }
+    }
+    ok(
+      `⭐ ring lap: a leaf is fully faded before its slot is rewritten (worst alpha ${worstAtRewrite})`,
+      worstAtRewrite === 0
+    );
+    ok(`ring lap: it fades over the usual fade time, no earlier (${earlyDim} early)`, earlyDim === 0);
+    // When the ring is NOT lapping, nothing changes: at 40 births/s a lap takes 51 s, longer than
+    // the longest life (14 s airborne cap + 26 s rest + 1.2 s fade).
+    const calmLap = secondsUntilRewrite(0, 1, cap, 40);
+    ok(
+      '⭐ ring lap: a gentle shed is untouched (no leaf dims before its own natural end)',
+      ringLapFade01(calmLap - (14 + 26 + 1.2), FADE_OUT) === 1
+    );
+    let r = 0;
+    for (let i = 0; i < 240; i++) r = nextBirthRate(r, 5, 1 / 60);
+    ok(`ring lap: the rate estimate settles on the real rate (${r.toFixed(1)} of 300 /s)`, Math.abs(r - 300) < 3);
+    for (let i = 0; i < 240; i++) r = nextBirthRate(r, 0, 1 / 60);
+    ok('ring lap: and falls away when the wind drops', r < 1);
+    ok('ring lap: a paused frame (dt 0) leaves it alone', nextBirthRate(42, 3, 0) === 42);
+    const rt = readFileSync(new URL('../particles/leaf-shed-runtime.js', new URL('.', import.meta.url)), 'utf8');
+    ok(
+      '⭐ ring lap: the draw fades by the ring (next slot + birth rate fed every frame)',
+      /uRingNext\.value = ring\.nextSlot/.test(rt) &&
+        /uRingRate\.value = birthRate/.test(rt) &&
+        /nextBirthRate\(birthRate, pendingBirths/.test(rt) &&
+        /fadeIn\.mul\(fadeOut\)\.mul\(lapFade\)/.test(rt)
+    );
+    ok(
+      'ring lap: the status reports the birth rate and how old a leaf is when its slot is rewritten',
+      /birthRate: Math\.round\(birthRate/.test(rt) && /rewriteAgeSec:/.test(rt)
     );
   }
 }

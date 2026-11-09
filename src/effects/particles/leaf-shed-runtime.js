@@ -82,6 +82,8 @@ import {
   createBirthRing,
   unpackBirthTagNodes,
   writeBirth,
+  RING_LAP,
+  nextBirthRate,
 } from '../leaf-shed-birth.js';
 import { buildShedLook, shedCoverage, SHAPE_KNOB_DEFAULTS, BROAD_FORM_KNOBS } from '../leaf-shed-shape.js';
 import { LEAF_SHADOW } from '../leaf-shed-shadow.js';
@@ -237,6 +239,10 @@ export function createLeafShedEngine({
 
   // ── uniforms ────────────────────────────────────────────────────────────
   const uDtSec = uniform(0);
+  // The ring's next slot and its births per second: the draw fades a leaf out before its slot is rewritten
+  // (RING_LAP, leaf-shed-birth.js).
+  const uRingNext = uniform(0);
+  const uRingRate = uniform(0);
   const uTimeMs = uniform(0);
   const uRectMin = uniform(vec2(sceneRect.minX, sceneRect.minY));
   const uRectMax = uniform(vec2(sceneRect.maxX, sceneRect.maxY));
@@ -632,7 +638,12 @@ export function createLeafShedEngine({
   const alive = iLife.lessThan(0).or(iAge.lessThan(iLife)).and(iC.w.greaterThan(0.5));
   const fadeIn = clamp(iAge.div(FADE_IN_SEC), 0, 1);
   const fadeOut = select(iLife.lessThan(0), float(1), clamp(iLife.sub(iAge).div(FADE_OUT_SEC), 0, 1));
-  const fade = select(alive, fadeIn.mul(fadeOut), float(0));
+  // RING LAP: slot i is rewritten after ((i − next) mod capacity) more births; fade out before then.
+  const capF = float(capacity);
+  const lapK = fract(float(instanceIndex).sub(uRingNext).div(capF)).mul(capF);
+  const lapSec = lapK.div(max(uRingRate, 1e-3)).sub(float(RING_LAP.MARGIN_SEC));
+  const lapFade = clamp(lapSec.div(float(FADE_OUT_SEC)), 0, 1);
+  const fade = select(alive, fadeIn.mul(fadeOut).mul(lapFade), float(0));
   const h = max(iC.x, 0);
   // NOT the critters' eye law. The canopies a leaf falls from are flat art (only the parallax layers
   // lift whole floors), and a leaf 7 m up under an 870 px eye would draw 2.4× its size, pushed
@@ -745,6 +756,13 @@ export function createLeafShedEngine({
   let births = 0;
   let steps = 0;
   let lastBirths = 0;
+  /** Births written since the last step, and the smoothed births per second (RING_LAP). */
+  let pendingBirths = 0;
+  let birthRate = 0;
+  /** Each slot's birth time (sim s), to report how old a leaf is when its slot is rewritten. */
+  const slotBornSec = new Float64Array(capacity).fill(Number.NaN);
+  let simSec = 0;
+  let rewriteAgeSec = null;
 
   return {
     scene,
@@ -767,6 +785,16 @@ export function createLeafShedEngine({
       birthAttr.needsUpdate = true;
       births += slots.length;
       lastBirths = slots.length;
+      pendingBirths += slots.length;
+      for (const slot of slots) {
+        const born = slotBornSec[slot];
+        if (Number.isFinite(born)) {
+          const ageSec = simSec - born;
+          rewriteAgeSec = rewriteAgeSec == null ? ageSec : rewriteAgeSec + (ageSec - rewriteAgeSec) * 0.02;
+        }
+        slotBornSec[slot] = simSec;
+      }
+      uRingNext.value = ring.nextSlot;
     },
 
     /**
@@ -776,6 +804,10 @@ export function createLeafShedEngine({
      */
     step(renderer, { dtSec, tMs }) {
       uDtSec.value = Math.min(MAX_DT_SEC, Math.max(0, dtSec || 0));
+      birthRate = nextBirthRate(birthRate, pendingBirths, dtSec || 0);
+      simSec += Math.max(0, dtSec || 0);
+      if (dtSec > 0) pendingBirths = 0;
+      uRingRate.value = birthRate;
       uTimeMs.value = tMs || 0;
       renderer.compute(updateKernel);
       steps++;
@@ -866,6 +898,10 @@ export function createLeafShedEngine({
         lastBirths,
         steps,
         nextSlot: ring.nextSlot,
+        // births per second (smoothed) and how old a leaf is, on average, when its slot is rewritten:
+        // below a leaf's life (a rest is 14-26 s) the storm laps live leaves, which RING_LAP fades out first
+        birthRate: Math.round(birthRate * 10) / 10,
+        rewriteAgeSec: rewriteAgeSec == null ? null : Math.round(rewriteAgeSec * 10) / 10,
         hasWindCells: !!windCells,
         readsWindTexture: !!fieldGrid,
         windHandleVersion,

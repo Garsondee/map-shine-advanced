@@ -101,11 +101,56 @@ export function writeBirth(backing, slot, stamp, b) {
 }
 
 /**
+ * RING LAP FADE (2026-11-09, Vegetation lab). The ring hands out slots in order and a storm can refill
+ * it faster than a leaf lives: the subsystem budgets births at capacity / 6 per second, while a leaf
+ * rests 14-26 s on the ground and a lofted one flies up to 26 s. Measured on the author's Deep Forest
+ * (205 canopies, standard profile, 2048 slots): births hit the budget, 313 /s, from 28 m/s, so every
+ * slot was rewritten after 6.5 s — a resting leaf vanished in one frame (a pop) instead of fading.
+ * The storm keeps its rate and its look; each leaf now fades out over its usual fade before its slot
+ * comes round again. `next` is the slot the ring writes next; slot `s` is rewritten after
+ * ((s − next) mod capacity) more births.
+ */
+export const RING_LAP = Object.freeze({
+  /** Seconds of safety before the rewrite: the rate estimate lags a rising storm a little. */
+  MARGIN_SEC: 0.25,
+  /** Time constant of the birth-rate estimate, seconds. */
+  RATE_TAU_SEC: 0.5,
+});
+
+/**
+ * Seconds until `slot` is rewritten, at `ratePerSec` births per second (Infinity in a calm).
+ * @param {number} slot @param {number} next @param {number} capacity @param {number} ratePerSec
+ */
+export function secondsUntilRewrite(slot, next, capacity, ratePerSec) {
+  const k = (((slot - next) % capacity) + capacity) % capacity;
+  return ratePerSec > 1e-3 ? k / ratePerSec : Infinity;
+}
+
+/**
+ * Opacity factor that fades a leaf out over `fadeSec` before its slot is rewritten (1 = untouched).
+ * @param {number} secsUntilRewrite @param {number} fadeSec
+ */
+export function ringLapFade01(secsUntilRewrite, fadeSec) {
+  return Math.min(1, Math.max(0, (secsUntilRewrite - RING_LAP.MARGIN_SEC) / Math.max(fadeSec, 1e-3)));
+}
+
+/**
+ * One frame of the birth-rate estimate (births per second), an exponential average.
+ * @param {number} rate - the estimate so far @param {number} births - births this frame @param {number} dtSec
+ */
+export function nextBirthRate(rate, births, dtSec) {
+  if (!(dtSec > 0)) return rate;
+  const a = 1 - Math.exp(-dtSec / RING_LAP.RATE_TAU_SEC);
+  return rate + (births / dtSec - rate) * a;
+}
+
+/**
  * The CPU's slot ring. Births go to consecutive slots, wrapping; a slot is
- * reused oldest-first, so the ring only cuts a leaf short when the scene asks
- * for more than `capacity` leaves alive at once (the caller's budget keeps that
- * rare). Stamps only ever grow, starting at 1 so a zeroed buffer (stamp 0)
- * matches the kernel's zeroed `seed` row and births nothing.
+ * reused oldest-first, so a storm that asks for more than `capacity` leaves
+ * alive at once cuts the oldest short: the draw fades each leaf out before its
+ * slot is rewritten (RING_LAP above), so that is a fade, never a pop. Stamps
+ * only ever grow, starting at 1 so a zeroed buffer (stamp 0) matches the
+ * kernel's zeroed `seed` row and births nothing.
  *
  * @param {number} capacity
  */

@@ -231,6 +231,7 @@ import {
   decodeCanvasPixel,
   buildProbeRow,
   buffersAgree,
+  readProbeTexel,
 } from '../diag/pixel-probe.js';
 import { createGpuProbe } from '../diag/gpu-probe.js';
 import { createGpuZoneTimer } from '../diag/gpu-zone-timer.js';
@@ -30242,6 +30243,30 @@ async function startVtPanViewerUnserialized({
       return hits;
     }
 
+    /**
+     * PROBE v2.2 (mmp-78u.26): does this texture have GPU storage RIGHT NOW? A render-scale step or a window
+     * resize runs RenderTarget#setSize, which disposes the target: three drops the texture's backend entry
+     * (`destroyTexture` -> `backend.delete`) and builds a new one only when something next renders into it.
+     * Reading in that gap made three throw ("reading 'format'"). `has` first: `get` would ADD an empty entry.
+     * WebGPU keeps the descriptor the copy reads, WebGL the GL texture.
+     */
+    function probeTextureReadable(texture) {
+      const backend = renderer?.backend;
+      if (!texture || typeof backend?.has !== 'function' || !backend.has(texture)) return false;
+      const data = backend.get(texture);
+      return !!(data?.textureDescriptorGPU || data?.textureGPU);
+    }
+
+    /** The CPU item lookup, fail-soft like the reads (probe v2.2): a registry hiccup nulls one field. */
+    function probeItemsAt(worldX, worldY) {
+      try {
+        return itemsCoveringWorldPoint(worldX, worldY);
+      } catch (err) {
+        log.warn('probe: item lookup failed at a point — itemsAtPoint is null there:', err);
+        return null;
+      }
+    }
+
     async function sampleOnePixel(worldX, worldY, { skipOffScreen = false } = {}) {
       // Nothing read at all. PROBE v2.1 (`skipOffScreen`, FRICTION #19): an off-screen point used to be
       // read at the CLAMPED edge pixel (ndcToPixel clamps) and came back as a confident wrong number; now
@@ -30253,7 +30278,7 @@ async function startVtPanViewerUnserialized({
         buffers: null,
         onScreen: false,
         ...(skipOffScreen ? { reason } : null),
-        itemsAtPoint: itemsCoveringWorldPoint(worldX, worldY),
+        itemsAtPoint: probeItemsAt(worldX, worldY),
       });
       if (!view) return unread('no view');
       const worldRect = viewToWorldRect(view, canvasW / canvasH);
@@ -30262,14 +30287,15 @@ async function startVtPanViewerUnserialized({
       if (skipOffScreen && !onScreen) {
         return unread(Number.isFinite(worldX) && Number.isFinite(worldY) ? 'off-screen' : 'bad point');
       }
-      // Device pixels, not canvasW/H — these buffers are now sized in DEVICE
-      // pixels (the pixel-ratio-parity fix), and readRenderTargetPixelsAsync
-      // indexes into the buffer's own pixel grid, not CSS pixels.
+      // `pixel` is the PRESENTED device pixel — a pixel of the drawing buffer, which is what the presented-
+      // pixel read and the markers use. The scene buffers are INTERNAL-tier targets (the drawing buffer x the
+      // render scale), so each one is read at the texel under that pixel in its OWN size (probe v2.2,
+      // mmp-78u.41: passing `pixel` straight through read the wrong place at any scale below 1, measured on
+      // the lab's grey wedge at 0.6). Reads never throw: a target a resize just freed says so (mmp-78u.26).
       const pixel = ndcToPixel(ndc, drawBufW, drawBufH);
-      const readOne = async (target, decode, textureIndex = 0) => {
-        const raw = await renderer.readRenderTargetPixelsAsync(target, pixel.x, pixel.y, 1, 1, textureIndex);
-        return { raw: raw ? Array.from(raw) : null, rgba: decode(raw) };
-      };
+      const present = { width: drawBufW, height: drawBufH };
+      const readOne = (target, decode, textureIndex = 0) =>
+        readProbeTexel({ renderer, target, textureIndex, pixel, present, decode, isReadable: probeTextureReadable });
       const [illum, lit, albedo, coloration, occlusion, attr] = await Promise.all([
         readOne(sceneIllum, decodeHalfFloatRgba),
         readOne(sceneLit, decodeHalfFloatRgba),
@@ -30281,12 +30307,19 @@ async function startVtPanViewerUnserialized({
         // by 255 to read the floor index back as an integer.
         readOne(sceneColor, decodeByteRgba, 1),
       ]);
+      const buffers = { illum, lit, albedo, coloration, occlusion, attr };
+      const readErrors = Object.entries(buffers)
+        .filter(([, b]) => b.error)
+        .map(([key, b]) => `${key}: ${b.error}`);
       return {
         worldX,
         worldY,
         pixel,
+        // The texel the scene buffers were read at (they share one size): `pixel` x the render scale.
+        bufferPixel: lit.texel ?? albedo.texel ?? null,
         onScreen,
-        buffers: { illum, lit, albedo, coloration, occlusion, attr },
+        buffers,
+        ...(readErrors.length ? { readErrors } : null),
         // CPU-only (`state.worldBounds` containment against the live item
         // registry) — no rendering, no render-target/MRT swapping. A prior
         // version of this diagnostic also rendered an isolated copy of the
@@ -30296,7 +30329,7 @@ async function startVtPanViewerUnserialized({
         // normal `runLightAccumulatePass`/`runSurfaceResponsePass` passes for
         // every following frame (live-caught 2026-08-04) — removed entirely,
         // not just fixed, because this probe must never be able to do that.
-        itemsAtPoint: itemsCoveringWorldPoint(worldX, worldY),
+        itemsAtPoint: probeItemsAt(worldX, worldY),
       };
     }
 
@@ -30730,16 +30763,59 @@ async function startVtPanViewerUnserialized({
      * `camera` is the view these reads mapped through ({x, y} = world centre, scale = CSS px per world px,
      * Foundry's stage-scale convention); MapShine.probe folds it into `context`.
      *
+     * PROBE v2.2 (mmp-78u.41, .26): correct at any render scale (each buffer is read at the texel under the
+     * presented pixel; rows carry `bufferPixel`), `renderScale` = the state the reads used (MapShine.probe
+     * folds it into `context.renderScale`), two reads only count as settled when the buffers kept their size
+     * between them, and the probe NEVER throws: a buffer it could not read is named in its row's
+     * `readErrors`, and anything else that fails comes back as `error` with whatever was read.
+     *
      * @param {Array<{x:number,y:number,name?:string}>} points - world (canvas) px
      * @param {{markers?:boolean, stable?:boolean, presented?:boolean, maxFrames?:number}} [opts]
      * @returns {Promise<{settled:boolean, framesWaited:number, presented:{ok:boolean, reason:string|null,
      *   format:string|null}|null, verdict:'ok'|'check'|'suspect'|'unknown', camera:{x:number, y:number,
-     *   scale:number, source:'viewer'}|null, results:object[]}>}
+     *   scale:number, source:'viewer'}|null, renderScale:object|null, results:object[], error?:string}>}
      */
     async function runProbeV2(points, opts = {}) {
-      const { markers = false, stable = true, presented = true, maxFrames = 10 } = opts;
+      try {
+        return await runProbeV2Reads(points, opts);
+      } catch (err) {
+        // Every read is fail-soft already, so this is a bug in the probe itself: say so, never throw it at
+        // the caller (a lab run that loses one probe must not lose the run).
+        log.warn('probe v2: failed outright — returning an empty reading with the error:', err);
+        let renderScale = null;
+        try {
+          renderScale = probeRenderScaleState();
+        } catch {
+          renderScale = null; // the state itself is unreadable: said as null
+        }
+        return {
+          settled: false,
+          framesWaited: 0,
+          presented: null,
+          verdict: 'unknown',
+          camera: null,
+          renderScale,
+          results: [],
+          error: `probe failed: ${err?.message ?? err}`,
+        };
+      }
+    }
+    /** What the reads used (probe v2.2): the player's setting, the scale asked for, and the two real sizes. */
+    function probeRenderScaleState() {
+      return {
+        setting: renderScaleUserSetting,
+        resolved: resolveCurrentInternalScale(),
+        present: { width: drawBufW, height: drawBufH },
+        internal: { width: sceneLit.width, height: sceneLit.height },
+      };
+    }
+    async function runProbeV2Reads(points, opts) {
+      const { markers = false, stable = true, presented = true, maxFrames = 10 } = opts ?? {};
       const list = (Array.isArray(points) ? points : []).slice(0, 64);
       const readAll = () => Promise.all(list.map((p) => sampleOnePixel(p?.x, p?.y, { skipOffScreen: true })));
+      // A resize between two reads changes which texel a point maps to, so they are not comparable.
+      const sizeKey = () => `${drawBufW}x${drawBufH}/${sceneLit.width}x${sceneLit.height}`;
+      let readKey = sizeKey();
       let samples = await readAll();
       // Nothing on screen = nothing read = nothing to wait for.
       let settled = !stable || samples.every((s) => !s.onScreen);
@@ -30747,14 +30823,29 @@ async function startVtPanViewerUnserialized({
       while (stable && !settled && framesWaited < maxFrames) {
         await nextAnimationFrame();
         framesWaited++;
+        const againKey = sizeKey();
         const again = await readAll();
-        settled = again.every((s, i) => !s.onScreen || buffersAgree(samples[i].buffers, s.buffers));
+        settled =
+          againKey === readKey && again.every((s, i) => !s.onScreen || buffersAgree(samples[i].buffers, s.buffers));
         samples = again;
+        readKey = againKey;
       }
+      const renderScale = probeRenderScaleState();
       let presentedRead = null;
       const onScreenIdx = samples.map((s, i) => (s.onScreen && s.pixel ? i : -1)).filter((i) => i >= 0);
-      if (presented && onScreenIdx.length)
+      if (presented && onScreenIdx.length) {
+        const readW = drawBufW;
+        const readH = drawBufH;
         presentedRead = await requestPresentedRead(onScreenIdx.map((i) => samples[i].pixel));
+        // A canvas resized after the buffer reads presents another view at those pixels: not this reading.
+        if (presentedRead?.ok && (presentedRead.size?.[0] !== readW || presentedRead.size?.[1] !== readH)) {
+          presentedRead = {
+            ok: false,
+            reason: `the canvas changed size (${readW}x${readH} -> ${presentedRead.size?.join('x')}) before the presented frame`,
+            format: presentedRead.format ?? null,
+          };
+        }
+      }
       const results = samples.map((s, i) => {
         const k = onScreenIdx.indexOf(i);
         const pres = presentedRead?.ok && k >= 0 ? presentedRead.pixels[k] : null;
@@ -30789,6 +30880,7 @@ async function startVtPanViewerUnserialized({
           view && view.halfSpanPx > 0
             ? { x: view.centerXPx, y: view.centerYPx, scale: canvasH / (2 * view.halfSpanPx), source: 'viewer' }
             : null,
+        renderScale,
         results,
       };
     }

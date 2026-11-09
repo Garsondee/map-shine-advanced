@@ -23,12 +23,16 @@ import {
   summarizeExposure,
   EXPOSURE_SETTLED_STOPS,
   buildProbeContext,
+  presentedPixelToTexel,
+  readProbeTexel,
+  summarizeRenderScale,
 } from '../pixel-probe.js';
 
 const near = (a, b, eps = 1e-3) => Math.abs(a - b) < eps;
 
-export function run(t) {
+export async function run(t) {
   const { ok } = t;
+  await runRenderScaleAndFailSoft(t);
 
   // ---- REAL, OBSERVED data (2026-07-19) — the exact bit pattern
   // MapShine.sampleIllumPixel returned live, and the resultColor
@@ -342,10 +346,10 @@ export function run(t) {
       noPres.presented === null && noPres.drift === null && noPres.gain !== null
     );
     ok(
-      'the row keys are the documented v2.1 shape, in order',
+      'the row keys are the documented v2.2 shape, in order',
       Object.keys(on).join(',') ===
-        'name,worldX,worldY,pixel,onScreen,reason,floorIndex,outdoors01,albedo,illum,lit,coloration,gain,' +
-          'expectedScreen,presented,drift,itemsAtPoint'
+        'name,worldX,worldY,pixel,bufferPixel,onScreen,reason,readErrors,floorIndex,outdoors01,albedo,illum,lit,' +
+          'coloration,gain,expectedScreen,presented,drift,itemsAtPoint'
     );
     ok('a null sample never throws and reads off-screen', buildProbeRow(null).onScreen === false);
   }
@@ -409,9 +413,10 @@ export function run(t) {
       at,
     });
     ok(
-      'context keys are the documented shape, in order',
-      Object.keys(ctx).join(',') === 'camera,exposure,forcedEffects,todHour,sceneId,levelId,at,errors'
+      'context keys are the documented v2.2 shape, in order',
+      Object.keys(ctx).join(',') === 'camera,exposure,forcedEffects,renderScale,todHour,sceneId,levelId,at,errors'
     );
+    ok('no render-scale state given: context.renderScale is null', ctx.renderScale === null);
     ok(
       'camera is rounded (x/y 0.1 px, scale 4 decimals) and says where it came from',
       ctx.camera.x === 4500 && ctx.camera.y === 3375.1 && ctx.camera.scale === 0.8 && ctx.camera.source === 'viewer'
@@ -510,5 +515,308 @@ export function run(t) {
     ok('kinds with no source are left out', !('fire' in c.masks));
     ok('derived products ride along', c.derived.casterHeight === 32);
     ok('no stack gives null', compactMaskStack(null, 0) === null);
+  }
+}
+
+/**
+ * PROBE v2.2 (mmp-78u.41 + .26). The rig numbers this pins (rig A, 2026-11-09, Lab · Effects C1 wedge):
+ * drawing buffer 1920x889; at render scale 0.6 the scene buffers were 1152x532 and the probe read step 0 as
+ * 233, steps 32..224 as the 128 floor beside the wedge and step 255 as 0, while the presented bytes were
+ * right. And a probe taken in the same task as a render-scale change threw three's "reading 'format'".
+ */
+async function runRenderScaleAndFailSoft(t) {
+  const { ok } = t;
+  const PRESENT = { width: 1920, height: 889 };
+  const AT_06 = { width: 1152, height: 532 }; // computeRenderSize(1920, 889, 0.6), as measured on the rig
+
+  // ---- presentedPixelToTexel: the texel under a presented pixel's centre, in the TARGET's own size.
+  {
+    const same = [
+      [0, 0],
+      [959, 444],
+      [1919, 888],
+      [720, 310],
+    ].every(([x, y]) => {
+      const p = presentedPixelToTexel({ x, y }, PRESENT, PRESENT);
+      return p.x === x && p.y === y;
+    });
+    ok('at render scale 1 the texel IS the presented pixel (nothing changes at native)', same);
+    const step0 = presentedPixelToTexel({ x: 720, y: 310 }, PRESENT, AT_06);
+    ok(
+      'at 0.6 the wedge step-0 pixel (720,310) maps to texel (432,185), not (720,310)',
+      step0.x === 432 && step0.y === 185
+    );
+    const corner = presentedPixelToTexel({ x: 1919, y: 888 }, PRESENT, AT_06);
+    ok(
+      "at 0.6 the screen's last pixel maps to the buffer's last texel, inside it (the old read was past the edge: zeros)",
+      corner.x === 1151 && corner.y === 531
+    );
+    // Every presented pixel's centre lies inside the texel it maps to, at every ladder rung and odd sizes.
+    let worst = 0;
+    let outOfBounds = 0;
+    let seed = 12345;
+    const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    for (let i = 0; i < 4000; i++) {
+      const pw = 64 + Math.floor(rand() * 3000);
+      const ph = 64 + Math.floor(rand() * 2000);
+      const s = [1, 0.85, 0.7, 0.6, 0.5, 1.25, 1.5][i % 7];
+      const tw = Math.max(2, Math.floor((pw * s) / 2) * 2);
+      const th = Math.max(2, Math.floor((ph * s) / 2) * 2);
+      const px = Math.floor(rand() * pw);
+      const py = Math.floor(rand() * ph);
+      const tx = presentedPixelToTexel({ x: px, y: py }, { width: pw, height: ph }, { width: tw, height: th });
+      if (tx.x < 0 || tx.y < 0 || tx.x >= tw || tx.y >= th) outOfBounds++;
+      // distance from the texel's centre to the pixel's centre, in texels (<= 0.5 means it holds it)
+      const du = Math.abs((tx.x + 0.5) / tw - (px + 0.5) / pw) * tw;
+      const dv = Math.abs((tx.y + 0.5) / th - (py + 0.5) / ph) * th;
+      worst = Math.max(worst, du, dv);
+    }
+    ok('4000 random sizes/rungs/pixels: every texel is inside its target', outOfBounds === 0);
+    ok(
+      `...and holds the presented pixel's centre (worst ${worst.toFixed(6)} texel from it, <= 0.5)`,
+      worst <= 0.5 + 1e-9
+    );
+    ok(
+      'missing or non-positive inputs give null, never a guess',
+      presentedPixelToTexel(null, PRESENT, AT_06) === null &&
+        presentedPixelToTexel({ x: 1, y: 1 }, null, AT_06) === null &&
+        presentedPixelToTexel({ x: 1, y: 1 }, PRESENT, { width: 0, height: 10 }) === null &&
+        presentedPixelToTexel({ x: NaN, y: 1 }, PRESENT, AT_06) === null
+    );
+  }
+
+  // ---- The wedge, end to end through readProbeTexel against a fake GPU. A fake internal target holds the
+  // picture the present will show: the C1 wedge seen at the rig's camera (nine 60 px steps from presented
+  // x 690), grey 128 elsewhere. Its texel tx shows the present's x = (tx + 0.5) * 1920 / width. A read past
+  // the texture's edge returns zeros, as the invalid WebGPU copy did on the rig.
+  const STEPS = [0, 32, 64, 96, 128, 160, 192, 224, 255];
+  const wedgeAt = (presentX) => {
+    const i = Math.floor((presentX - 690) / 60);
+    return i >= 0 && i < STEPS.length ? STEPS[i] : 128;
+  };
+  const makeTarget = (size, label) => ({ ...size, label, textures: [{ name: `${label}:0` }, { name: `${label}:1` }] });
+  const makeRenderer = () => {
+    const calls = [];
+    return {
+      calls,
+      async readRenderTargetPixelsAsync(target, x, y, w, h, textureIndex) {
+        calls.push({ label: target.label, x, y, w, h, textureIndex });
+        if (x < 0 || y < 0 || x >= target.width || y >= target.height) return new Float32Array(4); // zeros
+        const v = wedgeAt(((x + 0.5) * PRESENT.width) / target.width);
+        return Float32Array.from([v, v, v, 1]);
+      },
+    };
+  };
+  const passThrough = (raw) => (raw ? Array.from(raw) : null);
+  const stepPixels = STEPS.map((v, i) => ({ v, pixel: { x: 690 + 60 * i + 30, y: 310 } }));
+  for (const [label, size] of [
+    ['render scale 1', PRESENT],
+    ['render scale 0.6', AT_06],
+  ]) {
+    const renderer = makeRenderer();
+    const target = makeTarget(size, 'scene.color');
+    const got = [];
+    for (const { pixel } of stepPixels) {
+      const r = await readProbeTexel({ renderer, target, pixel, present: PRESENT, decode: passThrough });
+      got.push(r.rgba?.[0] ?? null);
+    }
+    ok(
+      `${label}: every wedge step reads its own painted value (${got.join('/')})`,
+      got.every((v, i) => v === STEPS[i])
+    );
+  }
+  {
+    // The fixture really is the rig's failure: reading the PRESENTED pixel straight from the 0.6 target (the
+    // old probe) gets the wrong step everywhere but the middle one, and zeros past the buffer's edge.
+    const renderer = makeRenderer();
+    const target = makeTarget(AT_06, 'scene.color');
+    const old = [];
+    for (const { pixel } of stepPixels) {
+      const raw = await renderer.readRenderTargetPixelsAsync(target, pixel.x, pixel.y, 1, 1, 0);
+      old.push(raw[0]);
+    }
+    const wrong = old.filter((v, i) => v !== STEPS[i]).length;
+    ok(`fixture check: the old read at 0.6 misreads ${wrong} of 9 steps (${old.join('/')})`, wrong >= 7);
+    const edge = await renderer.readRenderTargetPixelsAsync(target, 1635, 445, 1, 1, 0);
+    ok('fixture check: the old read of a right-hand point (x 1635) at 0.6 is past the buffer: zeros', edge[0] === 0);
+  }
+  {
+    // Every target is mapped from its OWN size: a half-size target in the same probe reads its own texel.
+    const renderer = makeRenderer();
+    const half = makeTarget({ width: 960, height: 444 }, 'half');
+    const r = await readProbeTexel({
+      renderer,
+      target: half,
+      pixel: { x: 720, y: 310 },
+      present: PRESENT,
+      decode: passThrough,
+    });
+    ok(
+      'a target is read at the texel of its own size (960x444: (360,155)), and says so',
+      renderer.calls[0].x === 360 &&
+        renderer.calls[0].y === 155 &&
+        r.texel.x === 360 &&
+        JSON.stringify(r.size) === '[960,444]' &&
+        r.error === null
+    );
+    const attr = makeTarget(AT_06, 'scene.color');
+    await readProbeTexel({
+      renderer,
+      target: attr,
+      textureIndex: 1,
+      pixel: { x: 4, y: 4 },
+      present: PRESENT,
+      decode: passThrough,
+    });
+    ok('the MRT attachment index reaches the read (attr = attachment 1)', renderer.calls[1].textureIndex === 1);
+  }
+
+  // ---- Fail-soft (mmp-78u.26): the probe must never throw.
+  {
+    const renderer = makeRenderer();
+    const target = makeTarget(AT_06, 'scene.lit');
+    const noTarget = await readProbeTexel({
+      renderer,
+      target: null,
+      pixel: { x: 1, y: 1 },
+      present: PRESENT,
+      decode: passThrough,
+    });
+    ok(
+      "no target: rgba null, error 'no render target', nothing read",
+      noTarget.rgba === null && noTarget.error === 'no render target' && renderer.calls.length === 0
+    );
+    const noAttachment = await readProbeTexel({
+      renderer,
+      target: { width: 4, height: 4, textures: [{}] },
+      textureIndex: 1,
+      pixel: { x: 1, y: 1 },
+      present: PRESENT,
+      decode: passThrough,
+    });
+    ok('a missing MRT attachment is no target, not a throw', noAttachment.error === 'no render target');
+    const freed = await readProbeTexel({
+      renderer,
+      target,
+      pixel: { x: 720, y: 310 },
+      present: PRESENT,
+      decode: passThrough,
+      isReadable: () => false,
+    });
+    ok(
+      'a texture a resize just freed is NOT read and says why (the rig repro threw here)',
+      freed.rgba === null && /not on the GPU/.test(freed.error) && renderer.calls.length === 0 && freed.texel.x === 432
+    );
+    const throwing = {
+      async readRenderTargetPixelsAsync() {
+        throw new TypeError("Cannot read properties of undefined (reading 'format')");
+      },
+    };
+    let threw = false;
+    let r = null;
+    try {
+      r = await readProbeTexel({
+        renderer: throwing,
+        target,
+        pixel: { x: 720, y: 310 },
+        present: PRESENT,
+        decode: passThrough,
+      });
+    } catch {
+      threw = true;
+    }
+    ok(
+      "three's own throw on a freed texture is caught: no throw, error names it",
+      !threw && r.rgba === null && r.error === "read failed: Cannot read properties of undefined (reading 'format')"
+    );
+    let threw2 = false;
+    let r2 = null;
+    try {
+      r2 = await readProbeTexel({
+        renderer,
+        target,
+        pixel: { x: 1, y: 1 },
+        present: PRESENT,
+        decode: passThrough,
+        isReadable: () => {
+          throw new Error('backend gone');
+        },
+      });
+    } catch {
+      threw2 = true;
+    }
+    ok('a readability check that throws is caught too', !threw2 && r2.rgba === null && /backend gone/.test(r2.error));
+    const noRenderer = await readProbeTexel({
+      renderer: null,
+      target,
+      pixel: { x: 1, y: 1 },
+      present: PRESENT,
+      decode: passThrough,
+    });
+    ok('no renderer: error, no throw', noRenderer.rgba === null && noRenderer.error === 'no renderer');
+    const badPixel = await readProbeTexel({ renderer, target, pixel: null, present: PRESENT, decode: passThrough });
+    ok('no pixel: error, no throw, nothing read', badPixel.rgba === null && /no pixel/.test(badPixel.error));
+  }
+
+  // ---- context.renderScale and the row fields.
+  {
+    const s = summarizeRenderScale({ setting: '0.6', resolved: 0.6, present: PRESENT, internal: AT_06 });
+    ok(
+      'renderScale says the scale the reads USED (internal / present) and both sizes',
+      s.setting === '0.6' &&
+        s.scale === 0.6 &&
+        s.resolved === 0.6 &&
+        JSON.stringify(s.present) === '[1920,889]' &&
+        JSON.stringify(s.internal) === '[1152,532]'
+    );
+    const trailing = summarizeRenderScale({ setting: 'auto', resolved: 0.85, present: PRESENT, internal: AT_06 });
+    ok(
+      'a governor step not yet applied: scale (what was read) 0.6, resolved (asked for) 0.85',
+      trailing.scale === 0.6 && trailing.resolved === 0.85 && trailing.setting === 'auto'
+    );
+    ok('no state gives null', summarizeRenderScale(null) === null && summarizeRenderScale('x') === null);
+    const junk = summarizeRenderScale({ setting: 3, resolved: 'x', present: { width: 0, height: 5 }, internal: AT_06 });
+    ok(
+      'malformed state reads as nulls, never throws',
+      junk.setting === null && junk.resolved === null && junk.present === null && junk.scale === null
+    );
+    const ctx = buildProbeContext({ renderScale: { setting: '1', resolved: 1, present: PRESENT, internal: PRESENT } });
+    ok(
+      'buildProbeContext carries it as context.renderScale',
+      ctx.renderScale.scale === 1 && ctx.renderScale.setting === '1'
+    );
+
+    const buffers = { lit: { rgba: [0.2, 0.2, 0.2, 1] }, albedo: { rgba: [0.2, 0.2, 0.2, 1] } };
+    const on = buildProbeRow(
+      { worldX: 1, worldY: 2, pixel: { x: 720, y: 310 }, bufferPixel: { x: 432, y: 185 }, onScreen: true, buffers },
+      { name: 'step0' }
+    );
+    ok(
+      'an on-screen row carries bufferPixel (the texel read) beside pixel (the presented one)',
+      on.bufferPixel.x === 432 && on.pixel.x === 720 && on.readErrors === null
+    );
+    const failedRow = buildProbeRow({
+      worldX: 1,
+      worldY: 2,
+      pixel: { x: 9, y: 9 },
+      bufferPixel: { x: 5, y: 5 },
+      onScreen: true,
+      buffers: { illum: { rgba: null, error: 'x' } },
+      readErrors: ['illum: not on the GPU right now (resized or never drawn since)'],
+    });
+    ok(
+      'a row whose reads failed names them in readErrors, its values null',
+      failedRow.readErrors.length === 1 &&
+        /illum: not on the GPU/.test(failedRow.readErrors[0]) &&
+        failedRow.illum === null
+    );
+    const off = buildProbeRow({
+      worldX: 1,
+      worldY: 2,
+      bufferPixel: { x: 5, y: 5 },
+      onScreen: false,
+      readErrors: ['x'],
+    });
+    ok('an off-screen row has no bufferPixel and no readErrors', off.bufferPixel === null && off.readErrors === null);
   }
 }

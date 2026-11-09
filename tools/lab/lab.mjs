@@ -117,7 +117,12 @@ const COMMANDS = {
         keep: argv.includes('--keep'),
       })
     );
-    console.log(`${r.plot} on ${r.level} (${r.view}) settled=${r.settled} verdict=${r.verdict} -> ${r.shot}`);
+    const rs = r.renderScale;
+    const scale = rs ? `${rs.scale}${rs.setting ? ` (setting ${rs.setting})` : ''}` : 'unknown';
+    console.log(
+      `${r.plot} on ${r.level} (${r.view}) settled=${r.settled} verdict=${r.verdict} renderScale=${scale}` +
+        `${r.error ? ` ERROR ${r.error}` : ''} -> ${r.shot}`
+    );
     console.table(r.table);
   },
   check: async () => {

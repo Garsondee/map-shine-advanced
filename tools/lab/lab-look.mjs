@@ -148,8 +148,12 @@ export async function look({
         return {
           settled: r.settled,
           verdict: r.verdict,
+          // Probe v2.2 (mmp-78u.41): the render scale the buffer reads used.
+          renderScale: r.context?.renderScale ?? null,
+          error: r.error ?? null,
           rows: r.results.map((x) => ({
             on: x.onScreen,
+            readErrors: x.readErrors ?? null,
             albedo: x.albedo,
             illum: x.illum,
             lit: x.lit,
@@ -178,6 +182,8 @@ export async function look({
         dark: r.dark == null ? '-' : Number(r.dark).toFixed(2),
         regions: r.regions || '-',
         lights: r.lights,
+        // Probe v2.2 (mmp-78u.26): a buffer that could not be read is named rather than thrown.
+        ...(r.readErrors ? { unread: r.readErrors.join('; ') } : null),
       };
     });
 
@@ -193,6 +199,8 @@ export async function look({
       shot: file,
       settled: probed.settled,
       verdict: probed.verdict,
+      renderScale: probed.renderScale,
+      ...(probed.error ? { error: probed.error } : null),
       table,
     };
   } finally {

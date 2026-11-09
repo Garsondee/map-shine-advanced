@@ -12857,8 +12857,9 @@ function install() {
    * MapShine.probe's `context` (probe v2.1). Each piece is read on its own: one failure nulls one field and
    * is named in `errors`, never a throw (diag/pixel-probe.js#buildProbeContext shapes and checks it).
    * @param {{x:number, y:number, scale:number, source:string}|null} viewerCamera - the view the reads used.
+   * @param {object|null} [viewerRenderScale] - probe v2.2: the render-scale state the reads used.
    */
-  const readProbeContext = (viewerCamera) => {
+  const readProbeContext = (viewerCamera, viewerRenderScale = null) => {
     const errors = [];
     const read = (what, fn) => {
       try {
@@ -12874,6 +12875,7 @@ function install() {
       camera: viewerCamera ?? foundry?.camera ?? null,
       dynamicRange: read('exposure', () => getVtPanViewerDynamicRangeInfo()),
       forced: read('forcedEffects', () => effectRegistry.forcedEffects()),
+      renderScale: viewerRenderScale,
       todHour: read('todHour', () => getVtPanViewerTodHour()),
       sceneId: foundry?.sceneId ?? null,
       levelId: foundry?.levelId ?? null,
@@ -12893,8 +12895,18 @@ function install() {
   // emitters only, `otherSources` = MSA vision-only / global light / darkness). An off-screen point is not
   // read: its buffer fields are null with `reason: 'off-screen'`. `context` = camera, exposure state, forced
   // effects, hour, scene, level and time, so two readings can be compared. Markers off by default.
+  //
+  // PROBE v2.2 (2026-11-09, mmp-78u.41 + .26): right at ANY render scale (rows add `bufferPixel`, the scene
+  // buffers' texel; `context.renderScale` = {setting, scale the reads used, resolved, present, internal}), and
+  // it never throws: a buffer it could not read is named in the row's `readErrors`, a failed probe returns
+  // `{verdict: 'unknown', results: [], error}`. An instrument must not break the run that measures with it.
   MapShine.probe = async (points, opts = {}) => {
-    const r = await probeVtPanViewerV2(points, opts);
+    let r;
+    try {
+      r = await probeVtPanViewerV2(points, opts);
+    } catch (err) {
+      r = { settled: false, framesWaited: 0, presented: null, verdict: 'unknown', results: [], error: String(err) };
+    }
     if (!r || r.skipped || !Array.isArray(r.results)) return r;
     const viewedFloor = activeFloorContext?.floorIndex ?? 0;
     for (const row of r.results) {
@@ -12905,15 +12917,20 @@ function install() {
       } catch {
         row.masks = null;
       }
-      row.foundry = readProbeAttribution(row.worldX, row.worldY);
+      try {
+        row.foundry = readProbeAttribution(row.worldX, row.worldY);
+      } catch (err) {
+        row.foundry = { skipped: [`attribution failed: ${err?.message ?? err}`] };
+      }
     }
     return {
       settled: r.settled,
       framesWaited: r.framesWaited,
       presented: r.presented,
       verdict: r.verdict,
-      context: readProbeContext(r.camera ?? null),
+      context: readProbeContext(r.camera ?? null, r.renderScale ?? null),
       results: r.results,
+      ...(r.error ? { error: r.error } : null),
     };
   };
   MapShine.armMaskProbe = async (maxPoints = 3) => {

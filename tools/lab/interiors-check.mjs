@@ -254,6 +254,8 @@ async function pageProbeGroup({ g, scale, settleMs, mode, extra, forces, measure
   const trim = (x, i) => ({
     name: x.name,
     onScreen: x.onScreen,
+    // probe v2.2 (mmp-78u.26): a buffer the probe could not read is named here instead of throwing
+    readErrors: x.readErrors ?? null,
     floorIndex: x.floorIndex,
     outdoors01: x.outdoors01,
     albedo: f4(x.albedo),
@@ -347,8 +349,10 @@ async function pageProbeGroup({ g, scale, settleMs, mode, extra, forces, measure
     giOwned,
     level: canvas.level?.name ?? null,
     scale: canvas.stage?.scale?.x ?? null,
-    // the render-scale governor can drop the internal resolution under load; probe reads below 1 are suspect
-    renderScale: MapShine.getRenderScaleState?.()?.resolvedInternalScale ?? null,
+    // The render scale the probe's reads USED (probe v2.2 context.renderScale; the live setting as a fallback).
+    // Since v2.2 the buffer reads are right at any scale (mmp-78u.41); presented bytes below 1 still pass
+    // through the upscale + sharpen, so the claims keep skipping rows read below native.
+    renderScale: first.context?.renderScale?.scale ?? MapShine.getRenderScaleState?.()?.resolvedInternalScale ?? null,
     regionField,
     suspectDrift: suspects(first),
     reread,

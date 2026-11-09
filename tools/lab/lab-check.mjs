@@ -58,9 +58,15 @@ async function probeCell(page, cell, { scale, settleMs }) {
       return {
         settled: r.settled,
         verdict: r.verdict,
+        // Probe v2.2 (mmp-78u.41): the render scale the buffer reads used ({setting, scale, resolved, present,
+        // internal}); reads are right at any scale now, but presented bytes below 1 pass through the upscale.
+        renderScale: r.context?.renderScale ?? null,
+        error: r.error ?? null,
         rows: r.results.map((x) => ({
           name: x.name,
           onScreen: x.onScreen,
+          // Probe v2.2 (mmp-78u.26): a buffer the probe could not read (freed by a resize) is named here.
+          readErrors: x.readErrors ?? null,
           albedo: f4(x.albedo),
           illum: f4(x.illum),
           lit: f4(x.lit),
@@ -174,7 +180,13 @@ export async function checkWalls({
     const raw = {};
     for (const [i, cell] of cells.entries()) {
       const r = await probeCell(page, cell, { scale, settleMs });
-      raw[cell.key] = { settled: r.settled, verdict: r.verdict, rows: r.rows };
+      raw[cell.key] = {
+        settled: r.settled,
+        verdict: r.verdict,
+        renderScale: r.renderScale,
+        ...(r.error ? { error: r.error } : null),
+        rows: r.rows,
+      };
       data[cell.key] = Object.fromEntries(r.rows.map((row) => [row.name, row]));
       if (i % 14 === 13) log(`[check] ${i + 1}/${cells.length} cells probed`);
     }

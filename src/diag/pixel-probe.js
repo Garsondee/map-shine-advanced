@@ -328,10 +328,16 @@ export function compactMaskStack(stack, floorIndex) {
  * null, `pixel` is null too (the old clamped edge pixel is not this point's pixel), and `reason` says why
  * ('off-screen' | 'no view' | 'bad point'). `itemsAtPoint` is a CPU registry lookup, so it stays.
  *
- * @param {object|null} sample - `{worldX, worldY, pixel, onScreen, reason?, buffers, itemsAtPoint}`
+ * PROBE v2.2: `pixel` is the PRESENTED device pixel; `bufferPixel` is the texel of the scene buffers it was
+ * read at (the same at render scale 1, `pixel` x the scale below it — mmp-78u.41). A buffer that could not be
+ * read (freed by a resize and not yet redrawn, mmp-78u.26) leaves its fields null and is named in
+ * `readErrors` ('<buffer>: <why>'); null when every read worked.
+ *
+ * @param {object|null} sample - `{worldX, worldY, pixel, bufferPixel?, onScreen, reason?, buffers, readErrors?,
+ *   itemsAtPoint}`
  * @param {{name?:string|null, presented?:ArrayLike<number>|null}} [o] - the point's name; its presented bytes.
- * @returns {object} `{name, worldX, worldY, pixel, onScreen, reason, floorIndex, outdoors01, albedo, illum,
- *   lit, coloration, gain, expectedScreen, presented, drift, itemsAtPoint}`
+ * @returns {object} `{name, worldX, worldY, pixel, bufferPixel, onScreen, reason, readErrors, floorIndex,
+ *   outdoors01, albedo, illum, lit, coloration, gain, expectedScreen, presented, drift, itemsAtPoint}`
  */
 export function buildProbeRow(sample, { name = null, presented = null } = {}) {
   const s = sample ?? {};
@@ -342,13 +348,16 @@ export function buildProbeRow(sample, { name = null, presented = null } = {}) {
   const albedo = rgb(b?.albedo);
   const lit = rgb(b?.lit);
   const pres = onScreen && presented && presented.length >= 3 ? Array.from(presented).slice(0, 3) : null;
+  const readErrors = onScreen && Array.isArray(s.readErrors) && s.readErrors.length ? s.readErrors.map(String) : null;
   return {
     name: name ?? null,
     worldX: s.worldX ?? null,
     worldY: s.worldY ?? null,
     pixel: onScreen ? (s.pixel ?? null) : null,
+    bufferPixel: onScreen ? (s.bufferPixel ?? null) : null,
     onScreen,
     reason: onScreen ? null : (s.reason ?? 'off-screen'),
+    readErrors,
     floorIndex: attr ? Math.round(attr[0] * 255) : null,
     outdoors01: attr ? +Number(attr[1]).toFixed(3) : null,
     albedo,
@@ -447,9 +456,12 @@ function isoTime(at) {
  * @param {string|null} [parts.levelId]
  * @param {Date|number|string} [parts.at] - when; defaults to now.
  * @param {string[]} [parts.errors] - context reads that failed, each with its reason.
+ * @param {object|null} [parts.renderScale] - probe v2.2: the viewer's render-scale state at the reads (see
+ *   summarizeRenderScale); null = not available.
  * @returns {{camera:{x:number, y:number, scale:number, source:string|null}|null,
  *   exposure:ReturnType<typeof summarizeExposure>, forcedEffects:{on:string[], off:string[]}|null,
- *   todHour:number|null, sceneId:string|null, levelId:string|null, at:string|null, errors:string[]}}
+ *   renderScale:ReturnType<typeof summarizeRenderScale>, todHour:number|null, sceneId:string|null,
+ *   levelId:string|null, at:string|null, errors:string[]}}
  */
 export function buildProbeContext(parts = {}) {
   const p = parts && typeof parts === 'object' ? parts : {};
@@ -475,10 +487,123 @@ export function buildProbeContext(parts = {}) {
     camera,
     exposure: summarizeExposure(p.dynamicRange ?? null),
     forcedEffects,
+    renderScale: summarizeRenderScale(p.renderScale ?? null),
     todHour: roundOrNull(p.todHour, 3),
     sceneId: idOrNull(p.sceneId),
     levelId: idOrNull(p.levelId),
     at: isoTime(p.at),
     errors: Array.isArray(p.errors) ? p.errors.map(String) : [],
+  };
+}
+
+// ============================================================================
+// PROBE v2.2 (2026-11-09, mmp-78u.41 + mmp-78u.26) — right at any render scale, and it never throws.
+//   .41 The scene buffers (illum, lit, colour, coloration, occlusion, attr) are INTERNAL-tier targets: the
+//       drawing buffer times the render scale, which 'Auto' drops to 0.5-0.85 under GPU load. The probe's
+//       pixel is a PRESENTED device pixel, and it was passed straight to every target, so below scale 1 it
+//       read a point further right and down, or past the buffer's edge (zeros). Measured on the lab's grey
+//       wedge at 0.6: every step read the wrong art (step 0 read 233, step 255 read 0) while the presented
+//       bytes were right. Each target is now read at the texel under the presented pixel, from the target's
+//       OWN size, and `context.renderScale` says what the reads used.
+//   .26 A render-scale step or a window resize frees a target's GPU texture (three's RenderTarget#setSize
+//       disposes it) until the next frame draws into it. A read in that gap threw from inside three
+//       ("reading 'format'"), and the probe threw with it. A read now says why it could not be taken.
+// ============================================================================
+
+/**
+ * The texel of a render target under a PRESENTED pixel, at any render scale (probe v2.2, mmp-78u.41).
+ *
+ * The present pass samples each internal-tier target at the screen uv, so the presented device pixel
+ * (px, py) shows the target at uv = ((px + 0.5) / presentW, (py + 0.5) / presentH). This returns the texel
+ * that holds that uv. At scale 1 (equal sizes) it is the pixel itself. Below 1 the screen shows a bilinear
+ * blend of the texels around it, so on a hard edge the reading is the nearest texel, not the blend.
+ *
+ * @param {{x:number, y:number}|null} pixel - a device pixel of the drawing buffer (top-left origin).
+ * @param {{width:number, height:number}|null} present - the drawing buffer's size.
+ * @param {{width:number, height:number}|null} target - the render target's own size.
+ * @returns {{x:number, y:number}|null} null when an input is missing, not finite or not positive.
+ */
+export function presentedPixelToTexel(pixel, present, target) {
+  const px = Number(pixel?.x);
+  const py = Number(pixel?.y);
+  const pw = Number(present?.width);
+  const ph = Number(present?.height);
+  const tw = Math.floor(Number(target?.width));
+  const th = Math.floor(Number(target?.height));
+  if (![px, py, pw, ph, tw, th].every(Number.isFinite) || pw <= 0 || ph <= 0 || tw <= 0 || th <= 0) return null;
+  const tx = Math.floor(((px + 0.5) / pw) * tw);
+  const ty = Math.floor(((py + 0.5) / ph) * th);
+  return { x: Math.min(Math.max(tx, 0), tw - 1), y: Math.min(Math.max(ty, 0), th - 1) };
+}
+
+const errorText = (err) => String(err?.message ?? err);
+
+/**
+ * Read ONE texel of a render target for the probe, FAIL-SOFT (probe v2.2, mmp-78u.26 + .41). Never throws:
+ * an instrument must not break the thing it measures, and a probe call that rejects takes the caller's
+ * whole run down with it.
+ *
+ * The texel is the one under the presented `pixel` in THIS target's own size (presentedPixelToTexel). With
+ * `isReadable` false (the texture has no GPU storage right now: freed by a resize and not yet redrawn)
+ * nothing is read. A read that throws (three's copy on a texture it does not hold) is caught. Either way
+ * `rgba` is null and `error` says why.
+ *
+ * @param {object} a
+ * @param {{readRenderTargetPixelsAsync:Function}|null} a.renderer
+ * @param {{width:number, height:number, textures?:object[], texture?:object}|null} a.target - a RenderTarget.
+ * @param {number} [a.textureIndex] - the MRT attachment (scene.color's `attr` is attachment 1).
+ * @param {{x:number, y:number}|null} a.pixel - the presented device pixel.
+ * @param {{width:number, height:number}|null} a.present - the drawing buffer's size.
+ * @param {(raw:ArrayLike<number>|null) => any} a.decode - decodeHalfFloatRgba / decodeByteRgba.
+ * @param {(texture:object) => boolean} [a.isReadable] - omitted = assume readable.
+ * @returns {Promise<{raw:number[]|null, rgba:any, texel:{x:number,y:number}|null, size:[number,number]|null,
+ *   error:string|null}>}
+ */
+export async function readProbeTexel({ renderer, target, textureIndex = 0, pixel, present, decode, isReadable }) {
+  const failed = (error, texel = null, size = null) => ({ raw: null, rgba: null, texel, size, error });
+  const texture = target?.textures?.[textureIndex] ?? (textureIndex === 0 ? target?.texture : null) ?? null;
+  if (!target || !texture) return failed('no render target');
+  const size = [target.width, target.height];
+  const texel = presentedPixelToTexel(pixel, present, target);
+  if (!texel) return failed('no pixel to read (bad point or size)', null, size);
+  try {
+    if (typeof isReadable === 'function' && isReadable(texture) === false) {
+      return failed('not on the GPU right now (resized or never drawn since)', texel, size);
+    }
+    if (typeof renderer?.readRenderTargetPixelsAsync !== 'function') return failed('no renderer', texel, size);
+    const raw = await renderer.readRenderTargetPixelsAsync(target, texel.x, texel.y, 1, 1, textureIndex);
+    return { raw: raw ? Array.from(raw) : null, rgba: decode(raw), texel, size, error: null };
+  } catch (err) {
+    return failed(`read failed: ${errorText(err)}`, texel, size);
+  }
+}
+
+/**
+ * The render scale a reading was taken at (probe v2.2, mmp-78u.41): `context.renderScale`. Pure and total.
+ *
+ * `scale` is what the reads USED: the scene buffers' width over the drawing buffer's. The buffers are resized
+ * on the governor's step, so for a moment this can trail `resolved`, the scale the setting or the Auto
+ * governor asks for now. `setting` is the player's choice ('auto', '1', '0.85', ...).
+ *
+ * @param {{setting?:string, resolved?:number, present?:{width:number, height:number},
+ *   internal?:{width:number, height:number}}|null} s
+ * @returns {{setting:string|null, scale:number|null, resolved:number|null, present:[number,number]|null,
+ *   internal:[number,number]|null}|null} null when there is no state (no viewer).
+ */
+export function summarizeRenderScale(s) {
+  if (!s || typeof s !== 'object') return null;
+  const pair = (v) => {
+    const w = finiteOrNull(v?.width);
+    const h = finiteOrNull(v?.height);
+    return w !== null && h !== null && w > 0 && h > 0 ? [w, h] : null;
+  };
+  const present = pair(s.present);
+  const internal = pair(s.internal);
+  return {
+    setting: typeof s.setting === 'string' ? s.setting : null,
+    scale: present && internal ? roundOrNull(internal[0] / present[0], 4) : null,
+    resolved: roundOrNull(s.resolved, 4),
+    present,
+    internal,
   };
 }

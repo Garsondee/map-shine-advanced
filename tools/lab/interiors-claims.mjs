@@ -21,7 +21,8 @@
  * Illumination, Night fader, transient effect overrides) and restores everything after.
  *
  * THE REGION DARKNESS OVERRIDE. MSA has a world setting (regionDarknessOverrideEnabled; ON by default when this
- * was measured, value 0.9 on the rig; the manager decided 2026-11-09 that it defaults OFF from now on, mmp-6pc.3)
+ * was measured, value 0.9 on the rig; OFF by default since 2026-11-09, mmp-6pc.3, and never applied to a scene
+ * flagged regionDarknessAuthored; MapShine.restoreRegionDarkness() puts the stashed originals back)
  * that REWRITES every darkening behaviour of the viewed scene to OVERRIDE <value> on view
  * (src/foundry/region-darkness-override.js). With it on, the lab's authored modes cannot survive a view, so
  * the region-math claims are measured with it OFF (the checker switches it off on the private rig if needed
@@ -623,7 +624,7 @@ export const INTERIORS_CLAIMS = [
   {
     id: 'IR-21',
     source: 'foundry',
-    cite: 'shader depth gate adjust-darkness-level.mjs (shader):55-62; MSA region-geometry.js:690-730, vt-pan-viewer.js:7165-7181',
+    cite: 'shader depth gate adjust-darkness-level.mjs (shader):55-62; MSA region-geometry.js regionOverlapsElevationBand + selectRegionsForViewedFloor (the viewer gate since 2026-11-09)',
     claim:
       "A Region only darkens the floors its elevation band overlaps: from Upper, I1's Region ([0,20)) does not darken the Upper slab; from the Basement, R4's ground block without a Region reads the basement's own 0.264.",
     needs: [...needs('upper', 'U.slab'), ...needs('basement', 'R4@basement')],
@@ -639,7 +640,7 @@ export const INTERIORS_CLAIMS = [
     cite: 'client/canvas/board.mjs:1377-1382; client/documents/abstract/canvas-document.mjs:97-104',
     claim:
       'A Region scoped to one Level (levels [Ground]) is only active while that Level is viewed: from the Basement, R4.A reads the basement value 0.264.',
-    note: 'SUSPECT in the prose: MSA never reads region.levels, only elevation (scene-regions.js:99-120); A has an open elevation, so the min rule would give 0.561.',
+    note: '(c) 2026-11-09: was SUSPECT (MSA never read region.levels, so A, open elevation, leaked onto the basement: 0.559 measured). MSA now reads the Levels and gates by the viewed Level (scene-regions.js, region-geometry.js selectRegionsForViewedFloor; mmp-78u.19), so the claim is unchanged and expected to pass.',
     needs: needs('basement', 'R4@basement'),
     check: (P) => approx('basement A', ill(P('basement', 'R4@basement', 'A')), ambientAt(0.9), 0.02),
   },
@@ -649,7 +650,8 @@ export const INTERIORS_CLAIMS = [
     cite: 'board.mjs:1381; shader depth test (shader):86-89',
     claim:
       'Seen from Upper through transparent art, ground pixels follow Foundry: A (levels [Ground]) is not viewed, so it reads like C (no Region); B (levels [], elevation [0,20)) darkens them (0.561).',
-    note: 'SUSPECT in the prose: MSA gates per viewed floor, so it does the opposite (A applies, B does not).',
+    note: "SUSPECT in the prose: MSA gated per viewed floor, so it did the opposite (A applied, B did not). (c) 2026-11-09: the A half follows Foundry now (the Levels gate, mmp-78u.19). The B half is still open: MSA tests the VIEWED floor's band for every pixel, so an elevation-only Region over the ground is not applied from Upper (Foundry depth-tests per pixel; the rest of mmp-78u.19).",
+    known: 'mmp-78u.19',
     needs: needs('upper', 'R4@upper'),
     check: (P) =>
       every(
@@ -694,7 +696,7 @@ export const INTERIORS_CLAIMS = [
     cite: `${FD}:65-90 (one mesh per behaviour) + min sort`,
     claim:
       'Two darkness behaviours on one Region: Foundry makes a mesh for each, so the lower adjusted value (0.4) wins whatever their order: R2b.dual (.9 then .4) and R2b.dual2 (.4 then .9) both read Foundry darkness 0.40 and illum 0.635.',
-    note: 'SUSPECT, documented: MSA reads only the FIRST active behaviour (scene-regions.js deriveRegionDarknessAdjuster, a named rare-edge-case simplification). dual2 added 2026-11-09 to show the order dependence.',
+    note: 'dual2 added 2026-11-09 to show the order dependence. (c) 2026-11-09: was SUSPECT (MSA read only the FIRST active behaviour: dual 0.264 = 0.9 measured). MSA now gives each active darkness behaviour its own adjuster (scene-regions.js deriveRegionDarknessAdjusters) and the min wins, as in Foundry (mmp-78u.22), so the claim is unchanged and expected to pass.',
     needs: needs('noon', 'R2b'),
     check: (P) =>
       every(
@@ -1225,7 +1227,8 @@ export const INTERIORS_CLAIMS = [
     cite: 'board.mjs:1381; shader depth test; Physics says dark either way',
     claim:
       "Seen from Ground down the stairwell, the basement is dark when a Region active for that view covers it: STAIR.below (levels [], elevation [-20,0)) darkens the basement pixel by Foundry's depth test (0.264); Foundry's darkness for the basement elevation there is 0.9.",
-    note: "SUSPECT: MSA's per-floor band gate cannot darken a lower floor seen through a hole (region-darkness.js:92-108). (c) 2026-11-09, after the first run: the attribute's floor index is not an absolute floor (it read 0 for every point seen from Upper, the Upper slab included), so 'the hole shows the basement' is proved by the basement art's albedo signature (opaque art reads 0.2303/0.2235/0.2303, the Ground's 0.2197) instead.",
+    known: 'mmp-78u.19',
+    note: "SUSPECT: MSA's per-floor band gate cannot darken a lower floor seen through a hole (region-darkness.js:92-108); still open after the 2026-11-09 Levels gate (per-pixel elevation, the rest of mmp-78u.19). (c) 2026-11-09, after the first run: the attribute's floor index is not an absolute floor (it read 0 for every point seen from Upper, the Upper slab included), so 'the hole shows the basement' is proved by the basement art's albedo signature (opaque art reads 0.2303/0.2235/0.2303, the Ground's 0.2197) instead.",
     needs: [...needs('noon', 'STAIR'), ...needs('basement', 'B.west')],
     check: (P) => {
       const r = P('noon', 'STAIR', 'hole');
@@ -1326,7 +1329,7 @@ export const INTERIORS_CLAIMS = [
     cite: 'src/foundry/region-darkness-override.js header (world setting regionDarknessOverrideEnabled; ON by default since author 2026-09-09, OFF by default per the manager 2026-11-09, mmp-6pc.3)',
     claim:
       "When a GM switches MSA's Region darkness override ON (value v), viewing the scene rewrites every darkening behaviour (DARKEN, OVERRIDE > 0) to OVERRIDE v and keeps the original in a flag; BRIGHTEN and OVERRIDE 0 are untouched. R1.e (DARKEN .5) and D1.ov01 (OVERRIDE .1) then read A(v); R1.d and R1.c keep 0.933.",
-    note: '(c) 2026-11-09: worded for the new default (OFF, mmp-6pc.3); the checker switches it on only for this measurement and restores what it found. Its scope (outdoor, OVERRIDE 0.1 and Level-scoped Regions, first behaviour only) is decision mmp-78u.23.',
+    note: '(c) 2026-11-09: worded for the new default (OFF, mmp-6pc.3); the checker switches it on only for this measurement and restores what it found. (c) 2026-11-09, mmp-6pc.3 implemented: EVERY darkening behaviour of a Region is rewritten now, not only the first (MSA honours them all, IR-26); a scene flagged regionDarknessAuthored is never rewritten; MapShine.restoreRegionDarkness() puts the originals back. Its reach over outdoor, OVERRIDE 0.1 and Level-scoped Regions (mmp-78u.23) is settled by it being opt-in. The checks below are unchanged: the lab scene is not flagged.',
     needs: needs('override', 'R1', 'D1'),
     check: (P) => {
       const env = P('override', 'R1', 'e').env ?? {};

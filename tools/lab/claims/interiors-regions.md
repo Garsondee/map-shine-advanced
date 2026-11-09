@@ -164,6 +164,6 @@ Lab-design notes: (1) the basement Region is `levels: [Basement]`, so from Groun
 
 ## Manager review (2026-11-09) — checked against the code, not yet measured
 - IR-27 confirmed in code: Suppress Weather is a documented DELIBERATE STUB (src/foundry/scene-regions.js header + readSuppressWeatherStub). Not a hidden bug; still a real gap for outdoor Regions.
-- IR-26 confirmed in code: only the FIRST active adjustDarknessLevel behaviour is read, a named "rare-edge-case simplification" (scene-regions.js deriveRegionDarknessAdjuster).
+- IR-26 confirmed in code: only the FIRST active adjustDarknessLevel behaviour is read, a named "rare-edge-case simplification" (scene-regions.js deriveRegionDarknessAdjuster). Fixed 2026-11-09 (mmp-78u.22): every active behaviour is read (`deriveRegionDarknessAdjusters`), and the Region's `levels` too (IR-22, the A half of IR-23; mmp-78u.19).
 - IR-35..38 confirmed in code: the region overlay is "exactly the old opaque overwrite" of the ambient fill at full coverage (region-darkness.js header; vt-pan-viewer.js draws it after illumQuad and BEFORE tree/bush shadows). So building/cloud shadows (in the ambient fill) vanish inside a Region while vegetation shadows survive. Needs an outdoor-Region plot to measure.
 - IR-01 answered: probe foundry.darkness reads 0.90 inside the walls lab's override-0.9 Region (measured 2026-11-08), so Foundry attribution works inside Regions.

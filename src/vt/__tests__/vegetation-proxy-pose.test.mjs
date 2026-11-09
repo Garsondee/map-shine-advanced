@@ -76,4 +76,18 @@ export function run(t) {
     'edge hold: no other UV shuffle reaches the canopy sample unheld',
     (src.match(/gatedUv\.addAssign\(/g) ?? []).length === 2
   );
+
+  // SHOW IT NOW (mmp-78u.33.6): a canopy overlay that finishes loading after the last residency pass must
+  // ask for one, or it stays hidden until the next pan (Deep Forest cold visit: no trees for 6+ minutes).
+  const ensureAt = src.indexOf('function ensureVegetationOverlay(');
+  const ensureBody = src.slice(ensureAt, src.indexOf('\n    }\n', src.indexOf('.catch((err) => {', ensureAt)));
+  ok('the overlay builder is found', ensureAt >= 0 && ensureBody.length > 1000);
+  ok(
+    '⭐ a canopy that finishes loading asks for a residency pass (it is built hidden)',
+    /scheduleResidencyUpdate\(\)\.catch\(/.test(ensureBody)
+  );
+  ok(
+    'a canopy with no texture says so (never fails silently)',
+    /log\.warn\(`vegetation overlay: no texture/.test(ensureBody)
+  );
 }

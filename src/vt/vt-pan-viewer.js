@@ -23760,6 +23760,8 @@ async function startVtPanViewerUnserialized({
           .then(async (loaded) => {
             if (!loaded) {
               entry.status = 'error';
+              // Never silently: a canopy that will never draw is a missing tree on the map (mmp-78u.33.6).
+              log.warn(`vegetation overlay: no texture for item "${item.id}" kind "${kind.id}" (${url}); not drawn`);
               return;
             }
             // FRESH state (not the vegState read above) — both params and the
@@ -24057,6 +24059,14 @@ async function startVtPanViewerUnserialized({
                   appearance: shadowBuilt.appearance,
                 }
               : null; // this tier draws no shadow at all — see vegTier.shadowEnabled above
+            // SHOW IT NOW (mmp-78u.33.6, 2026-11-09). The mesh was built hidden; only a residency pass
+            // (refreshVegetationOverlay) shows it. A canopy that finishes AFTER the last pass — on a cold
+            // first visit its art waits minutes for first-time compression — stayed hidden until the next
+            // pan, floor switch or reload: measured on Deep Forest, no trees for 6+ minutes on a still
+            // table. The whole-image path already asks for a pass when it lands; so does this one now.
+            scheduleResidencyUpdate().catch(() => {
+              // Non-fatal: the next pass shows it.
+            });
           })
           .catch((err) => {
             entry.status = 'error';

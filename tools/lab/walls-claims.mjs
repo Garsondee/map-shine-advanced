@@ -198,7 +198,10 @@ export const presOf = (r) => mean3(r?.presented);
 export const excess = (r, ref) => gOf(r) - gOf(ref);
 /** The light's multiplier at `r` against a clear mirror: coloration ratio (the `ref` argument is unused, kept for call shape). */
 export const ratio = (r, m, _ref) => colOf(r) / Math.max(colOf(m), MIN_MIRROR_COLOR);
-/** Foundry's light sources whose shape contains the point (MSA's vision-only door lights and global light dropped). */
+/**
+ * Foundry's light emitters whose shape contains the point. Probe v2.1 lists only emitters in `lights`; runs saved
+ * before it also carried MSA's vision-only door lights and the global light there, so those are still dropped.
+ */
 export const foundryLights = (r) =>
   (r?.foundry?.lights ?? []).filter((l) => !/^(msa-vision|globalLight)/.test(String(l.id)));
 export const foundryLit = (r) => foundryLights(r).length > 0;
@@ -295,7 +298,7 @@ const C = (s) =>
     pen: 'src/effects/lighting/light-penumbra.js (wall fade 8 px; shadow band 2 + 0.35 px per px past the corner; inside only)',
     gobo: 'src/effects/lighting/aperture-gobo.js + foundry/scene-walls.js#deriveWallAperture (flag windowPattern)',
     room: 'src/effects/window/window-room-light.js + scene/room-map.js (window light fades near room-dividing walls)',
-    probe: 'src/vt/vt-pan-viewer.js#runProbeV2 (drift = presented vs OETF(lit); ok < 32)',
+    probe: 'src/diag/pixel-probe.js#judgePresentedDrift (luma of presented vs OETF(lit); ok < 32)',
   })[s] ?? s;
 
 // --------------------------------------------------------------------------------------------- claims

@@ -256,13 +256,19 @@ async function pageProbeGroup({ g, scale, settleMs, mode, extra, forces, measure
     lit: f4(x.lit),
     coloration: f4(x.coloration),
     presented: x.presented ? x.presented.slice(0, 3) : null,
-    drift: x.drift ? { maxAbs: x.drift.maxAbs, verdict: x.drift.verdict } : null,
+    // Probe v2.1 judges drift on luma; the worst single channel rides along.
+    drift: x.drift
+      ? { lumaDrift: x.drift.lumaDrift, channelMaxAbs: x.drift.channelMaxAbs, verdict: x.drift.verdict }
+      : null,
     fd: { b: fd(world[i], -19), g: fd(world[i], 1), u: fd(world[i], 21) },
     foundry: x.foundry
       ? {
           darkness: x.foundry.darkness,
           regions: (x.foundry.regions ?? []).map((r) => `${r.name}: ${r.behaviors.join('+')}`),
+          // Probe v2.1: `lights` holds light emitters only; MSA's vision-only sources, Foundry's global light and
+          // darkness sources are `otherSources` (kind msaVision / globalLight / darkness).
           lights: (x.foundry.lights ?? []).map((l) => ({ id: l.id, kind: l.kind, dist: l.dist })),
+          otherSources: (x.foundry.otherSources ?? []).map((s) => ({ id: s.id, kind: s.kind, dist: s.dist })),
         }
       : null,
   });

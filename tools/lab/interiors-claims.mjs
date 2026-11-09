@@ -217,9 +217,17 @@ const toSrgb = (lin) => {
   const c = Math.max(0, Math.min(1, lin));
   return 255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
 };
-/** Foundry light sources at the point, without MSA's vision-only door lights and the global light (FRICTION #31). */
+/**
+ * Foundry light emitters at the point. Probe v2.1 lists only emitters in `lights` (FRICTION #31); runs saved
+ * before it also carried MSA's vision-only door lights and the global light there, so those are still dropped.
+ */
 const lamps = (r) => (r?.foundry?.lights ?? []).filter((l) => !/^(msa-vision|globalLight)/.test(String(l.id)));
-const hasGlobal = (r) => (r?.foundry?.lights ?? []).some((l) => /global/i.test(`${l.id} ${l.kind}`));
+/** Foundry's global light covers the point: probe v2.1 files it in `otherSources`; runs saved before it, in `lights`. */
+const hasGlobal = (r) => {
+  const f = r?.foundry;
+  if (Array.isArray(f?.otherSources)) return f.otherSources.some((s) => s.kind === 'globalLight');
+  return (f?.lights ?? []).some((l) => /global/i.test(`${l.id} ${l.kind}`));
+};
 const seriesOf = (r, key = 'illum') => (r?.series ?? []).map((s) => mean3(s?.[key])).filter(Number.isFinite);
 const range = (xs) => (xs.length ? Math.max(...xs) - Math.min(...xs) : NaN);
 
@@ -1329,7 +1337,7 @@ export const INTERIORS_CLAIMS = [
   {
     id: 'IR-64',
     source: 'msa',
-    cite: 'src/vt/vt-pan-viewer.js#runProbeV2 (drift = presented vs OETF(lit); ok < 32); walls G02',
+    cite: 'src/diag/pixel-probe.js#judgePresentedDrift (luma of presented vs OETF(lit); ok < 32); walls G02',
     claim:
       'With the post effects off, the presented pixel matches the lit buffer (probe drift ok) at every noon point of the scene.',
     views: ['measure'],
@@ -1339,7 +1347,8 @@ export const INTERIORS_CLAIMS = [
       for (const g of ['OPEN', 'R1', 'R2', 'R2b', 'R3', 'R4', 'R5', 'D1', 'I1', 'BLK', 'STAIR', 'EDGE']) {
         for (const p of allGroups()[g].pts) {
           const r = P('noon', g, p.name);
-          if (r.drift && r.drift.verdict !== 'ok') bad.push(`${g}.${p.name}:${r.drift.maxAbs}`);
+          // Probe v2.1 judges on luma (lumaDrift); runs saved before it carry v2's worst-channel maxAbs.
+          if (r.drift && r.drift.verdict !== 'ok') bad.push(`${g}.${p.name}:${r.drift.lumaDrift ?? r.drift.maxAbs}`);
         }
       }
       return res(bad.length === 0, bad.length ? bad.slice(0, 8).join(', ') : 'all ok', 'drift ok (<32)');

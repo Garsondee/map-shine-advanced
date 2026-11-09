@@ -942,7 +942,9 @@ export const LENS = Object.freeze({
         'a per-tier structural change" shape, the same one meniscus/foam already use elsewhere in this ' +
         'codebase — but the TAPS themselves (a 9-sample Kawase blur for the pulse, two extra directional ' +
         'samples for motion) only exist in the compiled graph from this tier up, which is the real reason ' +
-        'this is its own rung rather than folded into tier 0.',
+        'this is its own rung rather than folded into tier 0. From this rung up the fringe is the five-tap ' +
+        'spectral one and each starburst spoke takes 12 taps; rung 0 keeps the three-tap red/green/blue split ' +
+        'and 6-tap spokes of the same reach and energy (perf sweep 2026-11-08).',
     }),
     Object.freeze({
       n: 2,

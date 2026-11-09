@@ -41,6 +41,7 @@ import { run as runLens } from './lens.test.mjs';
 import { run as runLensMotion } from './lens-motion.test.mjs';
 import { run as runLensRender } from './lens-render.test.mjs';
 import { run as runPerfSweep20261108 } from './perf-sweep-2026-11-08.test.mjs';
+import { run as runTierLedger } from './tier-ledger.test.mjs';
 import { run as runLensZoom } from './lens-zoom.test.mjs';
 import { run as runWindTrails } from './wind-trails.test.mjs';
 import { run as runLeafShed } from './leaf-shed.test.mjs';
@@ -113,6 +114,7 @@ const suites = [
   ['lens-zoom', runLensZoom],
   ['lens-render', runLensRender],
   ['perf-sweep-2026-11-08', runPerfSweep20261108],
+  ['tier-ledger', runTierLedger],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

@@ -20,7 +20,9 @@
  *   node tools/foundry-cdp/cdp.mjs eval     --name gm --code "game.scenes.viewed.name"
  *   node tools/foundry-cdp/cdp.mjs eval     --name gm --file script.js [--args '{"a":1}']
  *                                            (a file is the BODY of an async function; `args` is in scope;
- *                                             `--file -` reads it from stdin)
+ *                                             `--file -` reads it from stdin. A lint-safe page script, one
+ *                                             top-level `async function name(args)`, is called for you:
+ *                                             see `withPageEntryCall`)
  *   node tools/foundry-cdp/cdp.mjs settle   --name gm [--timeout 300]   wait for MSA's scene-settled report
  *   node tools/foundry-cdp/cdp.mjs report   --name gm --id scene-settled   run any MapShine.debug report/action
  *   node tools/foundry-cdp/cdp.mjs shot     --name gm --out shot.png [--full] [--clean]  (--clean hides Foundry UI)
@@ -106,6 +108,20 @@ export function wrapScript(body, { expression = false } = {}) {
     : !/\breturn\b/.test(trimmed) && !trimmed.includes(';') && !trimmed.includes('\n');
   const inner = isExpression ? `return (${trimmed});` : trimmed;
   return `async (args) => { ${inner} }`;
+}
+
+/**
+ * A LINT-SAFE PAGE SCRIPT (`tools/lab/*-page.js`, the weather lab's scripts) is one top-level
+ * `async function <name>(args) { ... }`: `npm run lint` lints tools/, and a body ending in a top-level `return` is a
+ * parse error there. Run as an `eval --file` body it would only define the function, so the call is appended here:
+ * `return await <name>(args);`. A body with a top-level `return` of its own (a classic body, or a driver that
+ * appended the call itself) is left alone, and so is any other file.
+ * @param {string} body @returns {string}
+ */
+export function withPageEntryCall(body) {
+  if (/^return\b/m.test(body)) return body;
+  const m = /^async function ([A-Za-z_$][\w$]*)\s*\(\s*args\s*\)/m.exec(body);
+  return m ? `${body}\nreturn await ${m[1]}(args);\n` : body;
 }
 
 /**
@@ -304,10 +320,10 @@ async function evalCmd(opts) {
         : String(opts.code ?? '');
   if (!body.trim()) throw new Error('give --code "<js>" or --file script.js');
   const args = typeof opts.args === 'string' ? JSON.parse(opts.args) : {};
+  const isCode = typeof opts.code === 'string' && opts.file === undefined;
   await withPage(opts, async (page) => {
-    const res = await runInPage(page, body, args, {
-      expression: typeof opts.code === 'string' && opts.file === undefined,
-    });
+    // a file or stdin body that is one lint-safe page function gets its call (see `withPageEntryCall`)
+    const res = await runInPage(page, isCode ? body : withPageEntryCall(body), args, { expression: isCode });
     out(res.value);
   });
 }

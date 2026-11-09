@@ -1,6 +1,11 @@
 // Node tests for the pure parts of tools/foundry-cdp/cdp.mjs (mmp-f0k.1).
 // Run by tools/run-tests.mjs (in-process `run(t)` suite).
-import { parseArgs, resolvePort, wrapScript, chromeArgs, parseReport } from './cdp.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseArgs, resolvePort, wrapScript, withPageEntryCall, chromeArgs, parseReport } from './cdp.mjs';
+
+const LAB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'lab');
 
 const throwsMatching = (fn, re) => {
   try {
@@ -65,4 +70,47 @@ export function run(t) {
   ok('parseReport: object passes through', parseReport({ settled: false })?.settled === false);
   ok('parseReport: value wrapper', parseReport({ value: '{"a":1}' })?.a === 1);
   ok('parseReport: junk is null', parseReport('not json') === null && parseReport(null) === null);
+
+  // ── LINT-SAFE PAGE SCRIPTS: one top-level `async function name(args)`, called for the caller ─────────────────
+  const page = '// note\nasync function fooPage(args) {\n  return args.x * 2;\n}\n';
+  ok(
+    'withPageEntryCall: a page function gets its call appended',
+    withPageEntryCall(page).endsWith('\nreturn await fooPage(args);\n')
+  );
+  ok(
+    'withPageEntryCall: a classic body with its own top-level return is left alone',
+    withPageEntryCall('const x = 1;\nreturn x;') === 'const x = 1;\nreturn x;'
+  );
+  const driven = `${page}return await fooPage(args);\n`;
+  ok('withPageEntryCall: a driver that appended the call already is left alone', withPageEntryCall(driven) === driven);
+  ok(
+    'withPageEntryCall: an inner (indented) function or another signature is not an entry',
+    withPageEntryCall('const f = 1;\n  async function inner(args) {}\n') ===
+      'const f = 1;\n  async function inner(args) {}\n' &&
+      withPageEntryCall('async function buildLab(manifest) {}\n') === 'async function buildLab(manifest) {}\n'
+  );
+
+  // Every lab page script compiles the way `eval --file` runs it (a syntax check of the real files, no page needed).
+  const scripts = fs.readdirSync(LAB).filter((f) => f.endsWith('.js') && f !== 'build-in-foundry.js');
+  const broken = [];
+  for (const f of scripts) {
+    const body = fs.readFileSync(path.join(LAB, f), 'utf8');
+    try {
+      new Function(`return (${wrapScript(withPageEntryCall(body))});`)();
+    } catch (e) {
+      broken.push(`${f}: ${e.message}`);
+    }
+  }
+  ok(
+    `every tools/lab page script compiles as \`cdp.mjs eval --file\` runs it (${scripts.length} scripts${broken.length ? `; broken: ${broken.join(' | ')}` : ''})`,
+    scripts.length > 0 && broken.length === 0
+  );
+  const uncalled = scripts.filter((f) => {
+    const body = fs.readFileSync(path.join(LAB, f), 'utf8');
+    return !/^return\b/m.test(withPageEntryCall(body));
+  });
+  ok(
+    `...and every one returns its result: a top-level return or a page function cdp calls (${uncalled.length ? `no result: ${uncalled.join(', ')}` : 'all'})`,
+    uncalled.length === 0
+  );
 }

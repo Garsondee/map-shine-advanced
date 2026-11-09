@@ -619,7 +619,7 @@ const VT_MESH_POOL_META = {
   regionMeshes: {
     label: 'Region-darkness mesh pool',
     note:
-      "hits = an existing region shape's mesh reused untouched; misses = a brand-new regionId:shapeIndex key OR " +
+      "hits = an existing region shape's mesh reused untouched; misses = a brand-new behaviour-key:shapeIndex key OR " +
       'an existing one whose shape TYPE changed under the same key (shapes are not retyped in place by Foundry — ' +
       'handled defensively anyway, same posture as lightMeshes).',
   },

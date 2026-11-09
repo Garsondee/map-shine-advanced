@@ -20,8 +20,24 @@
  *     ago). Picked up for real alongside weather simulation, not before.
  *
  * Split pure-vs-live the same way every other `foundry/` reader does:
- * `deriveRegionDarknessAdjuster` is the testable validation logic,
+ * `deriveRegionDarknessAdjusters` is the testable validation logic,
  * `readActiveDarknessRegions` is the live, impure gatherer. Never throws.
+ *
+ * EVERY BEHAVIOUR, NOT THE FIRST (2026-11-09, mmp-78u.22). Foundry makes one
+ * darkness mesh per active behaviour (`adjust-darkness-level.mjs`
+ * `#onBehaviorViewed`) and the minimum (brightest) adjusted value wins
+ * whatever their order. So a Region with two darkness behaviours gives TWO
+ * adjusters here, each with its own `key` (`<regionId>#<behaviour id>`), and the
+ * existing min rule (`computeRegionAdjustedDarkness`, the field's brightest-last
+ * draw) resolves them. This used to read only the first active one, so
+ * "OVERRIDE .9 then .4" rendered 0.9 where Foundry shows 0.4 (lab IR-26).
+ *
+ * LEVELS (2026-11-09, mmp-78u.19). Each adjuster carries the Region's own
+ * `levels` (ids; empty = every Level, `canvas-document.mjs#includedInLevel`).
+ * Foundry only views a darkness behaviour on those Levels
+ * (`board.mjs#handleRegionBehaviorViewedEvents`); the viewer applies that gate
+ * with `effects/lighting/region-geometry.js#selectRegionsForViewedFloor`, using
+ * `readRegionViewedLevelId` below for the viewed Level.
  *
  * @module foundry/scene-regions
  */
@@ -33,46 +49,55 @@ function clamp01(v) {
 }
 
 /**
- * Validate + normalize one raw region read into the shape `region-darkness.js`
- * consumes, or `null` if it contributes no darkness adjustment this frame
- * (hidden, no shapes, or no ACTIVE `adjustDarknessLevel` behavior).
+ * Validate + normalize one raw region read into the adjusters `region-darkness.js`
+ * consumes: ONE PER ACTIVE `adjustDarknessLevel` BEHAVIOUR (see this module's
+ * header), or `[]` if the region contributes no darkness adjustment this frame
+ * (hidden, no shapes, or no active darkness behaviour).
  *
  * @param {*} raw - `{regionId, hidden, shapes, elevationBottom, elevationTop,
- *   behaviors: [{type, disabled, mode, modifier}]}`, already plucked from a
- *   live `RegionDocument` (or a Node-test stand-in with the same shape).
+ *   levels, behaviors: [{id, type, disabled, mode, modifier}]}`, already plucked
+ *   from a live `RegionDocument` (or a Node-test stand-in with the same shape).
  *   `elevationBottom`/`elevationTop` are `null` when unrestricted — Foundry's
  *   own convention (`common/documents/region.mjs`'s `elevation` field
- *   comment: "Treat null as -Infinity"/"+Infinity" respectively).
- * @returns {{regionId: string, mode: number, modifier: number, shapes: object[],
- *   elevationBottom: number|null, elevationTop: number|null}|null}
+ *   comment: "Treat null as -Infinity"/"+Infinity" respectively). `levels` is
+ *   the Region's Level ids (`SceneLevelsSetField`); empty or absent = every Level.
+ * @returns {Array<{key: string, regionId: string, behaviorId: string, mode: number,
+ *   modifier: number, shapes: object[], elevationBottom: number|null,
+ *   elevationTop: number|null, levels: string[]}>}
  */
-export function deriveRegionDarknessAdjuster(raw) {
-  if (!raw || raw.hidden) return null;
-  if (typeof raw.regionId !== 'string' || raw.regionId.length === 0) return null;
+export function deriveRegionDarknessAdjusters(raw) {
+  if (!raw || raw.hidden) return [];
+  if (typeof raw.regionId !== 'string' || raw.regionId.length === 0) return [];
   const shapes = Array.isArray(raw.shapes) ? raw.shapes : null;
-  if (!shapes || shapes.length === 0) return null;
+  if (!shapes || shapes.length === 0) return [];
   const behaviors = Array.isArray(raw.behaviors) ? raw.behaviors : [];
-  // Foundry allows more than one behavior of the same type on a region; this
-  // reads the FIRST active one — a rare-edge-case simplification (multiple
-  // adjustDarknessLevel behaviors on ONE region), named rather than silent.
-  const active = behaviors.find((b) => b && b.type === 'adjustDarknessLevel' && !b.disabled);
-  if (!active) return null;
-  const mode = Number.isInteger(active.mode) ? active.mode : 0;
   // finite-or-null, NEVER clamp01'd — these are world elevation units (can be
   // negative, e.g. a basement), a completely different value class from the
-  // mode/modifier fields above. A non-finite authored value (never expected,
+  // mode/modifier fields below. A non-finite authored value (never expected,
   // but Foundry data can be malformed) reads as null (unrestricted) rather
   // than propagating a NaN into every downstream elevation-band comparison.
   const elevationBottom = Number.isFinite(raw.elevationBottom) ? raw.elevationBottom : null;
   const elevationTop = Number.isFinite(raw.elevationTop) ? raw.elevationTop : null;
-  return {
-    regionId: raw.regionId,
-    mode,
-    modifier: clamp01(active.modifier ?? 0),
-    shapes,
-    elevationBottom,
-    elevationTop,
-  };
+  const levels = Array.isArray(raw.levels) ? raw.levels.filter((id) => typeof id === 'string' && id.length > 0) : [];
+  const out = [];
+  behaviors.forEach((b, index) => {
+    if (!b || b.type !== 'adjustDarknessLevel' || b.disabled) return;
+    // The behaviour's own document id keeps the key stable when a sibling
+    // behaviour is added or removed; its position is the fallback.
+    const behaviorId = typeof b.id === 'string' && b.id.length > 0 ? b.id : String(index);
+    out.push({
+      key: `${raw.regionId}#${behaviorId}`,
+      regionId: raw.regionId,
+      behaviorId,
+      mode: Number.isInteger(b.mode) ? b.mode : 0,
+      modifier: clamp01(b.modifier ?? 0),
+      shapes,
+      elevationBottom,
+      elevationTop,
+      levels,
+    });
+  });
+  return out;
 }
 
 /**
@@ -81,8 +106,9 @@ export function deriveRegionDarknessAdjuster(raw) {
  * render frame down with it (same reasoning as every other `readScene*`/
  * `readActive*` function in this zone).
  *
- * @returns {{regions: Array<NonNullable<ReturnType<typeof deriveRegionDarknessAdjuster>>>,
- *   source: 'scene'|'default', reason: string|null}}
+ * @returns {{regions: ReturnType<typeof deriveRegionDarknessAdjusters>,
+ *   source: 'scene'|'default', reason: string|null}} one entry per active
+ *   darkness BEHAVIOUR (a Region with two gives two, sharing its `regionId`).
  */
 export function readActiveDarknessRegions() {
   try {
@@ -98,13 +124,14 @@ export function readActiveDarknessRegions() {
     for (const region of collection) {
       const behaviors = region?.behaviors
         ? [...region.behaviors].map((b) => ({
+            id: b?.id,
             type: b?.type,
             disabled: b?.disabled,
             mode: b?.system?.mode,
             modifier: b?.system?.modifier,
           }))
         : [];
-      const adjuster = deriveRegionDarknessAdjuster({
+      const adjusters = deriveRegionDarknessAdjusters({
         regionId: region?.id,
         hidden: region?.hidden,
         shapes: region?.shapes,
@@ -112,13 +139,15 @@ export function readActiveDarknessRegions() {
         // separate {bottom,top} field (verified against source, 2026-07-19,
         // the region-darkness elevation-gating fix). `?.elevation` itself
         // can legitimately be absent on a malformed/Node-test document;
-        // deriveRegionDarknessAdjuster's own Number.isFinite guard handles
+        // deriveRegionDarknessAdjusters' own Number.isFinite guard handles
         // an absent/non-numeric bottom or top as "unrestricted".
         elevationBottom: region?.elevation?.bottom,
         elevationTop: region?.elevation?.top,
+        // RegionDocument.levels — a Set of Level ids in v14 (SceneLevelsSetField).
+        levels: region?.levels ? Array.from(region.levels) : [],
         behaviors,
       });
-      if (adjuster) regions.push(adjuster);
+      for (const adjuster of adjusters) regions.push(adjuster);
     }
     return { regions, source: 'scene', reason: null };
   } catch (err) {
@@ -127,6 +156,29 @@ export function readActiveDarknessRegions() {
       source: 'default',
       reason: `reading canvas.scene.regions threw: ${err?.message ?? err}`,
     };
+  }
+}
+
+/**
+ * The Level id a Region's `levels` are tested against this frame: the Level
+ * MSA is drawing (`floorLevelId`, the viewer's current floor) when it is a real
+ * Level of this scene, else Foundry's `canvas.level` (the single-floor
+ * `'legacy'` case — the same fallback `scene-wall-clip.js` takes, with its
+ * reasons). `null` when neither resolves: the caller then fails OPEN (every
+ * Region stays active), never darkness-muting a scene on a lookup miss.
+ * @param {string|null} floorLevelId
+ * @returns {string|null}
+ */
+export function readRegionViewedLevelId(floorLevelId) {
+  try {
+    if (typeof canvas === 'undefined' || !canvas) return null;
+    if (typeof floorLevelId === 'string' && floorLevelId && canvas.scene?.levels?.get?.(floorLevelId)) {
+      return floorLevelId;
+    }
+    const id = canvas.level?.id;
+    return typeof id === 'string' && id ? id : null;
+  } catch {
+    return null;
   }
 }
 

@@ -94,7 +94,7 @@ This section describes the module's actual roster as of 0.12.0 (superseding an o
 - **Prism** / **Iridescence** — TSL/WebGPU-native refraction and iridescent surface finishes.
 - **Lens** — overlay/grime texture compositing on the camera lens.
 - **Bloom**, **Depth of Field**, **Grade** (color grading), **Sun Shadows**, **TAA** — the post-processing chain.
-- **Region Darkness Override** — a GM-set floor for every scene's darkening regions.
+- **Region darkness** — Foundry's Adjust Darkness Level Regions with a soft edge, scoped by their Levels, every behaviour honoured (the brightest wins). **Region Darkness Override** (off by default) forces one value on the viewed scene's darkening regions, never on a scene flagged `regionDarknessAuthored`; `MapShine.restoreRegionDarkness()` puts the originals back.
 
 ### World / weather state (`src/world/`)
 

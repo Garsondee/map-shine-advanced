@@ -730,6 +730,54 @@ export function regionOverlapsElevationBand(regionBottom, regionTop, floorBottom
 }
 
 /**
+ * Is a Region with these `levels` viewed on the Level `viewedLevelId`?
+ * Foundry's own rule (`client/documents/abstract/canvas-document.mjs#includedInLevel`):
+ * an EMPTY list means every Level; otherwise only the listed ones. A darkness
+ * behaviour is only drawn while its Region is viewed
+ * (`client/canvas/board.mjs#handleRegionBehaviorViewedEvents`), so a Region
+ * scoped to Ground does nothing while the Basement or Upper is viewed, whatever
+ * its elevation (lab IR-22/IR-23, mmp-78u.19).
+ *
+ * No viewed Level identified (`viewedLevelId` null) fails OPEN, the same
+ * posture as the elevation gate: never darkness-mute a scene on a lookup miss.
+ *
+ * @param {string[]|undefined} levels @param {string|null} viewedLevelId
+ * @returns {boolean}
+ */
+export function regionIncludedInLevel(levels, viewedLevelId) {
+  if (!Array.isArray(levels) || levels.length === 0) return true;
+  if (typeof viewedLevelId !== 'string' || viewedLevelId.length === 0) return true;
+  return levels.includes(viewedLevelId);
+}
+
+/**
+ * THE VIEWER'S REGION GATE, ONE PLACE (2026-11-09): the darkness Regions that
+ * apply while a floor is viewed. Two tests, both Foundry's:
+ *   1. LEVELS — `regionIncludedInLevel` against the VIEWED Level (Foundry scopes
+ *      a behaviour by the viewed Level, not by the pixel's floor).
+ *   2. ELEVATION — `regionOverlapsElevationBand` against the viewed floor's band.
+ *      Foundry depth-tests elevation PER PIXEL, so a lower floor seen through a
+ *      hole gets the Regions of ITS elevation; MSA still tests the VIEWED
+ *      floor's band for every pixel (the open half of mmp-78u.19: an
+ *      elevation-only Region over a stairwell, seen from above, is missed).
+ *
+ * @param {Array<{levels?: string[], elevationBottom: number|null, elevationTop: number|null}>} regions
+ * @param {{floorBottom?: number|null, floorTop?: number|null, viewedLevelId?: string|null}} view
+ * @returns {Array<object>} a new array (the input is never mutated)
+ */
+export function selectRegionsForViewedFloor(
+  regions,
+  { floorBottom = null, floorTop = null, viewedLevelId = null } = {}
+) {
+  if (!Array.isArray(regions)) return [];
+  return regions.filter(
+    (region) =>
+      regionIncludedInLevel(region?.levels, viewedLevelId) &&
+      regionOverlapsElevationBand(region?.elevationBottom, region?.elevationTop, floorBottom, floorTop)
+  );
+}
+
+/**
  * The scene darkness a query point ACTUALLY sees, after every darkness-
  * adjusting region it falls inside — the CPU/TSL-side stand-in for Foundry's
  * own per-pixel `darknessLevelTexture` sample (this module's header). No

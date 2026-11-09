@@ -318,6 +318,7 @@ import {
   watchWorldTimeOfDay,
   readGlobalLightConfig,
   readActiveDarknessRegions,
+  readRegionViewedLevelId,
   readGridDistancePixels,
   readGridSizePixels,
   // Foundry's own occluder set + vision polygons (scene-occlusion-sources.js).
@@ -424,6 +425,8 @@ import {
   applyDarknessAdjustment,
   computeMinimumDarknessFloor,
   regionOverlapsElevationBand,
+  regionIncludedInLevel,
+  selectRegionsForViewedFloor,
   DARKNESS_ADJUST_MODES,
   REGION_EDGE_FADE_PX,
   REGION_FIELD_BLUR_TAPS,
@@ -7086,7 +7089,7 @@ async function startVtPanViewerUnserialized({
      * invalidated). `bakes` counts real re-bakes, for getRegionDarknessInfo. */
     const regionField = { plan: null, hash: 0, bakedHash: null, bakes: 0, retries: 0, shapeCount: 0, boxes: [] };
 
-    /** `${regionId}:${shapeIndex}` -> { mesh, material, kind, uMode,
+    /** `${adjuster key}:${shapeIndex}` (key = `<regionId>#<behaviour id>`) -> { mesh, material, kind, uMode,
      * uModifier, uCoverage, ...kind-specific uniforms }. Reconciled
      * every frame in updateRegionDarknessMeshes; same hide-not-dispose
      * lifecycle gap lightMeshes documents (a region genuinely deleted is
@@ -7186,9 +7189,12 @@ async function startVtPanViewerUnserialized({
       // because a floor lookup came up empty this one frame.
       const floorBottom = currentFloor?.elevationBottom ?? null;
       const floorTop = currentFloor?.elevationTop ?? null;
-      const filtered = regions.filter((region) =>
-        regionOverlapsElevationBand(region.elevationBottom, region.elevationTop, floorBottom, floorTop)
-      );
+      // THE LEVELS GATE (2026-11-09, mmp-78u.19): a Region scoped to Levels is
+      // only viewed on those Levels (Foundry's includedInLevel), on top of the
+      // elevation band above. The viewed Level is the floor MSA draws (its real
+      // Level id), else canvas.level; null fails open like the band does.
+      const viewedLevelId = readRegionViewedLevelId(currentFloor?.id ?? null);
+      const filtered = selectRegionsForViewedFloor(regions, { floorBottom, floorTop, viewedLevelId });
       // ⚠️ THE GATING DECISION, RECORDED (2026-07-26). "15 of 15 regions active"
       // reads identically whether every region genuinely belongs to this floor's
       // band or the floor lookup returned null and the filter FAILED OPEN — and
@@ -7211,6 +7217,7 @@ async function startVtPanViewerUnserialized({
         floorIndex: view?.floorIndex ?? null,
         floorBottom,
         floorTop,
+        viewedLevelId,
         regions,
         filteredCount: filtered.length,
       };
@@ -7271,7 +7278,9 @@ async function startVtPanViewerUnserialized({
                   ? 'emanation-polygon'
                   : 'emanation-ellipse' // circle or ellipse base
               : shape.type;
-        const key = `${region.regionId}:${shapeIndex}`;
+        // One adjuster per darkness BEHAVIOUR (2026-11-09): two behaviours of
+        // one Region share its regionId, so the pool keys on the adjuster's own key.
+        const key = `${region.key ?? region.regionId}:${shapeIndex}`;
         seen.add(key);
         let entry = regionMeshes.get(key);
         if (!entry || entry.kind !== kind) {
@@ -33876,7 +33885,8 @@ async function startVtPanViewerUnserialized({
           scope:
             'rectangle/ellipse/circle/polygon/cone/ring/line/emanation shapes, hole (subtraction) support — ' +
             'all built 2026-07-19 (see keyhole-region-shapes-and-holes-build memory). Elevation-band-gated ' +
-            'against the currently viewed floor, and overlaps resolved by MIN (brightest) adjusted value. ' +
+            'against the currently viewed floor, Levels-scoped to the viewed Level, one mesh set per darkness ' +
+            'behaviour (2026-11-09), and overlaps resolved by MIN (brightest) adjusted value. ' +
             "NONE of the shape/hole GPU work has been live-verified in a browser before this session's own " +
             "live checks — region-darkness.js's own header has the full citations.",
           poolSize: regionMeshes.size,
@@ -33900,25 +33910,36 @@ async function startVtPanViewerUnserialized({
           // Regions` stashes every frame — see `lastRegionGatingRaw`'s own doc
           // for why the `.map()` moved here instead of running unconditionally
           // on the hot path.
+          // (2026-11-09) Also the LEVELS gate: `viewedLevelId` is what each Region's
+          // `levels` were tested against (null = failed open); per entry, `inBand`
+          // and `inLevel` say which gate dropped it. One entry per darkness BEHAVIOUR.
           elevationGating: lastRegionGatingRaw
             ? {
                 floorIndex: lastRegionGatingRaw.floorIndex,
                 floorBand: { bottom: lastRegionGatingRaw.floorBottom, top: lastRegionGatingRaw.floorTop },
                 failedOpen: lastRegionGatingRaw.floorBottom === null && lastRegionGatingRaw.floorTop === null,
+                viewedLevelId: lastRegionGatingRaw.viewedLevelId ?? null,
                 total: lastRegionGatingRaw.regions.length,
                 kept: lastRegionGatingRaw.filteredCount,
                 dropped: lastRegionGatingRaw.regions.length - lastRegionGatingRaw.filteredCount,
-                bands: lastRegionGatingRaw.regions.map((r) => ({
-                  key: r.key,
-                  bottom: r.elevationBottom ?? null,
-                  top: r.elevationTop ?? null,
-                  kept: regionOverlapsElevationBand(
+                bands: lastRegionGatingRaw.regions.map((r) => {
+                  const inBand = regionOverlapsElevationBand(
                     r.elevationBottom,
                     r.elevationTop,
                     lastRegionGatingRaw.floorBottom,
                     lastRegionGatingRaw.floorTop
-                  ),
-                })),
+                  );
+                  const inLevel = regionIncludedInLevel(r.levels, lastRegionGatingRaw.viewedLevelId ?? null);
+                  return {
+                    key: r.key ?? r.regionId,
+                    bottom: r.elevationBottom ?? null,
+                    top: r.elevationTop ?? null,
+                    levels: r.levels ?? [],
+                    inBand,
+                    inLevel,
+                    kept: inBand && inLevel,
+                  };
+                }),
               }
             : 'not yet evaluated',
           // The shared uniforms EVERY region's material actually reads —

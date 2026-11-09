@@ -1,5 +1,5 @@
 ---
-sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/lens.js (Glare), src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), src/foundry/scene-environment.js (readSceneAuthoredDarkness), boot.js onSweepToHour
+sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/lens.js (Glare), src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), src/foundry/scene-environment.js (readSceneAuthoredDarkness), src/foundry/scene-regions.js (every darkness behaviour), src/foundry/region-darkness-override.js (off by default, regionDarknessAuthored, restoreRegionDarkness), boot.js onSweepToHour
 ---
 Map Shine lights a scene like a camera would see it: a real sun that moves, shadows that stretch, lamps that glow, and a camera that copes with bright and dark together.
 
@@ -25,6 +25,12 @@ The scene's own **Environment** settings in Foundry (Base and Darkness: tint, lu
 ### Window light
 
 Rooms get daylight through the patches you paint on `_Window`. It follows the sun and dims with clouds, so interiors feel connected to the weather.
+
+### Dark rooms
+
+Foundry's **Adjust Darkness Level** Regions darken rooms as they do in Foundry, with a soft edge. Give a room its own Region if it should be brighter than the rest. When one Region has several darkness behaviours, the brightest wins.
+
+**Studio → Effects → Region Darkness Override** forces one value on every darkening Region of the scene you view. It is off unless you switch it on, and it never changes a scene flagged as tuned room by room (`regionDarknessAuthored`). It keeps each original: run `MapShine.restoreRegionDarkness()` in the console to put them back. Switching it off does not.
 
 ### The camera
 

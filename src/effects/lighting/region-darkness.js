@@ -92,11 +92,12 @@
  *   - ✅ CORRECTED, was WRONG: gated by the region's own `elevation:
  *     {bottom,top}` (bottom/top `null` = Foundry's own "unrestricted", per
  *     `common/documents/region.mjs`'s own field comment) — see
- *     `foundry/scene-regions.js#deriveRegionDarknessAdjuster` for the read
- *     and `vt-pan-viewer.js#updateRegionDarknessMeshes` for the per-frame
+ *     `foundry/scene-regions.js#deriveRegionDarknessAdjusters` for the read
+ *     and `region-geometry.js#selectRegionsForViewedFloor` for the per-frame
  *     filter against the CURRENTLY VIEWED floor's own elevation band
  *     (`foundry/active-scene-source.js#getActiveSceneFloors`'s
- *     `elevationBottom`/`elevationTop`). A prior version of this comment
+ *     `elevationBottom`/`elevationTop`) and, since 2026-11-09, the Region's
+ *     own `levels` against the viewed Level. A prior version of this comment
  *     said "not gated... no per-floor query dimension yet" — that was true
  *     when written and is fixed now: verified against source that real
  *     Foundry DOES gate this behavior by elevation (`adjust-darkness-

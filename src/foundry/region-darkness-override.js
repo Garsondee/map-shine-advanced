@@ -1,31 +1,39 @@
 /**
- * REGION DARKNESS OVERRIDE — a world-wide consistency pass over every scene's
+ * REGION DARKNESS OVERRIDE — an OPT-IN consistency pass over the viewed scene's
  * "Adjust Darkness Level" region behaviors (the read-side of this same
  * behavior type lives in `scene-regions.js`; see its own header for the
  * schema receipt against the vendored Foundry source).
  *
- * THE PROBLEM: different scenes/authors hand-type wildly inconsistent
- * `modifier` values (and sometimes different `mode`s) for "darken this
- * building's interior" regions, so the same nominal "indoors" reads
- * differently map to map. This module lets a GM pin one number (default
- * 0.75) that every darkening region on the CURRENTLY VIEWED scene is forced
- * to use, re-applied on every scene load and every settings change.
+ * WHAT IT DOES, WHEN A GM TURNS IT ON: pins one number (default 0.75) that
+ * every darkening region behavior on the CURRENTLY VIEWED scene is forced to
+ * use, re-applied on every scene load and every settings change, so the same
+ * nominal "indoors" reads the same map to map.
+ *
+ * ⚠️ OFF BY DEFAULT SINCE 2026-11-09 (decision mmp-6pc.3). It shipped ON
+ * (author, 2026-09-09: "EVERY map in the catalogue darkens interiors by the
+ * same amount"). The author reversed that on 2026-11-09: "I was wrong about
+ * darkness region uniforms ... carefully adjusted by you on a per scene basis
+ * ... splitting the regions up a bit and using different values". Rooms are
+ * now judged one by one, and a forced value flattens exactly that work (it
+ * rewrote Docklands' DARKEN 0.4 and Speakeasy's DARKEN 0.75 to OVERRIDE 0.9,
+ * mmp-6pc.2). So:
+ *   1. `regionDarknessOverrideEnabled` defaults OFF. Foundry stores a world
+ *      setting only once someone sets it, so a world where a GM ever flipped
+ *      the toggle keeps its stored value until it is switched again.
+ *   2. Even when ON, a scene flagged `flags["map-shine-advanced"]
+ *      .regionDarknessAuthored === true` is never rewritten. Map-agent editions
+ *      set it: their per-room values are the authored ones.
+ *   3. `restoreRegionDarkness` puts the stashed originals back. It is an
+ *      explicit GM command (`MapShine.restoreRegionDarkness`) and NEVER runs on
+ *      its own: turning the override off does not undo what it already wrote.
  *
  * TWO WORLD-SCOPED SETTINGS, kept OUT of the per-effect enable/disable
  * cascade in `effects/effect-settings.js` on purpose: this is not a rendered,
  * per-frame "effect" the way Grade or Bloom are (no GPU/shader component at
  * all), and unlike every other effect's params it must NOT have a per-client
- * override layer — per-client divergence is exactly what this feature exists
- * to eliminate. Shape borrowed from `sky-persistence.js` instead:
- *   - `regionDarknessOverrideEnabled` (bool, world) — ON by default. This is
- *     a deliberate, confirmed choice (author, 2026-09-09): the whole point of
- *     the feature is that EVERY map in the catalogue darkens interiors by the
- *     same amount automatically, not an opt-in a GM has to remember to flip
- *     on per world. It DOES mean updating the module can rewrite a scene's
- *     hand-authored `modifier` the first time it loads post-update — accepted
- *     outright in favour of catalogue-wide consistency, which is exactly why
- *     the pre-override `{mode, modifier}` is still stashed in a flag below
- *     (not a safety rail against this default, just cheap insurance).
+ * override layer — it writes scene documents every client shares. Shape
+ * borrowed from `sky-persistence.js` instead:
+ *   - `regionDarknessOverrideEnabled` (bool, world) — OFF by default (above).
  *   - `regionDarknessOverrideValue` (world) — the override level, 0..1,
  *     default 0.75. Stored as a string: the settings adapter only has
  *     `bool`/`enum` kinds (its own header: "a thin, dumb wrapper... widening
@@ -36,21 +44,23 @@
  *   card, not Foundry's native settings sheet (same reasoning as the sky
  *   setting: a second editing surface for the same value is just a mirror).
  *
- * WHICH REGIONS COUNT AS "DARKENING": a `BRIGHTEN`-mode behavior is, by
+ * WHICH BEHAVIORS COUNT AS "DARKENING": a `BRIGHTEN`-mode behavior is, by
  * construction, doing the opposite of this feature's job and is never
  * touched. An `OVERRIDE`-mode behavior with `modifier === 0` is a GM
  * deliberately forcing "always fully lit" (a lit foyer, a magic-lit room) —
  * also never touched. Everything else active (`DARKEN` at any modifier, or
- * `OVERRIDE` with `modifier > 0`) is a darkening region and gets forced to
+ * `OVERRIDE` with `modifier > 0`) is darkening and gets forced to
  * `{mode: OVERRIDE, modifier: <override value>}` — OVERRIDE because the
- * whole point is one absolute, consistent number, not a value blended
- * against whatever ambient darkness a scene happens to have at the moment.
- * See `isDarkeningRegionBehavior` below for the exact rule, Node-tested.
+ * whole point is one absolute, consistent number. EVERY darkening behavior of
+ * a Region is rewritten, not only its first (2026-11-09): MSA now honours every
+ * darkness behavior (Foundry's min rule, `scene-regions.js`), so a second one
+ * left alone would still win wherever it is brighter. See
+ * `isDarkeningRegionBehavior` below for the exact rule, Node-tested.
  *
- * A region's pre-override `{mode, modifier}` is stashed once, in a flag, on
- * the first write that actually changes it — not surfaced anywhere yet (no
- * restore UI/command exists), but kept rather than lost outright, since this
- * rewrites hand-authored data across the whole map catalogue.
+ * A behavior's pre-override `{mode, modifier}` is stashed once, in a flag
+ * (`regionDarknessOverrideOriginal`), on the first write that actually changes
+ * it, so the stash always holds the value from BEFORE any override.
+ * `restoreRegionDarkness` writes it back and clears the flag.
  *
  * GM-GATED exactly like `pf2e-darkness-standdown.js`: `applyRegionDarknessOverride`
  * is called unconditionally on every client (from `canvasReady` and from the
@@ -70,6 +80,9 @@ export const REGION_DARKNESS_OVERRIDE_NAMESPACE = 'map-shine-advanced';
 export const REGION_DARKNESS_OVERRIDE_ENABLED_KEY = 'regionDarknessOverrideEnabled';
 export const REGION_DARKNESS_OVERRIDE_VALUE_KEY = 'regionDarknessOverrideValue';
 export const DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE = 0.75;
+/** Scene flag: `true` = this scene's Region darkness was set room by room; the override never rewrites it. */
+export const REGION_DARKNESS_AUTHORED_FLAG_KEY = 'regionDarknessAuthored';
+const NS = REGION_DARKNESS_OVERRIDE_NAMESPACE;
 const ORIGINAL_FLAG_KEY = 'regionDarknessOverrideOriginal';
 
 /** `AdjustDarknessLevelRegionBehaviorType.MODES` — verbatim from source
@@ -92,7 +105,7 @@ export const REGION_DARKNESS_OVERRIDE_PARAMS = Object.freeze({
     default: DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE,
     category: 'Darkness',
     label: 'Interior darkness',
-    help: 'Every darkening "Adjust Darkness Level" region behavior on the current scene is forced to this value — 0 fully lit, 1 fully dark — so every interior reads the same regardless of what each scene\'s author originally typed in.',
+    help: 'Off by default. When on, every darkening "Adjust Darkness Level" region on the viewed scene is forced to this value (0 fully lit, 1 fully dark). Scenes tuned room by room (flagged regionDarknessAuthored) are never changed. Originals are kept: MapShine.restoreRegionDarkness() puts them back; switching this off does not.',
   },
 });
 
@@ -108,16 +121,16 @@ function clamp01(v, fallback = DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE) {
  */
 export function registerRegionDarknessOverrideSettings(options = {}) {
   registerSettings(
-    REGION_DARKNESS_OVERRIDE_NAMESPACE,
+    NS,
     [
       {
         key: REGION_DARKNESS_OVERRIDE_ENABLED_KEY,
         scope: 'world',
         kind: 'bool',
-        default: true,
+        default: false,
         config: false,
         name: 'Region darkness override',
-        hint: "Force every scene's darkening region behaviors to one consistent value.",
+        hint: "Force the viewed scene's darkening region behaviors to one value (off by default).",
       },
       {
         key: REGION_DARKNESS_OVERRIDE_VALUE_KEY,
@@ -139,16 +152,15 @@ export function registerRegionDarknessOverrideSettings(options = {}) {
  */
 export function readRegionDarknessOverrideSettings() {
   try {
-    const enabled = readSetting(REGION_DARKNESS_OVERRIDE_NAMESPACE, REGION_DARKNESS_OVERRIDE_ENABLED_KEY) === true;
-    const raw = readSetting(REGION_DARKNESS_OVERRIDE_NAMESPACE, REGION_DARKNESS_OVERRIDE_VALUE_KEY);
+    const enabled = readSetting(NS, REGION_DARKNESS_OVERRIDE_ENABLED_KEY) === true;
+    const raw = readSetting(NS, REGION_DARKNESS_OVERRIDE_VALUE_KEY);
     return { enabled, value: clamp01(raw) };
   } catch {
     // A read this early (before `registerRegionDarknessOverrideSettings` has
-    // run) is a wiring bug, not a normal state — but if it ever happens, fall
-    // back to the same "on" default the setting itself registers with, not
-    // the old off-by-default posture, so a bug here never silently reverts
-    // the catalogue-wide-consistency intent this feature exists for.
-    return { enabled: true, value: DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE };
+    // run) is a wiring bug, not a normal state — it falls back to the same OFF
+    // the setting itself registers with, so a bug here can never rewrite a
+    // scene's hand-set darkness.
+    return { enabled: false, value: DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE };
   }
 }
 
@@ -161,14 +173,10 @@ export function readRegionDarknessOverrideSettings() {
 export async function writeRegionDarknessOverrideSettings(patch) {
   try {
     if (typeof patch?.enabled === 'boolean') {
-      await writeSetting(REGION_DARKNESS_OVERRIDE_NAMESPACE, REGION_DARKNESS_OVERRIDE_ENABLED_KEY, patch.enabled);
+      await writeSetting(NS, REGION_DARKNESS_OVERRIDE_ENABLED_KEY, patch.enabled);
     }
     if (typeof patch?.value === 'number') {
-      await writeSetting(
-        REGION_DARKNESS_OVERRIDE_NAMESPACE,
-        REGION_DARKNESS_OVERRIDE_VALUE_KEY,
-        String(clamp01(patch.value))
-      );
+      await writeSetting(NS, REGION_DARKNESS_OVERRIDE_VALUE_KEY, String(clamp01(patch.value)));
     }
     return { ok: true, reason: null };
   } catch (err) {
@@ -192,40 +200,93 @@ export function isDarkeningRegionBehavior(mode, modifier) {
 }
 
 /**
- * Live gather of every non-hidden, shaped region's first active, currently-
- * darkening `adjustDarknessLevel` BEHAVIOR DOCUMENT (not the pure-projected
- * shape `scene-regions.js#readActiveDarknessRegions` returns — this needs
- * the real handle to call `.update()`/`.getFlag()` on) on the currently
- * viewed scene. Browser-only, same split as every other live reader in this
- * zone — left untested under Node, matching `scene-regions.test.mjs`'s own
- * documented split.
- * @returns {object[]} RegionBehavior documents.
+ * Was this scene's Region darkness set room by room (the override's opt-out)?
+ * Reads the flag straight off the document's `flags`, so a plain object works too.
+ * @param {*} scene @returns {boolean}
  */
-function findDarkeningBehaviors() {
-  const collection = typeof canvas !== 'undefined' ? (canvas?.scene?.regions ?? null) : null;
-  if (!collection) return [];
-  const found = [];
-  for (const region of collection) {
-    if (region?.hidden) continue;
-    if (!Array.isArray(region?.shapes) || region.shapes.length === 0) continue;
-    const behaviors = region?.behaviors ? [...region.behaviors] : [];
-    const behavior = behaviors.find(
-      (b) =>
-        b?.type === 'adjustDarknessLevel' &&
-        !b?.disabled &&
-        isDarkeningRegionBehavior(b?.system?.mode, b?.system?.modifier)
-    );
-    if (behavior) found.push(behavior);
-  }
-  return found;
+export function isSceneRegionDarknessAuthored(scene) {
+  return scene?.flags?.[NS]?.[REGION_DARKNESS_AUTHORED_FLAG_KEY] === true;
+}
+
+/** @param {*} behavior @returns {*} the stashed pre-override `{mode, modifier}`, or undefined. */
+function readStash(behavior) {
+  return behavior?.flags?.[NS]?.[ORIGINAL_FLAG_KEY];
+}
+
+/** The update entry that removes the stash: Foundry v14's `ForcedDeletion`, else the legacy `-=` key. */
+function stashDeletion() {
+  const ForcedDeletion = globalThis.foundry?.data?.operators?.ForcedDeletion;
+  return typeof ForcedDeletion === 'function'
+    ? { [`flags.${NS}.${ORIGINAL_FLAG_KEY}`]: new ForcedDeletion() }
+    : { [`flags.${NS}.-=${ORIGINAL_FLAG_KEY}`]: null };
+}
+
+/** Iterate a Foundry Collection, an array, or nothing. */
+function each(collection) {
+  return collection && typeof collection[Symbol.iterator] === 'function' ? collection : [];
 }
 
 /**
- * THE MAIN ENTRY POINT — force every darkening region on the current scene to
- * the configured override value. GM-gated (a benign no-op, honestly
- * reported, on every other client); safe and cheap to call unconditionally
- * and often (scene load, settings change) since it skips any behavior
- * already at the target `{mode, modifier}`.
+ * The override's writes for a set of regions, as data. Pure, Node-tested:
+ * every active, darkening `adjustDarknessLevel` behavior of every non-hidden,
+ * shaped region that is not already at `value` gets
+ * `{system.mode: OVERRIDE, system.modifier: value}`, plus the stash when it has none.
+ * @param {Iterable<object>} regions - `canvas.scene.regions`, or stand-ins.
+ * @param {number} value
+ * @returns {{scanned: number, updates: Array<{behavior: object, payload: object}>}}
+ */
+export function planRegionDarknessOverride(regions, value) {
+  const updates = [];
+  let scanned = 0;
+  for (const region of each(regions)) {
+    if (!region || region.hidden) continue;
+    if (!Array.isArray(region.shapes) || region.shapes.length === 0) continue;
+    for (const behavior of each(region.behaviors)) {
+      if (behavior?.type !== 'adjustDarknessLevel' || behavior?.disabled) continue;
+      const mode = behavior?.system?.mode;
+      const modifier = behavior?.system?.modifier;
+      if (!isDarkeningRegionBehavior(mode, modifier)) continue;
+      scanned += 1;
+      if (mode === MODES.OVERRIDE && Math.abs(Number(modifier) - value) < 0.001) continue; // already compliant
+      const payload = { 'system.mode': MODES.OVERRIDE, 'system.modifier': value };
+      if (readStash(behavior) === undefined) payload[`flags.${NS}.${ORIGINAL_FLAG_KEY}`] = { mode, modifier };
+      updates.push({ behavior, payload });
+    }
+  }
+  return { scanned, updates };
+}
+
+/**
+ * The restore's writes for a set of regions, as data. Pure, Node-tested:
+ * every darkness behavior carrying a stash gets its `{mode, modifier}` back and
+ * the stash removed — hidden regions and disabled behaviors included, since the
+ * stash is the only record of what the author typed.
+ * @param {Iterable<object>} regions
+ * @returns {{updates: Array<{behavior: object, payload: object}>}}
+ */
+export function planRegionDarknessRestore(regions) {
+  const updates = [];
+  for (const region of each(regions)) {
+    for (const behavior of each(region?.behaviors)) {
+      if (behavior?.type !== 'adjustDarknessLevel') continue;
+      const stash = readStash(behavior);
+      if (!stash || typeof stash !== 'object') continue;
+      const payload = { ...stashDeletion() };
+      if (Number.isInteger(stash.mode)) payload['system.mode'] = stash.mode;
+      if (Number.isFinite(Number(stash.modifier))) payload['system.modifier'] = clamp01(stash.modifier, 0);
+      updates.push({ behavior, payload });
+    }
+  }
+  return { updates };
+}
+
+/**
+ * THE MAIN ENTRY POINT — force every darkening region behavior on the current
+ * scene to the configured override value, when the override is ON and the scene
+ * is not flagged `regionDarknessAuthored`. GM-gated (a benign no-op, honestly
+ * reported, on every other client); safe and cheap to call unconditionally and
+ * often (scene load, settings change) since it skips any behavior already at
+ * the target `{mode, modifier}`.
  *
  * @returns {Promise<{ok: boolean, reason: string|null, scanned: number, updated: number}>}
  */
@@ -241,20 +302,22 @@ export async function applyRegionDarknessOverride() {
     };
   }
   try {
-    const candidates = findDarkeningBehaviors();
+    const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
+    if (isSceneRegionDarknessAuthored(scene)) {
+      return {
+        ok: true,
+        reason: `scene "${scene?.name ?? scene?.id}" is flagged ${REGION_DARKNESS_AUTHORED_FLAG_KEY}: its per-room darkness is kept`,
+        scanned: 0,
+        updated: 0,
+      };
+    }
+    const { scanned, updates } = planRegionDarknessOverride(scene?.regions, value);
     let updated = 0;
-    for (const behavior of candidates) {
-      const mode = behavior?.system?.mode;
-      const modifier = behavior?.system?.modifier;
-      if (mode === MODES.OVERRIDE && Math.abs(Number(modifier) - value) < 0.001) continue; // already compliant
-      const payload = { 'system.mode': MODES.OVERRIDE, 'system.modifier': value };
-      if (behavior.getFlag(REGION_DARKNESS_OVERRIDE_NAMESPACE, ORIGINAL_FLAG_KEY) === undefined) {
-        payload[`flags.${REGION_DARKNESS_OVERRIDE_NAMESPACE}.${ORIGINAL_FLAG_KEY}`] = { mode, modifier };
-      }
+    for (const { behavior, payload } of updates) {
       await behavior.update(payload);
       updated += 1;
     }
-    return { ok: true, reason: null, scanned: candidates.length, updated };
+    return { ok: true, reason: null, scanned, updated };
   } catch (err) {
     return {
       ok: false,
@@ -262,5 +325,59 @@ export async function applyRegionDarknessOverride() {
       scanned: 0,
       updated: 0,
     };
+  }
+}
+
+/**
+ * THE RESTORE — an explicit GM command (`MapShine.restoreRegionDarkness`),
+ * NEVER called by MSA itself: puts every stashed pre-override `{mode, modifier}`
+ * back and clears the stash, on the viewed scene, or on every scene with
+ * `{all: true}`.
+ *
+ * A scene flagged `regionDarknessAuthored` is skipped unless
+ * `{includeAuthored: true}`: its rooms were set one by one after the override
+ * ran, and the stash there is history, not the value anyone wants back.
+ * While the override is still ON, the next view of an unflagged scene rewrites
+ * it again; the result says so (`warning`).
+ *
+ * @param {{all?: boolean, includeAuthored?: boolean}} [options]
+ * @returns {Promise<{ok: boolean, reason: string|null, scenes: number, restored: number,
+ *   skippedAuthored: string[], warning: string|null}>}
+ */
+export async function restoreRegionDarkness({ all = false, includeAuthored = false } = {}) {
+  const result = { ok: true, reason: null, scenes: 0, restored: 0, skippedAuthored: [], warning: null };
+  if (!readIsGM()) {
+    return { ...result, ok: false, reason: 'not GM — only the GM can restore region darkness' };
+  }
+  try {
+    const viewed = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
+    const scenes = all ? [...each(typeof game !== 'undefined' ? game?.scenes : null)] : viewed ? [viewed] : [];
+    if (scenes.length === 0) {
+      result.reason = all ? 'no scenes in this world' : 'no scene is viewed — pass {all: true} to restore every scene';
+      return result;
+    }
+    for (const scene of scenes) {
+      if (!includeAuthored && isSceneRegionDarknessAuthored(scene)) {
+        result.skippedAuthored.push(String(scene?.name ?? scene?.id));
+        continue;
+      }
+      const { updates } = planRegionDarknessRestore(scene?.regions);
+      if (updates.length === 0) continue;
+      for (const { behavior, payload } of updates) {
+        await behavior.update(payload);
+        result.restored += 1;
+      }
+      result.scenes += 1;
+    }
+    if (result.skippedAuthored.length > 0) {
+      result.reason = `kept ${result.skippedAuthored.length} scene(s) flagged ${REGION_DARKNESS_AUTHORED_FLAG_KEY} (pass {includeAuthored: true} to restore them too)`;
+    }
+    if (result.restored > 0 && readRegionDarknessOverrideSettings().enabled) {
+      result.warning =
+        'the Region darkness override is still ON: the next view of an unflagged scene rewrites it again. Switch it off in Studio → Region Darkness Override.';
+    }
+    return result;
+  } catch (err) {
+    return { ...result, ok: false, reason: `restoring region darkness failed: ${err?.message ?? err}` };
   }
 }

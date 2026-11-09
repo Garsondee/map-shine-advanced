@@ -402,21 +402,33 @@ export { readSceneDoors, deriveDoorSnapshot, normalizeDoorAnimationType, watchDo
 
 // THE REGION READER — feeds effects/lighting/region-darkness.js's per-point
 // darkness adjustment; the one place canvas.scene.regions (+ each region's
-// own "Adjust Darkness Level" behavior) is read. `readSuppressWeatherStub` is
-// a deliberate, documented no-op — see scene-regions.js's own header.
-export { readActiveDarknessRegions, deriveRegionDarknessAdjuster, readSuppressWeatherStub } from './scene-regions.js';
+// own "Adjust Darkness Level" behaviors, one adjuster each) is read.
+// `readRegionViewedLevelId` names the Level a Region's `levels` are tested
+// against. `readSuppressWeatherStub` is a deliberate, documented no-op — see
+// scene-regions.js's own header.
+export {
+  readActiveDarknessRegions,
+  deriveRegionDarknessAdjusters,
+  readRegionViewedLevelId,
+  readSuppressWeatherStub,
+} from './scene-regions.js';
 
-// THE REGION DARKNESS OVERRIDE — a GM-set, world-scoped consistency value
-// every scene's darkening `adjustDarknessLevel` behaviors are forced to on
-// scene load (own header: `region-darkness-override.js`).
+// THE REGION DARKNESS OVERRIDE — an opt-in (OFF by default since 2026-11-09),
+// GM-set, world-scoped value every darkening `adjustDarknessLevel` behavior of
+// the viewed scene is forced to, except on scenes flagged
+// `regionDarknessAuthored`; `restoreRegionDarkness` puts the stashed originals
+// back (own header: `region-darkness-override.js`).
 export {
   registerRegionDarknessOverrideSettings,
   readRegionDarknessOverrideSettings,
   writeRegionDarknessOverrideSettings,
   applyRegionDarknessOverride,
+  restoreRegionDarkness,
   isDarkeningRegionBehavior,
+  isSceneRegionDarknessAuthored,
   REGION_DARKNESS_OVERRIDE_PARAMS,
   DEFAULT_REGION_DARKNESS_OVERRIDE_VALUE,
+  REGION_DARKNESS_AUTHORED_FLAG_KEY,
 } from './region-darkness-override.js';
 export { readPaintContext, savePaintedMasks, loadPaintedMasks, readFloorWalls } from './paint-adapter.js';
 // MSA READY (2026-11-01) — full-size mask files: Save next to map, Download, Import.

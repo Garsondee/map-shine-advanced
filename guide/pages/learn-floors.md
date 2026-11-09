@@ -1,5 +1,5 @@
 ---
-sources: Foundry v14 Levels, src/foundry/mask-discovery.js (discoveryTargetsFrom), src/effects/depth-of-field.js (blurPerFloor), boot.js level visibility
+sources: Foundry v14 Levels, src/foundry/mask-discovery.js (discoveryTargetsFrom), src/effects/depth-of-field.js (blurPerFloor), boot.js level visibility, src/effects/lighting/region-geometry.js (selectRegionsForViewedFloor)
 ---
 Foundry lets one scene hold several floors, called **Levels**: a cellar, a ground floor and an attic stacked above each other. Map Shine draws each floor with its own masks and effects.
 
@@ -15,6 +15,12 @@ Each Level lists the other floors that can be seen from it. Map Shine follows th
 
 - From an upper floor, list the floors **below** if its art has holes to look through: a balcony, a broken floor, a stairwell.
 - Don't list floors **above** unless their art is mostly transparent. An opaque floor above covers the one you're on. [The wrong floor is showing](page:fix-wrong-floor).
+
+### Dark rooms on each floor
+
+A darkness Region follows its own **Levels** list, as in Foundry: leave it empty and it darkens every floor; fill it and it works only while you view one of those floors. Its elevation range limits it too.
+
+> [!note] Looking down a stairwell, the floor below takes the darkness Regions of the floor you are on, not its own.
 
 ### Roofs and overhead tiles
 

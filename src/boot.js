@@ -794,6 +794,7 @@ import {
   readRegionDarknessOverrideSettings,
   writeRegionDarknessOverrideSettings,
   applyRegionDarknessOverride,
+  restoreRegionDarkness,
   REGION_DARKNESS_OVERRIDE_PARAMS,
   readScenePlayerLightPermissions,
   writeScenePlayerLightPermissions,
@@ -1062,6 +1063,14 @@ MapShine.THREE = THREE; // single Three instance for the whole V3 tree
 // vt-pan-viewer.js#setDarknessRealism / environmental-light.js.
 MapShine.setDarknessRealism = setDarknessRealism;
 MapShine.getDarknessRealism = getDarknessRealism;
+// THE REGION DARKNESS RESTORE (2026-11-09, decision mmp-6pc.3): GM only. Puts back
+// every "Adjust Darkness Level" value the Region Darkness Override replaced (it
+// stashes each original in a flag) and clears the stash. `{all: true}` does every
+// scene; a scene flagged `regionDarknessAuthored` is kept unless
+// `{includeAuthored: true}`. NEVER runs on its own: switching the override off
+// does not restore anything. Resolves to a report {ok, scenes, restored,
+// skippedAuthored, reason, warning}. See foundry/region-darkness-override.js.
+MapShine.restoreRegionDarkness = (options) => restoreRegionDarkness(options);
 // ALBEDO CLARITY (2026-07-28, author-requested tuning surface; real UI added
 // 2026-08-15 — "Sharpening" card, Make panel): the zoom-out sharpness repair.
 // `MapShine.setAlbedoClarity({ sharpness, gateLo, gateHi, farLo, farHi,
@@ -19922,10 +19931,12 @@ function install() {
           log.error('sky resolve (canvasReady) failed:', err);
         }
         // THE REGION DARKNESS OVERRIDE — re-applied on every scene load/floor
-        // switch, same as the sky resolve just above. Cheap and idempotent
-        // (skips any behavior already at the target value), and GM-gated
-        // internally, so a "not GM"/"override is off" reason here is benign,
-        // not an error — logged at `info`, matching the fade-state block below.
+        // switch, same as the sky resolve just above. OFF by default since
+        // 2026-11-09 and never applied to a scene flagged regionDarknessAuthored
+        // (mmp-6pc.3). Cheap and idempotent (skips any behavior already at the
+        // target value), and GM-gated internally, so a "not GM"/"override is
+        // off" reason here is benign, not an error — logged at `info`, matching
+        // the fade-state block below.
         try {
           const { ok, reason } = await applyRegionDarknessOverride();
           if (!ok && reason) log.info(`region darkness override (canvasReady): ${reason}`);

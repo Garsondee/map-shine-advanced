@@ -197,6 +197,8 @@ export {
   computeRegionAdjustedDarkness,
   computeMinimumDarknessFloor,
   regionOverlapsElevationBand,
+  regionIncludedInLevel,
+  selectRegionsForViewedFloor,
   DARKNESS_ADJUST_MODES,
   REGION_EDGE_FADE_PX,
   REGION_FIELD_BLUR_TAPS,

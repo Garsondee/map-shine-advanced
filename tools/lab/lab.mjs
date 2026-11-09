@@ -2,7 +2,8 @@
 /**
  * tools/lab/lab.mjs — drive the MSA Lab (mmp-78u).
  *
- *   node tools/lab/lab.mjs paint  [--out <dir>] [--only interiors]   paint every floor image + mask (python)
+ *   node tools/lab/lab.mjs paint  [--out <dir>] [--only interiors] [--art-root <folder holding maps/>]
+ *        paint every floor image + mask (python); Lab · Vegetation pastes crops of the author's art
  *   node tools/lab/lab.mjs deploy-rig --rig <dataPath>      copy the painted set into a private rig
  *   node tools/lab/lab.mjs seed   --name <cdp client>       build/replace the lab scenes as GM
  *   node tools/lab/lab.mjs look --name <client> --plot C1 [--level ground] [--view shipped|measure] [--scale 0.45]
@@ -62,6 +63,11 @@ function paint() {
   const only = opt('only');
   if (only) job.images = job.images.filter((i) => i.name.includes(only));
   if (!job.images.length) throw new Error(`paint: no image name contains '${only}'`);
+  // `paste` ops crop the author's own art (Lab · Vegetation). Her maps live in the outer project
+  // folder, never in this public repo: --art-root <folder holding maps/>, else MSA_ART_ROOT, else
+  // the folder above the repo (true for the main checkout, not for a scratch worktree).
+  const artRoot = path.resolve(opt('art-root', process.env.MSA_ART_ROOT ?? path.join(REPO, '..')));
+  for (const im of job.images) for (const o of im.ops) if (o.op === 'paste') o.artRoot = artRoot;
   fs.writeFileSync(jobPath, JSON.stringify(job));
   const extra = argv.includes('--lossless-art') ? ['--lossless-art'] : [];
   run('python', ['-I', path.join(HERE, 'paint.py'), jobPath, outDir, ...extra]);

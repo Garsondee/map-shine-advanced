@@ -12,6 +12,8 @@ Ops (all coordinates in image pixels, colours as byte lists):
     text    {x, y, text, size, rgba}
     checker {x, y, w, h, cell, a, b}
     ellipse {cx, cy, rx, ry, rgba}       ~1 px anti-aliased edge (canopy cut-outs for _Tree/_Bush)
+    paste   {src, sx, sy, sw, sh, x, y, flip, rot}  a crop of the author's own art (Lab · Vegetation),
+                                         read from the job's artRoot; her art never enters the repo
 
 Encoding copies the author's maps: lossy WebP for everything, alpha kept exact.
 After writing, each image is decoded again and its op regions are checked, so a codec
@@ -116,12 +118,46 @@ def op_ellipse(img, o):
     img.paste(Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8), "RGBA"), (X0, Y0))
 
 
+_ART_CACHE = {}
+
+
+def op_paste(img, o):
+    """Paste a crop of one of the author's own images (her real _Tree/_Bush art) at (x, y).
+
+    o = {src, sx, sy, sw, sh, x, y, flip?, rot?}: `src` is relative to the job's `artRoot` (her
+    maps folder lives outside the public MSA repo, so the lab never commits her art: the spec
+    names a file and a rectangle, and the painted result stays in the git-ignored out/ folder).
+    `flip` mirrors left-right, `rot` turns by a multiple of 90 degrees (her maps reuse stamps
+    turned and mirrored). Pixels are alpha-composited, keeping the leaf colour under the
+    author's own alpha edge exactly.
+    """
+    root = Path(o["artRoot"])
+    p = root / o["src"]
+    if p not in _ART_CACHE:
+        if not p.exists():
+            raise SystemExit(f"paste: art not found: {p} (pass --art-root to lab.mjs paint)")
+        _ART_CACHE[p] = Image.open(p).convert("RGBA")
+    src = _ART_CACHE[p]
+    sx, sy, sw, sh = (int(o[k]) for k in ("sx", "sy", "sw", "sh"))
+    c = src.crop((sx, sy, sx + sw, sy + sh))
+    if o.get("flip"):
+        c = c.transpose(Image.FLIP_LEFT_RIGHT)
+    rot = int(o.get("rot") or 0) % 360
+    if rot:
+        c = c.rotate(rot, expand=True)
+    x, y = int(round(o["x"])), int(round(o["y"]))
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    layer.paste(c, (x, y))
+    img.alpha_composite(layer)
+
+
 OPS = {
     "rect": op_rect,
     "clear": op_clear,
     "text": op_text,
     "checker": op_checker,
     "ellipse": op_ellipse,
+    "paste": op_paste,
 }
 
 

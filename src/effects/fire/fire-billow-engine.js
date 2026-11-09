@@ -602,10 +602,11 @@ export function createBillowEngine({
   smokeCapacity,
   createRenderer = createBillowRenderer,
 }) {
-  const buildGate = (TSL, { depthTexNode: dTex, depthFlagsTexNode: fTex, expectedDepth }) =>
+  // `depthHere`/`flagsHere` may be passed in so a draw that gates at several heights samples the depth once.
+  const buildGate = (TSL, { depthTexNode: dTex, depthFlagsTexNode: fTex, expectedDepth, depthHere, flagsHere }) =>
     buildDepthHeightGateNode(TSL, {
-      depthHere: dTex.sample(TSL.screenUV),
-      flagsHere: fTex ? fTex.sample(TSL.screenUV) : null,
+      depthHere: depthHere ?? dTex.sample(TSL.screenUV),
+      flagsHere: flagsHere !== undefined ? flagsHere : fTex ? fTex.sample(TSL.screenUV) : null,
       uLightExpectedDepth: expectedDepth,
     });
   const renderer = createRenderer({

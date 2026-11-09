@@ -891,11 +891,16 @@ export function createBillowRenderer({
     let gate = float(1);
     let smokeGate = float(1);
     if (depth?.depthTexNode && depth?.buildGate) {
+      // One depth + one flags tap shared by the three gates (perf sweep 2026-11-08; was six taps per pixel).
+      const depthHere = depth.depthTexNode.sample(TSL.screenUV);
+      const flagsHere = depth.depthFlagsTexNode ? depth.depthFlagsTexNode.sample(TSL.screenUV) : null;
       const at = (expectedDepth) =>
         depth.buildGate(TSL, {
           depthTexNode: depth.depthTexNode,
           depthFlagsTexNode: depth.depthFlagsTexNode,
           expectedDepth,
+          depthHere,
+          flagsHere,
         });
       gate = at(U.expectedDepth);
       const low = at(U.smokeExpectedDepthLow);

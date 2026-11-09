@@ -147,7 +147,11 @@ const GROUND_SPLASH_SCALE = 0.5;
 const STRIKE_REF_HEIGHT_PX = 300;
 /** Ceiling on the size multiplier so a high exaggeration on a tall tower cannot
  * draw a splash the size of a room. */
-const STRIKE_SCALE_MAX = 3;
+const STRIKE_SCALE_MAX = 1.25;
+/** Hard ceiling on a splash quad's drawn size (world px, across), whatever the dials multiply it by.
+ * Ingram 2026-11-09: one splash read HUGE next to a droplet. 64 px is the biggest a crown ever needs
+ * (see GROWTH_BEZIER: the visible peak is ~64-127 before the 0.5 ground scale). */
+const SPLASH_MAX_PX = 64;
 
 /**
  * V2's `SizeOverLife` control points — `new Bezier(0.4, 4.0, 7.0, 9.0)`
@@ -235,8 +239,24 @@ export function createPrecipSplashEngine({
   fed = false,
 }) {
   const TSL = THREE.TSL;
-  const { Fn, If, instanceIndex, float, vec2, vec3, vec4, uniform, sin, cos, atan, fract, uv, mix, positionGeometry } =
-    TSL;
+  const {
+    Fn,
+    If,
+    instanceIndex,
+    float,
+    vec2,
+    vec3,
+    vec4,
+    uniform,
+    sin,
+    cos,
+    atan,
+    fract,
+    uv,
+    mix,
+    positionGeometry,
+    positionLocal,
+  } = TSL;
 
   const resolved = resolveSpecies(speciesId);
   const S = resolved.ok ? resolved.species : null;
@@ -869,7 +889,8 @@ export function createPrecipSplashEngine({
     const sizePx = c.y
       .mul(growth(t))
       .mul(uSizeScale)
-      .mul(strikeScaleAt(position.element(i)));
+      .mul(strikeScaleAt(position.element(i)))
+      .min(float(SPLASH_MAX_PX));
     const local = positionGeometry.xy.mul(sizePx);
 
     /**
@@ -1190,6 +1211,22 @@ export function createPrecipSplashEngine({
     // exists to prevent, reintroduced by the fix for something else.
     const clip = float(1).sub(p0.length().sub(float(0.9)).div(float(0.1)).clamp(float(0), float(1)));
     shape.assign(shape.mul(clip));
+
+    // ⭐ PER-PIXEL SKY-REACH CLIP (Ingram 2026-11-09: "a splash outside should be clipped to only appear
+    // outdoors"). The vertex gate above asks about the splash's CENTRE only, so a big crown beside a wall
+    // spilled indoors. Ask again at THIS pixel's ground point; the baked field is smooth, so the crown
+    // fades out at the wall instead of cutting. No bake / outside the rect ⇒ 1 (keep splashing).
+    if (skyReachTex) {
+      const wx = positionLocal.x.sub(uSkyReachRect.x).div(uSkyReachRect.z.sub(uSkyReachRect.x).max(float(1)));
+      const wy = positionLocal.y.sub(uSkyReachRect.y).div(uSkyReachRect.w.sub(uSkyReachRect.y).max(float(1)));
+      const inRect = wx
+        .greaterThanEqual(float(0))
+        .and(wx.lessThanEqual(float(1)))
+        .and(wy.greaterThanEqual(float(0)))
+        .and(wy.lessThanEqual(float(1)));
+      const reach = skyReachTex.sample(vec2(wx.clamp(float(0), float(1)), wy.clamp(float(0), float(1)))).r;
+      shape.assign(shape.mul(mix(float(1), reach, uSkyReachHasBake.mul(inRect.select(float(1), float(0))))));
+    }
 
     return shape.mul(alpha);
   })();

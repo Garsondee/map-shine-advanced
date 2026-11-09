@@ -92,3 +92,12 @@ Both pausing clocks run off one record (the GM's pause ledger, `core/frame-clock
 in `src/effects/` or `src/world/`, any timer of their own there, wall time handed to a frame-loop `.sync/.step/.tick`, or one
 more wall-time read than a file's budget fails `npm run verify:structure`. A throttle on the sim clock is the opposite bug
 (it latches when paused) — throttles stay on wall time, by listing them.
+
+## 9. Performance tiers — every effect keeps its ladder true
+
+Every effect follows the player's *Performance profile* through its manifest `tiers` and its `xTierPlan(tier)`; the
+pattern, the rules and the per-effect ledger are in `docs/planning/Perf-Sweep-2026-11-08/tiers.md`. **Any substantial
+change to an effect's cost or look updates its tier plan, its manifest `tiers` and its ledger row in the same commit.**
+`standard` reproduces the shipped look, lower rungs degrade gracefully (cheapest look loss first), and every rung saves
+something you can measure (`MapShine.priceTiers('<id>')`). `src/effects/__tests__/tier-ledger.test.mjs` fails on a
+registered effect with no row, a row for a removed effect, or a stale Ladder.

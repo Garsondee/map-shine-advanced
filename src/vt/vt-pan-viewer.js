@@ -871,6 +871,8 @@ const REGION_MATERIAL_BUILDERS = {
  * Reuses planImageTiles + computeTileSubPlacement, both already tested for the
  * multi-tile case. */
 const MAX_WHOLE_TILE_DIM = 8192;
+/** The quiet storm's ambient stand-in (never read: the idle frame needs no comparison). */
+const STORM_QUIET_BG = Object.freeze([0, 0, 0]);
 
 /** Resolution cap for the RAW fallback ONLY — the path taken when the compressed
  * worker is unavailable (CSP-blocked / crashed) and we can't get BC1/BC7 blocks.
@@ -14019,7 +14021,8 @@ async function startVtPanViewerUnserialized({
       const lp = lensSt?.enabled ? (lensSt.params ?? {}) : {};
       const features = cameraGlareFeatures(lp);
       const dirtName = `${String(lp.dirtImage || 'lens_grease_01')}.jpg`;
-      const key = `${features.join(',')}|${bloomActiveAtmoTop}|${dirtName}`;
+      const starTaps = lensTierPlan(Number.isFinite(lensSt?.perfTier) ? lensSt.perfTier : undefined).starTaps;
+      const key = `${features.join(',')}|${bloomActiveAtmoTop}|${dirtName}|${starTaps}`;
       if (key !== cameraGlare.key) {
         cameraGlare.key = key;
         const fineMip = bloomMips[Math.min(1, bloomActiveMipCount - 1)];
@@ -14037,6 +14040,7 @@ async function startVtPanViewerUnserialized({
           features,
           uniforms: cameraGlareUniforms,
           uvGuard: tableSubsystem.lensGuard,
+          starTaps,
         });
         if (cameraGlare.quad) cameraGlare.quad.material = cameraGlare.built.material;
         else cameraGlare.quad = new THREE.QuadMesh(cameraGlare.built.material);
@@ -15007,27 +15011,35 @@ async function startVtPanViewerUnserialized({
       {
         const ls = getLightningRenderState();
         const lp = ls?.params ?? {};
-        const bg = lastAmbientColors ? maxRgb(lastAmbientColors.background, lastGlobalLightFloor) : [0, 0, 0];
-        const stormView = view ? viewToWorldRect(view, canvasW / canvasH) : null;
-        stormFrame = stormLightning.step({
-          nowMs: Number.isFinite(ls?.sharedNowMs) ? ls.sharedNowMs : (env.time?.tMs ?? 0),
-          lightning01: env.weather.lightning01 ?? 0,
-          enabled: !!ls?.enabled && Number(ls?.perfTier) >= 2,
-          dayFactor01: env.sun.dayFactor01,
-          ambientLum: bg[0] * 0.2126 + bg[1] * 0.7152 + bg[2] * 0.0722,
-          sceneRect: dimensions?.sceneRect ?? null,
-          gridPx: readGridSizePixels().gridSizePixels,
-          view: stormView,
-          params: {
-            rateScale: lp.stormRate,
-            brightness: lp.stormBrightness,
-            dayStrength: lp.stormDayStrength,
-            groundShare: lp.stormGroundShare,
-            // No strike light (switched off, or below its rung): the sky part carries the whole flash.
-            pointLightShare: lp.stormStrikeLight === false || Number(ls?.perfTier) < 3 ? 0 : undefined,
-          },
-          colorRgb: stormColorFor(lp.stormColor),
-        });
+        // Perf sweep 2026-11-08: no storm and nothing live → the idle frame, without the per-frame argument build.
+        const stormQuiet = !((env.weather.lightning01 ?? 0) > 0) && stormLightning.quiet;
+        const bg = stormQuiet
+          ? STORM_QUIET_BG
+          : lastAmbientColors
+            ? maxRgb(lastAmbientColors.background, lastGlobalLightFloor)
+            : [0, 0, 0];
+        const stormView = view && !stormQuiet ? viewToWorldRect(view, canvasW / canvasH) : null;
+        stormFrame = stormQuiet
+          ? STORM_IDLE
+          : stormLightning.step({
+              nowMs: Number.isFinite(ls?.sharedNowMs) ? ls.sharedNowMs : (env.time?.tMs ?? 0),
+              lightning01: env.weather.lightning01 ?? 0,
+              enabled: !!ls?.enabled && Number(ls?.perfTier) >= 2,
+              dayFactor01: env.sun.dayFactor01,
+              ambientLum: bg[0] * 0.2126 + bg[1] * 0.7152 + bg[2] * 0.0722,
+              sceneRect: dimensions?.sceneRect ?? null,
+              gridPx: readGridSizePixels().gridSizePixels,
+              view: stormView,
+              params: {
+                rateScale: lp.stormRate,
+                brightness: lp.stormBrightness,
+                dayStrength: lp.stormDayStrength,
+                groundShare: lp.stormGroundShare,
+                // No strike light (switched off, or below its rung): the sky part carries the whole flash.
+                pointLightShare: lp.stormStrikeLight === false || Number(ls?.perfTier) < 3 ? 0 : undefined,
+              },
+              colorRgb: stormColorFor(lp.stormColor),
+            });
         envLight.setFlash(stormFrame);
         syncStormShadows(ls, lp, stormView);
         // THE CAMERA THROUGH A STRIKE (mmp-ilo.22): hold the metered light for the whole strike train and a second

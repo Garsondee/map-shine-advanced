@@ -319,6 +319,12 @@ export function createStormLightning({ seed = 0x5713a1 } = {}) {
       lastFrame = STORM_IDLE;
       return lastFrame;
     }
+    // Perf sweep 2026-11-08: axis at 0 with nothing live or queued is the idle frame (rate 0 adopts nothing and
+    // findNext answers null), so skip building the dials, the placer and the schedule walk every frame.
+    if (!(lightning01 > 0) && !live.size && !pendingForce) {
+      lastFrame = STORM_IDLE;
+      return lastFrame;
+    }
     const P = {
       ...STORM_DEFAULTS,
       ...Object.fromEntries(Object.entries(params).filter(([, v]) => Number.isFinite(v))),
@@ -468,6 +474,10 @@ export function createStormLightning({ seed = 0x5713a1 } = {}) {
   return {
     step,
     force,
+    /** True when a frame at lightning 0 would be the idle frame: nothing live, nothing forced. */
+    get quiet() {
+      return !live.size && !pendingForce;
+    },
     /** The last frame `step` returned. */
     get frame() {
       return lastFrame;

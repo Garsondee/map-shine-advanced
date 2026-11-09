@@ -42,7 +42,15 @@ const outDir = path.resolve(opt('out', path.join(HERE, 'out', 'wind', tag)));
 fs.mkdirSync(outDir, { recursive: true });
 
 const points = windProbes().filter((p) => plotsWanted === 'all' || plotsWanted.split(',').includes(p.plot));
-const pageScript = path.join(HERE, 'wind-meter-page.js');
+// The page script defines `windMeterPage(args)`; the call is appended here (a committed page script has no
+// top-level return, which lint rejects).
+const pageScript = path.join(outDir, '.wind-meter-page.run.js');
+fs.writeFileSync(
+  pageScript,
+  `${fs.readFileSync(path.join(HERE, 'wind-meter-page.js'), 'utf8')}
+return await windMeterPage(args);
+`
+);
 
 for (const s of speeds) {
   const args = {

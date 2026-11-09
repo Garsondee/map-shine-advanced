@@ -1032,6 +1032,7 @@ export function createBillowEngine({
           meterRow.flameH = Number.isFinite(res.flameH) ? Math.round(res.flameH) : null;
           meterRow.grainX = Number.isFinite(res.grainX) ? Math.round(res.grainX * 10) / 10 : null;
           meterRow.grainY = Number.isFinite(res.grainY) ? Math.round(res.grainY * 10) / 10 : null;
+          meterRow.grainLift = Number.isFinite(res.grainLift) ? Math.round(res.grainLift * 10) / 10 : null;
           meterRow.tSec = Math.round(timeSec * 1000) / 1000;
         }
 

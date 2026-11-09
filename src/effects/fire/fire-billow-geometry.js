@@ -1224,8 +1224,11 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     smokeGY: smokeGW > 0 ? smokeGY / smokeGW : null,
     smokeZ: smokeGW > 0 ? smokeGZ / smokeGW : null,
     flameH: height,
+    // the grain frame's travel with the air (world px) apart from the column's lift up the page, so a meter can hold
+    // the pattern's motion against the air that carries the smoke
     grainX: frameX,
-    grainY: frameY,
+    grainY: pxPerAirM * nowWy,
+    grainLift: vLiftR * nowR,
   };
 }
 

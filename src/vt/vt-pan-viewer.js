@@ -21260,13 +21260,21 @@ async function startVtPanViewerUnserialized({
           // and the darkest wins, so a long dawn/dusk streak could only take `smearTaps + 1`
           // values — flat bands, one per station. Every station but the tip (which carries
           // the penumbra cross) is shifted by this pixel's own fraction of a step
-          // (interleaved gradient noise on the world position — a fixed pattern, never
+          // (interleaved gradient noise on the SCREEN pixel, below — a fixed pattern, never
           // time-varying), so neighbouring pixels land on different values and the
           // staircase becomes a fine dither the station blur absorbs. No extra fetches.
-          const ditherWorld = THREE.TSL.positionWorld.xy;
-          const smearDither = THREE.TSL.fract(
-            float(52.9829189).mul(THREE.TSL.fract(ditherWorld.x.mul(0.06711056).add(ditherWorld.y.mul(0.00583715))))
+          // Interleaved gradient noise on the SCREEN pixel, not the world position (author, 2026-11-09: combs). The
+          // noise is built for integer pixels; sampled at world positions it folds into streaks whenever one screen
+          // pixel spans several world pixels (zoomed out) and into a fine diagonal weave when it spans a fraction.
+          const ditherPx = THREE.TSL.floor(THREE.TSL.screenCoordinate.xy);
+          const ditherA = THREE.TSL.fract(
+            float(52.9829189).mul(THREE.TSL.fract(ditherPx.x.mul(0.06711056).add(ditherPx.y.mul(0.00583715))))
           );
+          // A little white noise (Hoskins hash12) breaks the lattice's own diagonal without the speckle a pure hash gives.
+          const ditherP3a = THREE.TSL.fract(THREE.TSL.vec3(ditherPx.x, ditherPx.y, ditherPx.x).mul(0.1031));
+          const ditherP3 = ditherP3a.add(THREE.TSL.dot(ditherP3a, ditherP3a.yzx.add(33.33)));
+          const ditherH = THREE.TSL.fract(ditherP3.x.add(ditherP3.y).mul(ditherP3.z));
+          const smearDither = THREE.TSL.fract(ditherA.add(ditherH.sub(0.5).mul(0.35)));
           const sideLodAt = (t) =>
             THREE.TSL.log2(max(uShadowSideBlur.x.add(uShadowSideBlur.y.mul(t)), float(1))).clamp(0, 6);
           for (let s = 1; s <= smearTaps; s++) {

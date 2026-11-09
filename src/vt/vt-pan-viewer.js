@@ -7781,6 +7781,8 @@ async function startVtPanViewerUnserialized({
     let windFieldLagRT = null;
     /** { material, quad, uBakeTimeMs, layoutVersion } for the CURRENT layout; rebuilt lazily. */
     let windFieldBake = null;
+    /** The sim times the two slices above were last baked at (the MSA Lab read-back stamps its copy with them). */
+    const windFieldBakeStamp = { nowMs: null, lagMs: null, frames: 0 };
     // THE WIND'S RECORDED PAST (world/wind-gust-history.js, epic mmp-fpu) — a ring of 16 gust-magnitude grids,
     // one per 0.6 s moment, in one atlas; each is drawn into the one-tile target and copied into its tile.
     // `uWindGustGridIndex` is the latest recorded moment: the baker's decision, read by every shader.
@@ -8788,6 +8790,75 @@ async function startVtPanViewerUnserialized({
       renderer.setRenderTarget(windFieldLagRT);
       bake.quad.render(renderer);
       renderer.setRenderTarget(prevRT);
+      windFieldBakeStamp.nowMs = tMs;
+      windFieldBakeStamp.lagMs = tMs - lagMs;
+      windFieldBakeStamp.frames += 1;
+    }
+
+    /**
+     * THE MSA LAB'S WIND READ-BACK (mmp-vm1.1) — the baked field exactly as every `baked: 'now'|'lagged'`
+     * consumer reads it, copied back from the GPU and decoded to numbers, stamped with the sim time it was baked
+     * at, with the grid, the live ambient and the CPU cell channels beside it. Field values are in `sampleWind`'s
+     * dial units (× 70 = m/s; × 70 × px/m = world px/s). Row `r`, column `c` holds the field at world
+     * `origin + (c + ½, r + ½) · cellSize` (the bake quad's v = 0 is the grid's top row; see
+     * `wind-field-bake.js#buildWindFieldBakeMaterial`). Console and lab only: it stalls the GPU queue a frame.
+     *
+     * @param {{lag?: boolean, cells?: boolean}} [opts] - `lag` also reads the lagged slice; `cells: false` skips
+     *   the CPU channels (openness, shadow, solid, sky) when a time series only needs the field.
+     */
+    async function readWindFieldForLab({ lag = false, cells = true } = {}) {
+      const g = windHandle.grid;
+      if (!g || !windFieldNowRT) return { ok: false, reason: windHandle.hasBake ? 'no baked field target' : 'no bake' };
+      const stamp = { ...windFieldBakeStamp };
+      const decode = async (rt) => {
+        const raw = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, g.cols, g.rows);
+        const half = raw instanceof Uint16Array;
+        // WebGPU pads each copied row to 256 bytes: derive the row stride from what came back.
+        const stride = g.rows > 1 ? (raw.length - g.cols * 4) / (g.rows - 1) : g.cols * 4;
+        const n = g.cols * g.rows;
+        const fx = new Array(n);
+        const fy = new Array(n);
+        for (let r = 0; r < g.rows; r++) {
+          for (let c = 0; c < g.cols; c++) {
+            const o = r * stride + c * 4;
+            const x = half ? THREE.DataUtils.fromHalfFloat(raw[o]) : raw[o];
+            const y = half ? THREE.DataUtils.fromHalfFloat(raw[o + 1]) : raw[o + 1];
+            fx[r * g.cols + c] = Math.round(x * 1e5) / 1e5;
+            fy[r * g.cols + c] = Math.round(y * 1e5) / 1e5;
+          }
+        }
+        return { fx, fy };
+      };
+      const now = await decode(windFieldNowRT);
+      const lagged = lag && windFieldLagRT ? await decode(windFieldLagRT) : null;
+      const round3 = (a) => (a ? Array.from(a, (v) => Math.round(Number(v) * 1000) / 1000) : null);
+      const cellData = cells && windHandle.cells ? windHandle.cells : null;
+      return {
+        ok: true,
+        bakedAtMs: stamp.nowMs,
+        lagBakedAtMs: stamp.lagMs,
+        bakeFrames: stamp.frames,
+        simMs: lastEnvSnapshot?.env?.time?.tMs ?? null,
+        paused: !!globalThis.game?.paused,
+        grid: { ...g },
+        ambient: {
+          directionDeg: uWindDirectionDeg.value,
+          speed01: uWindSpeed01.value,
+          gustiness01: uWindGustiness01.value,
+          pixelsPerMetre: uWindPixelsPerMetre.value,
+        },
+        now,
+        lag: lagged,
+        cells: cellData
+          ? {
+              openness: round3(cellData.openness),
+              windShadow: round3(cellData.windShadow),
+              solid: cellData.solid ? Array.from(cellData.solid) : null,
+              sky: round3(cellData.sky),
+              wallProximity: round3(cellData.wallProximity),
+            }
+          : null,
+      };
     }
 
     /**
@@ -32436,6 +32507,9 @@ async function startVtPanViewerUnserialized({
         const r = await precipitationSubsystem.readParticles(renderer, opts);
         return { simMs, pxPerMetre: windAmbientRef?.pixelsPerMetre?.value ?? null, ...r };
       },
+      /** MSA Lab read-back (mmp-vm1.1): the baked wind field as its consumers read it, decoded, stamped with its
+       * bake time, plus grid, ambient and cell channels. Console/lab only — it stalls. */
+      readWindField: readWindFieldForLab,
       /** Live look tuning (fallSlant01, parallaxStreak01, streakScale, ...). */
       setPrecipitationTuning: (t) => {
         precipitationSubsystem.setTuning(t);
@@ -35868,6 +35942,11 @@ export function getVtPanViewerPrecipitationStatus() {
 export async function readVtPanViewerPrecipParticles(opts) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.readPrecipParticles(opts);
+}
+/** @param {{lag?: boolean, cells?: boolean}} [opts] @returns {Promise<object>} the MSA Lab's wind field read-back. */
+export async function readVtPanViewerWindField(opts) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.readWindField(opts);
 }
 /** @param {object} t @returns {object} */
 export function setVtPanViewerPrecipitationTuning(t) {

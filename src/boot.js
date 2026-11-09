@@ -416,6 +416,7 @@ import {
   setVtPanViewerPrecipKind,
   getVtPanViewerPrecipitationStatus,
   readVtPanViewerPrecipParticles,
+  readVtPanViewerWindField,
   setVtPanViewerPrecipitationTuning,
   rebakeVtPanViewerWindField,
   triggerVtPanViewerWindDoorImpulse,
@@ -1629,6 +1630,13 @@ MapShine.setPrecipitationTuning = setVtPanViewerPrecipitationTuning;
  * Stalls the GPU queue for a frame or two — console and lab only.
  */
 MapShine.readPrecipParticles = readVtPanViewerPrecipParticles;
+/**
+ * The MSA Lab's wind read-back (mmp-vm1.1): the baked wind field exactly as every effect that reads the wind
+ * texture sees it this frame (dial units: × 70 = m/s), stamped with the sim time it was baked at, plus the grid, the
+ * live ambient and the openness / shadow / wall cells. `tools/lab/wind-meter.js` samples it over time for gust
+ * factors, spectra and correlation lengths. Stalls the GPU queue for a frame — console and lab only.
+ */
+MapShine.readWindField = readVtPanViewerWindField;
 
 MapShine.addWeatherEvent = addVtPanViewerWeatherEvent;
 MapShine.releaseWeatherEvent = releaseVtPanViewerWeatherEvent;

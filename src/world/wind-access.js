@@ -551,6 +551,14 @@ export function createWindHandle({
       wallProximity,
       sky,
       /**
+       * The travelling GUST ENVELOPE here, now (2026-11-10, Wind Trails are born on gusts): 1 = the mean wind,
+       * WIND_GUST_LULL..WIND_GUST_PEAK at full gustiness. `undefined` when there is no gustiness to read (branch at JS
+       * time). The same memoized term `coherent` multiplies by, so reading both costs it once.
+       */
+      get gust() {
+        return gustEnvelope();
+      },
+      /**
        * The ambient bias, deflected off nearby walls and attenuated by the wind
        * shadow, UNGATED by openness. The angle convention is METEOROLOGICAL
        * (the direction the wind blows FROM, hence the negate) — the same one

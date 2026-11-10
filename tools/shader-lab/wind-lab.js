@@ -375,6 +375,8 @@ async function main() {
     },
     capture,
     exposure,
+    /** The trail meter (gust-runtime.js#readTrails): every slot's latched strength, exit fade, age and path. */
+    readTrails: () => trails.readTrails(renderer),
   };
   say('ready');
 }

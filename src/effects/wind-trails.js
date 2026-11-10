@@ -25,6 +25,14 @@
  * room. Measured on the lab rig against the same wind: 15.7% of trail points inside roofs before, 1.9% after (the rest are
  * the stop pixel on the edge). See `particles/gust-runtime.js`, "TRACER MODE".
  *
+ * ⭐ 2026-11-10, FEW, CHUNKY, BORN ON GUSTS (author: *"we need a lot less of them and we need them to be elegant. It
+ * shouldn't be about a realistic / accurate depiction of wind speed … It needs to never suddenly vanish … It needs to
+ * be chunkier and a lot less of them, with the ones that do appear being more considered and perhaps tracking gusts
+ * more than just the average wind speed and direction."*): a trail is now born only where a travelling GUST front is
+ * passing, and its strength is decided at birth and held for its life (a lull, the view edge or the count dropping
+ * fade it, never cut it). About three on screen in a gale at the default Density, fatter, longer, slower, and fewer
+ * loops. The engine side is `particles/gust-runtime.js`, "BORN ON A GUST".
+ *
  * THE LOOK IS ANIME WIND LINES (author, 2026-10-27, after the first lab cut:
  * *"Those lines aren't tapered at both ends, they are overlapping, we need much
  * more sparse. Think anime wind lines."*): a FEW thin strokes on screen at once,
@@ -50,17 +58,19 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
     min: 0,
     max: 3,
     step: 0.05,
-    default: 0.35, // author's own default, 2026-10-31
+    // 2026-11-10 (author: "a lot less of them"): 1 is about three strokes in a gale, one or two in a breeze, each born
+    // on a gust. (Was 0.35 of twelve, 2026-10-31, and every slot showed whenever the air was fast.)
+    default: 1,
     category: 'Look',
     label: 'Density',
-    help: 'How many trails at a given wind speed. More wind always means more trails; this scales the lot.',
+    help: 'How many trails at once. At 1, about three in a gale and one or two in a breeze, each born on a passing gust. More wind still means more.',
   },
   widthPx: {
     type: 'float',
     min: 2,
-    max: 24,
+    max: 40,
     step: 0.5,
-    default: 8, // author's own default, 2026-10-31
+    default: 18, // 2026-11-10 "chunkier" (was 8, 2026-10-31)
     category: 'Look',
     label: 'Thickness',
     help: 'The fattest point of a trail, in map pixels. Trails taper to a point at both ends.',
@@ -70,8 +80,9 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.05,
-    default: 0.8,
-    // Author, 2026-10-31: "Include a much wider variety of trail sizes".
+    // Author, 2026-10-31: "Include a much wider variety of trail sizes". 2026-11-10: 0.8 -> 0.35, "more considered":
+    // the few strokes there are should read as one family, not a scatter of slivers.
+    default: 0.35,
     category: 'Look',
     label: 'Size variation',
     help: 'How much trails differ in size. 0 makes every trail the Thickness and Length above; 1 ranges from under half to over twice that, big trails both longer and fatter.',
@@ -81,7 +92,7 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
     min: 0.1,
     max: 1.2,
     step: 0.01,
-    default: 0.2, // author's own default, 2026-10-27
+    default: 0.45, // 2026-11-10 longer, sweeping strokes (was 0.2, 2026-10-27)
     category: 'Look',
     label: 'Length',
     help: 'How much of its path a trail shows, in seconds. Faster wind makes the same setting longer on the map.',
@@ -91,7 +102,7 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
     min: 0,
     max: 2,
     step: 0.05,
-    default: 1.2, // author's own default, 2026-10-31
+    default: 0.5, // 2026-11-10 "elegant": about a quarter loop, once (was 1.2, 2026-10-31)
     // Up to 1: how many trails loop (half of them at 1). Past 1: more turns per
     // loop. Loops are always WHOLE turns, so a trail leaves its loop along the
     // wind (`particles/trail-swirl.js`).
@@ -124,12 +135,12 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
   lifeSec: {
     type: 'float',
     min: 0.5,
-    max: 2.5,
+    max: 4,
     step: 0.05,
-    default: 1.55, // author's own default, 2026-10-31
+    default: 2.6, // 2026-11-10 slower, unhurried strokes with long fades (was 1.55, 2026-10-31)
     category: 'Timing',
     label: 'Lifetime',
-    help: 'Average seconds a trail lives, from fade-in to gone. Each varies a little around this.',
+    help: 'Average seconds a trail lives, from fade-in to gone. Each varies a little around this. A trail never vanishes early: leaving the view or meeting a roof fades it out.',
   },
   minSpeedMps: {
     type: 'float',
@@ -139,7 +150,17 @@ export const WIND_TRAILS_PARAMS = Object.freeze({
     default: 5,
     category: 'Timing',
     label: 'Appears above (m/s)',
-    help: 'Local wind speed below which no trails show. 5 m/s is a gentle-to-moderate breeze; 17 m/s a gale.',
+    help: 'Local wind speed below which no trail is born. 5 m/s is a gentle-to-moderate breeze; 17 m/s a gale. Once born, a trail lives out its life even if the gust passes.',
+  },
+  speedCapMps: {
+    type: 'float',
+    min: 0,
+    max: 70,
+    step: 0.5,
+    default: 10, // 2026-11-10: "it shouldn't be about a realistic / accurate depiction of wind speed"
+    category: 'Timing',
+    label: 'Top speed (m/s)',
+    help: 'How fast a trail may travel, however hard the wind blows. Trails run with the air but are held to a calm, graceful pace: the faster the wind, the closer they get to this. 0 runs them at the true air speed.',
   },
   color: {
     type: 'color',
@@ -174,7 +195,7 @@ export const WIND_TRAILS = Object.freeze({
       n: 0,
       name: 'trails',
       cost: Object.freeze({ class: 'C7', estMsPerMp: 0.03 }),
-      adds: 'curling, tapered wind strokes riding the shared wind field at its real speed',
+      adds: 'a few chunky tapered wind strokes, born on passing gusts, riding the 3-D air at its real speed',
     }),
   ]),
 });
@@ -238,12 +259,14 @@ export function buildWindTrailsSystem(params = {}, profile) {
       capacity: 48,
       segments: WIND_TRAILS_SEGMENTS,
       meshSegments: windTrailsMeshSegments(profile),
-      // A dead calm shows nothing; a hurricane only ~a dozen. SPARSE is the look:
+      // A dead calm shows nothing; a hurricane only ~three (× Density). SPARSE is the look:
       // anime wind lines are a handful on screen, never a field of them.
       minTrails: 0,
-      maxTrails: 12,
+      // 2026-11-10: three at Density 1, in a gale (was twelve).
+      maxTrails: 3,
       gateLoMps: v('minSpeedMps'),
       gateHiMps: v('minSpeedMps') * 1.8 + 1,
+      speedCapMps: v('speedCapMps'),
       widthPx: v('widthPx'),
       opacityMax: v('opacity'),
       colorRGB: hexToRgb01(params.color ?? WIND_TRAILS_PARAMS.color.default),
@@ -253,7 +276,8 @@ export function buildWindTrailsSystem(params = {}, profile) {
       windGain: 1,
       accelToMaxSeconds: 0.25,
       lifeMs,
-      fadeMs: Math.min(450, lifeMs / 3),
+      // long, soft fades in and out (2026-11-10: "never suddenly vanish"; was 450 ms)
+      fadeMs: Math.min(800, lifeMs / 3),
       lifeJitter: 0.35,
       // Purely random rebirth — biasing toward the windiest spot bunched the
       // few trails into the same gust; sparse means spread out.
@@ -266,7 +290,7 @@ export function buildWindTrailsSystem(params = {}, profile) {
       segmentSec: v('lengthSec') / WIND_TRAILS_SEGMENTS,
       // …but never longer on the map than this (a hurricane's 0.3 s of path is
       // 10 m; a trail reads as a stroke, not a lane marking).
-      maxLengthM: 8,
+      maxLengthM: 14,
       blending: 'normal',
     },
   };
@@ -288,6 +312,7 @@ export function windTrailsLook(params = {}) {
     lifeSec: v('lifeSec'),
     lengthSec: v('lengthSec'),
     minSpeedMps: v('minSpeedMps'),
+    speedCapMps: v('speedCapMps'),
     colorRGB: hexToRgb01(params.color ?? WIND_TRAILS_PARAMS.color.default),
   };
 }

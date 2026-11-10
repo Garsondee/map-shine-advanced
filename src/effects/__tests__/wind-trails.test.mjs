@@ -88,6 +88,7 @@ export function run(t) {
       'lifeSec',
       'lengthSec',
       'minSpeedMps',
+      'speedCapMps',
       'colorRGB',
     ].every((k) => k in look)
   );
@@ -96,20 +97,32 @@ export function run(t) {
     sys.params.swirlVariation === WIND_TRAILS_PARAMS.swirlVariation.default &&
       sys.params.sizeVariation === WIND_TRAILS_PARAMS.sizeVariation.default
   );
-  // The author's 2026-10-31 defaults, pasted from her card.
+  // 2026-11-10 (author: "a lot less of them … elegant … never suddenly vanish … chunkier … tracking gusts"):
+  // the redesign's defaults, replacing her 2026-10-31 card values.
   {
     const want = {
-      density: 0.35,
-      widthPx: 8,
-      lengthSec: 0.2,
-      swirl: 1.2,
+      density: 1,
+      widthPx: 18,
+      sizeVariation: 0.35,
+      lengthSec: 0.45,
+      swirl: 0.5,
       opacity: 0.5,
-      lifeSec: 1.55,
+      lifeSec: 2.6,
       minSpeedMps: 5,
       color: '#ffffff',
     };
     const bad = Object.entries(want).filter(([k, x]) => WIND_TRAILS_PARAMS[k].default !== x);
-    ok(`the author's 2026-10-31 defaults (${bad.map(([k]) => k).join(', ') || 'all match'})`, bad.length === 0);
+    ok(`the 2026-11-10 redesign defaults (${bad.map(([k]) => k).join(', ') || 'all match'})`, bad.length === 0);
+    ok(
+      '"a lot less of them": three at most at the default Density, in a gale',
+      sys.params.maxTrails * WIND_TRAILS_PARAMS.density.default <= 3
+    );
+    ok('"chunkier": at least twice the old 8 px', WIND_TRAILS_PARAMS.widthPx.default >= 16);
+    ok(
+      'a visual top speed keeps a gale from crossing the view in a blink',
+      sys.params.speedCapMps > 0 && sys.params.speedCapMps <= 15
+    );
+    ok('"never suddenly vanish": fades last at least 0.6 s', sys.params.fadeMs >= 600);
   }
   // 2026-11-09: Wind Trails are TRACERS (ride the 3-D air, turn smoothly, stop at the `_Outdoors` wall, loop only where
   // there is room), and the smoothest a stroke may turn is a real eddy's.

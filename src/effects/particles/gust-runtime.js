@@ -179,6 +179,14 @@ const log = createLogger('gust-runtime');
  */
 export const TRACER_MIN_RADIUS_M = 0.8;
 
+/** TRACER MODE births (2026-11-10): a gust's score (0..1, `gustScoreAt`) a trail needs to be born. */
+export const TRACER_GUST_BIRTH = 0.3;
+/** A dormant tracer slot rests this long (plus up to `TRACER_REST_SPAN_MS`, per seed) before it looks again. */
+export const TRACER_REST_MIN_MS = 350;
+export const TRACER_REST_SPAN_MS = 1400;
+/** How far past the view a tracer may drift while it fades out (a share of the view size) before it is reborn. */
+export const TRACER_EXIT_PAD = 0.35;
+
 /** A bake-less handle — an un-wired engine still gets the organic field rather
  * than dead-still ribbons (see candle-flame-render.js's own identical constant). */
 const TIER0_WIND_HANDLE = createWindHandle();
@@ -228,6 +236,7 @@ export function createGustEngine({
     cos,
     fract,
     smoothstep,
+    mix,
     pow,
     attribute,
     Loop,
@@ -321,6 +330,8 @@ export function createGustEngine({
   const uLifeMs = uniform(float(Math.max(1, p.lifeMs ?? 4000)));
   const uFadeMs = uniform(float(Math.min(p.fadeMs ?? 1200, (p.lifeMs ?? 4000) / 2)));
   const uWidthPx = uniform(float(p.widthPx ?? 12));
+  // TRACER MODE's visual top speed, m/s (0 = none): see `softSpeed`.
+  const uSpeedCapMps = uniform(float(Number.isFinite(p.speedCapMps) ? p.speedCapMps : 0));
   const uOpacityMax = uniform(float(p.opacityMax ?? 0.7));
   // Active-trail count (set from windSpeed01 each frame in step()) — a trail
   // whose index is >= this is forced invisible, giving "a few, more when
@@ -472,6 +483,39 @@ export function createGustEngine({
   // A random world point inside the current rect, from two hash salts.
   const randPointInRect = (sa, sb) =>
     vec2(uRectMin.x.add(uRectSize.x.mul(hash11(sa))), uRectMin.y.add(uRectSize.y.mul(hash11(sb))));
+  /** True when `q` is outside the rect grown by `pad` × its size on every side (pad 0 = the rect itself). */
+  const outsideRect = (q, pad) => {
+    const lo = uRectMin.sub(uRectSize.mul(pad));
+    const hi = uRectMin.add(uRectSize.mul(1 + pad));
+    return q.x.lessThan(lo.x).or(q.x.greaterThan(hi.x)).or(q.y.lessThan(lo.y)).or(q.y.greaterThan(hi.y));
+  };
+
+  // ── BORN ON A GUST (TRACER MODE, 2026-11-10) ────────────────────────────────────────────────────────────────────
+  // Ingram: "a lot less of them … elegant … never suddenly vanish … chunkier … perhaps tracking gusts more than just
+  // the average wind speed and direction." So a trail decides at BIRTH whether it shows, and how strongly:
+  //   - it is born only where a travelling gust front is passing (the wind's own gust envelope, `kernel().gust`),
+  //     outdoors, in air past the m/s gate, and only in a slot the count allows;
+  //   - that strength is LATCHED for its life. Nothing that happens to the air later (a lull, a gust passing on) can
+  //     switch it off; only its own life fade, a wall, or leaving the view fade it, and those always fade over
+  //     `uFadeMs` (the old gate followed the air speed at the head every frame, and the count and the view edge cut a
+  //     trail in one frame: the "suddenly vanish");
+  //   - a slot that finds no gust stays DORMANT (strength 0, invisible) and looks again after a random rest, so a gust
+  //     arriving wakes a few slots one by one, never all of them in one frame.
+  /** A gust's score 0..1 at a point: how far the envelope is above the mean, as a share of the most it can be. */
+  const gustiness01Node = windHandle?.ambient?.gustiness01;
+  const gustScoreAt = (q) => {
+    if (!gustiness01Node) return float(1); // no gusts to follow: any spot in the wind will do
+    const g = windHandle.kernel(TSL, { centerXY: q, time: uTimeMs, cellBuffer: windOpennessBuffer }).gust;
+    if (g === undefined) return float(1);
+    const score = g
+      .sub(1)
+      .div(float(WIND_GUST_PEAK - 1).mul(gustiness01Node.max(0.05)))
+      .clamp(0, 1);
+    // dead-calm gustiness has no gusts at all: trails follow the mean wind instead of never showing
+    return gustiness01Node.lessThan(0.05).select(float(1), score);
+  };
+  /** How long a dormant slot rests before it looks for a gust again, ms (seed-hashed: births never come in step). */
+  const restOf = (seedF) => float(TRACER_REST_MIN_MS).add(hash11(seedF.mul(7.13).add(3.3)).mul(TRACER_REST_SPAN_MS));
 
   // --- SEED kernel: spread heads across the rect; collapse each trail's whole
   // --- ring onto its head so a fresh trail has zero length until it moves. ---
@@ -663,7 +707,14 @@ export function createGustEngine({
         .mul(pxPerSecPerFieldUnit)
         .mul(uWindGain);
       const fLen = F.length();
-      const speed = fLen.min(ceilingPxPerSec);
+      // VISUAL SPEED (2026-11-10, "it shouldn't be about a realistic / accurate depiction of wind speed"): the head runs
+      // at the air's speed squeezed through v / (1 + v / cap), so a gale's 30-70 m/s crosses the view in seconds, not in
+      // a tenth of one (the trail used to be reborn ten times a second). The air's DIRECTION is untouched.
+      const rawSpeed = fLen.min(ceilingPxPerSec);
+      const capPx = ppm.mul(uSpeedCapMps);
+      const speed = uSpeedCapMps
+        .greaterThan(0)
+        .select(rawSpeed.div(float(1).add(rawSpeed.div(capPx.max(1)))), rawSpeed);
       const want0 = fLen.greaterThan(1e-3).select(F.div(fLen.max(1e-3)), vec2(1, 0));
       const oldV = velocity.element(i);
       const oLen = oldV.length();
@@ -764,7 +815,8 @@ export function createGustEngine({
         ? outdoorsAt(pos).greaterThanEqual(0.5).select(clearFraction(pos, delta), float(1))
         : float(1);
       next = pos.add(delta.mul(frac));
-      const hit = frac.lessThan(0.9999);
+      // a wall stops it, and leaving the view (or the view leaving it, on a pan) fades it too: never a cut
+      const hit = frac.lessThan(0.9999).or(outsideRect(next, 0));
       const fadeOld = custom.element(i).y;
       tracerFade = hit
         .or(fadeOld.greaterThan(0))
@@ -774,13 +826,20 @@ export function createGustEngine({
     }
 
     // Respawn on leaving the rect OR ageing out (same visual: fresh random spot).
-    const outOfBounds = next.x
-      .lessThan(uRectMin.x)
-      .or(next.x.greaterThan(uRectMin.x.add(uRectSize.x)))
-      .or(next.y.lessThan(uRectMin.y))
-      .or(next.y.greaterThan(uRectMin.y.add(uRectSize.y)));
+    const outOfBounds = outsideRect(next, 0);
     const ageExpired = age.element(i).greaterThanEqual(lifeMs);
-    const shouldRespawn = tracerGone ? outOfBounds.or(ageExpired).or(tracerGone) : outOfBounds.or(ageExpired);
+    let shouldRespawn = outOfBounds.or(ageExpired);
+    // A TRACER (BORN ON A GUST, above) is never cut: a living one leaving the view fades (`tracerFade`) and is reborn
+    // only once faded, or once far past the view (a big pan); a dormant one is reborn whenever its rest is up.
+    const strengthOld = custom.element(i).x;
+    if (tracer) {
+      const dormant = strengthOld.lessThanEqual(0);
+      const restDone = age.element(i).greaterThanEqual(restOf(s));
+      shouldRespawn = outsideRect(next, TRACER_EXIT_PAD)
+        .or(ageExpired)
+        .or(tracerGone)
+        .or(dormant.and(restDone.or(outOfBounds)));
+    }
 
     // BIASED reseed: pick the windiest of `respawnCandidates` random points, so
     // the few trails concentrate into fast air. Bounded, position+seed-hashed
@@ -807,9 +866,42 @@ export function createGustEngine({
       bestPos = better.select(cand, bestPos);
       bestMag = better.select(mag, bestMag);
     }
-    // a tracer is reborn OUTDOORS: the first of four random points that is not under a roof (a trail born indoors
-    // would sit out its life invisible, a slot wasted)
-    if (hasOutdoors) {
+    // A TRACER is born on a GUST, outdoors: the first of four random points that is not under a roof and that a gust
+    // front is passing over now. None found → the slot stays dormant this round (strength 0).
+    let birthStrength = null;
+    if (tracer) {
+      let pick = bestPos;
+      let pickScore = float(0);
+      let found = null;
+      for (let c = 0; c < 4; c++) {
+        const cand = randPointInRect(
+          s
+            .mul(0.53)
+            .add(next.y.mul(0.021))
+            .add(83.0 + c * 5.17),
+          s
+            .mul(0.37)
+            .add(next.x.mul(0.023))
+            .add(97.0 + c * 2.93)
+        );
+        const score = gustScoreAt(cand);
+        const ok = outdoorsAt(cand)
+          .greaterThanEqual(0.5)
+          .and(score.greaterThanEqual(float(TRACER_GUST_BIRTH)));
+        const take = found ? found.not().and(ok) : ok;
+        pick = take.select(cand, pick);
+        pickScore = take.select(score, pickScore);
+        found = found ? found.or(ok) : ok;
+      }
+      bestPos = pick;
+      // how bold a stroke this gust earns: stronger gusts and faster air draw a surer line, latched for its life
+      const speedGate = smoothstep(uGateLoMps, uGateHiMps, airAt(pick).length().mul(float(MPS_PER_FIELD_UNIT)));
+      const born = found.and(float(i).lessThan(uActiveTrails)).and(speedGate.greaterThan(0.25));
+      birthStrength = born.select(
+        mix(float(0.6), float(1), pickScore).mul(mix(float(0.55), float(1), speedGate)),
+        float(0)
+      );
+    } else if (hasOutdoors) {
       let pick = bestPos;
       let pickOk = outdoorsAt(bestPos).greaterThanEqual(0.5);
       for (let c = 1; c < 4; c++) {
@@ -852,10 +944,9 @@ export function createGustEngine({
     // which squared the dial and meant nothing physical.
     let gate = smoothstep(uGateLoMps, uGateHiMps, finalFlow.flowMag.mul(float(MPS_PER_FIELD_UNIT)));
     if (tracer) {
-      // the air it rides (not the old field), never under a roof, and fading out once it has met a wall
-      gate = smoothstep(uGateLoMps, uGateHiMps, airAt(finalPos).length().mul(float(MPS_PER_FIELD_UNIT)))
-        .mul(outdoorsAt(finalPos).greaterThanEqual(0.5).select(float(1), float(0)))
-        .mul(shouldRespawn.select(float(1), float(1).sub(tracerFade)));
+      // LATCHED (BORN ON A GUST, above): the strength it was born with, for its whole life. The draw multiplies in the
+      // fade-out (`custom.y`) itself, so nothing here can drop a living trail in one frame.
+      gate = shouldRespawn.select(birthStrength, strengthOld);
     }
     // x = gate (READ BY THE DRAW's opacityNode below — must stay this exact
     // slot); y/z/w are diagnostic-only (flowMag, openness, head speed).
@@ -1032,7 +1123,9 @@ export function createGustEngine({
       const lifeMsDraw = lifeOf(seed.element(instanceIndex));
       const fadeIn = ageMs.div(uFadeMs).clamp(float(0), float(1));
       const fadeOut = lifeMsDraw.sub(ageMs).div(uFadeMs).clamp(float(0), float(1));
-      const thin = pow(fadeIn.min(fadeOut), float(0.6));
+      // a tracer fading at a wall or the view's edge thins as it goes, the same as at the end of its life
+      const exitFade = tracer ? float(1).sub(custom.element(instanceIndex).y) : float(1);
+      const thin = pow(fadeIn.min(fadeOut).min(exitFade), float(0.6));
       const widthMul = sizeOn ? sizeOf(seed.element(instanceIndex)).width : float(1);
       halfW = uWidthPx.mul(widthMul).mul(body).mul(thin).mul(float(0.5));
     } else {
@@ -1054,7 +1147,11 @@ export function createGustEngine({
   const vGust = Fn(() => {
     const trail = instanceIndex;
     const gate = custom.element(trail).x;
-    const active = float(trail).lessThan(uActiveTrails).select(float(1), float(0));
+    // A tracer's count only decides BIRTHS (BORN ON A GUST): a living trail outlives a count that drops, and its own
+    // exit fade (y) is the only other thing that dims it. Other engines keep the hard per-index cut.
+    const active = tracer
+      ? float(1).sub(custom.element(trail).y)
+      : float(trail).lessThan(uActiveTrails).select(float(1), float(0));
     const ageMs = age.element(trail);
     const fadeIn = ageMs.div(uFadeMs).clamp(float(0), float(1));
     const fadeOut = lifeOf(seed.element(trail)).sub(ageMs).div(uFadeMs).clamp(float(0), float(1));
@@ -1143,7 +1240,8 @@ export function createGustEngine({
         let segDt = segmentSec;
         if (maxLengthM > 0) {
           const ppm = Number(windHandle.ambient?.pixelsPerMetre?.value ?? pxPerMeter);
-          const pxs = Math.max(1, windTravelPxPerSec(windHandle.ambient?.speed01?.value ?? 0, ppm));
+          let pxs = Math.max(1, windTravelPxPerSec(windHandle.ambient?.speed01?.value ?? 0, ppm));
+          if (tracer && uSpeedCapMps.value > 0) pxs /= 1 + pxs / Math.max(1, uSpeedCapMps.value * ppm); // as the kernel squeezes it
           segDt = Math.min(segmentSec, (maxLengthM * ppm) / (pxs * SEG));
         }
         segmentAccSec += uDtSec.value;
@@ -1224,6 +1322,7 @@ export function createGustEngine({
     setLook(look = {}) {
       if (Number.isFinite(look.density)) densityMul = Math.max(0, look.density);
       if (Number.isFinite(look.widthPx)) uWidthPx.value = Math.max(0, look.widthPx);
+      if (Number.isFinite(look.speedCapMps)) uSpeedCapMps.value = Math.max(0, look.speedCapMps);
       if (Number.isFinite(look.opacity)) uOpacityMax.value = Math.max(0, Math.min(1, look.opacity));
       if (Number.isFinite(look.swirl) && swirlOn) uSwirl.value = Math.max(0, look.swirl);
       if (Number.isFinite(look.swirlVariation)) uSwirlVar.value = Math.min(1, Math.max(0, look.swirlVariation));
@@ -1250,6 +1349,8 @@ export function createGustEngine({
     async readTrails(renderer) {
       const hist = new Float32Array(await renderer.getArrayBufferAsync(trailHistory.value));
       const cus = new Float32Array(await renderer.getArrayBufferAsync(custom.value));
+      // ages too (2026-11-10): an age that went DOWN is a rebirth, so a meter can tell a fade from a cut
+      const ages = new Float32Array(await renderer.getArrayBufferAsync(age.value));
       const trails = [];
       for (let t = 0; t < capacity; t++) {
         const pts = [];
@@ -1259,9 +1360,9 @@ export function createGustEngine({
           const o = (t * SEG + slot) * 2;
           pts.push([hist[o], hist[o + 1]]);
         }
-        trails.push({ gate: cus[t * 4], fade: cus[t * 4 + 1], loop: cus[t * 4 + 2], pts });
+        trails.push({ gate: cus[t * 4], fade: cus[t * 4 + 1], loop: cus[t * 4 + 2], ageMs: ages[t], pts });
       }
-      return { trails, seg: SEG, headSlot, tracer };
+      return { trails, seg: SEG, headSlot, tracer, fadeMs: uFadeMs.value, activeTrails: uActiveTrails.value };
     },
 
     /** For the debug panel: prove the engine is alive without a screenshot. */

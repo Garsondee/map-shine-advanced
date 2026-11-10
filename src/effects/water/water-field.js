@@ -454,6 +454,43 @@ export const WATER_BANK_INFLUENCE = 0.35;
  */
 export const WATER_BANK_REACH_PX = 180;
 
+/** How far off the wall the bank warp takes to rise to full, world px (2026-11-09, mmp-78u.30.1: a steep rise sheared
+ * the crest foam into a column of chevrons along every straight wall). Stays well above the JFA checker zone (48 px). */
+export const WATER_BANK_WARP_RISE_PX = 24;
+
+/** Where the combined bank + flow bend flattens out, in wave cells (2026-11-09, mmp-78u.30.1). */
+export const WATER_BEND_LIMIT_CELLS = 0.45;
+
+// ── ONE SURFACE, DRIVEN BY THE WIND (2026-11-10, mmp-78u.30.6 — Ingram: "If we derive our caustics from the real
+// surface state, the real angle of the sun and the state of clouds then we only have to drive the surface state via the
+// wind and everything else comes along with it ... we create a single slider which drives a bunch of effects.") ──
+// Before this the swell, its foam crests and the caustic net all travelled with the FLOW only; wind reached nothing but
+// a thin ripple layer, so in a lab with wind left-to-right and flow south everything still swam south.
+/**
+ * How far the swell travels per pixel of the CPU-integrated wind drift (`windDrift`, 120 px/s at wind 1, see
+ * `water-surface-subsystem.js`). 0.5 → 60 px/s in a full gale, ~12 px/s in a breeze: wind waves run downwind slower than
+ * the short ripples on them, and fast enough to read. The drift is ONE vector for the whole map (never per pixel × time,
+ * this file's header), so the surface translates and cannot shear into rays. Every reader of `domainOffset` (swell,
+ * crest foam, caustic net, filament foam, silt) inherits it.
+ */
+export const WATER_WIND_SURFACE_TRAVEL = 0.5;
+/**
+ * The bed depth, world px, at mask white with the Depth dial at its default, for the SUN-ANGLE OFFSET of the caustics:
+ * the light reaching a bed point entered the surface `depth · tan(θt)` toward the sun (θt = the refracted sun angle,
+ * Snell), so a low sun slides the caustics off the waves that made them, more over deep water than shallow. 0 at noon.
+ * 160 px ≈ 2.4 m at 100 px per 5 ft square; tan θt never exceeds ~1.13 (critical angle), so the offset is bounded.
+ */
+export const WATER_CAUSTIC_DEPTH_PX = 160;
+/**
+ * Finite-difference step, in swell cells, for the swell's FOCUS (`causticFocus`): `−div(slope)` of the swell's first
+ * octave, positive where the surface converges light (a crest acts as a lens) and negative where it spreads it.
+ */
+export const WATER_CAUSTIC_FOCUS_EPS = 0.12;
+
+/** Spacing of the 3x3 taps whose blurred mask gives the bank direction, world px (2026-11-09, mmp-78u.30.1): about a
+ * foam's width, so a right-angled corner's two walls blend into one diagonal over ~100 px instead of flipping on a line. */
+export const WATER_BANK_BLUR_PX = 48;
+
 /**
  * How far the REAL solved flow's local direction may warp the noise domain
  * away from `bankWarp` above, as a FRACTION OF ONE NOISE CELL — same unit,
@@ -549,6 +586,10 @@ export const WATER_FLOW_WARP_CAP_CELLS = 1.0;
 export const WATER_FLOW_WARP_SOLID_FADE_PX = 48;
 
 export const WATER_FOAM_SHORE_PX = 140;
+
+/** Along-shore scale of the crest foam's reach variation, world px (2026-11-09, mmp-78u.30.1): long enough that one
+ * stretch of bank keeps its own reach over several squares, short enough that a pond's rim is never all one width. */
+export const WATER_FOAM_REACH_VARIATION_PX = 520;
 
 /**
  * TIER 4 — WAVE SHOALING'S OWN REACH, world px. How far from the bank the
@@ -980,6 +1021,7 @@ export function buildWaterSurfaceField({
   worldXY,
   timeMsNode,
   tangentXY,
+  sampleSdfAt = null,
   shoreDist,
   insideWater,
   uWaveScalePx,
@@ -1065,6 +1107,11 @@ export function buildWaterSurfaceField({
   uWindDriftPx = null,
   uRain01 = null,
   uSunCaustic = null,
+  // (2026-11-10) The sky's share of direct sun (`uSunWater.y` = key / (key + fill)): under cloud the light is no longer
+  // one collimated beam, so the caustic lines blur before they fade. `null` = always sharp (the old behaviour).
+  uSunWater = null,
+  // (2026-11-10) Structural depth 0..~1.6 (mask brightness × the Depth dial), for the sun-angle caustic offset. `null` = 0.
+  causticDepth01 = null,
 }) {
   const {
     vec2,
@@ -1143,7 +1190,10 @@ export function buildWaterSurfaceField({
   // a control claims a DIRECTION — which is exactly what the author asked for
   // when they asked for a compass. See `waterFlowVector`'s own header.
   const current = uFlowDir;
-  const drift = current.mul(uFlowSpeedPx.mul(tSec)).negate();
+  // TRAVEL = the flow's own heading × speed × t, PLUS the wind's integrated drift (`WATER_WIND_SURFACE_TRAVEL`): both are
+  // one vector for the whole map, so the sum is too. Pattern moves opposite to its domain, hence the one `negate`.
+  const windTravel = uWindDriftPx ? uWindDriftPx.mul(float(WATER_WIND_SURFACE_TRAVEL)) : vec2(0, 0);
+  const drift = current.mul(uFlowSpeedPx.mul(tSec)).add(windTravel).negate();
   // Correction #4's PROJECTION is still what shapes the warp — invariant under
   // `t → −t`, so the tangent's sign flip at the river's medial axis cancels
   // rather than seaming the two halves against each other.
@@ -1167,16 +1217,46 @@ export function buildWaterSurfaceField({
   // every consumer (foam, turbidity via `depth01`, slope via the reflection) is
   // already multiplied by `inside` downstream.
   const bankInfluence = float(1).sub(smoothstep(float(0), float(WATER_BANK_REACH_PX), shoreDist));
-  const alongBank = tangentXY.mul(dot(current, tangentXY)).mul(bankInfluence);
+  // THE BANK DIRECTION COMES FROM A WIDE BLUR OF THE MASK, NOT FROM THE FLOOD'S STORED TANGENT (2026-11-09, mmp-78u.30.1 -
+  // Ingram: "look at the inner and outer corners, there is extreme and strong, pixel line forming distortion ... in
+  // organic maps we end up with a complex but crushed set of competing directions"). The stored tangent is the jump
+  // flood's NEAREST-SEED direction: at a right-angled corner it swaps between two perpendiculars across the 45-degree
+  // bisector (a straight crease in the wave pattern, Lab / Water B1cornerIn + B1pierRoot), and on organic banks the
+  // seeds compete everywhere. Averaging the tangent only made the jump a ramp whose kinks still drew the line. The
+  // gradient of the mask blurred over `WATER_BANK_BLUR_PX` has no such jump by construction: it points diagonally at a
+  // corner, and its length shrinks to nothing where banks pull against each other, so the warp fades out exactly
+  // there. It reaches only about one blur radius off a wall (the bend the old tangent gave out to 360 px was a minor
+  // part of the look and is the flow warp's job in open water).
+  let alongBank = vec2(0, 0);
+  if (sampleSdfAt) {
+    // Central differences of the signed distance, 2R apart: the field is continuous everywhere, so the direction can
+    // only change smoothly (a 3x3 mask blur jumps whenever a tap crosses a wall, which drew a hard outline 48 px out).
+    const S = WATER_BANK_BLUR_PX;
+    const gx = sampleSdfAt(float(S), float(0)).sub(sampleSdfAt(float(-S), float(0))).div(float(2 * S));
+    const gy = sampleSdfAt(float(0), float(S)).sub(sampleSdfAt(float(0), float(-S))).div(float(2 * S));
+    const gLen = length(vec2(gx, gy));
+    const nrm = vec2(gx, gy).div(max(gLen, float(1e-5)));
+    const t = vec2(nrm.y.negate(), nrm.x);
+    // 1 along a straight wall, falling toward 0 where two banks pull against each other (corners, crushed organic bends)
+    const strength = smoothstep(float(0.3), float(0.85), gLen);
+    alongBank = t.mul(dot(current, t)).mul(strength).mul(bankInfluence);
+  } else {
+    alongBank = tangentXY.mul(dot(current, tangentXY)).mul(bankInfluence);
+  }
   // ⚠️ FADED IN FROM THE SHORE TOO (2026-10-17), over `WATER_FLOW_WARP_SOLID_FADE_PX`.
   // Measured in the shader lab at a Tower Bridge pier nose: `tangentXY` is the jump
   // flood's nearest-seed direction, and within a few texels of a wall it flips between
   // the staircase's orientations texel by texel — shifting the domain by up to a whole
   // wave cell along it tore the crest foam into ~7 px checker squares (bankInfluence 0
   // made them vanish). The bend still runs from there out to `WATER_BANK_REACH_PX`.
+  // ⚠️ RISE OVER `WATER_BANK_WARP_RISE_PX`, NOT 48 px (2026-11-09, mmp-78u.30.1). The shift along the bank is a HUMP in
+  // distance (rising off the wall, falling by the reach), and the slope of that hump is a shear: 48 px up then 180 px
+  // down bent every crest blob into an arrowhead, so a straight wall grew a regular column of chevrons in the foam
+  // (Lab · Water B1, channel 8) — a fixed-width band by another route. Spread wide, the peak shear is ~3x smaller and
+  // the blobs keep their own shapes; the wall-side texels (the JFA checker of 2026-10-17) still see almost no shift.
   const bankWarp = alongBank
     .mul(uWaveScalePx.mul(bankInfluenceNode))
-    .mul(smoothstep(float(0), float(WATER_FLOW_WARP_SOLID_FADE_PX), shoreDist));
+    .mul(smoothstep(float(0), float(WATER_BANK_WARP_RISE_PX), shoreDist));
 
   // FLOW WARP — `bankWarp`'s sibling, see `WATER_FLOW_WARP_INFLUENCE`'s own
   // doc for the full safety argument. `localFlowDir` defaults to `null`
@@ -1242,7 +1322,14 @@ export function buildWaterSurfaceField({
   // independent copies of "travel + bank warp" is exactly the shape that let
   // this file's own drift bug and Y-flip bug ship unnoticed once already
   // (`feedback_shared_field_two_meanings_two_registries`).
-  const domainOffset = drift.add(bankWarp).add(flowWarp);
+  // ⚠️ THE COMBINED BEND IS SOFT-LIMITED TO ~0.45 OF A WAVE CELL (2026-11-09, mmp-78u.30.1 - Ingram: "not clean ... swirls").
+  // With the bank and flow bends at their tuned defaults the pattern was pushed up to a whole cell at a wall: smooth, but
+  // it read as swirls round every pier and boat (debug channel 32, the distortion grid). `w / (1 + |w| / c)` follows the
+  // bend exactly for small shifts and flattens toward `c` for large ones: no clamp, no kink, sliders unchanged.
+  const bendSum = bankWarp.add(flowWarp);
+  const bendCap = uWaveScalePx.mul(float(WATER_BEND_LIMIT_CELLS));
+  const bendLimited = bendSum.div(float(1).add(length(bendSum).div(max(bendCap, float(1)))));
+  const domainOffset = drift.add(bendLimited);
 
   // ONE fetch. `mx_fractal_noise_vec3` is three's own MaterialX fractal noise —
   // vendored, backend-neutral, and identical on WebGPU and WebGL2, which is why
@@ -1294,11 +1381,19 @@ export function buildWaterSurfaceField({
   // toward the shore, then breaking) read at two points on one curve, so their
   // extents must agree or a wave could be reported as "shoaling" past the
   // point where the very foam that shoaling causes has already died away.
-  const shoalGate = shoaling
-    ? float(1)
-        .sub(smoothstep(float(0), float(WATER_SHOAL_REACH_PX), shoreDist))
-        .mul(float(WATER_SHOAL_STRENGTH))
-    : float(0);
+  // ⚠️ NO FIXED-WIDTH BAND, NO END LINE (2026-11-09, mmp-78u.30.1 — Ingram: "make it so that the edges of the effect
+  // don't look so obviously like a single width band of foam area. It's easy on some settings to see the foam end
+  // point as a line."). Both the shoal gate and the crest gate below used to be `1 − smoothstep(0, 140 px, shoreDist)`:
+  // one width all round every shore, and foam patches straddling 140 px were cut there, so the band ended on a line
+  // that copied the shoreline's shape (Lab · Water B1/C2 channel 8). Now (1) the reach varies along the shore with a
+  // slow world-anchored noise (0.45x-1.9x, drifting over tens of seconds), and (2) distance never cuts foam: it raises
+  // the steepness a crest needs before it breaks, so foam thins into rarer, smaller patches with no boundary at all.
+  const reachUv = worldXY.div(float(WATER_FOAM_REACH_VARIATION_PX));
+  const reachNoise = mx_fractal_noise_float(vec3(reachUv.x, reachUv.y, tSec.mul(float(0.02))), 2, 2.0, 0.5);
+  const reachMul = mix(float(0.45), float(1.9), smoothstep(float(-0.35), float(0.35), reachNoise));
+  // 0 at the waterline, 1 at this stretch's own reach; unbounded beyond (no clamp, no kink).
+  const shoreT = shoreDist.div(float(WATER_FOAM_SHORE_PX).mul(reachMul));
+  const shoalGate = shoaling ? TSL.exp(shoreT.mul(float(-2.2))).mul(float(WATER_SHOAL_STRENGTH)) : float(0);
   // `n.y.mul(1 + shoalGate)`, not `n.y.add(shoalGate)` — this must SCALE the
   // existing steepness, not offset it. An additive shoal would still "shoal" a
   // dead-calm patch of noise (n.y ≈ 0) into a nonzero crest test out of
@@ -1308,8 +1403,11 @@ export function buildWaterSurfaceField({
   const shoaledY = n.y.mul(float(1).add(shoalGate));
   const shoaledZ = n.z.mul(float(1).add(shoalGate));
 
-  const crest = smoothstep(float(0.18), float(0.55), shoaledY);
-  const shoreGate = float(1).sub(smoothstep(float(0), float(WATER_FOAM_SHORE_PX), shoreDist));
+  // Distance raises the break threshold instead of gating the result (see the reach note above): at the local reach a
+  // crest must be ~0.75 steeper to foam, which the noise almost never reaches, so the patches dissolve.
+  const breakRise = TSL.pow(shoreT, float(1.5)).mul(float(0.75));
+  const crest = smoothstep(float(0.18).add(breakRise), float(0.55).add(breakRise), shoaledY);
+  const shoreGate = TSL.exp(shoreT.mul(float(-0.7)));
   const foam = min(crest.mul(shoreGate).mul(insideWater).mul(uFoam), float(1));
 
   // SLOPE — the third reading of the same fetch, and the one this rung spent
@@ -1466,6 +1564,7 @@ export function buildWaterSurfaceField({
   // `causticScale` is the cell size directly, and `causticSharpness` is edge
   // WIDTH, not a post-hoc contrast exponent).
   let causticBrightness = float(0);
+  let causticFocus = float(0);
   if (caustics) {
     // THE NET'S OWN DOMAIN — the SAME safe `worldXY + domainOffset` every
     // other term in this fetch travels on (this function's own header on why
@@ -1530,6 +1629,13 @@ export function buildWaterSurfaceField({
     let netPoint = worldXY.add(domainOffset);
     if (uSunCaustic) {
       const sunH = vec2(uSunCaustic.x, uSunCaustic.y);
+      // THE SUN-ANGLE OFFSET (2026-11-10, `WATER_CAUSTIC_DEPTH_PX`): the bed sees the waves `depth · tan θt` toward the
+      // sun. Added BEFORE the stretch so both act on the same point; bounded (tan θt ≤ ~1.13, depth ≤ ~1.6).
+      if (causticDepth01) {
+        const cosT = max(uSunCaustic.z, float(0.3));
+        const tanT = TSL.sqrt(max(float(1).sub(cosT.mul(cosT)), float(0))).div(cosT);
+        netPoint = netPoint.add(sunH.mul(causticDepth01.mul(float(WATER_CAUSTIC_DEPTH_PX)).mul(tanT)));
+      }
       netPoint = netPoint.add(sunH.mul(dot(netPoint, sunH).mul(uSunCaustic.z.sub(float(1)))));
     }
     const netCellPreOrganic = netPoint.div(cellPx).add(waveWarp);
@@ -1682,11 +1788,15 @@ export function buildWaterSurfaceField({
       // proven mechanism, so the same world-space band can never alias into a
       // hard single-pixel edge at closer zoom, whatever `causticSharpness` is
       // set to.
-      const edgeFarBase = mix(
+      const edgeFarSun = mix(
         float(WATER_CAUSTICS_EDGE_FAR_MAX),
         float(WATER_CAUSTICS_EDGE_FAR_MIN),
         causticSharpnessNode
       );
+      // CLOUD BLURS BEFORE IT DIMS (2026-11-10): a hazy sky is a wide light source, so each focused line spreads.
+      // Full sun share (~0.75+ on a clear day) keeps the author's sharpness; toward overcast the lines widen to the lacy end.
+      const collimation = uSunWater ? smoothstep(float(0.12), float(0.7), uSunWater.y) : float(1);
+      const edgeFarBase = mix(float(WATER_CAUSTICS_EDGE_FAR_MAX).mul(float(1.4)), edgeFarSun, collimation);
 
       /** One layer's brightness — an EDGE test (`F2−F1`, as before) times a
        * NEW JUNCTION test (`F3−F2`) that concentrates full brightness only
@@ -1824,6 +1934,19 @@ export function buildWaterSurfaceField({
       .mul(shoalBoost)
       .mul(insideWater)
       .mul(rainBreak);
+
+    // THE SWELL'S OWN FOCUS (2026-11-10, mmp-78u.30.6): where the real swell converges light, the net burns; where it
+    // spreads it, the net goes dim. `−div(slope)` of the swell's FIRST octave, read from the very fetch the surface uses
+    // (`mx_fractal_noise_vec3(p, 1, …)` is bit-for-bit octave 1 of the 3-octave `n`), at the same cell and time — so the
+    // bright zones ride the waves exactly, wind and all. Replaces an independent "dapple" noise that only pretended to.
+    // A rain-pocked surface focuses nothing coherent, same `rainBreak` as the net.
+    const fEps = float(WATER_CAUSTIC_FOCUS_EPS);
+    const swellAt = (c) => mx_fractal_noise_vec3(vec3(c.x, c.y, tSec.mul(float(0.15))), 1, 2.0, 0.5);
+    const s0 = swellAt(cell);
+    const sx = swellAt(cell.add(vec2(fEps, 0)));
+    const sy = swellAt(cell.add(vec2(0, fEps)));
+    const divergence = sx.y.sub(s0.y).add(sy.z.sub(s0.z)).div(fEps);
+    causticFocus = divergence.negate().mul(rainBreak);
   }
 
   // `windRipple` is exactly `float(0)` (a compile-time literal, not a live
@@ -1835,7 +1958,10 @@ export function buildWaterSurfaceField({
     turbidity: turbidity.add(windRipple),
     slope,
     domainOffset,
+    bankWarp,
+    bend: bendLimited,
     causticBrightness,
+    causticFocus,
     flowWarp,
     rainSplash,
     rainRough,

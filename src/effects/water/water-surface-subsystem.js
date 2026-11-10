@@ -58,7 +58,7 @@ import { waterKeyLightDirection } from './water-light.js';
 // #581), beside `waterFlowVector` in the same file for the same reason — the
 // sim subsystem reads the identical function, never a second copy of the rule.
 import { waterFlowSpeedPx, waterFlowVector } from './water-field.js';
-import { extractSprayShore, planSprayBirths } from './water-spray-shore.js';
+import { extractSprayShore, planSprayBirths, planWhitecapBirths, SPRAY_WIND_DRIVE_PX } from './water-spray-shore.js';
 import { QUAD_UVS, QUAD_INDICES, buildQuadPositions } from '../../scene/index.js';
 
 const log = createLogger('WaterSurface');
@@ -1200,8 +1200,10 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(nowMs)) lastWeatherMs = nowMs;
       const wind01 = Number.isFinite(wx?.wind01) ? wx.wind01 : 0;
       const dir = Array.isArray(wx?.windDir) ? wx.windDir : [1, 0];
-      windDrift[0] = (windDrift[0] + dir[0] * wind01 * 120 * dtSec) % 1e5;
-      windDrift[1] = (windDrift[1] + dir[1] * wind01 * 120 * dtSec) % 1e5;
+      // Wrapped at 1e6 px (was 1e5): the swell now travels on this drift too (`WATER_WIND_SURFACE_TRAVEL`), and a wrap
+      // is a one-frame jump of the whole surface. 1e6 px is ~2.3 h of full gale per axis; float32 still resolves 1/16 px.
+      windDrift[0] = (windDrift[0] + dir[0] * wind01 * 120 * dtSec) % 1e6;
+      windDrift[1] = (windDrift[1] + dir[1] * wind01 * 120 * dtSec) % 1e6;
       surface.setWeather?.({
         wind01,
         windDir: dir,
@@ -1527,7 +1529,8 @@ export function createWaterSurfaceSubsystem({
         sprayRect = { minX: r.minX, minY: r.minY, maxX: r.maxX, maxY: r.maxY };
         sprayShore = extractSprayShore(sprayData.data, sprayData.width, sprayData.height, sprayRect);
       }
-      if (!sprayShore?.count) return (sprayWhyNot = 'no hard shore in the mask'), null;
+      // (2026-11-10) No hard shore no longer means no spray: open water throws whitecaps. `planSprayBirths` returns no
+      // births for an empty shore.
       const state = getWaterRenderState();
       if (state?.enabled === false) return (sprayWhyNot = 'water disabled'), null;
       sprayWhyNot = null;
@@ -1535,20 +1538,49 @@ export function createWaterSurfaceSubsystem({
       const speed = waterFlowSpeedPx(p) ?? 0;
       const [fx, fy] = waterFlowVector(Number.isFinite(p.flowAngleDeg) ? p.flowAngleDeg : 180);
       const spray = Number.isFinite(p.breakSpray) ? p.breakSpray : 1;
+      // (2026-11-10, mmp-78u.30.7) The surface's own clock and wind: waves are driven by both, and their crests decide
+      // WHEN a stretch of wall throws (see `water-spray-shore.js#sprayWaveImpact`).
+      const wxS = getWeather();
+      const tMs = Number(timeMsNode?.value);
+      const windS = Number.isFinite(wxS?.wind01) ? wxS.wind01 : 0;
+      const windDirS = Array.isArray(wxS?.windDir) ? wxS.windDir : [1, 0];
+      const tSecS = Number.isFinite(tMs) ? tMs / 1000 : 0;
       const births = planSprayBirths(sprayShore, {
         dtSec,
         flowDir: [fx, fy],
         flowSpeedPx: speed,
+        wind01: windS,
+        windDir: windDirS,
+        tSec: tSecS,
         spray,
         view,
         maxBirths,
         out: sprayBirthsOut,
       });
+      // OPEN-WATER WHITECAPS (2026-11-10, mmp-78u.30.7 — Ingram: "spawn across the water surface as well as along
+      // edges"): the same crests, breaking on open water once the wind is up. Appended to this frame's births.
+      planWhitecapBirths(sprayData, sprayRect, {
+        dtSec,
+        flowDir: [fx, fy],
+        flowSpeedPx: speed,
+        wind01: windS,
+        windDir: windDirS,
+        tSec: tSecS,
+        spray,
+        view,
+        maxBirths: Math.max(0, maxBirths - births.length),
+        out: births,
+      });
       return {
         births,
         maskTexture,
         rect: sprayRect,
-        currentPx: [fx * speed * 0.85, fy * speed * 0.85],
+        // a landed fleck floats ON the surface: the current plus the wind's push on it (2026-11-10, mmp-78u.30.7), the
+        // same downwind speed the swell and the foam texture travel at
+        currentPx: [
+          fx * speed * 0.85 + windDirS[0] * windS * SPRAY_WIND_DRIVE_PX,
+          fy * speed * 0.85 + windDirS[1] * windS * SPRAY_WIND_DRIVE_PX,
+        ],
         expectedDepth: lastExpectedDepth,
         shorePoints: sprayShore.count,
       };

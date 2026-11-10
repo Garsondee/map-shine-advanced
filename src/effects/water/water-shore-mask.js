@@ -82,6 +82,8 @@ const BREAKUP_SCALE_PX = 190;
 /** Along-shore wobble of the line: scale and amplitude, world px. */
 const WOBBLE_SCALE_PX = 55;
 const WOBBLE_PX = 4;
+/** Along-shore scale of the slow in-and-out drift of the whole foam profile, world px (2026-11-09, mmp-78u.30.1). */
+const DRIFT_SCALE_PX = 150;
 /** Where |∇m| is below this (per world px) the mask has no gradient to measure. */
 const MIN_GRADIENT = 1e-4;
 /** Clamp on the distance estimate, world px. */
@@ -194,7 +196,13 @@ export function buildMaskShoreDensity(
   const wobbleUv = worldXY.div(float(WOBBLE_SCALE_PX));
   const wobbleNoise = mx_fractal_noise_float(vec3(wobbleUv.x, wobbleUv.y, tSec.mul(float(0.06))), 2, 2.0, 0.5);
   // Distance from the foam's LEADING EDGE, world px, positive into the water.
-  const x = dist.sub(swash).sub(wobbleNoise.mul(float(WOBBLE_PX * 2.5)));
+  // ⚠️ NOT ONE RING PER EDGE (2026-11-09, mmp-78u.30.1 — Ingram: "I see three rings around the boats"). The leading edge
+  // only wobbled +-10 px, so the line, the tail's end and the open water sat at fixed offsets round every hull: three
+  // concentric rings. A second, slower warp (`DRIFT_SCALE_PX`) pushes the whole profile in and out along the shore by up
+  // to ~0.8 of the local reach, so where the foam starts and where it ends wander independently of the hull's outline.
+  const driftUv = worldXY.div(float(DRIFT_SCALE_PX));
+  const driftNoise = mx_fractal_noise_float(vec3(driftUv.x.add(float(3.7)), driftUv.y, tSec.mul(float(0.05))), 2, 2.0, 0.5);
+  const x = dist.sub(swash).sub(wobbleNoise.mul(float(WOBBLE_PX * 2.5))).sub(driftNoise.mul(widthPx).mul(float(1.6)));
 
   // ── VARIATION: every stretch of shore its own reach, coverage and line weight ──
   // Three independent world-anchored noises at a few hundred px, each drifting on
@@ -231,7 +239,7 @@ export function buildMaskShoreDensity(
   );
   // The line itself only breaks in the deepest gaps; elsewhere it thins and thickens.
   const lineGate = mix(
-    mix(float(1), smoothstep(float(-0.15), float(0.15), coverNoise), variation),
+    mix(float(1), smoothstep(float(0.02), float(0.3), coverNoise.add(weightNoise.mul(float(0.6)))), variation),
     float(1),
     frontN
   ).mul(mix(float(1), float(0.4), leeN));
@@ -245,6 +253,12 @@ export function buildMaskShoreDensity(
   const aa = max(fwidth(x), float(1.5));
   const lead = smoothstep(aa.negate(), aa, x);
   const xp = max(x, float(0));
+  const patchNoiseEarly = mx_fractal_noise_float(
+    vec3(breakupUv.x.mul(float(2.7)).add(float(9.1)), breakupUv.y.mul(float(2.7)), tSec.mul(float(0.03))),
+    2,
+    2.0,
+    0.5
+  );
   const lineW = float(LINE_PX)
     .mul(float(1).add(wobbleNoise.mul(float(1.8))))
     .mul(weightMul)
@@ -256,7 +270,8 @@ export function buildMaskShoreDensity(
     .mul(widthMul)
     .mul(float(1).add(frontN.mul(float(1.4))))
     .mul(float(1).sub(leeN.mul(float(0.6))));
-  const tail = exp(xp.div(max(reach, float(1))).negate()).mul(float(0.85));
+  const tailReach = reach.mul(float(0.55).add(smoothstep(float(-0.4), float(0.4), wobbleNoise.add(patchNoiseEarly)).mul(float(0.9))));
+  const tail = exp(xp.div(max(tailReach, float(1))).negate()).mul(float(0.85));
   const patchNoise = mx_fractal_noise_float(
     vec3(breakupUv.x.add(float(17.3)), breakupUv.y, tSec.mul(float(0.015))),
     2,

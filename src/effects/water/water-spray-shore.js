@@ -124,6 +124,68 @@ export function extractSprayShore(data, width, height, rect) {
   return { points: kept, count, spacingPx: step * Math.max(wPerTx, hPerTx) * keepEvery };
 }
 
+// ── WAVES DECIDE WHEN (2026-11-10, mmp-78u.30.7 — Ingram: "The flecks are less convincing because they are generated so
+// evenly. What we need to do instead is a 'wave' across every surface with peaks and troughs so that we get the waves
+// from the water itself informing the sudden splats of whole bunch of flecks appearing at once.") ──
+// A steady Poisson trickle spread over every wall reads as fizz. Now three crest trains roll across the map with the
+// surface (the current plus the wind, `WATER_WIND_SURFACE_TRAVEL`'s rate), a few degrees apart so their crests cross
+// and break the walls into pieces, grouped into sets by a slow envelope. A stretch of wall throws only while a crest
+// is ON it: nothing for seconds, then a splat of dozens at once, sweeping along the face as an oblique crest runs down it.
+// The AVERAGE rate is unchanged (normalised by `WAVE_IMPACT_MEAN`), so the Break spray dial still means what it did.
+
+/** World px/s of drive per unit of wind (the swell's own downwind speed: 120 px/s drift × 0.5). */
+export const SPRAY_WIND_DRIVE_PX = 60;
+/** The crest trains: heading offset (rad), wavelength (world px), height, phase. */
+const WAVE_TRAINS = Object.freeze([
+  Object.freeze({ ang: 0, len: 340, amp: 1, ph: 0 }),
+  Object.freeze({ ang: 0.38, len: 230, amp: 0.7, ph: 2.1 }),
+  Object.freeze({ ang: -0.31, len: 520, amp: 0.85, ph: 4.4 }),
+]);
+/** Wave sets: the length of one group of big waves, world px. */
+const WAVE_SET_PX = 2600;
+/** How narrow a crest is (exponent on a raised cosine): higher = shorter, sharper splats. */
+const WAVE_CREST_POWER = 10;
+/** Below this crest height a wave laps without throwing. */
+const WAVE_THROW_FLOOR = 0.3;
+
+/**
+ * How hard the waves hit this spot now, ≥ 0 (mean {@link WAVE_IMPACT_MEAN} over space and time).
+ * @param {number} x @param {number} y - world px.
+ * @param {number} t - seconds on the water's clock.
+ * @param {number} dx @param {number} dy - unit heading the waves run.
+ * @param {number} c - drive speed, world px/s.
+ */
+export function sprayWaveImpact(x, y, t, dx, dy, c) {
+  const speed = Math.max(20, c);
+  let h = 0;
+  for (const w of WAVE_TRAINS) {
+    const ca = Math.cos(w.ang);
+    const sa = Math.sin(w.ang);
+    const kx = dx * ca - dy * sa;
+    const ky = dx * sa + dy * ca;
+    const ck = speed * 0.8 * Math.sqrt(w.len / 340);
+    const ph = (2 * Math.PI * (x * kx + y * ky - ck * t)) / w.len + w.ph;
+    h += w.amp * Math.pow(0.5 + 0.5 * Math.cos(ph), WAVE_CREST_POWER);
+  }
+  const sp = (2 * Math.PI * (x * dx + y * dy - 0.5 * speed * t)) / WAVE_SET_PX + 1.3;
+  const env = 0.3 + 0.7 * Math.pow(0.5 + 0.5 * Math.cos(sp), 2);
+  const over = h * env - WAVE_THROW_FLOOR;
+  return over > 0 ? over * over : 0;
+}
+
+/** The mean of {@link sprayWaveImpact}, sampled once (deterministic grid over position and time). */
+export const WAVE_IMPACT_MEAN = (() => {
+  let s = 0;
+  let n = 0;
+  for (let i = 0; i < 97; i++) {
+    for (let j = 0; j < 89; j++) {
+      s += sprayWaveImpact(i * 53.3, j * 7.1, j * 0.731 + i * 0.37, 1, 0, 60);
+      n++;
+    }
+  }
+  return Math.max(1e-4, s / n);
+})();
+
 /** Off-screen points this far outside the view still throw (a fleck flies in). */
 const VIEW_MARGIN_PX = 220;
 
@@ -218,15 +280,37 @@ export function planSprayBirths(shore, o) {
   const pool = o.out ? (births.pooled?.length ?? 0) : 0;
   births.length = 0;
   const random = o.random ?? Math.random;
-  if (!shore?.count || !(o.dtSec > 0) || !(o.spray > 0) || !(o.flowSpeedPx > 0) || !(o.maxBirths > 0)) return births;
-  const fx = o.flowDir?.[0] ?? 0;
-  const fy = o.flowDir?.[1] ?? 0;
-  const speedK = Math.min(2.5, o.flowSpeedPx / SPRAY_REFERENCE_FLOW_PX);
+  if (!shore?.count || !(o.dtSec > 0) || !(o.spray > 0) || !(o.maxBirths > 0)) return births;
+  // THE DRIVE: the current plus the wind on the surface (2026-11-10) — one vector, as the swell travels.
+  const flowPx = Math.max(0, o.flowSpeedPx || 0);
+  const windPx = Math.max(0, o.wind01 || 0) * SPRAY_WIND_DRIVE_PX;
+  const ddx = (o.flowDir?.[0] ?? 0) * flowPx + (o.windDir?.[0] ?? 0) * windPx;
+  const ddy = (o.flowDir?.[1] ?? 0) * flowPx + (o.windDir?.[1] ?? 0) * windPx;
+  const drive = Math.hypot(ddx, ddy);
+  if (!(drive > 0.5)) return births;
+  // quantised to ~1° so a gently easing wind does not rebuild the per-point weights every frame
+  const fx = Math.round((ddx / drive) * 64) / 64;
+  const fy = Math.round((ddy / drive) * 64) / 64;
+  const speedK = Math.min(2.5, drive / SPRAY_REFERENCE_FLOW_PX);
   const pts = shore.points;
   // candidates in view, weighted by how squarely the current drives into the face (cached, see `candidatesFor`)
-  const { idx, cum, len, total } = candidatesFor(shore, fx, fy, o.view);
+  const c = candidatesFor(shore, fx, fy, o.view);
+  const { idx, len, total } = c;
   if (total <= 0 || len === 0) return births;
-  const expected = total * shore.spacingPx * SPRAY_RATE_PER_PX_SEC * o.spray * speedK * o.dtSec;
+  // THE WAVES (see `sprayWaveImpact`): each candidate's weight × how hard a crest is hitting it right now.
+  const tSec = Number.isFinite(o.tSec) ? o.tSec : 0;
+  if (!c.wave || c.wave.length < len) c.wave = new Float64Array(Math.max(len, 16));
+  const cum = c.wave;
+  let waveTotal = 0;
+  for (let j = 0; j < len; j++) {
+    const i = idx[j];
+    const wi = c.w[i] * sprayWaveImpact(pts[i * 4], pts[i * 4 + 1], tSec, fx, fy, drive);
+    waveTotal += wi;
+    cum[j] = waveTotal;
+  }
+  if (!(waveTotal > 0)) return births;
+  const expected =
+    (waveTotal / WAVE_IMPACT_MEAN) * shore.spacingPx * SPRAY_RATE_PER_PX_SEC * o.spray * speedK * o.dtSec;
   // Poisson-ish: the whole part plus a coin for the fraction, so a frame never carries a fixed batch
   let n = Math.floor(expected);
   if (random() < expected - n) n++;
@@ -234,8 +318,8 @@ export function planSprayBirths(shore, o) {
   const T = SPRAY_THROW;
   const spread = (T.spreadDeg * Math.PI) / 180;
   for (let b = 0; b < n; b++) {
-    // pick a point by weight (binary search on the running total)
-    const r = random() * total;
+    // pick a point by weight × wave impact (binary search on the running total)
+    const r = random() * waveTotal;
     let lo = 0;
     let hi = len - 1;
     while (lo < hi) {
@@ -277,6 +361,140 @@ export function planSprayBirths(shore, o) {
       if (o.out) (births.pooled ??= [])[b] = r;
       births.push(r);
     }
+  }
+  return births;
+}
+
+// ── OPEN-WATER WHITECAPS (2026-11-10, mmp-78u.30.7 — Ingram: "Make the foam flecks spawn across the water surface as
+// well as along edges.") ──
+// The same crest trains as the walls (`sprayWaveImpact`), breaking on open water once the wind is up: a crest that is
+// high where a slow patch field is also high throws a SPLAT, a little cluster of flecks at once, carried downwind. Dead
+// calm throws none; whitecap cover rises steeply with wind (Monahan: W ∝ U^3.4), so a breeze gives the odd splat and a
+// gale a sea full of them. A painted puddle is too small to matter: tries land on water by the mask, so the count
+// follows how much water is in view.
+
+/** Whitecaps begin at this wind (0..1); cover grows as ((w − onset) / (1 − onset))^WHITECAP_POWER. */
+export const WHITECAP_ONSET = 0.18;
+const WHITECAP_POWER = 2.2;
+/** Splats per world px² per second at full cover and Break spray 1. */
+export const WHITECAP_SPLATS_PER_PX2_SEC = 0.00002;
+/** Flecks per splat, and how far they start from its centre, world px. */
+const SPLAT_MIN = 3;
+const SPLAT_MAX = 14;
+const SPLAT_RADIUS_PX = 11;
+/** The patch field's cell, world px: whitecaps break in patches, not along whole crest lines. */
+const WHITECAP_PATCH_PX = 420;
+
+/** Smooth value noise in 0..1, world-anchored (pure JS twin of a cheap shader noise). */
+function patchNoise(x, y) {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const fx = x - xi;
+  const fy = y - yi;
+  const h = (i, j) => {
+    const s = Math.sin(i * 127.1 + j * 311.7) * 43758.5453;
+    return s - Math.floor(s);
+  };
+  const ux = fx * fx * (3 - 2 * fx);
+  const uy = fy * fy * (3 - 2 * fy);
+  const a = h(xi, yi) + (h(xi + 1, yi) - h(xi, yi)) * ux;
+  const b = h(xi, yi + 1) + (h(xi + 1, yi + 1) - h(xi, yi + 1)) * ux;
+  return a + (b - a) * uy;
+}
+
+/** How much of the sea breaks white at this wind, 0..1. */
+export function whitecapCover(wind01) {
+  const t = (Math.max(0, wind01) - WHITECAP_ONSET) / (1 - WHITECAP_ONSET);
+  return t <= 0 ? 0 : Math.min(1.4, Math.pow(t, WHITECAP_POWER));
+}
+
+/**
+ * This frame's open-water births, APPENDED to `o.out` (the shore planner's reused list), same record shape.
+ * @param {{data: Uint8Array|Uint8ClampedArray, width: number, height: number}|null} mask - the decoded `_Water` mask.
+ * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect - the world rect the mask covers.
+ * @param {object} o - as {@link planSprayBirths}, plus the same `out`.
+ * @returns {Array<object>} `o.out` (or a new list).
+ */
+export function planWhitecapBirths(mask, rect, o) {
+  const births = o.out ?? [];
+  const random = o.random ?? Math.random;
+  const cover = whitecapCover(o.wind01 || 0);
+  if (!mask?.data || !rect || !(cover > 0) || !(o.dtSec > 0) || !(o.spray > 0) || !(o.maxBirths > 0)) return births;
+  const v = o.view ?? rect;
+  const x0 = Math.max(v.minX, rect.minX);
+  const y0 = Math.max(v.minY, rect.minY);
+  const x1 = Math.min(v.maxX, rect.maxX);
+  const y1 = Math.min(v.maxY, rect.maxY);
+  if (!(x1 > x0) || !(y1 > y0)) return births;
+  const { data, width, height } = mask;
+  const bpp = Math.max(1, Math.round(data.length / (width * height)));
+  const sx = width / (rect.maxX - rect.minX);
+  const sy = height / (rect.maxY - rect.minY);
+  const wet = (x, y) => {
+    const tx = Math.floor((x - rect.minX) * sx);
+    const ty = Math.floor((y - rect.minY) * sy);
+    if (tx < 0 || ty < 0 || tx >= width || ty >= height) return false;
+    return data[(ty * width + tx) * bpp] >= WATER_MIN;
+  };
+  // the drive the crests run with (current + wind, as the walls), and the downwind heading the flecks are thrown along
+  const flowPx = Math.max(0, o.flowSpeedPx || 0);
+  const windPx = Math.max(0, o.wind01 || 0) * SPRAY_WIND_DRIVE_PX;
+  const wdx = o.windDir?.[0] ?? 1;
+  const wdy = o.windDir?.[1] ?? 0;
+  const ddx = (o.flowDir?.[0] ?? 0) * flowPx + wdx * windPx;
+  const ddy = (o.flowDir?.[1] ?? 0) * flowPx + wdy * windPx;
+  const drive = Math.hypot(ddx, ddy) || 1;
+  const dx = ddx / drive;
+  const dy = ddy / drive;
+  const t = Number.isFinite(o.tSec) ? o.tSec : 0;
+  // patches drift with the surface (half the drive) and slowly re-form
+  const pdx = dx * drive * 0.5 * t;
+  const pdy = dy * drive * 0.5 * t;
+  // Rejection: tries spread over the view; each is kept with probability ∝ crest impact × patch, so splats sit on
+  // breaking crests inside patches. `ACCEPT_REF` is a high-ish impact; the try count is scaled so the kept MEAN matches.
+  const area = (x1 - x0) * (y1 - y0);
+  const splatsWanted = area * WHITECAP_SPLATS_PER_PX2_SEC * cover * o.spray * o.dtSec;
+  const ACCEPT_REF = WAVE_IMPACT_MEAN * 6;
+  const PATCH_MEAN = 0.18;
+  const meanAccept = (WAVE_IMPACT_MEAN / ACCEPT_REF) * PATCH_MEAN;
+  let tries = Math.min(6000, splatsWanted / meanAccept);
+  let nTries = Math.floor(tries);
+  if (random() < tries - nTries) nTries++;
+  const spread = (70 * Math.PI) / 180;
+  const base = Math.atan2(wdy, wdx);
+  let budget = o.maxBirths;
+  const pool = births.pooled;
+  for (let k = 0; k < nTries && budget > 0; k++) {
+    const x = x0 + random() * (x1 - x0);
+    const y = y0 + random() * (y1 - y0);
+    const pn = patchNoise((x - pdx) / WHITECAP_PATCH_PX, (y - pdy) / WHITECAP_PATCH_PX + t * 0.02);
+    const patch = Math.pow(Math.max(0, (pn - 0.45) / 0.55), 2);
+    if (patch <= 0) continue;
+    const imp = sprayWaveImpact(x, y, t, dx, dy, drive);
+    if (random() * ACCEPT_REF >= imp * patch) continue;
+    if (!wet(x, y)) continue;
+    // A SPLAT: a little cluster at once, each fleck its own throw
+    const n = Math.min(budget, SPLAT_MIN + Math.floor(random() * (SPLAT_MAX - SPLAT_MIN + 1)));
+    for (let f = 0; f < n; f++) {
+      const ra = random() * 2 * Math.PI;
+      const rr = SPLAT_RADIUS_PX * Math.sqrt(random());
+      const bx = x + Math.cos(ra) * rr;
+      const by = y + Math.sin(ra) * rr;
+      const a = base + (random() * 2 - 1) * spread;
+      const u = random();
+      const speed = (15 + 70 * u * u) * (0.7 + 0.6 * Math.min(1.5, o.wind01 || 0));
+      const airSec = 0.2 + 0.5 * Math.pow(random(), 0.9);
+      const apexPx = 2 + 12 * random() * (0.5 + 0.5 * u);
+      const sizePx = 0.4 + 0.75 * Math.pow(random(), 1.6);
+      const rec = { x: bx, y: by, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, airSec, apexPx, sizePx };
+      const slot = births.length;
+      if (pool?.[slot]) Object.assign(pool[slot], rec), births.push(pool[slot]);
+      else {
+        if (o.out) (births.pooled ??= [])[slot] = rec;
+        births.push(rec);
+      }
+    }
+    budget -= n;
   }
   return births;
 }

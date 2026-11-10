@@ -50,9 +50,11 @@ export const WATER_PARAMS = Object.freeze({
     min: 0,
     max: 1,
     step: 0.01,
-    // The author's own "large polluted medieval town river" target sits
-    // toward the murky end, not at either pole.
-    default: 1,
+    // ⚠️ 0.25, DOWN FROM 1 (2026-11-09, Water Lab, decision bead mmp-78u.30.2): at 1 EVERY map without its own water
+    // settings drew olive-brown sludge, from a puddle to the open sea (Lab · Water, and the Monastery sea: painted blue
+    // 14,57,72 came out 50,52,42). 0.25 is a clean-ish, slightly green water that reads right at every size; the town
+    // river is the `pollutedTownRiver` preset, and Pollution is still one dial away.
+    default: 0.25,
     category: 'Look',
     label: 'Pollution',
     help: 'Clean water at 0, silty sludge at 1 — blends between two real colour references (clear tropical shallows/abyss and murky silt-brown shallows/black-brown depths) rather than just darkening one tint. Also thickens the murk, so heavily polluted water hides its bed sooner than the Depth slider alone would.',
@@ -284,8 +286,8 @@ export const WATER_PARAMS = Object.freeze({
     step: 8,
     default: 32,
     category: 'Shape',
-    label: 'Depth reach',
-    help: 'How far in from the bank the water reaches its full depth, in canvas pixels. This is what gives a river shallow, sandy edges and a deep middle WITHOUT the mask having to paint a depth gradient — set it to roughly half the width of your widest channel. Small values make a narrow shelf and a deep body; very large values make the whole thing read as shallow.',
+    label: 'Shore band reach',
+    help: 'How far out from the bank the shore foam band reaches, in canvas pixels. It does not change how deep the water is: depth comes from the brightness of your water mask, so paint shallows grey and deep water white. A hard white edge (a quay, a hull, a pile) stays deep right up to it, as real water does.',
   },
   wetBandPx: {
     type: 'float',
@@ -1345,29 +1347,28 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
   Object.freeze({
     n: 4,
     id: 'shoreDist01',
-    label: '4 · Shore distance (tier 1 depth ramp)',
+    label: '4 · Shore distance (foam band scale)',
     reads:
-      'Black at the bank, white at `depthScalePx` in — the geometric ramp that turns a flat silhouette into ' +
-      'shallow edges and a deep channel. All-white everywhere means the SDF body pack never baked (below ' +
-      'tier 1, or the bake genuinely failed) and depth is riding the mask alone.',
+      'Black at the bank, white at `depthScalePx` in. Since 2026-11-09 this no longer changes depth (depth is the ' +
+      "mask's brightness alone); it scales the shore foam band. All-white everywhere means the SDF body pack never " +
+      'baked (below tier 1, or the bake genuinely failed).',
   }),
   Object.freeze({
     n: 5,
     id: 'depth01',
     label: '5 · Optical depth',
     reads:
-      "Mask x depth-ramp x inside x opacity x turbidity — the number Beer-Lambert's exp(-sigma*d) actually " +
-      'consumes. Should track channel 4 modulated by the mask and by `opacity`. All-black on real water means ' +
-      '`opacity` is 0 or the mask is not reading as painted here.',
+      "Mask x inside x opacity x turbidity — the number Beer-Lambert's exp(-sigma*d) actually consumes. Should " +
+      'track the mask (channel 2) scaled by `opacity`; never darker in a ring round a hard edge. All-black on real ' +
+      'water means `opacity` is 0 or the mask is not reading as painted here.',
   }),
   Object.freeze({
     n: 6,
     id: 'bedVisibility',
     label: '6 · Bed visibility (mean transmittance)',
     reads:
-      'White = you can see the bed clearly; black = fully absorbed, deep-tarn water. Should fall smoothly ' +
-      'from the bank toward the channel. Uniform grey everywhere on a silhouette mask means depth01 has no ' +
-      'variation — the exact "flat wash" failure this rung was built to fix.',
+      'White = you can see the bed clearly; black = fully absorbed, deep-tarn water. Follows the painted ' +
+      'depth: falls smoothly across a grey-painted bank, and stays even right up to a hard (hull, quay) edge.',
   }),
   Object.freeze({
     n: 7,
@@ -1645,6 +1646,32 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
       'White = solid foam, grey = scattered clumps, black = none. A shoreline that shows grid steps HERE means ' +
       'the mask distance handed over to the SDF too close to the edge; flat black below tier 4 is correct (the ' +
       'old path has no density).',
+  }),
+  Object.freeze({
+    n: 32,
+    id: 'domainGrid',
+    label: '31 · Distortion grid (2026-11-09)',
+    reads:
+      "A 48 px grid drawn in the wave field's own coordinates (bank warp + flow warp; the steady drift left out). " +
+      'Straight, evenly spaced lines = the pattern is undistorted; bent, swirled, kinked or crowded lines near a wall ' +
+      'or corner are distortions in the water itself. Red = how far the pattern is pushed; blue = water present.',
+  }),
+  Object.freeze({
+    n: 33,
+    id: 'domainShear',
+    label: '32 · Distortion shear (2026-11-09)',
+    reads:
+      'How hard the wave pattern is stretched or sheared at each pixel (derivative of the warp per world px): black = ' +
+      'rigid, red = 50%, yellow-white = doubled or worse. Seams and swirls near surfaces show as bright lines/blobs.',
+  }),
+  Object.freeze({
+    n: 34,
+    id: 'surfaceTravel',
+    label: '33 · Surface travel (2026-11-10)',
+    reads:
+      'A 384 px grid riding the surface itself (the full domain shift: flow, wind and bends). It slides the way the ' +
+      'swell, its foam and the caustics all travel: south with a south flow in calm air, bending downwind as the wind ' +
+      'rises. Rigid, so two frames show the motion exactly (Lab · Water motion tool).',
   }),
 ]);
 

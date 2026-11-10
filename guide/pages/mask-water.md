@@ -1,7 +1,9 @@
 ---
-sources: src/scene/mask-catalog.js (water: rgba, red read), src/effects/water/ (WATER_PARAMS, WATER_GRID_MAX_DIM), shore foam from the mask edge (0cfd9fd9)
+sources: src/scene/mask-catalog.js (water: rgba, red read), src/effects/water/ (WATER_PARAMS, WATER_GRID_MAX_DIM), shore foam from the mask edge (0cfd9fd9), src/effects/water/water-field.js (WATER_WIND_SURFACE_TRAVEL), src/effects/water/water-spray-shore.js (sprayWaveImpact)
 ---
-`_Water` says **where the water is and how deep**. Map Shine adds moving waves, shore foam, reflections of the sky, the sun shining through the shallows, and rain rings when it rains.
+`_Water` says **where the water is and how deep**. Map Shine adds moving waves, shore foam, reflections of the sky, rain rings when it rains, and sunlight through the water: bright, shifting caustics in the shallows and soft shafts with drifting silt over deeper water. They dim under cloud and in shadow and are gone at night.
+
+**The wind drives the surface, and the rest follows.** The waves, the foam floating on them and the caustics underneath all travel with the current *and* downwind. In a strong wind the caustics turn busier and dimmer, and on a calm day they are bolder and slower. Under thin cloud they blur before they fade, and a low sun shifts them away from the waves that made them. Where waves meet a hard edge (a quay wall, a hull, a pier), spray flies off in sudden splats as each crest hits. Between crests that edge stays quiet.
 
 ::: compare "**Docklands Warehouse**, the waterfront. Drag to compare: the painted riverbed becomes moving water, with foam around the boat and the jetty."
 ![Plain art](docklands-water-art.webp)
@@ -13,7 +15,7 @@ sources: src/scene/mask-catalog.js (water: rgba, red read), src/effects/water/ (
 ### How to read it
 
 - **Black**: dry land.
-- **Any grey or white**: water. **Brighter is deeper.**
+- **Any grey or white**: water. **Brighter is deeper.** Depth comes from this brightness and nothing else: a white edge against a hull, pier or quay wall stays deep right up to it, like real water. For a sloping bank or a beach, paint a grey ramp.
 - Map Shine reads only the red channel. Paint in grey.
 
 ### Painting it

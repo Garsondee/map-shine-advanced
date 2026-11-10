@@ -281,6 +281,7 @@ import {
   WATER_CAUSTICS_JUNCTION_FRACTION,
   WATER_CAUSTICS_LINE_FLOOR,
   WATER_CAUSTICS_SPECULAR_INFLUENCE,
+  WATER_WIND_SURFACE_TRAVEL,
 } from './water-field.js';
 import {
   buildWaterSpecular,
@@ -384,7 +385,7 @@ export const WATER_POLLUTION_ABSORPTION_RANGE = Object.freeze([1.0, 1.6]);
  * polluted medieval town river" lean (`pollution`). Matches `water.js`'s
  * schema defaults; a change lands in both places or in neither. */
 export const WATER_TIER1_DEPTH = 0.45;
-export const WATER_TIER1_POLLUTION = 0.6;
+export const WATER_TIER1_POLLUTION = 0.25;
 
 /**
  * Where the mask's RED channel is thresholded into presence, and over how wide
@@ -554,6 +555,10 @@ export const WATER_TIER1_INSCATTER = 0.18;
 /**
  * TIER 1 — HOW FAR FROM THE BANK THE WATER REACHES FULL DEPTH, world px.
  *
+ * ⚠️ RETIRED AS A DEPTH TAPER 2026-11-09 (mmp-78u.30.1): it put a shelf of clear water round every boat, pile and quay
+ * wall. Depth is the mask's brightness alone now; this length only scales the shore FOAM band (`waterFoamReachPx`) and
+ * debug channel 4. The history below is why it once existed.
+ *
  * ⚠️ **THIS IS THE CONTROL THAT MAKES WATER STOP LOOKING LIKE PAINT, AND ITS
  * ABSENCE — NOT THE BLEND — IS WHY IT DID (2026-07-26).**
  *
@@ -585,6 +590,21 @@ export const WATER_TIER1_INSCATTER = 0.18;
  * more, a stream less.
  */
 export const WATER_TIER1_DEPTH_SCALE_PX = 312;
+
+/** Caustics v2 (2026-11-09, mmp-78u.30.1): how many times the bed the brightest net junction reaches (the old net peaked
+ * at 1.6), the strength of the sun shafts, the size and strength of the silt grain lit inside them. */
+export const WATER_CAUSTICS_HDR_PEAK = 4.2;
+export const WATER_SHAFT_GAIN = 0.16;
+export const WATER_SILT_GRAIN_PX = 3.2;
+export const WATER_SILT_GAIN = 0.9;
+
+/** Spacing of the 3x3 taps that average the solved flow before it bends the wave field, world px (2026-11-09,
+ * mmp-78u.30.1): several flow texels, so the per-texel direction flips beside a wall average out. */
+export const WATER_FLOW_SMOOTH_PX = 30;
+
+/** Spacing of the five taps that smooth the shore distance the wave field reads, world px (2026-11-09, mmp-78u.30.1):
+ * a few flood texels, so a seed switch's kink is rounded off without softening the shore itself. */
+export const WATER_SHORE_DIST_SMOOTH_PX = 24;
 
 /**
  * TIER 2 — how strongly the surface field varies optical depth, as a fraction.
@@ -1266,6 +1286,7 @@ export function buildWaterSurfaceMaterial({
     screenCoordinate,
     ivec2,
     floor,
+    fract,
   } = THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
@@ -1588,6 +1609,33 @@ export function buildWaterSurfaceMaterial({
     })
   );
   const flowPackGated = flowPackTexNode.mul(inRect);
+  // ⚠️ THE DIRECTION THE WAVE FIELD IS BENT BY IS A WIDE AVERAGE, NOT ONE TEXEL (2026-11-09, mmp-78u.30.1 — Ingram: "not
+  // clean ... swirls ... distortions near surfaces"). The distortion grid (debug channel 32) showed a strip along every
+  // wall where the pattern is pushed 48+ px and the grid lines run in pixel stairs, ending on a hard rectangle: the
+  // solved velocity is ~7 px per texel and falls to zero in the solid texels beside a wall, so its DIRECTION flips texel
+  // by texel there. Averaged over 3x3 taps `WATER_FLOW_SMOOTH_PX` apart, and normalised softly (a short average is a
+  // short direction, not a noisy unit one), the bend becomes a slow, large-scale lean toward the lee of an obstacle.
+  const flowSmooth = (() => {
+    const S = WATER_FLOW_SMOOTH_PX;
+    let acc = vec2(0, 0);
+    for (const iy of [-1, 0, 1]) {
+      for (const ix of [-1, 0, 1]) {
+        const w = ((ix === 0 ? 2 : 1) * (iy === 0 ? 2 : 1)) / 16;
+        const u = positionWorld.x.add(float(ix * S)).sub(uMaskRect.x).div(spanX);
+        const v = positionWorld.y.add(float(iy * S)).sub(uMaskRect.y).div(spanY);
+        const tap = flowPackTexNode.sample(
+          buildSmoothTexelUv(THREE.TSL, { uvNode: vec2(clamp(u, 0, 1), clamp(v, 0, 1)), uTexSize: uFlowPackTexSize })
+        );
+        acc = acc.add(vec2(tap.r, tap.g).mul(float(w)));
+      }
+    }
+    // Where the averaged velocity is near zero (the stagnant strip beside a wall, a crush of competing directions) the
+    // direction means nothing: trust it only as the flow there is real, else fall back to the free-stream heading, so a
+    // wall deflects NOTHING at its face instead of everything (the full-cap strip with a hard rectangular end).
+    const accLen = length(acc);
+    const trust = smoothstep(float(0.2), float(0.65), accLen);
+    return mix(uFlowDir, acc.div(max(accLen, float(1e-4))), trust);
+  })();
 
   // ── SIM PACK: `res:waterSim` (2026-08-18, S5) ───────────────────────────
   // Foam's own per-frame memory — R is the RAW accumulator this pass reads
@@ -1772,7 +1820,13 @@ export function buildWaterSurfaceMaterial({
   // shoreline" is listed under tier 1's `adds`, not tier 0's).
   let bodyTexNode = null;
   let shoreDist = float(0);
-  let depthRamp = float(1);
+  // Depth never tapers toward an edge (see TIER 1a below): the mask's brightness alone is the depth.
+  const depthRamp = float(1);
+  // The shore-distance ramp, kept for debug channel 4 only (white `depthScalePx` in from the bank).
+  let shoreDistDisplay = float(1);
+  // The wave field's distance, smoothed (see TIER 1a): equals `shoreDist` below tier 1.
+  let shoreDistSmooth = float(0);
+  let sdfAt = () => float(0);
   let wetBand = float(0);
 
   if (activeTier >= 1) {
@@ -1796,13 +1850,34 @@ export function buildWaterSurfaceMaterial({
     // and both live here.
     const sdf = bodyTexNode.r;
 
-    // ── TIER 1a: THE DEPTH AXIS — the mask's painted depth TIMES the
-    // geometric ramp away from the bank. See WATER_TIER1_DEPTH_SCALE_PX: on a
-    // silhouette mask the first factor is constant, and without the second
-    // the whole rung has no variation to render and can only ever produce a
-    // flat wash.
+    // ── TIER 1a: DISTANCE FROM THE BANK — for the foam band and the debug view ONLY, never for depth.
+    // ⚠️ DEPTH IS THE MASK'S BRIGHTNESS, NOTHING ELSE (2026-11-09, mmp-78u.30.1 — Ingram, Docklands: "the black edge of
+    // the water comes up to the edge of the boats ... but the water gets a transparent transition zone which makes the
+    // water look clear in a ring around boats which is nonsense ... we can use the brightness of the _Water mask to
+    // understand the approximate depth"). Depth used to be `mask × smoothstep(0, depthScalePx, shoreDist)`, a shelf of
+    // shallow, clear water `depthScalePx` wide along EVERY edge: right for a sloping beach, nonsense at a hull, a pile
+    // or a quay wall, where real water is as deep at the edge as a metre out (default 32 px, the ocean preset 1200 px).
+    // The mask already says which edge is which: a soft, grey-painted bank is a slope (its brightness IS the shallows,
+    // as the guide tells authors), a hard white-to-black edge is a wall. `depthRamp` stays 1 at every tier.
     shoreDist = max(sdf.negate(), float(0)); // sdf is negative INSIDE the water
-    depthRamp = smoothstep(float(0), max(uDepthScalePx, float(1)), shoreDist);
+    shoreDistDisplay = smoothstep(float(0), max(uDepthScalePx, float(1)), shoreDist);
+    // ⚠️ THE WAVE FIELD READS A SMOOTHED DISTANCE (2026-11-09, mmp-78u.30.1). The flood's distance is exact at texel
+    // centres but KINKED where the nearest seed changes (the lines running straight on from a pier's sides past its
+    // nose, Lab / Water B1pierNose); shoaling and the crest reach bend the waves through curves of it, so the kink drew
+    // a straight seam across open water. The mean of five taps `WATER_SHORE_DIST_SMOOTH_PX` apart rounds every kink off.
+    const sdfTap = (ox, oy) => {
+      const u = positionWorld.x.add(float(ox)).sub(uBodyRect.x).div(uBodyRect.z.sub(uBodyRect.x));
+      const v = positionWorld.y.add(float(oy)).sub(uBodyRect.y).div(uBodyRect.w.sub(uBodyRect.y));
+      return bodyTexNode.sample(
+        buildSmoothTexelUv(THREE.TSL, { uvNode: vec2(clamp(u, 0, 1), clamp(v, 0, 1)), uTexSize: uBodyTexSize })
+      ).r;
+    };
+    sdfAt = sdfTap;
+    const Rs = WATER_SHORE_DIST_SMOOTH_PX;
+    shoreDistSmooth = max(
+      sdf.add(sdfTap(Rs, 0)).add(sdfTap(-Rs, 0)).add(sdfTap(0, Rs)).add(sdfTap(0, -Rs)).mul(float(-0.2)),
+      float(0)
+    );
 
     // ── TIER 1b: THE WET BAND ────────────────────────────────────────────
     // `1 − smoothstep(0, band, sdf)` on the POSITIVE (outside) side of the
@@ -1922,7 +1997,10 @@ export function buildWaterSurfaceMaterial({
     slope: null,
     domainOffset: vec2(0, 0),
     flowWarp: vec2(0, 0),
+    bankWarp: vec2(0, 0),
+    bend: vec2(0, 0),
     causticBrightness: float(0),
+    causticFocus: float(0),
     rainSplash: null,
     rainRough: null,
   };
@@ -1932,7 +2010,9 @@ export function buildWaterSurfaceMaterial({
       worldXY: vec2(positionWorld.x, positionWorld.y),
       timeMsNode: timeMsNode ?? float(0),
       tangentXY: vec2(bodyTexNode.b, bodyTexNode.a),
-      shoreDist,
+      // the distance field read at neighbouring points; the field takes its central differences for the bank direction
+      sampleSdfAt: (ox, oy) => sdfAt(ox, oy),
+      shoreDist: shoreDistSmooth,
       insideWater: inside,
       uWaveScalePx,
       uFlowSpeedPx,
@@ -1950,7 +2030,7 @@ export function buildWaterSurfaceMaterial({
       // This is what lets `buildWaterSurfaceField`'s new `flowWarp`
       // (`WATER_FLOW_WARP_INFLUENCE`'s own doc) bend the BASE surface near
       // an obstacle instead of only foam's shape/orientation.
-      localFlowDir: localFlowDirSafe,
+      localFlowDir: flowSmooth,
       uBankInfluence,
       uFlowWarpInfluence,
       uCausticSharpness,
@@ -1989,6 +2069,8 @@ export function buildWaterSurfaceMaterial({
       uWindDriftPx,
       uRain01,
       uSunCaustic,
+      uSunWater,
+      causticDepth01: structuralDepth01.mul(float(0.4).add(uDepth.mul(float(1.2)))),
     });
   }
 
@@ -2539,7 +2621,11 @@ export function buildWaterSurfaceMaterial({
     const bankTangent = vec2(maskShore.outward.y.negate(), maskShore.outward.x);
     const downstream = smoothstep(float(-0.25), float(0.25), dot(bankTangent, uFlowDir)).mul(float(2)).sub(float(1));
     const alongBankPx = bankTangent.mul(downstream).mul(uFlowSpeedPx).mul(float(0.7));
-    const currentPx = mix(localVel.mul(uFlowSpeedPx), alongBankPx, nearBank);
+    // (2026-11-10, mmp-78u.30.6) Foam floats ON the surface, so the wind pushes it too: the same downwind speed the
+    // swell travels at (`WATER_WIND_SURFACE_TRAVEL` × the 120 px/s wind drift rate), on top of the current. Safe per
+    // pixel here: the foam texture's flow-map phases reset every cycle, so a rate change can never accumulate into rays.
+    const windOnFoamPx = uWindDir.mul(uWind01.mul(float(120 * WATER_WIND_SURFACE_TRAVEL)));
+    const currentPx = mix(localVel.mul(uFlowSpeedPx), alongBankPx, nearBank).add(windOnFoamPx);
     const simShoreFade = smoothstep(float(0), float(0.25), inside).mul(smoothstep(float(8), float(48), shoreDist));
     foamDensity = max(max(maskShore.density, waterSimFoam.mul(simShoreFade)), field.foam.mul(crestPatch));
     foamTexture = buildFoamTexture(THREE, {
@@ -2628,11 +2714,67 @@ export function buildWaterSurfaceMaterial({
   // the surface, so it needs the sun up and unclouded (`uSunWater.w`: the key's
   // strength × what the surface lets in), and open sky above (the same outdoors
   // gate the reflection uses) — before this it shone under roofs and at night.
-  const causticExcess = field.causticBrightness
+  // ── CAUSTICS v2 (2026-11-09, mmp-78u.30.1 — Ingram: "a high dynamic range dramatic and evolving caustic pattern which
+  // responds correctly to what is above it, darkening when things block the sun, darkening in shadow, darkening and changing
+  // as the sky gets clouds ... a bit of shaft lighting with grain that moves as if it were soil/sand moving in turbulent
+  // stream ... sell the illusion of depth"). The sun, cloud, cast-shadow and open-sky gates below are unchanged (they were
+  // already right: `uSunWater.w` is the key's strength after clouds and night, `specular.sunVis` the raw cast shadow, and
+  // `outdoors` the sky gate). What changes is the picture they gate:
+  //   1. HDR: the Worley net runs through a contrast curve to `WATER_CAUSTICS_HDR_PEAK`x the bed (junctions burn, the cells
+  //      between stay dark), instead of a gentle 1.6x.
+  //   2. DAPPLE: a slow, large-scale noise (7 wave cells) moves the convergence zones about, so intensity wanders over the
+  //      map and the net is never evenly bright (evolving, not a wallpaper).
+  //   3. DEPTH: caustics focus within a couple of metres; deeper water (mask brightness x the Depth dial) fades them out, so
+  //      a shallow ford sparkles and an abyss does not.
+  const TSLc = THREE.TSL;
+  const tSecC = (timeMsNode ?? float(0)).mul(float(1 / 1000));
+  const wxyC = vec2(positionWorld.x, positionWorld.y).add(field.domainOffset);
+  //   2b. (2026-11-10, mmp-78u.30.6) The dapple is no longer its own noise: it is the swell's FOCUS (`field.causticFocus`,
+  //      −div of the real surface slope), so the bright zones sit under the converging waves and travel with them, wind
+  //      included. Wind roughens the surface: the swell's focus loses coherence and the peak spreads over many finer
+  //      lines, so a gale's caustics are busier and dimmer, a calm day's bold and slow.
+  const windRoughC = smoothstep(float(0.08), float(1), uWind01);
+  const focusSpread = mix(float(1), float(0.45), windRoughC);
+  const dappleMul = mix(float(0.3), float(1.8), smoothstep(float(-1.6), float(1.6), field.causticFocus.mul(focusSpread)));
+  const netNorm = clamp(field.causticBrightness.div(float(WATER_CAUSTICS_MAX)), float(0), float(1));
+  const netHdr = pow(netNorm, float(1.7)).mul(float(WATER_CAUSTICS_HDR_PEAK)).mul(mix(float(1), float(0.6), windRoughC));
+  const waterDeep = structuralDepth01.mul(float(0.4).add(uDepth.mul(float(1.2))));
+  const causticDepthFade = float(1).sub(smoothstep(float(0.5), float(1.3), waterDeep));
+  const causticExcess = netHdr
+    .mul(dappleMul)
+    .mul(causticDepthFade)
     .mul(causticGain)
     .mul(specular.sunVis)
     .mul(uSunWater.w)
     .mul(specular.outdoors ?? float(1));
+  // ── SUN SHAFTS + SILT (2026-11-09, mmp-78u.30.1) — light scattered back from the water column. Seen from above, a shaft
+  // is the caustic light smeared along the refracted sun's direction by depth, so the field is a fractal noise stretched
+  // 7:1 along the sun azimuth (`uSunCaustic.xy`), drifting slowly and evolving; its strength is the SAME sun/shadow/cloud/
+  // sky gates as the net, times how much water there is to scatter in (mask depth) and how murky it is (Pollution). Silt:
+  // ~3 px grains in the water's own moving frame (the wave domain travels with the current), twinkling as turbulence
+  // turns them, visible only INSIDE a shaft. Additive, in the in-scatter mesh.
+  const sunHc = vec2(uSunCaustic.x, uSunCaustic.y);
+  const sunPerpC = vec2(sunHc.y.negate(), sunHc.x);
+  const shaftAlong = dot(wxyC, sunHc);
+  const shaftAcross = dot(wxyC, sunPerpC);
+  const shaftUv = vec2(
+    shaftAlong.div(max(uWaveScalePx.mul(float(4.5)), float(1))).sub(tSecC.mul(float(0.025))),
+    shaftAcross.div(max(uWaveScalePx.mul(float(1.0)), float(1)))
+  );
+  const shaftN = TSLc.mx_fractal_noise_float(vec3(shaftUv.x, shaftUv.y, tSecC.mul(float(0.06))), 3, 2.0, 0.5);
+  const shaftBody = smoothstep(float(0.02), float(0.6), shaftN);
+  const shaftWater = smoothstep(float(0.08), float(0.7), structuralDepth01.mul(float(0.5).add(uDepth))).mul(
+    float(0.35).add(uPollution.mul(float(0.65)))
+  );
+  const shaftGate = uSunWater.w.mul(specular.sunVis).mul(specular.outdoors ?? float(1)).mul(inside);
+  const shaftEnergy = shaftBody.mul(shaftBody).mul(shaftWater).mul(shaftGate);
+  const siltCell = floor(wxyC.div(float(WATER_SILT_GRAIN_PX)));
+  const siltHash = (c, k) => fract(TSLc.sin(dot(c, vec2(127.1, 311.7)).add(k)).mul(float(43758.5453)));
+  const siltOn = step(float(0.975), siltHash(siltCell, float(0)));
+  const siltTwinkle = float(0.35).add(siltHash(siltCell, floor(tSecC.mul(float(5))).mul(float(1.7))).mul(float(0.65)));
+  const shaftLight = vec3(0.5, 0.82, 0.9)
+    .mul(shaftEnergy.mul(float(WATER_SHAFT_GAIN)))
+    .add(vec3(0.95, 0.98, 1).mul(shaftEnergy.mul(siltOn).mul(siltTwinkle).mul(float(WATER_SILT_GAIN))));
   // The bed's DIRECT light: only the transmitted share of the sun gets in, and a
   // low sun's refracted ray crosses more water on its way down (1/cos θt − 1
   // extra path), so at golden hour the bed falls dark while the surface takes the
@@ -2825,6 +2967,22 @@ export function buildWaterSurfaceMaterial({
       const depthAtRefraction = texture(depthTexture, refractedScreenUv);
       const tapValid = step(uExpectedDepth, depthAtRefraction);
       tapUv = mix(centerUv, refractedUv, tapValid);
+    }
+    // ⚠️ THE BENT TAP MUST STILL BE WATER (2026-11-10, mmp-78u.30.8 — Ingram: "parts of the land albedo are being bounced
+    // into the water by distortion"). Near any bank the bend pointed the tap at the quay, hull or beach beside it and
+    // copied that land's colour into the water. The `_Water` mask at the bent spot decides: dry there → the straight-down
+    // view, with a soft ramp so the bend fades out against a shore rather than snapping.
+    {
+      const tapMaskNode = texture(
+        maskTexture,
+        vec2(
+          clamp(refractedWorldXY.x.sub(uMaskRect.x).div(spanX), 0, 1),
+          clamp(refractedWorldXY.y.sub(uMaskRect.y).div(spanY), 0, 1)
+        )
+      );
+      maskTexNodes.push(tapMaskNode);
+      const tapWet = smoothstep(float(0.06), float(0.3), tapMaskNode.r);
+      tapUv = mix(centerUv, tapUv, tapWet);
     }
 
     // CHROMATIC FRINGE — ±1 texel R/B split, the top tier's own signature (no
@@ -3133,6 +3291,7 @@ export function buildWaterSurfaceMaterial({
     .mul(foamHide)
     .add(foamGlow.mul(float(0.85)))
     .add(reflection)
+    .add(shaftLight.mul(foamHide))
     .mul(float(1).sub(steamAlpha))
     .add(vec3(0.94, 0.95, 0.97).mul(steamAlpha))
     .mul(notOccluded);
@@ -3247,7 +3406,7 @@ export function buildWaterSurfaceMaterial({
       quad: vec3(1, 0, 1),
       mask: vec3(maskTexNode.r, maskTexNode.r, maskTexNode.r),
       inside: vec3(inside, inside, inside),
-      shoreDist01: vec3(depthRamp, depthRamp, depthRamp),
+      shoreDist01: vec3(shoreDistDisplay, shoreDistDisplay, shoreDistDisplay),
       depth01: vec3(depth01Display, depth01Display, depth01Display),
       bedVisibility: vec3(bedVisibility, bedVisibility, bedVisibility),
       turbidity: vec3(turbidityDisplay, turbidityDisplay, turbidityDisplay),
@@ -3314,6 +3473,40 @@ export function buildWaterSurfaceMaterial({
       // THE FOAM DENSITY (2026-10-17) — what the one foam texture is drawn from, tier 4+;
       // see `water-shore-mask.js`. Black below tier 4 (the old path, no density).
       foamDensity: vec3(foamDensity ?? float(0), foamDensity ?? float(0), foamDensity ?? float(0)),
+      // DISTORTION INSTRUMENTS (2026-11-09, mmp-78u.30.1 — Ingram: "Give yourself better tools for seeing it clearly").
+      // 32 draws a 48 px grid in the wave field's OWN coordinates (bank warp + flow warp, never the time drift): straight
+      // lines = an undistorted pattern; any bend, swirl or kink near a wall is a distortion you can see and measure. Tint
+      // = how far the domain is pushed (red) on the water's own presence (blue). 33 is the local shear of that warp: the
+      // length of its screen-space derivative over the world's, 0 = rigid, 1 = the pattern stretched to double.
+      ...(() => {
+        const warp = field.bend;
+        const g = vec2(positionWorld.x, positionWorld.y).add(warp).div(float(48));
+        const fw = max(fwidth(g), vec2(1e-4, 1e-4));
+        const dx = abs(fract(g.x.add(float(0.5))).sub(float(0.5))).div(fw.x);
+        const dy = abs(fract(g.y.add(float(0.5))).sub(float(0.5))).div(fw.y);
+        const line = float(1).sub(smoothstep(float(0.5), float(1.5), min(dx, dy)));
+        const push = clamp(length(warp).div(float(48)), float(0), float(1));
+        const wpx = max(fwidth(positionWorld.x), float(1e-4));
+        const shear = clamp(
+          length(vec2(fwidth(warp.x), fwidth(warp.y))).div(wpx).mul(float(1)),
+          float(0),
+          float(1)
+        );
+        return {
+          domainGrid: vec3(push, line.mul(float(0.85)), inside.mul(float(0.35))).add(vec3(line, line, line).mul(float(0.15))),
+          domainShear: vec3(shear, shear.mul(shear), inside.mul(float(0.25))),
+          // 34 (2026-11-10): the same grid in the FULL travelling domain (`domainOffset`: flow + wind drift + bends).
+          // The pattern sits at `x − offset`, so the grid is drawn at `x + offset` like every reader of the field.
+          surfaceTravel: (() => {
+            const t = vec2(positionWorld.x, positionWorld.y).add(field.domainOffset).div(float(384));
+            const tw = max(fwidth(t), vec2(1e-4, 1e-4));
+            const tx = abs(fract(t.x.add(float(0.5))).sub(float(0.5))).div(tw.x);
+            const ty = abs(fract(t.y.add(float(0.5))).sub(float(0.5))).div(tw.y);
+            const tl = float(1).sub(smoothstep(float(0.5), float(2), min(tx, ty))).mul(inside);
+            return vec3(tl, tl, tl);
+          })(),
+        };
+      })(),
     };
     // ⚠️ ARITHMETIC, NOT `select()` — see `effects/debug-channel-select.js`'s
     // header for the twelve specular rounds this trap cost before anyone dumped

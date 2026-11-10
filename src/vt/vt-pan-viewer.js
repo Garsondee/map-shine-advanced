@@ -25943,7 +25943,9 @@ async function startVtPanViewerUnserialized({
             waterSpray.setMask(plan.maskTexture, plan.rect);
             waterSpray.setView({
               currentPx: plan.currentPx,
-              windPx: [wf.x * w01 * 45, wf.y * w01 * 45],
+              // (2026-11-10, mmp-78u.30.7) light spray is torn downwind hard: 90 px/s at full wind in the air (was 45),
+              // half again the surface's own drift it rides once landed
+              windPx: [wf.x * w01 * 90, wf.y * w01 * 90],
               expectedDepth: plan.expectedDepth ?? 0,
             });
             waterSpray.writeBirths(plan.births);

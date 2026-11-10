@@ -14,6 +14,9 @@ Ops (all coordinates in image pixels, colours as byte lists):
     ellipse {cx, cy, rx, ry, rgba}       ~1 px anti-aliased edge (canopy cut-outs for _Tree/_Bush)
     paste   {src, sx, sy, sw, sh, x, y, flip, rot}  a crop of the author's own art (Lab · Vegetation),
                                          read from the job's artRoot; her art never enters the repo
+    ramp    {x, y, w, h, a, b, axis}     linear colour ramp a -> b along x or y (Lab · Water depth ramps)
+    blob    {cx, cy, rx, ry, peak, shore, wobble, seed}  a soft-shored grey pool for a _Water mask,
+                                         MAX-merged (Lab · Water puddles, ponds, islands)
 
 Encoding copies the author's maps: lossy WebP for everything, alpha kept exact.
 After writing, each image is decoded again and its op regions are checked, so a codec
@@ -151,6 +154,67 @@ def op_paste(img, o):
     img.alpha_composite(layer)
 
 
+def op_ramp(img, o):
+    """A linear colour ramp over a rectangle: colour `a` at the start edge, `b` at the far edge.
+
+    o = {x, y, w, h, a, b, axis}: axis 'x' runs left -> right, 'y' top -> bottom. Lab · Water paints
+    its depth ramps with it (a _Water mask from 0 to 255 = dry to deepest), and sand-to-rock beds.
+    """
+    x, y, w, h = (int(round(o[k])) for k in ("x", "y", "w", "h"))
+    a = np.array(rgba4(o["a"]), np.float32)
+    b = np.array(rgba4(o["b"]), np.float32)
+    n = w if o.get("axis", "x") == "x" else h
+    t = (np.arange(n, dtype=np.float32) + 0.5) / max(1, n)
+    line = a[None, :] * (1.0 - t[:, None]) + b[None, :] * t[:, None]
+    if o.get("axis", "x") == "x":
+        block = np.broadcast_to(line[None, :, :], (h, w, 4))
+    else:
+        block = np.broadcast_to(line[:, None, :], (h, w, 4))
+    img.paste(Image.fromarray(np.clip(block + 0.5, 0, 255).astype(np.uint8), "RGBA"), (x, y))
+
+
+def op_blob(img, o):
+    """A soft-shored body of water for a _Water mask (grey), merged with what is there by MAX.
+
+    o = {cx, cy, rx, ry, peak, shore, wobble?, seed?}: the value is `peak` (0-255) in the middle and
+    falls to 0 at the rim; `shore` is the fraction of the radius over which it rises from 0 at the
+    rim to `peak` (smoothstep), so shore 1 is a dome, 0.1 a flat pool with a narrow sloping bank and
+    0 a hard-edged pool. `wobble` bends the rim by up to that fraction of the radius with a few
+    deterministic harmonics, so puddles and ponds are not perfect ellipses.
+    """
+    cx, cy, rx, ry = (float(o[k]) for k in ("cx", "cy", "rx", "ry"))
+    peak = float(o["peak"])
+    shore = max(0.0, float(o.get("shore", 0.2)))
+    wob = float(o.get("wobble", 0.0))
+    seed = int(o.get("seed", 1))
+    reach = 1.0 + abs(wob)
+    X0, Y0 = max(0, int(cx - rx * reach) - 2), max(0, int(cy - ry * reach) - 2)
+    X1, Y1 = min(img.width, int(cx + rx * reach) + 3), min(img.height, int(cy + ry * reach) + 3)
+    yy, xx = np.mgrid[Y0:Y1, X0:X1].astype(np.float32)
+    dx, dy = (xx + 0.5 - cx) / rx, (yy + 0.5 - cy) / ry
+    r = np.sqrt(dx * dx + dy * dy)
+    if wob:
+        th = np.arctan2(dy, dx)
+        rng = np.random.default_rng(seed)
+        bend = np.zeros_like(th)
+        for k in (2, 3, 5, 7):
+            bend += np.sin(k * th + rng.uniform(0, 2 * np.pi)) / k
+        r = r / (1.0 + wob * bend / 1.03)
+    if shore <= 0:
+        # hard pool: ~1 px anti-aliased rim in pixel units
+        edge_px = np.clip((1.0 - r) * min(rx, ry) + 0.5, 0.0, 1.0)
+        v = peak * edge_px
+    else:
+        t = np.clip((1.0 - r) / shore, 0.0, 1.0)
+        v = peak * t * t * (3.0 - 2.0 * t)
+    region = np.asarray(img.crop((X0, Y0, X1, Y1))).astype(np.float32)
+    grey = np.maximum(region[..., 0], v)
+    out = region.copy()
+    out[..., 0] = out[..., 1] = out[..., 2] = grey
+    out[..., 3] = 255.0
+    img.paste(Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8), "RGBA"), (X0, Y0))
+
+
 OPS = {
     "rect": op_rect,
     "clear": op_clear,
@@ -158,6 +222,8 @@ OPS = {
     "checker": op_checker,
     "ellipse": op_ellipse,
     "paste": op_paste,
+    "ramp": op_ramp,
+    "blob": op_blob,
 }
 
 

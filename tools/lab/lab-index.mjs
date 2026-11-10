@@ -9,6 +9,7 @@ import { vegetationImages, vegetationScene } from './vegetation-spec.mjs';
 import { weatherImages, weatherScene } from './weather-spec.mjs';
 import { windImages, windScene } from './wind-spec.mjs';
 import { airImages, airScene } from './air-spec.mjs';
+import { waterImages, waterScene } from './water-spec.mjs';
 
 /**
  * The whole folder: Lab · Effects (activated) + Lab · Walls & Windows + Lab · Interiors & Regions +
@@ -25,6 +26,7 @@ export function labManifestAll({ assetDir, version = LAB_VERSION, only = null } 
     weatherScene(assetDir, version),
     windScene(assetDir, version),
     airScene(assetDir, version),
+    waterScene(assetDir, version),
   ];
   if (!only?.length) return { ...m, scenes: all };
   const picked = all.filter((s) => only.includes(s.key)).map((s, i) => ({ ...s, activate: i === 0 }));
@@ -45,6 +47,7 @@ export function labPaintJobAll(version = LAB_VERSION) {
       ...weatherImages(version),
       ...windImages(version),
       ...airImages(version),
+      ...waterImages(version),
     ],
   };
 }

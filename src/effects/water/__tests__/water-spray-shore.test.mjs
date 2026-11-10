@@ -3,7 +3,7 @@
  * decoded mask, and a frame's births. The author's complaint was flecks moving as one batch — so these pin that births
  * come out each with its own throw, in a count that varies frame to frame, only where the current drives into a face.
  */
-import { extractSprayShore, planSprayBirths } from '../water-spray-shore.js';
+import { extractSprayShore, planSprayBirths, sprayWaveImpact, WAVE_IMPACT_MEAN } from '../water-spray-shore.js';
 
 /** A seeded 0..1 generator (mulberry32), so the planner's draws are repeatable. */
 function seeded(s) {
@@ -46,7 +46,8 @@ export function run(t) {
   ok('normals point from the water into the wall (+x)', normalsRight);
 
   const view = { minX: 900, minY: 1900, maxX: 1500, maxY: 2500 };
-  const plan = (dir, speed, seed, spray = 1) =>
+  // `tSec` runs a long clock (seed × 0.37 s) so the crests that now decide WHEN a wall throws (2026-11-10) all pass.
+  const plan = (dir, speed, seed, spray = 1, extra = {}) =>
     planSprayBirths(shore, {
       dtSec: 1 / 60,
       flowDir: dir,
@@ -55,6 +56,8 @@ export function run(t) {
       view,
       maxBirths: 600,
       random: seeded(seed),
+      tSec: seed * 0.37,
+      ...extra,
     });
 
   const into = [];
@@ -89,10 +92,49 @@ export function run(t) {
   // a faster current throws more
   let slow = 0;
   let fast = 0;
-  for (let f = 0; f < 120; f++) {
+  // 2000 moments: spray is bursty now (waves), so a short sample is mostly quiet spells
+  for (let f = 0; f < 2000; f++) {
     slow += plan([1, 0], 35, 5000 + f).length;
     fast += plan([1, 0], 140, 5000 + f).length;
   }
   ok('a faster current throws more spray', fast > slow * 2);
   ok('maxBirths caps a frame', plan([1, 0], 70, 3, 1).length <= 600);
+
+  // WAVES DECIDE WHEN (2026-11-10, mmp-78u.30.7): quiet spells and sudden splats, not an even trickle.
+  const timeline = [];
+  for (let f = 0; f < 600; f++) {
+    timeline.push(
+      planSprayBirths(shore, {
+        dtSec: 1 / 30,
+        flowDir: [1, 0],
+        flowSpeedPx: 70,
+        spray: 1,
+        view,
+        maxBirths: 5000,
+        random: seeded(9000 + f),
+        tSec: f / 30,
+      }).length
+    );
+  }
+  const quiet = timeline.filter((n) => n === 0).length;
+  const peak = Math.max(...timeline);
+  const mean = timeline.reduce((a, b) => a + b, 0) / timeline.length;
+  ok(`spray comes in splats: quiet spells (${quiet}/600 frames empty)`, quiet > 120);
+  ok(`... and bursts far above the mean (peak ${peak} vs mean ${mean.toFixed(1)})`, peak > mean * 4);
+  ok('wind alone (no current) drives spray into a wall it blows at', (() => {
+    let n = 0;
+    for (let f = 0; f < 2000; f++) n += plan([1, 0], 0, f + 1, 1, { wind01: 0.8, windDir: [1, 0] }).length;
+    return n > 2000;
+  })());
+  ok('wind blowing away from the wall, no current: none', (() => {
+    let n = 0;
+    for (let f = 0; f < 120; f++) n += plan([1, 0], 0, f + 1, 1, { wind01: 0.8, windDir: [-1, 0] }).length;
+    return n === 0;
+  })());
+  ok('the wave impact averages to its stated mean', (() => {
+    let s = 0;
+    for (let i = 0; i < 4000; i++) s += sprayWaveImpact(i * 13.7, i * 3.1, i * 0.113, 0.6, 0.8, 60);
+    const m = s / 4000;
+    return m > WAVE_IMPACT_MEAN * 0.6 && m < WAVE_IMPACT_MEAN * 1.6;
+  })());
 }

@@ -810,13 +810,32 @@ export function createBillowRenderer({
     // the offset is exactly 0. (NOT screen derivatives of `vWorld`: at world coordinates in the thousands their ratio is
     // float noise, different in every 2x2 block, and it drew fine vertical stripes over the table.)
     let illumUv = screenUV;
+    // ⚠️ OUTDOOR SMOKE IS LIT BY THE SKY, NOT BY THE GROUND UNDER IT (2026-11-10 — Ingram, Docklands south: "it makes the
+    // shadow glow which is physically wrong"). The light buffer is the GROUND's light: tree and bush shadows cut the sun out
+    // of it, and then every lamp is MAX-blended on top. Inside a bush's shadow the fire's own pool beats the shadowed
+    // daylight, so the smoke crossing that shadow read the fire's orange pool (the `smokeSky` cap only caps brightness,
+    // not hue) and, the spot reading as "dark", took its own firelight undamped as well: an orange patch the exact shape
+    // of the shadow. The smoke rises above the canopies: under open sky it takes the open sky's light (`smokeSky`, the
+    // unshadowed outdoor fill); indoors it keeps the room's light at its pixel. (A cloud's ground shadow no longer dims
+    // the column either; it lit the same fire pool through it.)
+    let outdoorSky = float(0);
     if (lighting?.illumTexNode && lighting?.uOutdoorsRect) {
       const board = lighting.uOutdoorsRect;
       const onBoard = vec2(vWorld.x.clamp(board.x, board.z), vWorld.y.clamp(board.y, board.w));
       const viewSize = max(vec2(U.viewRect.z.sub(U.viewRect.x), U.viewRect.w.sub(U.viewRect.y)), vec2(1, 1));
       illumUv = clamp(screenUV.add(onBoard.sub(vWorld).div(viewSize)), vec2(0, 0), vec2(1, 1));
+      if (lighting?.outdoorsTexNode) {
+        // the same mapping as `outdoorKeep` above (the _Outdoors mask over the board rect)
+        const ouv = vec2(
+          onBoard.x.sub(board.x).div(max(board.z.sub(board.x), float(1))),
+          onBoard.y.sub(board.y).div(max(board.w.sub(board.y), float(1)))
+        );
+        outdoorSky = smoothstep(float(0.3), float(0.7), lighting.outdoorsTexNode.sample(ouv).r);
+      }
     }
-    const illum = lighting?.illumTexNode ? min(lighting.illumTexNode.sample(illumUv).rgb, U.smokeSky) : null;
+    const illum = lighting?.illumTexNode
+      ? mix(min(lighting.illumTexNode.sample(illumUv).rgb, U.smokeSky), U.smokeSky, outdoorSky)
+      : null;
     const illumLum = illum ? dot(illum, vec3(0.2126, 0.7152, 0.0722)) : float(0);
     const bright = smoothstep(float(0.55), float(1.0), illumLum);
     // the line: the first `smokeLinePx` px inside the silhouette, warm near-black

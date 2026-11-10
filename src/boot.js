@@ -385,6 +385,8 @@ import {
   triggerVtPanViewerFluidReaction,
   getVtPanViewerLeafShedStatus,
   getVtPanViewerWaterSprayStatus,
+  readVtPanViewerWaterWaves,
+  readVtPanViewerWaterFlow,
   getVtPanViewerCritterStatus,
   setVtPanViewerSunHour,
   sweepVtPanViewerTimeOfDay,
@@ -10344,6 +10346,9 @@ function install() {
   // LEAF SHED's counts — canopy colours decoded, emitters, births per frame, the engine.
   MapShine.getLeafShedStatus = () => getVtPanViewerLeafShedStatus();
   MapShine.getWaterSprayStatus = () => getVtPanViewerWaterSprayStatus();
+  /** THE ONE WAVE SYSTEM's live numbers, read back from the GPU (2026-11-10): sea, sun, bands, caustic slices. */
+  MapShine.readWaterWaves = (tune = null) => readVtPanViewerWaterWaves(tune);
+  MapShine.readWaterFlow = (opts = {}) => readVtPanViewerWaterFlow(opts);
 
   // THE CRITTERS' PER-FRAME COUNTS — `{smellyFlies, fireflies}`, each with the zone count, the zone
   // field's size, and every engine's tier, head-count and how much of the

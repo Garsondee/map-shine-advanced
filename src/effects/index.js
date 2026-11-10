@@ -315,6 +315,15 @@ export { createWaterFlowSubsystem } from './water/water-flow-subsystem.js';
 // THE SIM PACK (docs/planning/Water-Simulation-Turn.md §3 Layer C / §4 S5) —
 // foam's own per-frame memory, ping-ponged. `water-sim.js` is its TSL half.
 export { createWaterSimSubsystem } from './water/water-sim-subsystem.js';
+// THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9) — per viewer: the wind spectrum baked each frame, the caustic slices,
+// read by every floor's water (surface normal, caustics, shafts).
+export {
+  createWaterWaveSystem,
+  waveFetchMetres,
+  WAVE_CHOP_REFERENCE,
+} from './water/water-waves.js';
+export { waterFlowVector, waterFlowSpeedPx } from './water/water-field.js';
+export { waterKeyLightDirection } from './water/water-light.js';
 // THE SIM PACK'S OWN FOAM-BAND REACH — pure, CPU-side, the SAME derivation
 // `water-render.js#setDepthScalePx` already applies to the surface material's
 // own `uFoamReachPx` (`water-sim-subsystem.js`'s own header: "pushed, not

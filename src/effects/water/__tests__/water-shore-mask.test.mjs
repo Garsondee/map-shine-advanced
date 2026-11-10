@@ -25,6 +25,9 @@ import {
   WATER_FOAM_TEXTURE_PX,
   fleckReachPxNumber,
   FLECK_MOTION,
+  shoreFlowPhases,
+  SHORE_FLOW_CYCLE_SEC,
+  SHORE_SLIDE_MAX_PX,
 } from '../water-shore-mask.js';
 import { WATER_PARAMS } from '../water.js';
 
@@ -97,7 +100,42 @@ export function run(t) {
     'shoreFoamVariation spans 0..1 — 0 is the even band, so it stays reachable',
     WATER_PARAMS.shoreFoamVariation.min === 0 && WATER_PARAMS.shoreFoamVariation.max === 1
   );
+  ok(
+    'shoreFoamFlow is ON by default and 0..1 — 0 pins the foam to the bank again',
+    WATER_PARAMS.shoreFoamFlow.default === 1 &&
+      WATER_PARAMS.shoreFoamFlow.min === 0 &&
+      WATER_PARAMS.shoreFoamFlow.max === 1
+  );
   ok('breakSpray default matches WATER_BREAK_SPRAY', WATER_PARAMS.breakSpray.default === WATER_BREAK_SPRAY);
+
+  // ── the shore pattern's flow-map phases (CPU twin) ──────────────────────
+  {
+    let sumsToOne = true;
+    let zeroAtReset = true;
+    let halfCycleApart = true;
+    let normOk = true;
+    for (let i = 0; i < 400; i++) {
+      const p = shoreFlowPhases(i * 0.137);
+      if (Math.abs(p.w0 + p.w1 - 1) > 1e-12) sumsToOne = false;
+      if (p.ph0 < 0 || p.ph0 >= 1 || p.ph1 < 0 || p.ph1 >= 1) halfCycleApart = false;
+      // the two phases are half a cycle apart
+      const d = (((p.ph1 - p.ph0) % 1) + 1) % 1;
+      if (Math.abs(d - 0.5) > 1e-9) halfCycleApart = false;
+      // a copy is invisible exactly when it wraps (its phase is 0)
+      if (p.ph0 < 1e-9 && p.w0 > 1e-6) zeroAtReset = false;
+      if (p.norm < 0.7071 - 1e-9 || p.norm > 1 + 1e-9) normOk = false;
+    }
+    ok('the two flow-map weights always sum to 1', sumsToOne);
+    ok('the phases are always half a cycle apart', halfCycleApart);
+    ok('a copy has weight 0 at the instant it resets (nothing jumps on screen)', zeroAtReset);
+    ok('the variance-preserving divisor stays between 1/sqrt(2) and 1', normOk);
+    const mid = shoreFlowPhases(SHORE_FLOW_CYCLE_SEC * 0.25);
+    ok('a quarter into the cycle the two copies are equally weighted', Math.abs(mid.w0 - 0.5) < 1e-9);
+    ok(
+      'the shore pattern never slides faster than a rapid could shear it (60 px/s cap)',
+      SHORE_SLIDE_MAX_PX > 0 && SHORE_SLIDE_MAX_PX <= 90 && SHORE_FLOW_CYCLE_SEC >= 2
+    );
+  }
   ok('breakSpray reaches 0 — the spray can be switched off', WATER_PARAMS.breakSpray.min === 0);
 
   // ── construction ────────────────────────────────────────────────────────
@@ -141,6 +179,26 @@ export function run(t) {
       'it still constructs with no flow and no SDF (still water, a tier without the body pack)',
       !!bare && !bare.error
     );
+    let riding = null;
+    try {
+      riding = buildMaskShoreDensity(THREE, {
+        maskTexNode,
+        maskUvAt: (offset) => vec2(0.5, 0.5).add(offset.mul(float(0.001))),
+        worldXY,
+        shoreDist: float(10),
+        tSec,
+        flowDir: vec2(0, 1),
+        farOutward: vec2(1, 0),
+        slidePx: vec2(0, 40),
+      });
+    } catch (e) {
+      riding = { error: e };
+    }
+    ok(
+      'it constructs with a current to ride (the two-phase flow map on every along-shore noise)',
+      !!riding && !riding.error && !!riding.density
+    );
+    ok('the "rides the current" dial has its setter', typeof riding?.setters?.setShoreFoamFlow === 'function');
     ok('it hands back the texture-size node the foam texture reads', !!built?.uTexturePx);
     ok('it hands back the hardness (the spray gate) and the spray strength node', !!built?.hardness && !!built?.uSpray);
     const names = [
@@ -151,6 +209,7 @@ export function run(t) {
       'setShoreFoamSoftPx',
       'setFoamTexturePx',
       'setShoreFoamVariation',
+      'setShoreFoamFlow',
       'setBreakSpray',
     ];
     ok(

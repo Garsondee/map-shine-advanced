@@ -9,6 +9,7 @@
  * tier 0's three in phase 3, tier 1's three in phase 4, tier 2's four the same
  * session, and tier 3's four (sunGlint, skySheen, glossiness, viewerHeight).
  */
+import { WAVE_CHOP_REFERENCE } from '../water-waves.js';
 import { validateParamsSchema, validateParamValue } from '../../../core/params-schema.js';
 import { validateDialsSchema, DIAL_DRIVE_TYPES } from '../../../core/dials-schema.js';
 import { validateEffectManifest } from '../../effect-manifest.js';
@@ -18,19 +19,6 @@ import { WATER, WATER_PARAMS, WATER_DIALS, WATER_PRESETS, waterPreset } from '..
 import {
   WATER_BANK_INFLUENCE,
   WATER_TIER2_FLOW_ANGLE_DEG,
-  WATER_CAUSTICS_SHARPNESS,
-  WATER_CAUSTICS_SCALE,
-  WATER_CAUSTICS_NETTING,
-  WATER_CAUSTICS_WAVE_WARP_STRENGTH,
-  WATER_CAUSTICS_WAVE_WARP_CELLS,
-  WATER_CAUSTICS_GROWTH_STRENGTH,
-  WATER_CAUSTICS_GROWTH_CELLS,
-  WATER_CAUSTICS_GROWTH_FREQ,
-  WATER_CAUSTICS_GROWTH_TIME_SCALE,
-  WATER_CAUSTICS_EVOLVE_SPEED,
-  WATER_CAUSTICS_JUNCTION_FRACTION,
-  WATER_CAUSTICS_LINE_FLOOR,
-  WATER_CAUSTICS_SPECULAR_INFLUENCE,
   waterFlowSpeedPx,
 } from '../water-field.js';
 import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
@@ -39,6 +27,7 @@ import {
   WATER_TIER4_BREAK_FOAM,
   WATER_TIER4_CAUSTICS,
   WATER_SIM_FOAM_SMOOTH_TEXELS,
+  WATER_TIER4_LIGHT_SHAFTS,
 } from '../water-render.js';
 import { WATER_FOAM_PATCHINESS, WATER_FOAM_PATCH_SIZE_PX } from '../water-shore.js';
 
@@ -308,44 +297,19 @@ export function run(t) {
     '...and the gain stays inside its own declared range, so the calibrated K is never scaled past it',
     WATER_TIER4_CAUSTICS >= WATER_PARAMS.caustics.min && WATER_TIER4_CAUSTICS <= WATER_PARAMS.caustics.max
   );
-  // === CAUSTICS' OWN LOOK CONTROLS (2026-08-27) — same "one number, two
-  // homes" discipline as `caustics` itself, just against water-field.js
-  // instead of water-render.js (that is where these three constants live —
-  // see WATER_CAUSTICS_SHARPNESS's own doc for why). ===
-  for (const [key, constant, name] of [
-    ['causticSharpness', WATER_CAUSTICS_SHARPNESS, 'WATER_CAUSTICS_SHARPNESS'],
-    ['causticScale', WATER_CAUSTICS_SCALE, 'WATER_CAUSTICS_SCALE'],
-    ['causticNetting', WATER_CAUSTICS_NETTING, 'WATER_CAUSTICS_NETTING'],
-    // === round 6 (2026-08-27) — the rest of caustics' mechanics, promoted
-    // to live wide-range sliders on the author's own "give me plenty of
-    // controls" request. Same one-number-two-homes discipline. ===
-    ['causticWaveWarp', WATER_CAUSTICS_WAVE_WARP_STRENGTH, 'WATER_CAUSTICS_WAVE_WARP_STRENGTH'],
-    ['causticWaveWarpCap', WATER_CAUSTICS_WAVE_WARP_CELLS, 'WATER_CAUSTICS_WAVE_WARP_CELLS'],
-    ['causticGrowth', WATER_CAUSTICS_GROWTH_STRENGTH, 'WATER_CAUSTICS_GROWTH_STRENGTH'],
-    ['causticGrowthCap', WATER_CAUSTICS_GROWTH_CELLS, 'WATER_CAUSTICS_GROWTH_CELLS'],
-    ['causticGrowthScale', WATER_CAUSTICS_GROWTH_FREQ, 'WATER_CAUSTICS_GROWTH_FREQ'],
-    ['causticGrowthSpeed', WATER_CAUSTICS_GROWTH_TIME_SCALE, 'WATER_CAUSTICS_GROWTH_TIME_SCALE'],
-    ['causticEvolveSpeed', WATER_CAUSTICS_EVOLVE_SPEED, 'WATER_CAUSTICS_EVOLVE_SPEED'],
-    ['causticJunctionWidth', WATER_CAUSTICS_JUNCTION_FRACTION, 'WATER_CAUSTICS_JUNCTION_FRACTION'],
-    ['causticLineFloor', WATER_CAUSTICS_LINE_FLOOR, 'WATER_CAUSTICS_LINE_FLOOR'],
-    // === round 7 (2026-08-27) — the caustic-specular A/B test. ===
-    ['causticSpecularInfluence', WATER_CAUSTICS_SPECULAR_INFLUENCE, 'WATER_CAUSTICS_SPECULAR_INFLUENCE'],
+  // === THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9) — the thirteen Worley-net controls are gone; Light shafts and
+  // Wave speed are new; Surface chop's default is the wave system's reference (0.31 = the measured sea). ===
+  for (const key of [
+    'causticSharpness', 'causticScale', 'causticNetting', 'causticWaveWarp', 'causticWaveWarpCap', 'causticGrowth',
+    'causticGrowthCap', 'causticGrowthScale', 'causticGrowthSpeed', 'causticEvolveSpeed', 'causticJunctionWidth',
+    'causticLineFloor', 'causticSpecularInfluence',
   ]) {
-    ok(`${key} is declared as a plain float`, WATER_PARAMS[key].type === 'float');
-    ok(
-      `${key} schema default matches ${name} (water-field.js) — one number, two homes`,
-      WATER_PARAMS[key].default === constant
-    );
-    ok(
-      `${key}'s default stays inside its own declared range`,
-      constant >= WATER_PARAMS[key].min && constant <= WATER_PARAMS[key].max
-    );
-    ok(`${key} is categorised under Light, beside caustics itself`, WATER_PARAMS[key].category === 'Light');
-    ok(
-      `${key} has real help text, not a placeholder`,
-      typeof WATER_PARAMS[key].help === 'string' && WATER_PARAMS[key].help.length > 20
-    );
+    ok(`${key} is retired with the Worley net`, !(key in WATER_PARAMS));
   }
+  ok('lightShafts default matches WATER_TIER4_LIGHT_SHAFTS', WATER_PARAMS.lightShafts?.default === WATER_TIER4_LIGHT_SHAFTS);
+  ok('lightShafts lives under Light', WATER_PARAMS.lightShafts?.category === 'Light');
+  ok('waveSpeed defaults to real speed (1)', WATER_PARAMS.waveSpeed?.default === 1);
+  ok('Surface chop default is the wave system reference', WATER_PARAMS.chop.default === WAVE_CHOP_REFERENCE);
   // === 🎨 NAMED PRESETS ====================================================
   // A preset is raw param data with no schema behind it, which makes it the
   // easiest thing in this effect to rot silently: rename a param, retype one,

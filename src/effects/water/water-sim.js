@@ -133,6 +133,77 @@ import { WATER_SWASH_BANDS, WATER_SWASH_SPEED, WATER_SWASH_WIDTH, buildFoamPatch
  * tuning pass, not a measured constant. */
 export const WATER_SIM_TAU_FOAM_SEC = 1.6;
 
+/**
+ * FOAM THAT PEELS OFF AND FOAM OVER RIFFLES (2026-11-10, mmp-78u.30.11 — Ingram: "foam on the water surface which flows
+ * along with the flow"; she chose trails and riffle foam as one pass). Three changes to what the sim keeps and makes:
+ *
+ *   LIFE BY SPEED — foam used to last `simFoamDecaySec` (1.3 s) everywhere, so at a river reach's ~20 px/s a trail
+ *     died ~25 px from where it was born and nothing ever left a bank. Slow water now keeps its foam up to
+ *     `WATER_SIM_SLOW_LIFE_MUL` times longer (rafts drift for seconds in an eddy or a slow reach); fast water still
+ *     tears it apart at the author's decay. Two numbers, both pinned by a test:
+ *     life = decay × mix(SLOW_LIFE_MUL, 1, smoothstep(SLOW_SPEED, FAST_SPEED, speed01)).
+ *   THE BANK FEEDS IT — the swash emission was × speed01, i.e. ~0.1 beside a bank, so the sim barely knew a shore was
+ *     there. It now emits at least `WATER_SIM_BANK_FLOOR` wherever the water MOVES at all (a closed pond, speed 0, still
+ *     emits nothing: its foam has nowhere to go, the drawn shore foam covers it), and the current carries that foam off
+ *     where the bank turns away — round points, rocks and the outside of bends — as trails.
+ *   RIFFLES — fast water over shallows breaks white: emission × fast (speed01) × (shallow (the mask's depth, body pack G)
+ *     + climb, the water running UP a slope — a submerged boulder, a bar). Deep water never riffles, however fast.
+ */
+export const WATER_SIM_SLOW_LIFE_MUL = 4;
+export const WATER_SIM_SLOW_SPEED = 0.3;
+export const WATER_SIM_FAST_SPEED = 1.0;
+export const WATER_SIM_BANK_FLOOR = 0.35;
+export const WATER_SIM_RIFFLE_GAIN = 0.9;
+/** Riffles break out in spots (the world noise above this) that the current draws into streaks, never a sheet. */
+export const WATER_SIM_RIFFLE_SPOT_LO = 0.05;
+export const WATER_SIM_RIFFLE_SPOT_HI = 0.4;
+/**
+ * PEEL-OFF (2026-11-10): the solved current is potential flow - it closes smoothly behind a rock or an island and never
+ * separates - so foam born at a bank only slid along it. Foam is now also made where the current LEAVES a solid face
+ * (the downstream end of a rock or island, the far side of a point): the mirror of `emitFront`, × this gain. Carried
+ * off down the dividing streamline, it is the trail behind every obstacle.
+ */
+export const WATER_SIM_LEE_GAIN = 6;
+/** Emission soft cap (per second): E -> E / (1 + E / cap). A cluster of rocks in a rapid adds front + shear + lee + riffle
+ * and used to saturate into one white sheet; capped, it stays whitewater with dark tongues between. */
+export const WATER_SIM_EMIT_SOFT_CAP = 2.5;
+/** The sim foam (raw memory) that draws as FULL foam density from tier 4 up; below it the density ramps down, so a trail
+ * thins into flecks instead of switching off (`water-render.js`, MEASURED: rapids ~0.1-0.4, lee trails 0.1-0.2). */
+export const WATER_SIM_DENSITY_FULL = 0.45;
+/** Normalised current where riffling starts and where it is full (MEASURED, Lab · River: reaches 0.1-0.35, rapids ~1). */
+export const WATER_SIM_RIFFLE_SPEED_LO = 0.6;
+export const WATER_SIM_RIFFLE_SPEED_HI = 1.15;
+/** Mask depth (0..1) at and above which water is too deep to riffle, and where it is fully shallow. */
+export const WATER_SIM_RIFFLE_DEEP = 0.65;
+export const WATER_SIM_RIFFLE_SHALLOW = 0.3;
+/** Gain on the depth drop per sim texel along the current (the climb over a submerged rock). */
+export const WATER_SIM_RIFFLE_CLIMB_GAIN = 12;
+
+/**
+ * CPU twin of the foam life by speed (seconds).
+ * @param {number} decaySec - the author's `simFoamDecaySec`
+ * @param {number} speed01 - normalised current
+ */
+export function waterSimFoamLifeSec(decaySec, speed01) {
+  const t = Math.min(1, Math.max(0, (speed01 - WATER_SIM_SLOW_SPEED) / (WATER_SIM_FAST_SPEED - WATER_SIM_SLOW_SPEED)));
+  const s = t * t * (3 - 2 * t);
+  return decaySec * (WATER_SIM_SLOW_LIFE_MUL + (1 - WATER_SIM_SLOW_LIFE_MUL) * s);
+}
+
+/**
+ * CPU twin of the riffle emission (per second, before the foam amount and the gates).
+ * @param {number} speed01 @param {number} depth01 - mask depth here @param {number} climb - depth lost per texel along the current (>= 0)
+ */
+export function waterSimRiffleEmit(speed01, depth01, climb) {
+  const ss = (a, b, x) => {
+    const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+    return t * t * (3 - 2 * t);
+  };
+  const fast = ss(WATER_SIM_RIFFLE_SPEED_LO, WATER_SIM_RIFFLE_SPEED_HI, speed01);
+  const shallow = 1 - ss(WATER_SIM_RIFFLE_SHALLOW, WATER_SIM_RIFFLE_DEEP, depth01);
+  return fast * Math.min(1, shallow + Math.max(0, climb) * WATER_SIM_RIFFLE_CLIMB_GAIN) * WATER_SIM_RIFFLE_GAIN;
+}
+
 /** Blend weight toward the 3×3 blur of last frame's own buffer, applied
  * BEFORE this frame's decay/emission (see this file's header on why blur
  * targets the read, not the write). 0 = no diffusion, foam stays pixel-sharp
@@ -371,6 +442,7 @@ export function buildWaterSimStepMaterial({
     exp,
     dot,
     max,
+    min,
     length,
     clamp,
     smoothstep,
@@ -438,7 +510,11 @@ export function buildWaterSimStepMaterial({
   // this reordering, not the pseudocode's literal one, is what a single pass
   // can actually compute).
   const diffusedR = mix(prevSharpNode.r, blurredR, diffuseNode);
-  const decayedR = diffusedR.mul(exp(uDtSec.negate().div(tauFoamSecNode)));
+  // LIFE BY SPEED (`WATER_SIM_SLOW_LIFE_MUL`, twin `waterSimFoamLifeSec`)
+  const lifeSec = tauFoamSecNode.mul(
+    mix(float(WATER_SIM_SLOW_LIFE_MUL), float(1), smoothstep(float(WATER_SIM_SLOW_SPEED), float(WATER_SIM_FAST_SPEED), speed01))
+  );
+  const decayedR = diffusedR.mul(exp(uDtSec.negate().div(lifeSec)));
 
   // ── 3. EMIT — three independent terms, summed, then gated once by the
   // author's own overall foam amount and by a noise field so identical
@@ -476,7 +552,26 @@ export function buildWaterSimStepMaterial({
   const phase = d01.sub(tSec.mul(float(WATER_SWASH_SPEED)));
   const wave = sin(phase.mul(float(WATER_SWASH_BANDS * 2 * Math.PI)));
   const band = smoothstep(float(1 - 2 * WATER_SWASH_WIDTH), float(1), wave);
-  const emitSwash = band.mul(float(1).sub(d01)).mul(speed01);
+  // THE BANK FEEDS IT (`WATER_SIM_BANK_FLOOR`): any moving water emits at its bank; a closed pond (speed 0) does not
+  const moving = smoothstep(float(0.02), float(0.1), speed01);
+  const emitSwash = band.mul(float(1).sub(d01)).mul(max(speed01, float(WATER_SIM_BANK_FLOOR).mul(moving)));
+  // RIFFLES (`WATER_SIM_RIFFLE_GAIN`, twin `waterSimRiffleEmit`): fast × (shallow + climbing over a submerged rock)
+  const depthL = clampedNeighborSample(TSL, bodyTexture, uv0, -1, 0, texelU, texelV).g;
+  const depthR = clampedNeighborSample(TSL, bodyTexture, uv0, 1, 0, texelU, texelV).g;
+  const depthU = clampedNeighborSample(TSL, bodyTexture, uv0, 0, -1, texelU, texelV).g;
+  const depthD = clampedNeighborSample(TSL, bodyTexture, uv0, 0, 1, texelU, texelV).g;
+  const depthGrad = vec2(depthR.sub(depthL), depthD.sub(depthU)).div(float(2));
+  const climb = max(dot(velDir, depthGrad).negate(), float(0));
+  const fast = smoothstep(float(WATER_SIM_RIFFLE_SPEED_LO), float(WATER_SIM_RIFFLE_SPEED_HI), speed01);
+  const shallow = float(1).sub(smoothstep(float(WATER_SIM_RIFFLE_SHALLOW), float(WATER_SIM_RIFFLE_DEEP), bodyTexNode.g));
+  const emitRiffleRaw = fast
+    .mul(min(float(1), shallow.add(climb.mul(float(WATER_SIM_RIFFLE_CLIMB_GAIN)))))
+    .mul(float(WATER_SIM_RIFFLE_GAIN));
+  // PEEL-OFF (`WATER_SIM_LEE_GAIN`): the current leaving a solid face
+  const emitLee = max(dot(velDir, solidGrad).negate(), float(0))
+    .mul(nearSolid)
+    .mul(smoothstep(float(0.05), float(0.4), speed01))
+    .mul(float(WATER_SIM_LEE_GAIN));
 
   // A single low-frequency-ish noise sampled in WORLD space (not grid UV —
   // UV alone would put only a handful of cycles across an entire river) so
@@ -512,7 +607,10 @@ export function buildWaterSimStepMaterial({
         })
       : float(1);
 
-  const totalEmit = emitFront.add(emitShear).add(emitSwash).mul(uFoamAmount);
+  // riffles break out in spots (`WATER_SIM_RIFFLE_SPOT_LO`) that the current draws into streaks
+  const emitRiffle = emitRiffleRaw.mul(smoothstep(float(WATER_SIM_RIFFLE_SPOT_LO), float(WATER_SIM_RIFFLE_SPOT_HI), noiseRaw));
+  const emitSum = emitFront.add(emitShear).add(emitSwash).add(emitRiffle).add(emitLee);
+  const totalEmit = emitSum.div(float(1).add(emitSum.div(float(WATER_SIM_EMIT_SOFT_CAP)))).mul(uFoamAmount);
   const newR = decayedR.add(totalEmit.mul(uDtSec).mul(noiseGate).mul(patchGate));
 
   // ── 4. GATHER is already done (the diffuse-toward-blur blend above, §2).

@@ -92,6 +92,36 @@ const MAX_DIST_PX = 4096;
 const KERNEL = [1, 4, 6, 4, 1];
 
 /**
+ * THE SHORE PATTERN RIDES THE CURRENT (2026-11-10, mmp-78u.30.11 — Ingram: "we need foam on the water surface which flows
+ * along with the flow"). Every along-shore noise that decides where the foam is thick, thin, broken or absent (reach,
+ * coverage, line weight, patches, the swash phase) used to be anchored to the WORLD and only drifted in time, so the foam
+ * sat on the bank like paint while the water ran past it and only the small clumps drawn on top of it moved. Now each
+ * noise is read through a two-phase flow map: two copies slid downstream by the local current, half a cycle apart, each
+ * faded out at its own reset, so the patches themselves slide along the bank and thin out and break up as they go.
+ */
+export const SHORE_FLOW_CYCLE_SEC = 4;
+/** The fastest the shore pattern slides, world px/s. A fast rapid would shear the patches into rays inside one cycle; the
+ * clumps drawn on top (`buildFoamTexture`) still travel at the water's own speed. */
+export const SHORE_SLIDE_MAX_PX = 60;
+
+/**
+ * CPU twin of the flow map's phase weights, so the cross-fade is Node-assertable.
+ * @param {number} tSec
+ * @param {number} [cycleSec]
+ * @returns {{ph0:number, ph1:number, w0:number, w1:number, norm:number}} the two phases (0..1), their triangle weights
+ *   (sum 1; each is 0 at its own reset) and the variance-preserving divisor `sqrt(w0² + w1²)`.
+ */
+export function shoreFlowPhases(tSec, cycleSec = SHORE_FLOW_CYCLE_SEC) {
+  const cyc = tSec / cycleSec;
+  const ph0 = cyc - Math.floor(cyc);
+  const c1 = cyc + 0.5;
+  const ph1 = c1 - Math.floor(c1);
+  const w0 = 1 - Math.abs(ph0 * 2 - 1);
+  const w1 = 1 - w0;
+  return { ph0, ph1, w0, w1, norm: Math.max(Math.sqrt(w0 * w0 + w1 * w1), 1e-3) };
+}
+
+/**
  * CPU twin of the distance estimate, so its edge cases are Node-assertable.
  * @param {number} m - blurred mask value 0..1
  * @param {number} gradLen - |∇m| per world px
@@ -120,10 +150,12 @@ export function maskShoreDistance(m, gradLen, level, farDistPx = null, sigmaPx =
  * @param {*|null} [args.flowDir] - vec2 unit, which way the water is going here.
  * @param {*|null} [args.farOutward] - vec2 unit pointing away from the nearest shore, for
  *   where the mask has no gradient to give one (the body pack's rotated tangent).
+ * @param {*|null} [args.slidePx] - vec2 world px/s, the current the foam pattern rides (see `SHORE_FLOW_CYCLE_SEC`).
+ *   Null = the pattern stays where it is and only drifts in time (the old behaviour).
  */
 export function buildMaskShoreDensity(
   THREE,
-  { maskTexNode, maskUvAt, worldXY, shoreDist = null, tSec, flowDir = null, farOutward = null }
+  { maskTexNode, maskUvAt, worldXY, shoreDist = null, tSec, flowDir = null, farOutward = null, slidePx = null }
 ) {
   const {
     uniform,
@@ -141,6 +173,11 @@ export function buildMaskShoreDensity(
     length,
     mix,
     dot,
+    fract,
+    abs,
+    sqrt,
+    Fn,
+    If,
     mx_fractal_noise_float,
   } = THREE.TSL;
 
@@ -187,99 +224,128 @@ export function buildMaskShoreDensity(
   const outwardRaw = farOutward ? mix(farOutward, maskNormal, normalTrust) : maskNormal;
   const outward = outwardRaw.div(max(length(outwardRaw), float(1e-4)));
 
-  // ── MOTION: swash, wobble ───────────────────────────────────────────────
-  const breakupUv = worldXY.div(float(BREAKUP_SCALE_PX));
-  const phaseNoise = mx_fractal_noise_float(vec3(breakupUv.x, breakupUv.y, tSec.mul(float(0.02))), 2, 2.0, 0.5);
-  const swash = sin(tSec.mul(float((2 * Math.PI) / SWASH_PERIOD_SEC)).add(phaseNoise.mul(float(9))))
-    .mul(float(0.5))
-    .mul(swashPx);
-  const wobbleUv = worldXY.div(float(WOBBLE_SCALE_PX));
-  const wobbleNoise = mx_fractal_noise_float(vec3(wobbleUv.x, wobbleUv.y, tSec.mul(float(0.06))), 2, 2.0, 0.5);
-  // Distance from the foam's LEADING EDGE, world px, positive into the water.
-  // ⚠️ NOT ONE RING PER EDGE (2026-11-09, mmp-78u.30.1 — Ingram: "I see three rings around the boats"). The leading edge
-  // only wobbled +-10 px, so the line, the tail's end and the open water sat at fixed offsets round every hull: three
-  // concentric rings. A second, slower warp (`DRIFT_SCALE_PX`) pushes the whole profile in and out along the shore by up
-  // to ~0.8 of the local reach, so where the foam starts and where it ends wander independently of the hull's outline.
-  const driftUv = worldXY.div(float(DRIFT_SCALE_PX));
-  const driftNoise = mx_fractal_noise_float(vec3(driftUv.x.add(float(3.7)), driftUv.y, tSec.mul(float(0.05))), 2, 2.0, 0.5);
-  const x = dist.sub(swash).sub(wobbleNoise.mul(float(WOBBLE_PX * 2.5))).sub(driftNoise.mul(widthPx).mul(float(1.6)));
-
-  // ── VARIATION: every stretch of shore its own reach, coverage and line weight ──
-  // Three independent world-anchored noises at a few hundred px, each drifting on
-  // its own clock, so the band changes shape over tens of seconds instead of being
-  // an offset copy of the waterline. `variation` = 0 collapses all three to 1.
-  const varUv = worldXY.div(float(VARIATION_SCALE_PX));
-  const widthNoise = mx_fractal_noise_float(vec3(varUv.x, varUv.y, tSec.mul(float(0.035))), 2, 2.0, 0.5);
-  const coverNoise = mx_fractal_noise_float(
-    vec3(varUv.x.add(float(41.7)), varUv.y.sub(float(13.1)), tSec.mul(float(0.045))),
-    2,
-    2.0,
-    0.5
-  );
-  const weightNoise = mx_fractal_noise_float(
-    vec3(varUv.x.mul(float(2.3)).add(float(7.1)), varUv.y.mul(float(2.3)), tSec.mul(float(0.08))),
-    2,
-    2.0,
-    0.5
-  );
-  const widthMul = mix(
-    float(1),
-    mix(float(0.2), float(1.9), smoothstep(float(-0.32), float(0.32), widthNoise)),
-    variation
-  );
-  // THE CURRENT'S SAY (2026-10-17, author: "make it react to the stream movement"):
-  // a face the current drives into piles foam up wider and heavier and keeps a solid
-  // line; a wall the current merely runs past gets streaks and a line broken about half
-  // the time; the lee side, where the water pulls away, keeps only scraps.
+  // ── THE CURRENT'S SAY (2026-10-17, author: "make it react to the stream movement"): a face the current drives into piles
+  // foam up wider and heavier and keeps a solid line; a wall the current merely runs past gets streaks and a line broken
+  // about half the time; the lee side, where the water pulls away, keeps only scraps.
   const flowIntoShore = flowDir ? dot(flowDir, outward) : float(0);
   const frontN = max(flowIntoShore.negate(), float(0));
   const leeN = max(flowIntoShore, float(0));
-  const coverage = mix(float(1), smoothstep(float(-0.1), float(0.32), coverNoise), variation).mul(
-    mix(float(1), float(0.3), leeN)
-  );
-  // The line itself only breaks in the deepest gaps; elsewhere it thins and thickens.
-  const lineGate = mix(
-    mix(float(1), smoothstep(float(0.02), float(0.3), coverNoise.add(weightNoise.mul(float(0.6)))), variation),
-    float(1),
-    frontN
-  ).mul(mix(float(1), float(0.4), leeN));
-  const weightMul = mix(
-    float(1),
-    mix(float(0.25), float(2.2), smoothstep(float(-0.3), float(0.3), weightNoise)),
-    variation
-  );
 
-  // ── DENSITY PROFILE: a solid line, then a decaying tail ─────────────────
-  const aa = max(fwidth(x), float(1.5));
-  const lead = smoothstep(aa.negate(), aa, x);
-  const xp = max(x, float(0));
-  const patchNoiseEarly = mx_fractal_noise_float(
-    vec3(breakupUv.x.mul(float(2.7)).add(float(9.1)), breakupUv.y.mul(float(2.7)), tSec.mul(float(0.03))),
-    2,
-    2.0,
-    0.5
-  );
-  const lineW = float(LINE_PX)
-    .mul(float(1).add(wobbleNoise.mul(float(1.8))))
-    .mul(weightMul)
-    .mul(float(1).add(frontN.mul(float(0.8))));
-  const line = float(1)
-    .sub(smoothstep(lineW.sub(aa), lineW.add(aa), xp))
-    .mul(lineGate);
-  const reach = widthPx
-    .mul(widthMul)
-    .mul(float(1).add(frontN.mul(float(1.4))))
-    .mul(float(1).sub(leeN.mul(float(0.6))));
-  const tailReach = reach.mul(float(0.55).add(smoothstep(float(-0.4), float(0.4), wobbleNoise.add(patchNoiseEarly)).mul(float(0.9))));
-  const tail = exp(xp.div(max(tailReach, float(1))).negate()).mul(float(0.85));
-  const patchNoise = mx_fractal_noise_float(
-    vec3(breakupUv.x.add(float(17.3)), breakupUv.y, tSec.mul(float(0.015))),
-    2,
-    2.0,
-    0.5
-  );
-  const patches = float(0.55).add(smoothstep(float(-0.25), float(0.35), patchNoise).mul(float(0.45)));
-  const density = clamp(lead.mul(max(line, tail.mul(patches).mul(coverage))).mul(amount), float(0), float(1));
+  // ── THE PATTERN RIDES THE CURRENT (see `SHORE_FLOW_CYCLE_SEC`) ──────────
+  // Two copies of every along-shore noise, slid downstream by `slidePx`, half a cycle apart and each invisible at its own
+  // reset; a plain linear blend (weights sum to 1), because the two copies are the SAME field a little apart, not
+  // independent ones. With no current given the pattern stays put and costs one copy.
+  // `uSlide` (0..1, the `shoreFoamFlow` dial): 0 pins the pattern to the bank again.
+  const uSlide = uniform(float(1));
+  const slide = slidePx
+    ? slidePx.mul(min(float(1), float(SHORE_SLIDE_MAX_PX).div(max(length(slidePx), float(1e-3))))).mul(uSlide)
+    : null;
+  const rideCyc = tSec.div(float(SHORE_FLOW_CYCLE_SEC));
+  const ridePh0 = fract(rideCyc);
+  const ridePh1 = fract(rideCyc.add(float(0.5)));
+  const rideW0 = float(1).sub(abs(ridePh0.mul(float(2)).sub(float(1))));
+  const rideW1 = float(1).sub(rideW0);
+  const rideAt0 = slide ? worldXY.sub(slide.mul(ridePh0.mul(float(SHORE_FLOW_CYCLE_SEC)))) : worldXY;
+  const rideAt1 = slide ? worldXY.sub(slide.mul(ridePh1.mul(float(SHORE_FLOW_CYCLE_SEC)))) : worldXY;
+  // A 2-octave fractal noise anchored to the pattern: `scalePx` world px per noise unit, a shift in noise units, a time rate.
+  const rideNoise = (scalePx, shiftX, shiftY, rate) => {
+    const at = (w) =>
+      mx_fractal_noise_float(
+        vec3(
+          w.x.div(float(scalePx)).add(float(shiftX)),
+          w.y.div(float(scalePx)).add(float(shiftY)),
+          tSec.mul(float(rate))
+        ),
+        2,
+        2.0,
+        0.5
+      );
+    return slide ? at(rideAt0).mul(rideW0).add(at(rideAt1).mul(rideW1)) : at(worldXY);
+  };
+
+  // ── THE FOAM ITSELF, only near enough to a shore to matter ──────────────
+  // Eight noises and a profile are a lot to run on every pixel of an open sea, so the whole block sits inside an `If` on the
+  // distance: past ~9 reach-widths the tail has decayed far below anything the foam texture can draw. The derivative the
+  // edge's antialiasing needs is taken from `dist` BEFORE the branch (WGSL forbids `fwidth` under non-uniform control flow).
+  const density = Fn(() => {
+    const aa = max(fwidth(dist), float(1.5)).toVar('shoreAa');
+    const out = float(0).toVar('shoreDensity');
+    If(dist.greaterThan(float(-40)).and(dist.lessThan(widthPx.mul(float(9)).add(float(60)))), () => {
+      // ── MOTION: swash, wobble ─────────────────────────────────────────────
+      const phaseNoise = rideNoise(BREAKUP_SCALE_PX, 0, 0, 0.02);
+      const swash = sin(tSec.mul(float((2 * Math.PI) / SWASH_PERIOD_SEC)).add(phaseNoise.mul(float(9))))
+        .mul(float(0.5))
+        .mul(swashPx);
+      const wobbleNoise = rideNoise(WOBBLE_SCALE_PX, 0, 0, 0.06);
+      // Distance from the foam's LEADING EDGE, world px, positive into the water.
+      // ⚠️ NOT ONE RING PER EDGE (2026-11-09, mmp-78u.30.1 — Ingram: "I see three rings around the boats"). The leading edge
+      // only wobbled +-10 px, so the line, the tail's end and the open water sat at fixed offsets round every hull: three
+      // concentric rings. A second, slower warp (`DRIFT_SCALE_PX`) pushes the whole profile in and out along the shore by up
+      // to ~0.8 of the local reach, so where the foam starts and where it ends wander independently of the hull's outline.
+      const driftNoise = rideNoise(DRIFT_SCALE_PX, 3.7, 0, 0.05);
+      const x = dist
+        .sub(swash)
+        .sub(wobbleNoise.mul(float(WOBBLE_PX * 2.5)))
+        .sub(driftNoise.mul(widthPx).mul(float(1.6)));
+
+      // ── VARIATION: every stretch of shore its own reach, coverage and line weight ──
+      // Three independent noises at a few hundred px, each drifting on its own clock, so the band changes shape over tens
+      // of seconds instead of being an offset copy of the waterline. `variation` = 0 collapses all three to 1.
+      const widthNoise = rideNoise(VARIATION_SCALE_PX, 0, 0, 0.035);
+      const coverNoise = rideNoise(VARIATION_SCALE_PX, 41.7, -13.1, 0.045);
+      const weightNoise = rideNoise(VARIATION_SCALE_PX / 2.3, 7.1, 0, 0.08);
+      const widthMul = mix(
+        float(1),
+        mix(float(0.2), float(1.9), smoothstep(float(-0.32), float(0.32), widthNoise)),
+        variation
+      );
+      const coverage = mix(float(1), smoothstep(float(-0.1), float(0.32), coverNoise), variation).mul(
+        mix(float(1), float(0.3), leeN)
+      );
+      // The line itself only breaks in the deepest gaps; elsewhere it thins and thickens.
+      const lineGate = mix(
+        mix(float(1), smoothstep(float(0.02), float(0.3), coverNoise.add(weightNoise.mul(float(0.6)))), variation),
+        float(1),
+        frontN
+      ).mul(mix(float(1), float(0.4), leeN));
+      const weightMul = mix(
+        float(1),
+        mix(float(0.25), float(2.2), smoothstep(float(-0.3), float(0.3), weightNoise)),
+        variation
+      );
+
+      // ── DENSITY PROFILE: a solid line, then a decaying tail ───────────────
+      const lead = smoothstep(aa.negate(), aa, x);
+      const xp = max(x, float(0));
+      const patchNoiseEarly = rideNoise(BREAKUP_SCALE_PX / 2.7, 9.1, 0, 0.03);
+      const lineW = float(LINE_PX)
+        .mul(float(1).add(wobbleNoise.mul(float(1.8))))
+        .mul(weightMul)
+        .mul(float(1).add(frontN.mul(float(0.8))));
+      const line = float(1)
+        .sub(smoothstep(lineW.sub(aa), lineW.add(aa), xp))
+        .mul(lineGate);
+      const reach = widthPx
+        .mul(widthMul)
+        .mul(float(1).add(frontN.mul(float(1.4))))
+        .mul(float(1).sub(leeN.mul(float(0.6))));
+      const tailReach = reach.mul(
+        float(0.55).add(smoothstep(float(-0.4), float(0.4), wobbleNoise.add(patchNoiseEarly)).mul(float(0.9)))
+      );
+      const tail = exp(xp.div(max(tailReach, float(1))).negate()).mul(float(0.85));
+      const patchNoise = rideNoise(BREAKUP_SCALE_PX, 17.3, 0, 0.015);
+      const patches = float(0.55).add(smoothstep(float(-0.25), float(0.35), patchNoise).mul(float(0.45)));
+      // ⚠️ NO HOOPS (2026-11-10, Ingram: "do you see the 'loops/hoops' that are appearing. Could we fill them in please").
+      // `lead` is 0 shoreward of the leading edge, so wherever the swash, wobble or drift pushed the edge out from the
+      // waterline the strip between the shore and the foam was left as bare water: dark arches between foam and wall.
+      // That strip is now filled with the line's own foam (the same `lineGate`, so the line still breaks where it breaks).
+      const fill = float(1).sub(lead).mul(lineGate);
+      out.assign(
+        clamp(max(lead.mul(max(line, tail.mul(patches).mul(coverage))), fill).mul(amount), float(0), float(1))
+      );
+    });
+    return out;
+  })();
 
   // ── HARDNESS: is this water deep RIGHT AGAINST its shore? ───────────────
   // A hard-painted edge reaches full depth within ~2σ of the waterline; a soft ramp
@@ -318,6 +384,9 @@ export function buildMaskShoreDensity(
       },
       setShoreFoamVariation(v) {
         uB.value.z = v;
+      },
+      setShoreFoamFlow(v) {
+        uSlide.value = v;
       },
       setBreakSpray(v) {
         uB.value.w = v;
@@ -594,6 +663,16 @@ export const FLECK_MOTION = Object.freeze({
  * is cross-faded to a fresh copy. Short enough that shear along a wall streaks it
  * rather than shredding it. */
 const FLOW_CYCLE_SEC = 1.6;
+/** Streaks: the current speed (world px/s) where the smear starts and where it is full. */
+const FOAM_STREAK_SPEED_LO_PX = 8;
+const FOAM_STREAK_SPEED_HI_PX = 45;
+/** Streaks: how far up and down stream the two extra noise taps sit, in clump units (a clump is `texturePx`). ~1 is one
+ * noise period, so the three taps are nearly independent and the smear is about three clumps long. */
+const FOAM_STREAK_TAP_UNITS = 0.95;
+/** Streaks: restores the contrast the three-tap average loses (weights 0.5/1/0.5 of near-independent noise: std 0.61). */
+const FOAM_STREAK_GAIN = 1.35;
+/** How soft the edge of a clump is, in noise units (was 0.14 - a ~2 px cut-paper edge; foam is feathered). */
+const FOAM_EDGE_SOFT = 0.26;
 
 /**
  * WHAT foam looks like, for any density 0..1: domain-warped fractal clumps,
@@ -618,6 +697,7 @@ export function buildFoamTexture(THREE, { worldXY, density, tSec, texturePx, vel
     max,
     abs,
     sqrt,
+    length,
     clamp,
     smoothstep,
     fwidth,
@@ -639,6 +719,14 @@ export function buildFoamTexture(THREE, { worldXY, density, tSec, texturePx, vel
   const w0 = float(1).sub(abs(ph0.mul(float(2)).sub(float(1))));
   const w1 = float(1).sub(w0);
 
+  // STREAKS ALONG THE CURRENT (2026-11-10, mmp-78u.30.11): a clump is smeared along the way the water is going - the noise is
+  // read a little upstream and downstream of the pixel and the three averaged - so foam in moving water draws as filaments and
+  // rafts lying with the current instead of round blotches. Still water has none (strength 0, a pond keeps its round clumps).
+  // (A linear stretch of the coordinates would be cheaper, but it pivots on the world origin and every degree the heading
+  // changes would swing the pattern by hundreds of px; taps are local.)
+  const speedPx = velocityPx ? length(velocityPx) : float(0);
+  const streakDir = velocityPx ? velocityPx.div(max(speedPx, float(1e-3))) : vec2(0, 0);
+  const streakAmt = smoothstep(float(FOAM_STREAK_SPEED_LO_PX), float(FOAM_STREAK_SPEED_HI_PX), speedPx);
   const layer = (q, aaA, aaB) => {
     // Warp: two low-frequency noises push the domain around by ~a third of a clump,
     // so neither the clumps nor the bubbles line up into a visible lattice.
@@ -652,11 +740,23 @@ export function buildFoamTexture(THREE, { worldXY, density, tSec, texturePx, vel
       )
     ).mul(float(0.9));
     const qw = q.add(warp);
-    const clumpN = mx_fractal_noise_float(vec3(qw.x, qw.y, tSec.mul(float(0.07))), 3, 2.0, 0.5);
+    const clumpAt = (c) => mx_fractal_noise_float(vec3(c.x, c.y, tSec.mul(float(0.07))), 3, 2.0, 0.5);
+    const clump0 = clumpAt(qw);
+    let clumpN = clump0;
+    if (velocityPx) {
+      const tapOff = streakDir.mul(float(FOAM_STREAK_TAP_UNITS));
+      const smeared = clumpAt(qw.sub(tapOff))
+        .mul(float(0.5))
+        .add(clump0)
+        .add(clumpAt(qw.add(tapOff)).mul(float(0.5)))
+        .mul(float(FOAM_STREAK_GAIN));
+      clumpN = mix(clump0, smeared, streakAmt);
+    }
     // Bubbles: ROUND holes (Worley F1 discs) at two scales — big and many where the
     // foam is thin, small and few where it is dense. Round on purpose: holes punched
     // along F2−F1 cell walls are straight-sided polygons, and read as shards.
-    const bubbleRad = mix(float(0.42), float(0.12), smoothstep(float(0.3), float(0.95), d));
+    // (dense foam keeps a lace of 0.2 now, was 0.12: a thick patch drew as flat white)
+    const bubbleRad = mix(float(0.42), float(0.2), smoothstep(float(0.3), float(0.95), d));
     const f1a = mx_worley_noise_vec2(qw.mul(float(2.8)), float(1)).x;
     const f1b = mx_worley_noise_vec2(qw.mul(float(6.1)).add(vec2(13.7, 5.1)), float(1)).x;
     const holeA = float(1).sub(smoothstep(bubbleRad.sub(aaA), bubbleRad.add(aaA), f1a));
@@ -675,7 +775,7 @@ export function buildFoamTexture(THREE, { worldXY, density, tSec, texturePx, vel
     // never computed `p`. A `toVar` made in the body is assigned at this
     // statement, in uniform control flow.
     const fwP = fwidth(p.x).add(fwidth(p.y)).toVar('foamTextureFw');
-    const k = max(float(0.14), fwP.mul(float(4)));
+    const k = max(float(FOAM_EDGE_SOFT), fwP.mul(float(4)));
     const aaA = max(float(0.05), fwP.mul(float(2.8 * 1.5)));
     const aaB = max(float(0.05), fwP.mul(float(6.1 * 1.5)));
     const out = float(0).toVar('foamTextureOut');

@@ -197,7 +197,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 1,
     category: 'Motion',
     label: 'Wind ripple',
-    help: 'How visibly the map`s own wind roughens open water — gusts read as darker ripple patches, sheltered nooks and lee sides of walls stay glassy-calm, using the same wind field vegetation already leans in. At 0 the surface never responds to wind at all.',
+    help: 'How much the local air shapes the water, from the map`s own wind simulation: gusts sweep rougher patches across open water (ripples answer at once, the longer waves gently), and sheltered nooks and the lee of walls stay glassy. At 0 the whole water body has the same sea, whatever the air does around it.',
   },
   // ⚠️ WATER'S FIRST `bool`, and it needs NO new UI machinery — which is the
   // reason it is shaped as a param rather than a bespoke switch bolted onto
@@ -262,8 +262,8 @@ export const WATER_PARAMS = Object.freeze({
     step: 8,
     default: 88,
     category: 'Motion',
-    label: 'Surface scale',
-    help: 'How big the surface structure is, in canvas pixels. Small values look like fine ripples or noise; large values like slow, broad swells. Scale it to your map — a value that reads well on a stream looks like stains on a lake.',
+    label: 'Pattern scale',
+    help: 'The size of the murk and foam patterns drifting on the water, in canvas pixels. The waves themselves are sized by the wind and by how much open water the wind blows across, in real metres for your grid.',
   },
   chop: {
     type: 'float',
@@ -276,7 +276,7 @@ export const WATER_PARAMS = Object.freeze({
     default: 0.31,
     category: 'Motion',
     label: 'Surface chop',
-    help: 'How steeply the wavelets lean — and therefore how hard the water sparkles in sunlight. This is the control that decides whether a river glitters. At 0 the surface is mirror-flat and catches the sun in one place or not at all. The default is a light breeze, and is close to where sparkle is strongest: pushing it much higher does NOT keep adding sparkle, it tips the wavelets so far past the sun that the surface goes broad and dull again — which is a real look if you want a churned, storm-tossed river, but not a brighter one. If your water looks dead in daylight, start here.',
+    help: 'How steep the waves are, relative to real water in the same wind (the default, 0.31, is real). Steeper waves sparkle harder, bend the bed more and focus sharper caustics nearer the surface. The wind itself sets how big and how fast the waves are; this only exaggerates or calms them. 0 is a mirror-flat surface with no caustics.',
   },
   // ── Shape ───────────────────────────────────────────────────────────────
   depthScalePx: {
@@ -397,182 +397,32 @@ export const WATER_PARAMS = Object.freeze({
     default: 1,
     category: 'Light',
     label: 'Caustics',
-    help: 'The shifting net of bright light patches on the riverbed you get from sunlight refracting through a moving surface — strongest in clear, shallow water, and gone wherever the bed is too deep, murky or foam-covered to see at all. Turn it down for a stiller, less busy bed; 0 removes it entirely.',
+    help: 'The net of bright light on the bed: sunlight bent by the real waves and focused where they curve. It follows everything above it: the wind (a breeze gives a bold, slow net, a gale a busy, broken one), the depth (sharpest a metre or two down), the sun (it slides and stretches as the sun gets low) and the sky (cloud blurs and then dims it; shadow and night remove it). This is how strongly it shows; 0 removes it.',
   },
-  // ⚠️ NEW (2026-08-27), REBUILT SAME DAY — caustics' own look controls. The
-  // first version (a contrast curve over the wave field's own Jacobian) shipped
-  // and the author reported it was STILL soft round blobs even at maximum
-  // sharpness/netting, next to a reference image that was unmistakably a
-  // Worley/Voronoi cell-edge net. Root cause: no contrast curve can turn a
-  // smooth noise field's isolated round extrema into a connected net — that is
-  // a NOISE-BASIS problem, not a tuning problem. Rebuilt the same day around
-  // the Worley F2−F1 cell-edge technique this project already proved for shore
-  // foam (`water-shore.js#buildFoamCellularStructure`) — see water-field.js's
-  // own "CAUSTICS, A WORLEY F2−F1 CELL-EDGE NET" header for the mechanism each
-  // control now drives. All three are ROH — genuinely technical, each can make
-  // the effect look wrong at an extreme, exactly `feedback_foh_roh_must_differ`'s
-  // own test for what belongs here rather than on the front strip.
-  causticSharpness: {
+  // ── THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9) — the thirteen Worley-net caustic controls that lived here
+  // (sharpness, scale, netting, wave warp, growth, evolve speed, junctions, line floor, specular tie) are gone with
+  // the net: caustics are the real refraction of the sun through the real waves now, so their shape follows the wind,
+  // the sun and the depth, not sliders.
+  lightShafts: {
     type: 'float',
     min: 0,
-    max: 1,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_SHARPNESS (water-field.js).
-    default: 0.28,
-    category: 'Light',
-    label: 'Caustic sharpness',
-    help: 'How thin the bright lines of the caustic net read. 0 is a thick, lacy net; 1 is a hairline net, close to a real caustic photograph. This directly controls line WIDTH, not a brightness curve, so it stays effective across the whole slider — nothing to pair it with.',
-  },
-  causticScale: {
-    type: 'float',
-    min: 0.05,
-    max: 1,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_SCALE (water-field.js).
-    default: 0.44,
-    category: 'Light',
-    label: 'Caustic scale',
-    help: "The size of the caustic net's own cells, as a fraction of Wave scale — independent of how big the visible waves themselves look. Real caustics are much finer-grained than the swell that makes them, so this defaults well below 1. Raise it for a coarser, larger-celled net; lower it for a finer mesh.",
-  },
-  causticNetting: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_NETTING (water-field.js).
-    default: 0.3,
-    category: 'Light',
-    label: 'Caustic netting',
-    help: 'Blends in a second, finer caustic net so the pattern reads as several overlapping cell sizes rather than one uniform mesh — real shallow water shows several overlapping ripple scales at once. 0 is a single layer only. Costs extra render time whenever caustics are on, regardless of this value, so pull it back first if caustics ever need to be cheaper.',
-  },
-  // ⚠️ NEW (2026-08-27, round 6) — the rest of caustics' own mechanics
-  // (rounds 3-5: wave-linked distortion, growth/pull breathing, lattice
-  // evolution speed, junction-brightness shaping), promoted from baked
-  // internal constants to live wide-range ROH sliders on the author's own
-  // explicit request: "give me controls for the ROH and FOH so that I can
-  // fine tune the caustics. Give me plenty of controls with wide ranges."
-  // ⚠️ DEFAULTS UPDATED (round 7, same day) — the author live-tuned every
-  // one of these against a real render and reported the values back as
-  // "use these as default values", superseding rounds 3-5's own
-  // reasoned-but-unverified numbers. `causticWaveWarp` in particular landed
-  // at its OLD range ceiling (6) — widened below to give real headroom past
-  // it, not left pinned at the exact edge.
-  causticWaveWarp: {
-    type: 'float',
-    min: 0,
-    max: 10,
+    max: 3,
     step: 0.05,
-    // Matches WATER_CAUSTICS_WAVE_WARP_STRENGTH (water-field.js).
-    default: 6,
+    // Matches WATER_TIER4_LIGHT_SHAFTS (water-render.js).
+    default: 1,
     category: 'Light',
-    label: 'Caustic wave warp',
-    help: 'How strongly the moving waves bend the caustic pattern, which ties it to the surface instead of looking like a sticker. 0 removes the link.',
+    label: 'Light shafts',
+    help: 'Sunlight caught in the water itself: the same focused light that draws the caustics, seen on its way down through the water. A low sun stretches it into streaks pointing away from the sun; at noon it is a soft glow over the brightest spots. Strongest in deep, slightly murky water; gone in shadow, under cloud and at night. 0 removes it.',
   },
-  causticWaveWarpCap: {
-    type: 'float',
-    min: 0.05,
-    max: 2,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_WAVE_WARP_CELLS (water-field.js).
-    default: 0.18,
-    category: 'Light',
-    label: 'Caustic wave warp cap',
-    help: "The hard ceiling on Caustic wave warp's own displacement, in units of one caustic cell, however strong that slider or Surface chop get. Past roughly 1 the net's query point can start reading a neighbouring cell's own feature as if it were local, which reads as the net breaking apart rather than rippling — raise this only alongside a real check that it still looks like a net.",
-  },
-  causticGrowth: {
+  waveSpeed: {
     type: 'float',
     min: 0,
-    max: 4,
+    max: 2,
     step: 0.05,
-    // Matches WATER_CAUSTICS_GROWTH_STRENGTH (water-field.js).
-    default: 0.3,
-    category: 'Light',
-    label: 'Caustic growth',
-    help: 'How strongly caustic cells swell and shrink, each pushing into its neighbours. 0 is a still net. Values well above the default are untested: push them as an experiment.',
-  },
-  causticGrowthCap: {
-    type: 'float',
-    min: 0.05,
-    max: 2,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_GROWTH_CELLS (water-field.js).
-    default: 0.78,
-    category: 'Light',
-    label: 'Caustic growth cap',
-    help: "The hard ceiling on Caustic growth's own displacement, in units of one caustic cell. Same role as Caustic wave warp cap, for the breathing/pulling mechanism instead of the wave-linked one — raise it to let strong growth settings push further before being reined in.",
-  },
-  causticGrowthScale: {
-    type: 'float',
-    min: 0.05,
-    max: 3,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_GROWTH_FREQ (water-field.js).
-    default: 0.39,
-    category: 'Light',
-    label: 'Caustic growth scale',
-    help: "How large an area breathes together. LOW values (well under 1) make one growing patch span several caustic cells, so a cell visibly growing at its neighbour's expense is easy to see — this is what makes Caustic growth read as cells PULLING on each other rather than each one just quietly wobbling alone. HIGH values shrink that patch down toward a single cell's own size, which reads as isolated breathing instead.",
-  },
-  causticGrowthSpeed: {
-    type: 'float',
-    min: 0,
-    max: 2,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_GROWTH_TIME_SCALE (water-field.js).
-    default: 1.2,
-    category: 'Light',
-    label: 'Caustic growth speed',
-    help: 'How fast the breathing pattern itself migrates — which cells are currently growing versus shrinking keeps changing at this rate. 0 freezes which cells are growing (the net still looks breathed-on, it just stops changing which parts are doing the breathing). Kept slow by default on purpose: real cell growth reads as a rhythm, not a flicker.',
-  },
-  causticEvolveSpeed: {
-    type: 'float',
-    min: 0,
-    max: 3,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_EVOLVE_SPEED (water-field.js).
-    default: 1.62,
-    category: 'Light',
-    label: 'Caustic evolve speed',
-    help: "How often the caustic net's own topology genuinely reshuffles — cells merging, splitting and reforming, not just sliding around. 0 freezes the net's shape entirely (it can still ripple via Caustic wave warp/growth, but the underlying cell layout stops changing). Push this well above the default to make the net reform fast enough to see the mechanism clearly, then pull it back to whatever reads as a plausible pace for real water.",
-  },
-  causticJunctionWidth: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_JUNCTION_FRACTION (water-field.js).
-    default: 0.54,
-    category: 'Light',
-    label: 'Caustic junction width',
-    help: "How much of each line, measured out from a genuine multi-cell junction, reads at full brightness before falling back to Caustic line floor's own dim level. Wider values blur the contrast between a junction and a plain edge stretch; narrow it toward 0 to make ONLY the tightest intersections pop, matching how real caustic light concentrates.",
-  },
-  causticLineFloor: {
-    type: 'float',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    // Matches WATER_CAUSTICS_LINE_FLOOR (water-field.js).
-    default: 0.14,
-    category: 'Light',
-    label: 'Caustic line floor',
-    help: "How dim a plain stretch of caustic line reads, away from any junction, relative to a junction's own full brightness of 1. 0 makes plain edges vanish entirely — only the brightest intersections and the faint threads between them show. 1 removes the concentration effect altogether, back to a uniformly bright net.",
-  },
-  // ⚠️ NEW (2026-08-27, round 7) — an A/B test, not a considered look.
-  // Author: "The actual shape that we've created could actually be a good
-  // thing to use for the actual surface of the water too, the specular
-  // highlights layer... keeps the two elements tied together which makes
-  // physical sense. Give me a slider to A/B test this idea." Ships at 0
-  // (off) on purpose — this changes what specular looks like, unlike every
-  // other caustics control, which only ever changed caustics.
-  causticSpecularInfluence: {
-    type: 'float',
-    min: 0,
-    max: 3,
-    step: 0.02,
-    // Matches WATER_CAUSTICS_SPECULAR_INFLUENCE (water-field.js).
-    default: 0,
-    category: 'Light',
-    label: 'Caustic-specular tie',
-    help: "Reuses the caustic net's own pattern to modulate the specular sparkle — brighter right on a net line or junction, dimmer in a cell's open interior — the idea being that a real wave curved enough to focus a caustic below it is also curved enough to catch a highlight above it, so tying the two together is physically honest, not just a texture trick. 0 leaves specular untouched. Around 1 gives a visible, believable break-up; push toward 3 to see the mechanism clearly, then back off to whatever reads as real water rather than a special effect.",
+    default: 1,
+    category: 'Motion',
+    label: 'Wave speed',
+    help: 'How fast the waves run compared with real water. 1 is real: in a fresh breeze, metre-long waves pass about once a second, so the light on the bed dances quickly. Lower it for a calmer, dreamier map; 0 freezes the waves (the current still carries them).',
   },
   // ⚠️ NEW (2026-08-23) — was a baked module constant (WATER_TIER5_REFRACT_PX,
   // water-render.js) for tier 5's whole first day; author, live: "give me
@@ -912,6 +762,16 @@ export const WATER_PARAMS = Object.freeze({
     label: 'Shoreline foam variation',
     help: 'How uneven the shoreline foam is. At 0 it is the same band all along every shore; raised, each stretch of shore gets its own reach, its own coverage (with real gaps) and its own line weight, all slowly changing over tens of seconds.',
   },
+  shoreFoamFlow: {
+    type: 'float',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    default: 1,
+    category: 'Motion',
+    label: 'Shoreline foam rides the current',
+    help: 'How far the shoreline foam is carried by the water. At 1 the patches of foam slide down the bank with the current, thinning and breaking up as they go (a closed pond, with no current, keeps its foam where it is); at 0 they stay pinned to the bank while the water runs past.',
+  },
   breakSpray: {
     type: 'float',
     min: 0,
@@ -1065,7 +925,7 @@ export const WATER_DIALS = Object.freeze({
   // genuinely technical, most still not shader-lab-verified.
   caustics: {
     label: 'Caustics',
-    help: 'How much the shifting net of light plays across the riverbed — from none at all to a bright, busy net. The finer shape of the net (line thinness, cell size, how it breathes and evolves) lives in Advanced.',
+    help: 'How much the light focused by the waves plays across the bed, from none at all to a bright net. Its shape comes from the wind, the sun and the depth.',
     range: [0, 1],
     default: 1,
     drives: {
@@ -1779,25 +1639,8 @@ const WATER_PRESETS_TOWN = Object.freeze({
     breakFoam: 1,
     foamTrail: 0.85,
     caustics: 1,
-    // UPDATED (2026-08-27, round 7) — matches the schema defaults, which are
-    // now the author's OWN live-tuned values (reported back as "use these
-    // as default values"), not the earlier reasoned-but-unverified ones.
-    causticSharpness: 0.28,
-    causticScale: 0.44,
-    causticNetting: 0.3,
-    causticWaveWarp: 6,
-    causticWaveWarpCap: 0.18,
-    causticGrowth: 0.3,
-    causticGrowthCap: 0.78,
-    causticGrowthScale: 0.39,
-    causticGrowthSpeed: 1.2,
-    causticEvolveSpeed: 1.62,
-    causticJunctionWidth: 0.54,
-    causticLineFloor: 0.14,
-    // NEW (2026-08-27, round 7) — matches the schema default (0, off); this
-    // preset predates the caustic-specular A/B test and has no author
-    // opinion on it yet.
-    causticSpecularInfluence: 0,
+    lightShafts: 1,
+    waveSpeed: 1,
     // NEW (2026-08-23) — matches the schema default; this preset predates
     // refraction becoming a live param and has no author-tuned value of its
     // own yet (see WATER_PARAMS.refractStrengthPx's own doc for why a
@@ -1831,6 +1674,7 @@ const WATER_PRESETS_TOWN = Object.freeze({
     shoreFoamSoftPx: 4,
     foamTexturePx: 26,
     shoreFoamVariation: 0.85,
+    shoreFoamFlow: 1,
     breakSpray: 1,
     // NEW (2026-11-01) — no steam on a town river.
     steam: 0,
@@ -1865,6 +1709,8 @@ export const WATER_PRESETS = Object.freeze({
     wetStrength: 0.25,
     foamPatchiness: 0.95,
     caustics: 0.5,
+    lightShafts: 1,
+    waveSpeed: 1,
     refractStrengthPx: 90,
     shoreFoam: 0.06,
     shoreFoamWidthPx: 10,
@@ -1891,6 +1737,8 @@ export const WATER_PRESETS = Object.freeze({
     wetStrength: 0.3,
     foamPatchiness: 0.95,
     caustics: 0.15,
+    lightShafts: 1,
+    waveSpeed: 1,
     refractStrengthPx: 60,
     shoreFoam: 0.04,
     shoreFoamWidthPx: 8,
@@ -1916,6 +1764,8 @@ export const WATER_PRESETS = Object.freeze({
     breakFoam: 1,
     foamTrail: 0.9,
     caustics: 0.55,
+    lightShafts: 1,
+    waveSpeed: 1,
     refractStrengthPx: 160,
     shoreFoam: 0.8,
     breakSpray: 1.4,
@@ -1934,6 +1784,8 @@ export const WATER_PRESETS = Object.freeze({
     chop: 0.3,
     depthScalePx: 180,
     caustics: 0.5,
+    lightShafts: 1,
+    waveSpeed: 1,
     shoreFoam: 0.6,
     breakSpray: 0.7,
     foamPatchiness: 0.7,
@@ -1959,6 +1811,8 @@ export const WATER_PRESETS = Object.freeze({
     breakFoam: 0.4,
     foamTrail: 0.4,
     caustics: 0.4,
+    lightShafts: 1,
+    waveSpeed: 1,
     shoreFoam: 0.5,
     breakSpray: 0.5,
   }),
@@ -1980,7 +1834,8 @@ export const WATER_PRESETS = Object.freeze({
     foamTrail: 0.5,
     foamPatchiness: 0.6,
     caustics: 0.6,
-    causticScale: 0.55,
+    lightShafts: 1,
+    waveSpeed: 1,
     refractStrengthPx: 200,
     shoreFoam: 1.2,
     shoreFoamWidthPx: 40,
@@ -2008,6 +1863,8 @@ export const WATER_PRESETS = Object.freeze({
     breakFoam: 1,
     foamTrail: 1,
     caustics: 0,
+    lightShafts: 1,
+    waveSpeed: 1,
     refractStrengthPx: 80,
     shoreFoam: 1.5,
     shoreFoamWidthPx: 60,
@@ -2039,6 +1896,8 @@ export const WATER_PRESETS = Object.freeze({
     wetStrength: 0.35,
     foamPatchiness: 0.95,
     caustics: 0.35,
+    lightShafts: 1,
+    waveSpeed: 1,
     refractStrengthPx: 80,
     shoreFoam: 0.05,
     shoreFoamWidthPx: 8,
@@ -2067,6 +1926,8 @@ export const WATER_PRESETS = Object.freeze({
     wetStrength: 0.35,
     foamPatchiness: 0.95,
     caustics: 0,
+    lightShafts: 1,
+    waveSpeed: 1,
     refractStrengthPx: 20,
     shoreFoam: 0.05,
     shoreFoamWidthPx: 8,
@@ -2095,6 +1956,8 @@ export const WATER_PRESETS = Object.freeze({
     wetStrength: 0.4,
     foamPatchiness: 0.95,
     caustics: 0,
+    lightShafts: 1,
+    waveSpeed: 1,
     refractStrengthPx: 20,
     shoreFoam: 0.05,
     shoreFoamWidthPx: 8,

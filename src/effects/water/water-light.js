@@ -387,6 +387,7 @@ export function buildWaterSpecular({
   // WEATHER (2026-11-01) — extra roughness from rain and wind too fine for the
   // normal to carry (spray, sub-pixel capillaries). `null` = none.
   roughnessBoost = null,
+  extraAlpha = null,
   // RAIN RINGS, READ FROM STRAIGHT ABOVE (2026-11-01). Looking down, water
   // mirrors ~2% of the sky, so a ring that only tilts the normal is invisible
   // outside the sun's glint. What the eye actually catches is each ring's crest
@@ -441,7 +442,11 @@ export function buildWaterSpecular({
     float(1)
   );
   const alpha = roughness.mul(roughness);
-  const alphaSq = max(alpha.mul(alpha), float(1e-8));
+  // THE SEA'S OWN ROUGHNESS (2026-11-10, Ingram: "specular has vanished"): the slope the wave system does not draw
+  // (Cox & Munk minus the drawn share — `water-waves.js` `uGlintRough`, an rms slope ≈ GGX α) adds in quadrature, the
+  // way unresolved capillaries spread a real sea's sun glitter. Without it the drawn (gentle) facets almost never
+  // reached the sun through a 0.09-roughness mirror lobe. (The CPU twin below does not model it.)
+  const alphaSq = max(extraAlpha ? alpha.mul(alpha).add(extraAlpha.mul(extraAlpha)) : alpha.mul(alpha), float(1e-8));
 
   const f0 = vec3(WATER_F0, WATER_F0, WATER_F0);
 

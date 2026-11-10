@@ -291,6 +291,8 @@ export function createWaterSurfaceSubsystem({
   // strength texture (see `water-field.js`'s `windStrengthField`). Read FRESH
   // on every build, like `getWindHandle`.
   getWindStrengthField = null,
+  // (2026-11-10, mmp-78u.30.9) `() => waveSystem | null` — `water-waves.js#createWaterWaveSystem`, owned by the viewer.
+  getWaveSystem = null,
   // THE SHARED-EVALUATION RESOLVE (2026-10-25, W-02) — see
   // `water-render.js`'s `sharedResolve`. The viewer passes `true` and renders
   // `getResolveScene()` before the scene draw; tests and older callers keep the
@@ -593,6 +595,8 @@ export function createWaterSurfaceSubsystem({
       // here would be the exact bug this getter shape exists to prevent.
       windHandle: getWindHandle(),
       windStrengthField: getWindStrengthField?.() ?? null,
+      // THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9) — the viewer's, shared by every floor.
+      waves: getWaveSystem?.() ?? null,
       // THE DEPTH-AUTHORITY GATE (2026-08-15) — floor-INDEPENDENT (the SAME
       // `buf:scene.depth` attachment every instance reads), so it rebuilds
       // fine on a tier change like everything else here; only `uExpectedDepth`
@@ -1265,19 +1269,7 @@ export function createWaterSurfaceSubsystem({
           p.breakFoam,
           p.foamTrail,
           p.caustics,
-          p.causticSharpness,
-          p.causticScale,
-          p.causticNetting,
-          p.causticWaveWarp,
-          p.causticWaveWarpCap,
-          p.causticGrowth,
-          p.causticGrowthCap,
-          p.causticGrowthScale,
-          p.causticGrowthSpeed,
-          p.causticEvolveSpeed,
-          p.causticJunctionWidth,
-          p.causticLineFloor,
-          p.causticSpecularInfluence,
+          p.lightShafts,
           p.refractStrengthPx,
           p.foamEdgeSharpness,
           p.foamPatchiness,
@@ -1305,6 +1297,7 @@ export function createWaterSurfaceSubsystem({
           p.shoreFoamSoftPx,
           p.foamTexturePx,
           p.shoreFoamVariation,
+          p.shoreFoamFlow,
           p.breakSpray,
           p.windRipple,
           p.steam,
@@ -1343,19 +1336,7 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.breakFoam)) surface.setBreakFoam(p.breakFoam);
       if (Number.isFinite(p.foamTrail)) surface.setFoamTrail(p.foamTrail);
       if (Number.isFinite(p.caustics)) surface.setCaustics(p.caustics);
-      if (Number.isFinite(p.causticSharpness)) surface.setCausticSharpness(p.causticSharpness);
-      if (Number.isFinite(p.causticScale)) surface.setCausticScale(p.causticScale);
-      if (Number.isFinite(p.causticNetting)) surface.setCausticNetting(p.causticNetting);
-      if (Number.isFinite(p.causticWaveWarp)) surface.setCausticWaveWarp(p.causticWaveWarp);
-      if (Number.isFinite(p.causticWaveWarpCap)) surface.setCausticWaveWarpCap(p.causticWaveWarpCap);
-      if (Number.isFinite(p.causticGrowth)) surface.setCausticGrowth(p.causticGrowth);
-      if (Number.isFinite(p.causticGrowthCap)) surface.setCausticGrowthCap(p.causticGrowthCap);
-      if (Number.isFinite(p.causticGrowthScale)) surface.setCausticGrowthScale(p.causticGrowthScale);
-      if (Number.isFinite(p.causticGrowthSpeed)) surface.setCausticGrowthSpeed(p.causticGrowthSpeed);
-      if (Number.isFinite(p.causticEvolveSpeed)) surface.setCausticEvolveSpeed(p.causticEvolveSpeed);
-      if (Number.isFinite(p.causticJunctionWidth)) surface.setCausticJunctionWidth(p.causticJunctionWidth);
-      if (Number.isFinite(p.causticLineFloor)) surface.setCausticLineFloor(p.causticLineFloor);
-      if (Number.isFinite(p.causticSpecularInfluence)) surface.setCausticSpecularInfluence(p.causticSpecularInfluence);
+      if (Number.isFinite(p.lightShafts)) surface.setLightShafts?.(p.lightShafts);
       if (Number.isFinite(p.refractStrengthPx)) surface.setRefractStrengthPx(p.refractStrengthPx);
       if (Number.isFinite(p.foamEdgeSharpness)) surface.setFoamEdgeSharpness(p.foamEdgeSharpness);
       if (Number.isFinite(p.foamPatchiness)) surface.setFoamPatchiness(p.foamPatchiness);
@@ -1382,6 +1363,7 @@ export function createWaterSurfaceSubsystem({
       if (Number.isFinite(p.shoreFoamSoftPx)) surface.setShoreFoamSoftPx(p.shoreFoamSoftPx);
       if (Number.isFinite(p.foamTexturePx)) surface.setFoamTexturePx(p.foamTexturePx);
       if (Number.isFinite(p.shoreFoamVariation)) surface.setShoreFoamVariation(p.shoreFoamVariation);
+      if (Number.isFinite(p.shoreFoamFlow)) surface.setShoreFoamFlow(p.shoreFoamFlow);
       if (Number.isFinite(p.breakSpray)) surface.setBreakSpray(p.breakSpray);
       if (Number.isFinite(p.steam)) surface.setSteam?.(p.steam);
       if (Number.isFinite(p.steamSpreadPx)) surface.setSteamSpreadPx?.(p.steamSpreadPx);
@@ -1500,6 +1482,8 @@ export function createWaterSurfaceSubsystem({
      * learned the expensive way a second time.
      */
     getFullResMaskTexture: () => (loadedUrl ? maskTexture : null),
+    /** The decoded `_Water` bytes ({data, width, height}, by reference) - what the flow's potential solve reads. */
+    getMaskData: () => (loadedUrl ? sprayData : null),
     /**
      * THE SPRAY (2026-11-06, mmp-7kx.1): this frame's particle births off this floor's hard shores, and what the
      * spray engine needs to fly them (the mask it lands them on, the current it rides). `null` = no spray here.

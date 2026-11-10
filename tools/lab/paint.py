@@ -215,7 +215,143 @@ def op_blob(img, o):
     img.paste(Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8), "RGBA"), (X0, Y0))
 
 
+def _path_samples(points, widths, step=8.0):
+    """Catmull-Rom through `points` (end points repeated): dense samples, their widths, unit left normals and
+    signed curvature (centre of curvature at p + n / k)."""
+    P = np.array(points, np.float64)
+    W = np.array(widths if isinstance(widths, (list, tuple)) else [widths] * len(points), np.float64)
+    Pp = np.vstack([P[0] * 2 - P[1], P, P[-1] * 2 - P[-2]])
+    Wp = np.concatenate([[W[0]], W, [W[-1]]])
+    out, ws = [], []
+    for i in range(1, len(Pp) - 2):
+        p0, p1, p2, p3 = Pp[i - 1], Pp[i], Pp[i + 1], Pp[i + 2]
+        n = max(2, int(np.linalg.norm(p2 - p1) / step))
+        for j in range(n):
+            t = j / n
+            t2, t3 = t * t, t * t * t
+            out.append(0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3))
+            ws.append(Wp[i] + (Wp[i + 1] - Wp[i]) * t)
+    out.append(Pp[-2])
+    ws.append(Wp[-2])
+    S = np.array(out)
+    d1 = np.gradient(S, axis=0)
+    d2 = np.gradient(d1, axis=0)
+    sp = np.maximum(np.linalg.norm(d1, axis=1), 1e-6)
+    nrm = np.stack([-d1[:, 1], d1[:, 0]], axis=1) / sp[:, None]
+    k = (d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]) / sp**3
+    return S, np.array(ws), nrm, k
+
+
+def _smooth1d(a, n):
+    if n <= 1:
+        return a
+    ker = np.ones(n) / n
+    pad = np.pad(a, (n // 2, n - 1 - n // 2), mode="edge")
+    return np.convolve(pad, ker, mode="valid")
+
+
+def _disc_layer(size, centres, radii, blur, q=4):
+    """A soft coverage layer (float 0..1, full size): discs along a path, drawn at 1/q and Gaussian-blurred."""
+    W, H = size
+    lay = Image.new("L", ((W + q - 1) // q, (H + q - 1) // q), 0)
+    d = ImageDraw.Draw(lay)
+    for (x, y), r in zip(centres, radii):
+        r = max(0.5, r / q)
+        d.ellipse([x / q - r, y / q - r, x / q + r, y / q + r], fill=255)
+    if blur > 0:
+        lay = lay.filter(ImageFilter.GaussianBlur(radius=blur / q))
+    lay = lay.resize((W, H), Image.BILINEAR)
+    return np.asarray(lay).astype(np.float32) / 255.0
+
+
+def op_channel(img, o):
+    """A river along a smooth path (Lab · River).
+
+    o = {points: [[x, y], ...], width: px or [px per point], bank: px, peak, core: {width, peak, outer, blur},
+         rgba?, coreRgba?}
+    The channel rises from 0 at its banks over `bank` px to `peak`; a deeper core (`core.width` wide, `core.peak`)
+    is pushed toward the OUTSIDE of each bend by `core.outer` (0..1 of the free width): the cut bank is deep, the
+    inside of the bend a shallow point bar, as in a real river. Mask images MAX-merge greys; art images (`rgba`
+    given) paint the bank colour with the channel's coverage, then `coreRgba` with the core's.
+    """
+    S, ws, nrm, k = _path_samples(o["points"], o["width"])
+    bank = float(o.get("bank", 60))
+    A = _disc_layer(img.size, S, np.maximum(1.0, ws / 2 - bank / 2), bank / 2)
+    core = o.get("core")
+    B = None
+    if core:
+        cw = float(core["width"])
+        free = np.maximum(0.0, ws / 2 - cw / 2 - bank / 2)
+        bend = np.tanh(np.abs(k) * ws * 1.5)
+        off = _smooth1d(-np.sign(k) * bend * free * float(core.get("outer", 0.6)), 31)
+        C = S + nrm * off[:, None]
+        B = _disc_layer(img.size, C, np.full(len(C), cw / 2), float(core.get("blur", cw / 3)))
+    region = np.asarray(img).astype(np.float32)
+    if "rgba" in o:
+        out = region.copy()
+        for cov, col in ((A, o["rgba"]), (B, o.get("coreRgba"))):
+            if cov is None or col is None:
+                continue
+            c = np.array(rgba4(col), np.float32)
+            out[..., :3] = out[..., :3] * (1 - cov[..., None]) + c[:3] * cov[..., None]
+        out[..., 3] = 255.0
+    else:
+        grey = np.maximum(region[..., 0], A * float(o["peak"]))
+        if B is not None:
+            grey = np.maximum(grey, B * float(core["peak"]))
+        out = region.copy()
+        out[..., 0] = out[..., 1] = out[..., 2] = grey
+        out[..., 3] = 255.0
+    img.paste(Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8), "RGBA"), (0, 0))
+
+
+def op_dip(img, o):
+    """Cut a soft shallow (or a dry rock) INTO a _Water mask by MIN (Lab · River rocks and riffles).
+
+    o = {cx, cy, rx, ry, floor, shore, wobble?, seed?}: inside, the mask falls to `floor` (0 = dry rock), easing
+    in over `shore` of the radius (smoothstep; 0 = a hard edge) — where the mask is already shallower it is kept.
+    """
+    cx, cy, rx, ry = (float(o[k]) for k in ("cx", "cy", "rx", "ry"))
+    floor = float(o.get("floor", 0))
+    shore = max(0.0, float(o.get("shore", 0.2)))
+    wob = float(o.get("wobble", 0.0))
+    reach = 1.0 + abs(wob)
+    X0, Y0 = max(0, int(cx - rx * reach) - 2), max(0, int(cy - ry * reach) - 2)
+    X1, Y1 = min(img.width, int(cx + rx * reach) + 3), min(img.height, int(cy + ry * reach) + 3)
+    if X1 <= X0 or Y1 <= Y0:
+        return
+    yy, xx = np.mgrid[Y0:Y1, X0:X1].astype(np.float32)
+    dx, dy = (xx + 0.5 - cx) / rx, (yy + 0.5 - cy) / ry
+    r = np.sqrt(dx * dx + dy * dy)
+    if wob:
+        th = np.arctan2(dy, dx)
+        rng = np.random.default_rng(int(o.get("seed", 1)))
+        bend = np.zeros_like(th)
+        for kk in (2, 3, 5, 7):
+            bend += np.sin(kk * th + rng.uniform(0, 2 * np.pi)) / kk
+        r = r / (1.0 + wob * bend / 1.03)
+    if shore <= 0:
+        t = np.clip((1.0 - r) * min(rx, ry) + 0.5, 0.0, 1.0)
+    else:
+        t = np.clip((1.0 - r) / shore, 0.0, 1.0)
+        t = t * t * (3.0 - 2.0 * t)
+    region = np.asarray(img.crop((X0, Y0, X1, Y1))).astype(np.float32)
+    if "rgba" in o:
+        c = np.array(rgba4(o["rgba"]), np.float32)
+        out = region.copy()
+        out[..., :3] = region[..., :3] * (1 - t[..., None]) + c[:3] * t[..., None]
+    else:
+        g = region[..., 0]
+        grey = np.minimum(g, g * (1 - t) + floor * t)
+        out = region.copy()
+        out[..., 0] = out[..., 1] = out[..., 2] = grey
+    out[..., 3] = 255.0
+    img.paste(Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8), "RGBA"), (X0, Y0))
+
+
 OPS = {
+    "channel": op_channel,
+    "dip": op_dip,
     "rect": op_rect,
     "clear": op_clear,
     "text": op_text,

@@ -89,6 +89,10 @@ import {
   WATER_FLOW_SOLVE_OMEGA,
 } from './water-flow-solve.js';
 import { waterFlowVector } from './water-field.js';
+import { downsampleDepth, potentialGridDims, solvePotentialFlowSteps } from './water-flow-potential.js';
+
+/** Cell-updates of the potential solve run per frame (~7 ms): a scene's solve lands over ~1 s, never in one frame. */
+export const WATER_FLOW_POTENTIAL_WORK_PER_FRAME = 500_000;
 
 /**
  * Size the FINEST level's own grid over a world rect — the SAME trivial,
@@ -185,12 +189,13 @@ export function createWaterFlowSubsystem({
   waterBody,
   renderWaterPass,
   createFlowTexture,
+  createFlowFieldTexture = null,
   getWaterRenderState,
   texelBudgetPerFrame = WATER_FLOW_BAKE_TEXEL_BUDGET_PER_FRAME,
 }) {
   getWaterRenderState ??= () => ({ params: {} });
 
-  const { uniform, vec2, texture, uv } = THREE.TSL;
+  const { uniform, vec2, vec4, texture, uv } = THREE.TSL;
   /** Shared across EVERY level's own velocity-seed material — one `.value`
    * write updates all five at once on a bulk-direction change. */
   const uDir = uniform(vec2(0, -1));
@@ -237,6 +242,112 @@ export function createWaterFlowSubsystem({
   let job = null;
   let jobInfo = null;
   let lastBakeDoneMs = null;
+
+  // -- THE POTENTIAL (water-flow-potential.js): the current from what the map is - links, closed bodies, channels --
+  /** @type {{texture:*, w:number, h:number, key:string, stats:object, bodies:object[]}|null} */
+  let pot = null;
+  let publishPot = null;
+  let potRepublish = 0;
+  let potJob = null;
+  let potJobInfo = null;
+
+  /** Start the solve for this mask and bearing (unless the finished field already is for them). false = no mask bytes. */
+  function startPotential(bearingDeg, rect, key) {
+    potJob = null;
+    const md = waterSurface.getMaskData?.();
+    if (!createFlowFieldTexture || !md?.data || !(md.width > 0) || !(md.height > 0)) return false;
+    if (pot && pot.key === key) return true;
+    const { gw, gh } = potentialGridDims(rect.maxX - rect.minX, rect.maxY - rect.minY);
+    const bpp = Math.max(1, Math.round(md.data.length / (md.width * md.height)));
+    const depth = downsampleDepth(md.data, md.width, md.height, gw, gh, bpp);
+    const [dx, dy] = waterFlowVector(bearingDeg);
+    potJob = solvePotentialFlowSteps({ depth, gw, gh, dir: [dx, dy] });
+    potJobInfo = { key, frames: 0 };
+    return true;
+  }
+
+  function stepPotential() {
+    if (!potJob) return;
+    let spent = 0;
+    potJobInfo.frames++;
+    while (spent < WATER_FLOW_POTENTIAL_WORK_PER_FRAME) {
+      const s = potJob.next();
+      if (s.done) {
+        potJob = null;
+        finishPotential(s.value);
+        return;
+      }
+      spent += s.value;
+    }
+  }
+
+  function stepPotentialToEnd() {
+    for (;;) {
+      const s = potJob.next();
+      if (s.done) {
+        potJob = null;
+        finishPotential(s.value);
+        return;
+      }
+    }
+  }
+
+  function finishPotential(res) {
+    const next = createFlowFieldTexture(res.rgba, res.gw, res.gh);
+    const old = pot?.texture ?? null;
+    pot = {
+      texture: next,
+      w: res.gw,
+      h: res.gh,
+      key: potJobInfo.key,
+      frames: potJobInfo.frames,
+      finishedWhileBaking: Boolean(job),
+      bakesAtFinish: bakes,
+      levelsAtFinish: levels.length,
+      publishedAtFinish: Boolean(published),
+      stats: res.stats,
+      bodies: res.bodies.map((b) => ({ id: b.id, cells: b.cells, open: b.open, links: b.links.map((l) => `${l.edge}:${l.cells}`) })),
+    };
+    // (no publish here: the GPU bake WAITS for this solve before it renders - see `bakeSteps` - so the pack it
+    // composites with the field was rendered in the same frame. Copying a pack a few frames after its bake read
+    // back solidity 0 everywhere, 2026-11-10, measured: scratch targets are not safe to read later.)
+    old?.dispose?.();
+  }
+
+  /** The publish copy: the pack as baked, but with VELOCITY and SPEED from the potential field once there is one
+   *  (solidity stays the GPU's, cell-accurate at the full grid). Rebuilt when either source texture changes. */
+  function ensurePublishCopy(finest) {
+    if (publishCopy && publishCopy.source === finest.packRt.texture) return;
+    publishCopy?.material?.dispose?.();
+    const material = new THREE.NodeMaterial();
+    material.fragmentNode = texture(finest.packRt.texture, uv());
+    publishCopy = { material, quad: new THREE.QuadMesh(material), source: finest.packRt.texture };
+  }
+
+  /** The field's own pass: writes velocity and speed (RGB) over the published pack and KEEPS its alpha (the solidity,
+   *  cell-accurate at the full grid, which the GPU bake wrote just before). Rendered at the bake's end and again for a
+   *  few frames after (a new pipeline compiles asynchronously and skips its first draws). */
+  function renderPotentialPass() {
+    const potTex = pot?.texture ?? null;
+    if (!potTex || !published) return;
+    if (!publishPot || publishPot.pot !== potTex) {
+      publishPot?.material?.dispose?.();
+      const material = new THREE.NodeMaterial();
+      const p = texture(potTex, uv());
+      material.fragmentNode = vec4(p.x, p.y, p.z, 0);
+      material.transparent = true;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.blending = THREE.CustomBlending;
+      material.blendEquation = THREE.AddEquation;
+      material.blendSrc = THREE.OneFactor;
+      material.blendDst = THREE.ZeroFactor;
+      material.blendSrcAlpha = THREE.ZeroFactor;
+      material.blendDstAlpha = THREE.OneFactor;
+      publishPot = { material, quad: new THREE.QuadMesh(material), pot: potTex };
+    }
+    renderWaterPass(published.rt, publishPot.quad, { keep: true });
+  }
 
   let bakes = 0;
   let polls = 0;
@@ -441,6 +552,12 @@ export function createWaterFlowSubsystem({
    * @param {number} omega @param {number} iterationsPerLevel
    */
   function* bakeSteps(maskTexture, bearingDeg, finestDims, omega, iterationsPerLevel) {
+    // THE CURRENT FIRST: the potential solve lands over ~0.3 s; the pressure bake (now only the solidity) then runs
+    // and publishes in one go with the field in it
+    while (potJob) {
+      if (Number.isFinite(texelBudgetPerFrame)) yield texelBudgetPerFrame;
+      else stepPotentialToEnd();
+    }
     const [dirX, dirY] = waterFlowVector(bearingDeg);
     uDir.value.set(dirX, dirY);
     const key = `${finestDims.w}x${finestDims.h}`;
@@ -509,13 +626,10 @@ export function createWaterFlowSubsystem({
         key,
       };
     }
-    if (!publishCopy || publishCopy.source !== finest.packRt.texture) {
-      publishCopy?.material?.dispose?.();
-      const material = new THREE.NodeMaterial();
-      material.fragmentNode = texture(finest.packRt.texture, uv());
-      publishCopy = { material, quad: new THREE.QuadMesh(material), source: finest.packRt.texture };
-    }
+    ensurePublishCopy(finest);
     renderWaterPass(published.rt, publishCopy.quad);
+    renderPotentialPass();
+    potRepublish = 8;
     yield finest.w * finest.h;
   }
 
@@ -566,8 +680,21 @@ export function createWaterFlowSubsystem({
       boundOmega = omega;
       boundIterationsPerLevel = iterationsPerLevel;
       gridKey = newGridKey;
+      // the current comes from the potential solve when the mask bytes are here (`water-flow-potential.js`); the
+      // pressure projection still runs in full for the pack's SOLIDITY - ⚠️ measured 2026-11-10: with ONE iteration a
+      // level the pack's alpha (solidity) read 0 everywhere (cause not found; bead mmp-78u.30.12), so the cheap path
+      // is not taken
+      const potKey = `${maskTexture.uuid}|${bearingDeg}|${newGridKey}`;
+      const usePotential = startPotential(bearingDeg, rect, potKey);
+      void usePotential;
       job = bakeSteps(maskTexture, bearingDeg, finestDims, omega, iterationsPerLevel);
       jobInfo = { startPoll: polls, startMs: nowMs, frames: 0, passes: 0, bearingDeg, omega, iterationsPerLevel };
+    }
+
+    stepPotential();
+    if (!job && potRepublish > 0) {
+      potRepublish--;
+      renderPotentialPass();
     }
 
     if (job) {
@@ -647,6 +774,10 @@ export function createWaterFlowSubsystem({
     get width() {
       return published ? published.w : null;
     },
+    /** The published pack's render target, for the lab's read-back probe (`MapShine.readWaterFlow`). */
+    get rt() {
+      return published ? published.rt : null;
+    },
     get height() {
       return published ? published.h : null;
     },
@@ -662,6 +793,11 @@ export function createWaterFlowSubsystem({
         grid: gridKey || 'not allocated',
         levelCount: levels.length,
         published: published ? `${published.w}x${published.h}` : 'none',
+        potential: pot
+          ? { grid: `${pot.w}x${pot.h}`, frames: pot.frames, finishedWhileBaking: pot.finishedWhileBaking, bakesAtFinish: pot.bakesAtFinish, levelsAtFinish: pot.levelsAtFinish, publishedAtFinish: pot.publishedAtFinish, stats: pot.stats, bodies: pot.bodies }
+          : potJob
+            ? 'solving'
+            : 'none',
         baking: job ? { passes: jobInfo.passes, frames: jobInfo.frames } : false,
         scratchReleases,
         lastBake: lastBake ?? 'never baked',
@@ -671,6 +807,11 @@ export function createWaterFlowSubsystem({
       job = null;
       disposeLevels();
       disposePublished();
+      publishPot?.material?.dispose?.();
+      publishPot = null;
+      potJob = null;
+      pot?.texture?.dispose?.();
+      pot = null;
       zeroPressureTexture?.dispose?.();
       gridKey = '';
       boundMaskTexture = null;

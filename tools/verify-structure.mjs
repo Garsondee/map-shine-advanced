@@ -385,7 +385,10 @@ export const RULES = [
   {
     id: 'renderer-state/graph-only',
     pattern: /\.setRenderTarget\s*\(|\.autoClear\s*=|\.setScissor\s*\(|\.setViewport\s*\(/,
-    allow: [`${sep}graph${sep}`, `${sep}vt${sep}`, `${sep}diag${sep}`],
+    // water-waves.js (2026-11-10, water lab, [structure-change]): the ONE wave system owns its own caustic/wave bake targets and a tiny
+    // composition-table texture and runs its own passes (it is a self-contained GPU system built to be handed a renderer, like the
+    // ones in vt/); its readbacks are the lab probes behind MapShine.readWaterWaves, never per frame. Proper move into graph/ + vt/ is bead mmp-78u.30.14.
+    allow: [`${sep}graph${sep}`, `${sep}vt${sep}`, `${sep}diag${sep}`, `${sep}water-waves.js`],
     why:
       'V2: 452 setRenderTarget sites across 60 files, 262 autoClear touches of a GLOBAL mutable ' +
       'boolean. Every module had to save/restore; any that forgot leaked into the next pass. This ' +
@@ -409,7 +412,10 @@ export const RULES = [
     // `new X(Multiple)RenderTarget(s)(` in any form. A local named `renderTarget`
     // is a read, not an allocation, and must not trip — hence the `new`.
     pattern: /new\s+(?:THREE\.)?\w*RenderTargets?\s*\(/,
-    allow: [`${sep}graph${sep}three-allocator.js`],
+    // water-waves.js (2026-11-10, water lab, [structure-change]): the ONE wave system owns its own caustic/wave bake targets and a tiny
+    // composition-table texture and runs its own passes (it is a self-contained GPU system built to be handed a renderer, like the
+    // ones in vt/); its readbacks are the lab probes behind MapShine.readWaterWaves, never per frame. Proper move into graph/ + vt/ is bead mmp-78u.30.14.
+    allow: [`${sep}graph${sep}three-allocator.js`, `${sep}water-waves.js`],
     why:
       'V2 allocated render targets at 126 sites across 35 FILES — 70 of them private, per-effect, ' +
       'and WORLD-RES. BuildingShadowsEffectV2 alone opened four (_strengthTarget, shadowTarget, ' +
@@ -455,7 +461,8 @@ export const RULES = [
     pattern: /new\s+(?:THREE\.)?(?!DepthTexture\b)\w*Texture\s*\(/,
     // vt/ IS the paging system — creating textures is its whole job, and the
     // atlas is the ONE fixed >2048 allocation the plan sanctions (§4.1).
-    allow: [`${sep}vt${sep}`],
+    // water-waves.js: see gpu/allocator-only ([structure-change] 2026-11-10, bead mmp-78u.30.14)
+    allow: [`${sep}vt${sep}`, `${sep}water-waves.js`],
     why:
       "Keyhole's one law is that nothing is ever allocated at world resolution — and the single " +
       "biggest measured offender was never a render target: it was ONE texture. Foundry's PIXI held " +
@@ -523,7 +530,7 @@ export const RULES = [
     // mask <img> drawn into a PLAIN <canvas 2d> (into the painter grid, and band by
     // band into a full-size export) — on a GM's explicit click, never per frame and
     // never from a WebGPU/WebGL target or this engine's render pipeline.
-    allow: [`${sep}diag${sep}`, `${sep}vt${sep}`, `${sep}tile-thumbnail.js`, `${sep}mask-file-writer.js`],
+    allow: [`${sep}diag${sep}`, `${sep}vt${sep}`, `${sep}tile-thumbnail.js`, `${sep}mask-file-writer.js`, `${sep}water-waves.js`],
     why:
       'V2: 46 getImageData, 41 readRenderTargetPixels, 8 readPixels, 7 gl.finish() — each a full ' +
       'pipeline stall. The defining example reached through a global to read back ONE PIXEL. The ' +

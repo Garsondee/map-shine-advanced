@@ -267,20 +267,6 @@ import {
   WATER_TIER3_CHOP,
   WATER_BANK_INFLUENCE,
   WATER_FLOW_WARP_INFLUENCE,
-  WATER_CAUSTICS_SHARPNESS,
-  WATER_CAUSTICS_SCALE,
-  WATER_CAUSTICS_NETTING,
-  WATER_CAUSTICS_MAX,
-  WATER_CAUSTICS_WAVE_WARP_STRENGTH,
-  WATER_CAUSTICS_WAVE_WARP_CELLS,
-  WATER_CAUSTICS_GROWTH_STRENGTH,
-  WATER_CAUSTICS_GROWTH_CELLS,
-  WATER_CAUSTICS_GROWTH_FREQ,
-  WATER_CAUSTICS_GROWTH_TIME_SCALE,
-  WATER_CAUSTICS_EVOLVE_SPEED,
-  WATER_CAUSTICS_JUNCTION_FRACTION,
-  WATER_CAUSTICS_LINE_FLOOR,
-  WATER_CAUSTICS_SPECULAR_INFLUENCE,
   WATER_WIND_SURFACE_TRAVEL,
 } from './water-field.js';
 import {
@@ -311,10 +297,11 @@ import {
   WATER_FOAM_PATCHINESS,
   WATER_FOAM_PATCH_SIZE_PX,
 } from './water-shore.js';
-import { WATER_SIM_CLUMP_LO, WATER_SIM_CLUMP_HI, WATER_SIM_CLUMP_AA_PX } from './water-sim.js';
+import { WATER_SIM_CLUMP_LO, WATER_SIM_CLUMP_HI, WATER_SIM_CLUMP_AA_PX, WATER_SIM_DENSITY_FULL } from './water-sim.js';
 import { buildMaskShoreDensity, buildFoamTexture } from './water-shore-mask.js';
 import { buildDebugChannelColor } from '../debug-channel-select.js';
 import { WATER_DEBUG_CHANNELS } from './water.js';
+import { WAVE_DEPTH_M_AT_WHITE } from './water-waves.js';
 // Intra-zone: the ONE hex→byte decoder, already shared by the candle and by
 // water's own registration (`water-registration.js`'s tint decode). A second
 // copy is how two effects end up disagreeing about what a hex string means.
@@ -591,12 +578,18 @@ export const WATER_TIER1_INSCATTER = 0.18;
  */
 export const WATER_TIER1_DEPTH_SCALE_PX = 312;
 
-/** Caustics v2 (2026-11-09, mmp-78u.30.1): how many times the bed the brightest net junction reaches (the old net peaked
- * at 1.6), the strength of the sun shafts, the size and strength of the silt grain lit inside them. */
-export const WATER_CAUSTICS_HDR_PEAK = 4.2;
-export const WATER_SHAFT_GAIN = 0.16;
-export const WATER_SILT_GRAIN_PX = 3.2;
-export const WATER_SILT_GAIN = 0.9;
+/** THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9): the most a focused caustic may multiply the bed's sunlight by (folds
+ * of the real refraction reach far higher; past this they only burn), and the shafts' strength at Light shafts 1. */
+export const WATER_CAUSTIC_MAX_GAIN = 7;
+/** Share of the waves' unresolved rms slope that widens the sun lobe (all of it read as a grey smear at noon; the
+ * rest is left to the drawn normals' own sparkle). 2026-11-10, judged in the Foundry lab. */
+export const WATER_GLINT_ROUGH_SHARE = 0.5;
+/** Bright shaft cores (raised 0.55 → 0.9, 2026-11-10: "Shafts should be stronger"). */
+export const WATER_SHAFT_GAIN = 0.15;
+/** How strongly the column's spread/focused deviation shades the water's own in-scatter (dark lanes between shafts). */
+export const WATER_SHAFT_SHADE = 0.9;
+/** WATER_PARAMS `lightShafts` default. */
+export const WATER_TIER4_LIGHT_SHAFTS = 1;
 
 /** Spacing of the 3x3 taps that average the solved flow before it bends the wave field, world px (2026-11-09,
  * mmp-78u.30.1): several flow texels, so the per-texel direction flips beside a wall average out. */
@@ -1100,6 +1093,11 @@ export function buildWaterSurfaceMaterial({
   windHandle = null,
   // W-08 — see `water-field.js#buildWaterSurfaceField`'s own `windStrengthField`.
   windStrengthField = null,
+  // THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9) — `water-waves.js#createWaterWaveSystem()`, shared by every floor.
+  // Its surface is this water's slope (specular, refraction, crest foam), its slices the caustics and shafts. `null`
+  // (headless tests) = a calm noise surface, no caustics, no shafts.
+  waves = null,
+  lightShafts = WATER_TIER4_LIGHT_SHAFTS,
   timeMsNode = null,
   wetBandPx = WATER_TIER1_WET_BAND_PX,
   wetStrength = WATER_TIER1_WET_STRENGTH,
@@ -1407,34 +1405,7 @@ export function buildWaterSurfaceMaterial({
   const uSwashFoam = uniform(float(swashFoam));
   const uBreakFoam = uniform(float(breakFoam));
   const uCaustics = uniform(float(caustics));
-  // ROH TUNING (2026-08-27) — caustics' own look controls, live uniforms, no
-  // rebake needed, same shape as `uBankInfluence`/`uFlowWarpInfluence` above.
-  // See `water-field.js#WATER_CAUSTICS_SCALE`/`_SHARPNESS`/`_NETTING`'s own
-  // docs for the mechanism each one drives.
-  const uCausticSharpness = uniform(float(WATER_CAUSTICS_SHARPNESS));
-  const uCausticScale = uniform(float(WATER_CAUSTICS_SCALE));
-  const uCausticNetting = uniform(float(WATER_CAUSTICS_NETTING));
-  // ROH TUNING (2026-08-27, round 6) — the remaining caustics mechanics from
-  // rounds 3-5 (wave-linked distortion, growth/pull warp, lattice evolution
-  // speed, junction-brightness shaping), promoted from baked internal
-  // constants to live uniforms on the author's own explicit request ("give
-  // me controls for the ROH and FOH... plenty of controls with wide
-  // ranges") — the SAME request that put wide-range refraction controls in
-  // 2026-08-23 (see `causticSharpness`'s own schema neighbour above). See
-  // `water-field.js`'s own per-constant docs for the mechanism each one
-  // drives; the schema (`water.js`) carries the wide, explorable ranges.
-  const uCausticWaveWarp = uniform(float(WATER_CAUSTICS_WAVE_WARP_STRENGTH));
-  const uCausticWaveWarpCap = uniform(float(WATER_CAUSTICS_WAVE_WARP_CELLS));
-  const uCausticGrowth = uniform(float(WATER_CAUSTICS_GROWTH_STRENGTH));
-  const uCausticGrowthCap = uniform(float(WATER_CAUSTICS_GROWTH_CELLS));
-  const uCausticGrowthScale = uniform(float(WATER_CAUSTICS_GROWTH_FREQ));
-  const uCausticGrowthSpeed = uniform(float(WATER_CAUSTICS_GROWTH_TIME_SCALE));
-  const uCausticEvolveSpeed = uniform(float(WATER_CAUSTICS_EVOLVE_SPEED));
-  const uCausticJunctionWidth = uniform(float(WATER_CAUSTICS_JUNCTION_FRACTION));
-  const uCausticLineFloor = uniform(float(WATER_CAUSTICS_LINE_FLOOR));
-  // A/B TEST (round 7) — see WATER_CAUSTICS_SPECULAR_INFLUENCE's own doc.
-  // Ships at 0 (off, byte-identical reflection to before this round).
-  const uCausticSpecularInfluence = uniform(float(WATER_CAUSTICS_SPECULAR_INFLUENCE));
+  const uLightShafts = uniform(float(lightShafts));
   const uFoamTrail = uniform(float(foamTrail));
   const uFoamEdgeSharpness = uniform(float(foamEdgeSharpness));
   const { uPatchiness: uFoamPatchiness, uPatchSizePx: uFoamPatchSizePx } = createFoamPatchUniforms(THREE.TSL, {
@@ -1615,6 +1586,9 @@ export function buildWaterSurfaceMaterial({
   // solved velocity is ~7 px per texel and falls to zero in the solid texels beside a wall, so its DIRECTION flips texel
   // by texel there. Averaged over 3x3 taps `WATER_FLOW_SMOOTH_PX` apart, and normalised softly (a short average is a
   // short direction, not a noisy unit one), the bend becomes a slow, large-scale lean toward the lee of an obstacle.
+  // the same 3x3 average as a VECTOR (normalised current, 1 = free stream): what foam reads - its length is the
+  // water's speed, so a closed pond (current 0) gives foam no heading at all (2026-11-10, Lab · River)
+  let flowLocalVec = vec2(0, 0);
   const flowSmooth = (() => {
     const S = WATER_FLOW_SMOOTH_PX;
     let acc = vec2(0, 0);
@@ -1633,6 +1607,7 @@ export function buildWaterSurfaceMaterial({
     // direction means nothing: trust it only as the flow there is real, else fall back to the free-stream heading, so a
     // wall deflects NOTHING at its face instead of everything (the full-cap strip with a hard rectangular end).
     const accLen = length(acc);
+    flowLocalVec = acc;
     const trust = smoothstep(float(0.2), float(0.65), accLen);
     return mix(uFlowDir, acc.div(max(accLen, float(1e-4))), trust);
   })();
@@ -1999,8 +1974,6 @@ export function buildWaterSurfaceMaterial({
     flowWarp: vec2(0, 0),
     bankWarp: vec2(0, 0),
     bend: vec2(0, 0),
-    causticBrightness: float(0),
-    causticFocus: float(0),
     rainSplash: null,
     rainRough: null,
   };
@@ -2033,18 +2006,6 @@ export function buildWaterSurfaceMaterial({
       localFlowDir: flowSmooth,
       uBankInfluence,
       uFlowWarpInfluence,
-      uCausticSharpness,
-      uCausticScale,
-      uCausticNetting,
-      uCausticWaveWarp,
-      uCausticWaveWarpCap,
-      uCausticGrowth,
-      uCausticGrowthCap,
-      uCausticGrowthScale,
-      uCausticGrowthSpeed,
-      uCausticEvolveSpeed,
-      uCausticJunctionWidth,
-      uCausticLineFloor,
       // TIER 4's SHOALING AND CAUSTICS ALSO RIDE TIER 2's FETCH — see
       // `water-field.js`'s own header on why both must live inside this call
       // rather than in a separate `if (activeTier >= 4)` block: shoaling has to
@@ -2070,7 +2031,8 @@ export function buildWaterSurfaceMaterial({
       uRain01,
       uSunCaustic,
       uSunWater,
-      causticDepth01: structuralDepth01.mul(float(0.4).add(uDepth.mul(float(1.2)))),
+      waveSurface: waves ? waves.surfaceAt(vec2(positionWorld.x, positionWorld.y)) : null,
+      uWaveHsPx: waves ? waves.uHsPx : null,
     });
   }
 
@@ -2189,7 +2151,9 @@ export function buildWaterSurfaceMaterial({
       slopeXY: field.slope,
       // Spray and sub-pixel capillaries the normal is too coarse to carry: a
       // breeze takes the mirror off, rain dulls it to a sheen.
-      roughnessBoost: uWind01.mul(float(0.05)).add((field.rainRough ?? float(0)).mul(float(0.2))),
+      // with the wave system the wind's roughness IS its unresolved slope (`extraAlpha`), not a flat wind term
+      roughnessBoost: (waves ? float(0) : uWind01.mul(float(0.05))).add((field.rainRough ?? float(0)).mul(float(0.2))),
+      extraAlpha: waves ? waves.uGlintRough.mul(float(WATER_GLINT_ROUGH_SHARE)) : null,
       rippleSlopeXY: field.rainSlope ?? null,
     });
   }
@@ -2585,6 +2549,7 @@ export function buildWaterSurfaceMaterial({
     setShoreFoamSoftPx() {},
     setFoamTexturePx() {},
     setShoreFoamVariation() {},
+    setShoreFoamFlow() {},
     setBreakSpray() {},
   };
   const breakSpecks = null;
@@ -2597,10 +2562,22 @@ export function buildWaterSurfaceMaterial({
     // `water-shore-mask.js`), with the body pack's rotated tangent only as the far
     // fallback.
     const nearBank = float(1).sub(smoothstep(float(8), float(48), shoreDist));
-    const facingDirRaw = mix(localFlowDirSafe, uFlowDir, nearBank);
-    const facingDir = facingDirRaw.div(max(length(facingDirRaw), float(1e-4)));
+    // ⚠️ THE LOCAL CURRENT, NOT THE COMPASS (2026-11-10, Ingram: "If we have a pond cut off ... we don't want that to
+    // flow in the same way the river does"). The solved flow (`water-flow-potential.js`) runs ALONG the banks and is
+    // zero in a closed pond, so the shore's front and lee now come from the water actually moving past it - length =
+    // speed, capped at the free stream: a pond's shore gets no front/lee at all, a slow bend a little, a rapid full.
+    const facingDir = flowLocalVec.div(max(length(flowLocalVec), float(1)));
     const bodyOutward = vec2(bodyTexNode.a, bodyTexNode.b.negate());
+    // (2026-11-10, mmp-78u.30.6) Foam floats ON the surface, so the wind pushes it too: the same downwind speed the
+    // swell travels at (`WATER_WIND_SURFACE_TRAVEL` × the 120 px/s wind drift rate), on top of the current. Safe per
+    // pixel here: the foam texture's flow-map phases reset every cycle, so a rate change can never accumulate into rays.
+    const windOnFoamPx = uWindDir.mul(uWind01.mul(float(120 * WATER_WIND_SURFACE_TRAVEL)));
+    // (2026-11-10, mmp-78u.30.11) THE SHORE PATTERN RIDES THE CURRENT: where the foam is thick, thin, broken or absent used to
+    // be pinned to the world, so it sat on the bank like paint while the water ran past. The solved local flow carries it
+    // now (the 3x3 average, smooth right up to a wall) - a closed pond's zero current leaves it only the wind.
+    const shoreSlidePx = flowLocalVec.mul(uFlowSpeedPx).mul(float(0.85)).add(windOnFoamPx);
     const maskShore = buildMaskShoreDensity(THREE, {
+      slidePx: shoreSlidePx,
       maskTexNode,
       maskUvAt: (offset) =>
         vec2(
@@ -2619,15 +2596,22 @@ export function buildWaterSurfaceMaterial({
     // downstream, fading to a standstill where the bank faces the current square-on
     // (a pier's nose), so foam splits there instead of flickering between directions.
     const bankTangent = vec2(maskShore.outward.y.negate(), maskShore.outward.x);
-    const downstream = smoothstep(float(-0.25), float(0.25), dot(bankTangent, uFlowDir)).mul(float(2)).sub(float(1));
-    const alongBankPx = bankTangent.mul(downstream).mul(uFlowSpeedPx).mul(float(0.7));
-    // (2026-11-10, mmp-78u.30.6) Foam floats ON the surface, so the wind pushes it too: the same downwind speed the
-    // swell travels at (`WATER_WIND_SURFACE_TRAVEL` × the 120 px/s wind drift rate), on top of the current. Safe per
-    // pixel here: the foam texture's flow-map phases reset every cycle, so a rate change can never accumulate into rays.
-    const windOnFoamPx = uWindDir.mul(uWind01.mul(float(120 * WATER_WIND_SURFACE_TRAVEL)));
-    const currentPx = mix(localVel.mul(uFlowSpeedPx), alongBankPx, nearBank).add(windOnFoamPx);
-    const simShoreFade = smoothstep(float(0), float(0.25), inside).mul(smoothstep(float(8), float(48), shoreDist));
-    foamDensity = max(max(maskShore.density, waterSimFoam.mul(simShoreFade)), field.foam.mul(crestPatch));
+    // along the bank: the local current's own component along the shore (falls to 0 where the bank faces the current
+    // square-on, a pier's nose, and in a still pond) - no compass sign flip, so no split line
+    const alongBankPx = bankTangent.mul(dot(bankTangent, flowLocalVec)).mul(uFlowSpeedPx).mul(float(0.85));
+    // (2026-11-10) the SMOOTHED local current, not the raw flow texel: beside a rock or a wall the raw velocity jumps from
+    // texel to texel, and a foam texture carried by it is torn into thin horizontal/vertical pixel lines.
+    const currentPx = mix(flowLocalVec.mul(uFlowSpeedPx), alongBankPx, nearBank).add(windOnFoamPx);
+    // the sim's flowing foam may come right up to the bank (it used to fade out over 8-48 px, so foam leaving a shore
+    // or a rock only appeared well downstream): trails now peel visibly off the bank and the rocks
+    const simShoreFade = smoothstep(float(0), float(0.25), inside).mul(smoothstep(float(2), float(14), shoreDist));
+    // ⚠️ GRADED, NOT A SWITCH (2026-11-10, trails and riffles; MEASURED with `MapShine.readWaterFlow({sim: true})`): the
+    // sim's memory is smooth and broad (the lower rapids average 0.11, a lee trail 0.1-0.2), and `waterSimFoam`'s clump cut
+    // (0.03-0.15, made for the old Worley look) turned all of it into density 1 - one white sheet over a rapid, and a
+    // trail that was full foam then nothing. Here it is a ramp up to `WATER_SIM_DENSITY_FULL`, so the foam texture draws
+    // dense whitewater at the rocks and thinning flecks down a trail.
+    const simDensity = smoothstep(uSimClumpLo, float(WATER_SIM_DENSITY_FULL), simSoft).mul(inRect);
+    foamDensity = max(max(maskShore.density, simDensity.mul(simShoreFade)), field.foam.mul(crestPatch));
     foamTexture = buildFoamTexture(THREE, {
       worldXY: vec2(positionWorld.x, positionWorld.y),
       density: foamDensity,
@@ -2691,13 +2675,7 @@ export function buildWaterSurfaceMaterial({
   const totalFoam = field.rainSplash ? max(totalFoamBase, field.rainSplash.mul(float(0.45))) : totalFoamBase;
 
   // ── TIER 4: CAUSTICS' OWN AUTHOR-FACING GAIN ─────────────────────────────
-  // `field.causticBrightness` already carries the calibrated
-  // `WATER_CAUSTICS_K` internally (see that constant's own doc for the real
-  // GPU sweep it was tuned against) — this is a SEPARATE multiplier on top,
-  // so an author can pull the whole effect back without retuning the physics
-  // constant underneath it. `max(0, ...)`: a negative gain would flip
-  // brightening into darkening and darkening into brightening, which is not
-  // "less caustics", it is a different, wrong effect.
+  // The Caustics dial: a gain on the real refraction below. `max(0, …)`: a negative gain would invert light and shadow.
   const causticGain = max(uCaustics, float(0));
   // ⚠️ SUPPRESSED IN CAST SHADOW (round 7, 2026-08-27) — author: "Ideally
   // you need to suppress all caustics where shadows are." Physically real,
@@ -2714,67 +2692,45 @@ export function buildWaterSurfaceMaterial({
   // the surface, so it needs the sun up and unclouded (`uSunWater.w`: the key's
   // strength × what the surface lets in), and open sky above (the same outdoors
   // gate the reflection uses) — before this it shone under roofs and at night.
-  // ── CAUSTICS v2 (2026-11-09, mmp-78u.30.1 — Ingram: "a high dynamic range dramatic and evolving caustic pattern which
-  // responds correctly to what is above it, darkening when things block the sun, darkening in shadow, darkening and changing
-  // as the sky gets clouds ... a bit of shaft lighting with grain that moves as if it were soil/sand moving in turbulent
-  // stream ... sell the illusion of depth"). The sun, cloud, cast-shadow and open-sky gates below are unchanged (they were
-  // already right: `uSunWater.w` is the key's strength after clouds and night, `specular.sunVis` the raw cast shadow, and
-  // `outdoors` the sky gate). What changes is the picture they gate:
-  //   1. HDR: the Worley net runs through a contrast curve to `WATER_CAUSTICS_HDR_PEAK`x the bed (junctions burn, the cells
-  //      between stay dark), instead of a gentle 1.6x.
-  //   2. DAPPLE: a slow, large-scale noise (7 wave cells) moves the convergence zones about, so intensity wanders over the
-  //      map and the net is never evenly bright (evolving, not a wallpaper).
-  //   3. DEPTH: caustics focus within a couple of metres; deeper water (mask brightness x the Depth dial) fades them out, so
-  //      a shallow ford sparkles and an abyss does not.
-  const TSLc = THREE.TSL;
-  const tSecC = (timeMsNode ?? float(0)).mul(float(1 / 1000));
-  const wxyC = vec2(positionWorld.x, positionWorld.y).add(field.domainOffset);
-  //   2b. (2026-11-10, mmp-78u.30.6) The dapple is no longer its own noise: it is the swell's FOCUS (`field.causticFocus`,
-  //      −div of the real surface slope), so the bright zones sit under the converging waves and travel with them, wind
-  //      included. Wind roughens the surface: the swell's focus loses coherence and the peak spreads over many finer
-  //      lines, so a gale's caustics are busier and dimmer, a calm day's bold and slow.
-  const windRoughC = smoothstep(float(0.08), float(1), uWind01);
-  const focusSpread = mix(float(1), float(0.45), windRoughC);
-  const dappleMul = mix(float(0.3), float(1.8), smoothstep(float(-1.6), float(1.6), field.causticFocus.mul(focusSpread)));
-  const netNorm = clamp(field.causticBrightness.div(float(WATER_CAUSTICS_MAX)), float(0), float(1));
-  const netHdr = pow(netNorm, float(1.7)).mul(float(WATER_CAUSTICS_HDR_PEAK)).mul(mix(float(1), float(0.6), windRoughC));
-  const waterDeep = structuralDepth01.mul(float(0.4).add(uDepth.mul(float(1.2))));
-  const causticDepthFade = float(1).sub(smoothstep(float(0.5), float(1.3), waterDeep));
-  const causticExcess = netHdr
-    .mul(dappleMul)
-    .mul(causticDepthFade)
+  //   (2026-11-10, mmp-78u.30.9) THE PICTURE IS NOW THE REAL REFRACTION: `waves.causticAt` is the sun refracted
+  //   through the actual wave surface and splatted onto the bed at its real depth (1 = flat water's own light, above 1
+  //   focused, below 1 spread). It redistributes only the DIRECT sun's share of the bed light, so the dark cells between
+  //   the lines are honest shadowing, and every gate above (cloud, night, cast shadow, roof) still applies.
+  const posXY = vec2(positionWorld.x, positionWorld.y);
+  const depthM = structuralDepth01.mul(float(0.4).add(uDepth.mul(float(1.2)))).mul(float(WAVE_DEPTH_M_AT_WHITE));
+  const causticI = waves ? clamp(waves.causticAt(posXY, depthM), float(0), float(WATER_CAUSTIC_MAX_GAIN)) : float(1);
+  // the drifting strength patches (`causticMaskAt`): shared by the bed's caustics and the shafts
+  const causticMask = waves ? waves.causticMaskAt(posXY) : float(1);
+  const directShare = clamp(uSunWater.y.mul(float(1.15)), float(0), float(1));
+  const causticExcess = causticI
+    .sub(float(1))
+    .mul(directShare)
     .mul(causticGain)
+    .mul(causticMask)
     .mul(specular.sunVis)
-    .mul(uSunWater.w)
-    .mul(specular.outdoors ?? float(1));
-  // ── SUN SHAFTS + SILT (2026-11-09, mmp-78u.30.1) — light scattered back from the water column. Seen from above, a shaft
-  // is the caustic light smeared along the refracted sun's direction by depth, so the field is a fractal noise stretched
-  // 7:1 along the sun azimuth (`uSunCaustic.xy`), drifting slowly and evolving; its strength is the SAME sun/shadow/cloud/
-  // sky gates as the net, times how much water there is to scatter in (mask depth) and how murky it is (Pollution). Silt:
-  // ~3 px grains in the water's own moving frame (the wave domain travels with the current), twinkling as turbulence
-  // turns them, visible only INSIDE a shaft. Additive, in the in-scatter mesh.
-  const sunHc = vec2(uSunCaustic.x, uSunCaustic.y);
-  const sunPerpC = vec2(sunHc.y.negate(), sunHc.x);
-  const shaftAlong = dot(wxyC, sunHc);
-  const shaftAcross = dot(wxyC, sunPerpC);
-  const shaftUv = vec2(
-    shaftAlong.div(max(uWaveScalePx.mul(float(4.5)), float(1))).sub(tSecC.mul(float(0.025))),
-    shaftAcross.div(max(uWaveScalePx.mul(float(1.0)), float(1)))
-  );
-  const shaftN = TSLc.mx_fractal_noise_float(vec3(shaftUv.x, shaftUv.y, tSecC.mul(float(0.06))), 3, 2.0, 0.5);
-  const shaftBody = smoothstep(float(0.02), float(0.6), shaftN);
-  const shaftWater = smoothstep(float(0.08), float(0.7), structuralDepth01.mul(float(0.5).add(uDepth))).mul(
-    float(0.35).add(uPollution.mul(float(0.65)))
-  );
+    .mul(clamp(uSunWater.w.mul(float(1.5)), float(0), float(1)))
+    .mul(specular.outdoors ?? float(1))
+    .mul(inside);
+  // ── SHAFTS (2026-11-10, mmp-78u.30.9) — light scattered back out of the water column: the SAME caustic slices
+  // marched from the surface to the bed along the refracted sun's run (a low sun streaks each focused spot down-sun),
+  // only the focused excess, filtered by this water's own absorption on the way in and out (so its colour is the
+  // water's, not a painted tint), under the same sun/cloud/shadow/sky gates.
+  const sigmaPerM = sigma.mul(max(depth01, float(1e-3))).div(max(depthM, float(0.05)));
   const shaftGate = uSunWater.w.mul(specular.sunVis).mul(specular.outdoors ?? float(1)).mul(inside);
-  const shaftEnergy = shaftBody.mul(shaftBody).mul(shaftWater).mul(shaftGate);
-  const siltCell = floor(wxyC.div(float(WATER_SILT_GRAIN_PX)));
-  const siltHash = (c, k) => fract(TSLc.sin(dot(c, vec2(127.1, 311.7)).add(k)).mul(float(43758.5453)));
-  const siltOn = step(float(0.975), siltHash(siltCell, float(0)));
-  const siltTwinkle = float(0.35).add(siltHash(siltCell, floor(tSecC.mul(float(5))).mul(float(1.7))).mul(float(0.65)));
-  const shaftLight = vec3(0.5, 0.82, 0.9)
-    .mul(shaftEnergy.mul(float(WATER_SHAFT_GAIN)))
-    .add(vec3(0.95, 0.98, 1).mul(shaftEnergy.mul(siltOn).mul(siltTwinkle).mul(float(WATER_SILT_GAIN))));
+  const shafts = waves ? waves.shaftsAt(posXY, depthM, sigmaPerM) : null;
+  const shaftLight = shafts
+    ? shafts.light.mul(causticMask).mul(shaftGate).mul(uLightShafts).mul(float(WATER_SHAFT_GAIN))
+    : vec3(0, 0, 0);
+  // CONTRAST IN THE COLUMN (2026-11-10, Ingram: "Shafts should be stronger but the goal is to create contrast by having
+  // some caustic regions get darker even in full light"): the water's own in-scatter dims where the column's light is
+  // spread and lifts where it is focused — dark lanes between the shafts, the mean kept — under the same sun gates.
+  const shaftShade = shafts
+    ? clamp(
+        float(1).add(shafts.deviation.mul(float(WATER_SHAFT_SHADE)).mul(uLightShafts).mul(clamp(shaftGate, float(0), float(1)))),
+        float(0.25),
+        float(2.5)
+      )
+    : float(1);
   // The bed's DIRECT light: only the transmitted share of the sun gets in, and a
   // low sun's refracted ray crosses more water on its way down (1/cos θt − 1
   // extra path), so at golden hour the bed falls dark while the surface takes the
@@ -3234,48 +3190,12 @@ export function buildWaterSurfaceMaterial({
   // the water by construction (bedTransmit is 1 there), so it needs no gate.
   const inscatterMaterial = new THREE.NodeMaterial();
   markCompileDeferrable(inscatterMaterial, 'water inscatter'); // see absorbMaterial
-  // ⚠️ A/B TEST (round 7) — SHARED SHAPE, SHARED SURFACE. Reuses
-  // `causticExcess` (already fully composed above: gain-scaled, shadow-
-  // suppressed) as a specular modulation source — see
-  // `water-field.js#WATER_CAUSTICS_SPECULAR_INFLUENCE`'s own doc for the
-  // physical reasoning and why reusing the ALREADY-GATED signal, not a
-  // fresh sample, is what makes "tied together" literal. Normalised to
-  // roughly 0..1 (0 = a bare cell interior, 1 = a bright net line/junction)
-  // against the SAME ceiling the caustics composition itself uses, then
-  // mapped through `1 + influence·(norm − 0.5)` — a no-op at influence=0
-  // (exactly 1, byte-identical to before this round), symmetrically
-  // brightening net lines and dimming cell interiors as influence rises.
-  // `max(0, …)`: past influence≈2 the formula alone could go negative,
-  // which would invert the reflection's own colour — nonsensical, not just
-  // "too strong" — so the floor is a hard clamp, not a hope the range never
-  // reaches it.
-  //
-  // ⚠️ BRANCHED ON THE INFLUENCE UNIFORM (perf wave 2, 2026-09-25). This is
-  // the ONLY place the in-scatter material reads the caustics, and the
-  // influence ships at 0 (`WATER_CAUSTICS_SPECULAR_INFLUENCE`), where the
-  // modulation is exactly 1 — yet the in-scatter shader still evaluated the
-  // whole caustic net (two 3-D Worley layers + the growth noise) a second
-  // time per pixel, beside the absorb material's own copy. Priced live on
-  // Flooded River Prison (extreme, 2560x1215): caustics 27.4 ms of a 46 ms
-  // frame, i.e. ~13.7 ms per material. Skipping the evaluation while the
-  // influence is 0 is lossless, and a live slider still works without a
-  // recompile. The condition reads only a uniform, so this is UNIFORM control
-  // flow in WGSL — the `fwidth` calls inside the caustic net stay legal
-  // (they would not be under a per-pixel branch).
-  const causticSpecularMod = Fn(() => {
-    const out = float(1).toVar('waterCausticSpecularMod');
-    If(uCausticSpecularInfluence.greaterThan(float(0)), () => {
-      const causticNetNorm = clamp(causticExcess.div(float(WATER_CAUSTICS_MAX)), float(0), float(1));
-      out.assign(max(float(0), float(1).add(uCausticSpecularInfluence.mul(causticNetNorm.sub(float(0.5))))));
-    });
-    return out;
-  })();
   // The reflection is gated by `inside` (no glint on dry land — the same
   // antialiased shoreline every other term already uses) and by `foamHide`
   // (broken, foamy water scatters light, it does not mirror it — reusing the
   // exact factor that already suppresses the bed and the in-scatter, rather
   // than adding a second foam interaction to reason about).
-  const reflection = specular.reflection.mul(causticSpecularMod).mul(inside).mul(foamHide);
+  const reflection = specular.reflection.mul(inside).mul(foamHide);
 
   // The water's own returned light, itself occluded by foam, PLUS the foam,
   // PLUS the sun/sky reflection. 0.85 rather than pure white on the foam term:
@@ -3288,6 +3208,7 @@ export function buildWaterSurfaceMaterial({
   // Named (not inlined) because debug channel 18 (`inscatterFinal`) reads
   // this exact expression — see the instrument below.
   const inscatterFinalColor = inscatter
+    .mul(shaftShade)
     .mul(foamHide)
     .add(foamGlow.mul(float(0.85)))
     .add(reflection)
@@ -3775,114 +3696,9 @@ export function buildWaterSurfaceMaterial({
     setCaustics(v) {
       uCaustics.value = v;
     },
-    /** WATER_PARAMS `causticSharpness` — how WIDE the bright band around
-     * each Worley cell edge reads (`water-field.js#WATER_CAUSTICS_EDGE_FAR_
-     * MIN/MAX`'s own doc). 0 = a thick, lacy net, 1 = a hairline net. */
-    setCausticSharpness(v) {
-      uCausticSharpness.value = v;
-    },
-    /** WATER_PARAMS `causticScale` — the caustics Worley net's own cell
-     * size, as a fraction of `waveScalePx`, independent of the visible
-     * chop's own scale. See `water-field.js#WATER_CAUSTICS_SCALE`'s own doc
-     * for why this is what actually makes "thin" achievable at all. */
-    setCausticScale(v) {
-      uCausticScale.value = v;
-    },
-    /** WATER_PARAMS `causticNetting` — blend weight for a second, finer
-     * Worley layer (`WATER_CAUSTICS_NET_SCALE_RATIO`), so the net reads as
-     * several overlapping cell sizes rather than one uniform mesh. 0 = the
-     * single-layer net. */
-    setCausticNetting(v) {
-      uCausticNetting.value = v;
-    },
-    /** WATER_PARAMS `causticWaveWarp` — how strongly the ACTUAL wave `slope`
-     * displaces the net's own query point (round 3's fix for "isn't
-     * distorted by the refraction"). 0 = no wave-linked distortion at all.
-     * `water-field.js#WATER_CAUSTICS_WAVE_WARP_STRENGTH`'s own doc has the
-     * one shader-lab-confirmed-safe value (0.6) this defaults to — past
-     * roughly 4 the net tore apart on a real render, so treat values much
-     * higher than the default as genuinely exploratory. */
-    setCausticWaveWarp(v) {
-      uCausticWaveWarp.value = v;
-    },
-    /** WATER_PARAMS `causticWaveWarpCap` — the hard ceiling on the warp
-     * above, in Worley CELL UNITS, however extreme `causticWaveWarp` and
-     * `chop` get together. Raising this past ~1 risks the query reading a
-     * NEIGHBOURING cell's own feature as if it were local — the net
-     * breaking apart rather than rippling, the same failure a too-high
-     * `causticWaveWarp` alone can cause. */
-    setCausticWaveWarpCap(v) {
-      uCausticWaveWarpCap.value = v;
-    },
-    /** WATER_PARAMS `causticGrowth` — how strongly cells expand/contract and
-     * pull on their neighbours (round 5's ask, a warp built as the GRADIENT
-     * of a smooth scalar field — see `water-field.js`'s own hand-derived
-     * doc for why that specific construction couples neighbouring cells).
-     * 0 = no breathing at all, a static net. */
-    setCausticGrowth(v) {
-      uCausticGrowth.value = v;
-    },
-    /** WATER_PARAMS `causticGrowthCap` — the hard ceiling on the growth warp
-     * above, in Worley CELL UNITS. Same role as `causticWaveWarpCap`, for
-     * the growth mechanism instead of the wave-linked one. */
-    setCausticGrowthCap(v) {
-      uCausticGrowthCap.value = v;
-    },
-    /** WATER_PARAMS `causticGrowthScale` — the growth potential field's own
-     * spatial frequency. LOW values (well under 1) make one peak/trough
-     * pair span several cells, so a growing cell visibly compresses a
-     * DIFFERENT neighbour — the "pull" the mechanism is named for. HIGH
-     * values shrink the potential down toward one cell's own size, which
-     * reads as each cell breathing in isolation rather than pulling
-     * anything. */
-    setCausticGrowthScale(v) {
-      uCausticGrowthScale.value = v;
-    },
-    /** WATER_PARAMS `causticGrowthSpeed` — how fast the growth potential's
-     * OWN peaks and troughs migrate, i.e. how quickly which cells are
-     * "currently growing" changes. 0 freezes the breathing pattern in
-     * place (still spatially varied, just not animating). */
-    setCausticGrowthSpeed(v) {
-      uCausticGrowthSpeed.value = v;
-    },
-    /** WATER_PARAMS `causticEvolveSpeed` — how fast TIME advances as the
-     * Worley lattice's OWN third axis (round 4's fix for "cells don't
-     * evolve"), i.e. how often the net's topology genuinely reshuffles —
-     * cells merging, splitting, reforming — as opposed to simply
-     * translating. 0 freezes the lattice (still 3-D under the hood, just
-     * sliced at a fixed Z). Push well past the default to see the net
-     * reform faster than a real wave field plausibly would — useful for
-     * finding the setting fast, even if the final choice is more modest. */
-    setCausticEvolveSpeed(v) {
-      uCausticEvolveSpeed.value = v;
-    },
-    /** WATER_PARAMS `causticJunctionWidth` — how wide the "near a genuine
-     * multi-cell junction" test reads, as a fraction of the edge width
-     * itself (round 4's fix for "brightness should concentrate at
-     * intersections"). Wider values light up more of each edge at full
-     * brightness, narrowing the CONTRAST between a junction and a plain
-     * edge stretch; push it toward `causticSharpness`'s own ceiling to make
-     * nearly the whole net read as "junction-bright". */
-    setCausticJunctionWidth(v) {
-      uCausticJunctionWidth.value = v;
-    },
-    /** WATER_PARAMS `causticLineFloor` — how dim an ordinary two-cell edge
-     * reads, relative to a full junction's own brightness of 1. 0 makes a
-     * plain edge invisible (only junctions show at all — a sparse net of
-     * bright points and the threads connecting them fade to nothing); 1
-     * makes the whole net read uniformly bright again (junction
-     * concentration effectively off). */
-    setCausticLineFloor(v) {
-      uCausticLineFloor.value = v;
-    },
-    /** WATER_PARAMS `causticSpecularInfluence` — A/B test: how strongly the
-     * caustic net's own pattern modulates specular intensity (round 7's
-     * "reuse the same shape twice, ties the two elements together" idea).
-     * 0 = specular completely untouched. See
-     * `water-field.js#WATER_CAUSTICS_SPECULAR_INFLUENCE`'s own doc for the
-     * physical reasoning. */
-    setCausticSpecularInfluence(v) {
-      uCausticSpecularInfluence.value = v;
+    /** WATER_PARAMS `lightShafts` (2026-11-10) — gain on the shafts the wave system's caustic slices make. */
+    setLightShafts(v) {
+      uLightShafts.value = v;
     },
     // ── TIER 5 ────────────────────────────────────────────────────────────
     /** THE CAPTURE'S OWN WORLD RECT (`water-refraction-subsystem.js`'s

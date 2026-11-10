@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Wave lab</title>
+    <style>
+      body {
+        background: #111;
+        color: #ccc;
+        font: 12px monospace;
+        margin: 8px;
+      }
+      canvas {
+        display: block;
+        background: #000;
+        max-width: 100%;
+      }
+      pre {
+        white-space: pre-wrap;
+        margin: 6px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div>
+      Wave lab: <code>window.waveLab</code> — one wave system on the GPU: a wind spectrum drives the surface, the
+      caustics (refracted sun splatted onto the bed at five depths), the shafts (integrated through those depths) and
+      the specular (the same normals). 100 px = 5 ft.
+    </div>
+    <canvas id="view" width="1280" height="720"></canvas>
+    <pre id="status">loading…</pre>
+    <script type="module" src="/tools/shader-lab/wave-lab.js"></script>
+  </body>
+</html>

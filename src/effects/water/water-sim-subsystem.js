@@ -437,6 +437,10 @@ export function createWaterSimSubsystem({
     get softTexture() {
       return simSoftRt ? simSoftRt.texture : null;
     },
+    /** The pre-blurred foam's render target (lab read-back only, `MapShine.readWaterFlow({sim: true})`). */
+    get softTarget() {
+      return simSoftRt ?? null;
+    },
     /** The spray emitter (R) — `water-render.js`'s break-spray `sprayAt` reads
      * it. Same grid as `texture`; identity stable for a grid. */
     get sprayTexture() {

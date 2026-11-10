@@ -591,6 +591,12 @@ import {
   createWaterSurfaceSubsystem,
   createWaterFlowSubsystem,
   createWaterSimSubsystem,
+  createWaterWaveSystem,
+  waveFetchMetres,
+  WAVE_CHOP_REFERENCE,
+  waterFlowVector,
+  waterFlowSpeedPx,
+  waterKeyLightDirection,
   waterFoamReachPx,
   createWaterRefractionSubsystem,
   setWaterSharedResolveOff,
@@ -3156,9 +3162,12 @@ async function startVtPanViewerUnserialized({
      * sun next moves (live, 2026-10-27: building, overhead and tree shadows all
      * gone). Read off three's own draw counter, which counts only real draws.
      */
-    function renderSunShadowPass(target, quad) {
+    function renderSunShadowPass(target, quad, opts = null) {
       const drawsBefore = renderer.info?.render?.drawCalls ?? 0;
       const prev = renderer.getRenderTarget();
+      // `keep`: draw over what the target already holds (no clear) - the flow pack's field pass keeps its alpha
+      const prevAuto = renderer.autoClear;
+      if (opts?.keep) renderer.autoClear = false;
       // `allocator.create()` returns the WebGLRenderTarget/RenderTarget itself
       // (see sceneColor/sceneIllum/bloomMips' own call sites) — NOT a wrapper
       // with a `.target` field. `.target` was undefined, so this bound the
@@ -3168,6 +3177,7 @@ async function startVtPanViewerUnserialized({
       renderer.setRenderTarget(target);
       quad.render(renderer);
       renderer.setRenderTarget(prev);
+      renderer.autoClear = prevAuto;
       return (renderer.info?.render?.drawCalls ?? 1) > drawsBefore;
     }
     /**
@@ -10551,13 +10561,17 @@ async function startVtPanViewerUnserialized({
           resolvedH: 512,
           screenSized: false,
           type: THREE.HalfFloatType,
-          format: THREE.RedFormat,
+          // R = strength (the look's units, as before); G = the local wind SPEED in dial units (× the dial's top m/s =
+          // real m/s); B, A = the local flow vector (dial units) — what the wave system reads (2026-11-10, Ingram:
+          // "properly connect the wind texture"). The ratio
+          // strength ÷ dial it used before divided by ~0 at a calm dial.
+          format: THREE.RGBAFormat,
           colorSpace: THREE.NoColorSpace,
           filter: 'linear',
           depth: false,
         });
         const { uniform, vec4 } = THREE.TSL;
-        waterWindStrengthField = { texture: waterWindStrengthRT.texture, uRect: uniform(vec4(0, 0, 1, 1)) };
+        waterWindStrengthField = { texture: waterWindStrengthRT.texture, uRect: uniform(vec4(0, 0, 1, 1)), rt: waterWindStrengthRT };
       }
       return waterWindStrengthField;
     }
@@ -10578,11 +10592,14 @@ async function startVtPanViewerUnserialized({
         const r = waterWindStrengthField.uRect;
         const worldXY = vec2(r.x, r.y).add(uv().mul(vec2(r.z.sub(r.x), r.w.sub(r.y))));
         const material = new THREE.NodeMaterial();
+        // B, A = the local flow VECTOR (dial units, world px axes): the wave system turns the ripples to it and
+        // drifts the surface along it (2026-11-10, Ingram: "make the wind drive the state of the water").
+        const flow = windHandle.node(THREE.TSL, { centerXY: worldXY, time: uGlobalTimeMs, baked: 'now' });
         material.fragmentNode = vec4(
           length(windHandle.strengthNode(THREE.TSL, { centerXY: worldXY, time: uGlobalTimeMs, baked: 'now' })),
-          0,
-          0,
-          1
+          length(flow),
+          flow.x,
+          flow.y
         );
         waterWindStrengthQuad = new THREE.QuadMesh(material);
         waterWindStrengthLayout = layout;
@@ -11679,6 +11696,37 @@ async function startVtPanViewerUnserialized({
       // full reasoning.
       profiler?.begin(Z.lightWaterSimTick);
       const waterSimViewRect = view ? viewToWorldRect(view, canvasW / canvasH) : null;
+      // THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9): step the sea (phases on the sim clock, the wind, the current,
+      // the sun) and render it — the band bake and the caustic slices — before any water draws this frame. Only while
+      // some water is drawing; a paused clock (dtSec 0) holds the sea still.
+      if (waterEnabled && waterSimViewRect && waterFloors.some((f) => getWaterSurfaceForFloor(f.index).isDrawing())) {
+        const wp = getWaterRenderState()?.params ?? {};
+        const ppm = uWindPixelsPerMetre.value;
+        const flowSpeed = waterFlowSpeedPx(wp) ?? 0;
+        const [wfx, wfy] = waterFlowVector(Number.isFinite(wp.flowAngleDeg) ? wp.flowAngleDeg : 180);
+        const waveFloor = view?.floorIndex ?? waterFloors[0]?.index ?? 0;
+        waterWaves.update({
+          dtSec: env.time?.dtSec ?? 0,
+          wind01: Number.isFinite(env.wind?.speed01) ? env.wind.speed01 : 0,
+          windDeg: Number.isFinite(env.wind?.directionDeg) ? env.wind.directionDeg : 0,
+          fetchM: waveFetchMetres({
+            bounds: getWaterBodyForFloor(waveFloor)?.getWaterBounds?.() ?? null,
+            sceneRect: sceneRectToMinMax(dimensions?.sceneRect),
+            pxPerM: ppm,
+          }),
+          pxPerM: ppm,
+          sunDir: skyHandle?.key ? waterKeyLightDirection(skyHandle.key) : [0, 0, 1],
+          viewRect: waterSimViewRect,
+          flowPx: [wfx * flowSpeed, wfy * flowSpeed],
+          flowSpeedPx: flowSpeed,
+          timeScale: Number.isFinite(wp.waveSpeed) ? wp.waveSpeed : 1,
+          // √: maps tuned for the old water carry chop up to ~0.8, which as a straight ratio drew a sea 2.6× steeper
+          // than any real one (caustics past focus everywhere — Docklands went milky, 2026-11-10); 0.8 now reads 1.6×
+          slopeGain: Math.sqrt(Math.max(0, Number.isFinite(wp.chop) ? wp.chop : WAVE_CHOP_REFERENCE) / WAVE_CHOP_REFERENCE),
+          localWind: Number.isFinite(wp.windRipple) ? Math.min(1.5, Math.max(0, wp.windRipple)) : 1,
+        });
+        waterWaves.render(renderer);
+      }
       for (const floor of waterFloors) {
         const sim = getWaterSimForFloor(floor.index);
         // ⚠️ ONLY FOR WATER SOMEONE CAN SEE (2026-10-25, Water-Performance-Audit
@@ -18190,6 +18238,7 @@ async function startVtPanViewerUnserialized({
         refractScene: waterRefractScene,
         sharedResolve: true, // W-02 — `runWaterResolvePass` renders its resolve before the scene draw
         getWindStrengthField: getWaterWindStrengthField, // W-08 — `renderWaterWindStrength`
+        getWaveSystem: () => waterWaves, // THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9)
         waterBody: getWaterBodyForFloor(floorIndex),
         getWaterMaskUrl,
         createMaskTexture: createMaskDataTexture,
@@ -18321,6 +18370,16 @@ async function startVtPanViewerUnserialized({
         // a single constant, so the filter is irrelevant — 'linear' only for
         // consistency with every other flow-pack target.
         createFlowTexture: (data, w, h, filter) => createMaskDataTexture(data, w, h, filter),
+        // the potential solve's RGBA32F field (vx, vy, speed01, solid), bilinear - see `water-flow-potential.js`
+        createFlowFieldTexture: (data, w, h) => {
+          const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.FloatType);
+          tex.magFilter = THREE.LinearFilter;
+          tex.minFilter = THREE.LinearFilter;
+          tex.wrapS = THREE.ClampToEdgeWrapping;
+          tex.wrapT = THREE.ClampToEdgeWrapping;
+          tex.needsUpdate = true;
+          return tex;
+        },
         getWaterRenderState,
       });
     }
@@ -18346,6 +18405,22 @@ async function startVtPanViewerUnserialized({
     // re-pushed per frame (`water-sim.js`'s own doc on why this is
     // build-time, matching `water-render.js`'s own convention).
     const waterSimsByFloor = new Map();
+    // THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9) — ONE per viewer, not per floor: the sea is the same sea on every
+    // floor; what differs (depth, shore, shelter) is read per pixel. It reads the real wind strength texture
+    // (`renderWaterWindStrength`), the sky's sun and the sim clock, and is stepped right before the sim packs below.
+    const waterWaves = createWaterWaveSystem({
+      THREE,
+      getWindStrengthField: getWaterWindStrengthField,
+      // the viewed floor's solved flow field (`water-flow-potential.js`) - the surface drifts with the LOCAL current
+      getFlowField: () => {
+        const fi = view?.floorIndex ?? [...waterFlowsByFloor.keys()][0];
+        const tex = waterFlowsByFloor.get(fi)?.texture ?? null;
+        const rect = tex ? getWaterBodyForFloor(fi)?.getRect?.() : null;
+        return tex && rect ? { texture: tex, rect } : null;
+      },
+      windStrength01Node: (speed01) => windStrength01Node(THREE.TSL, speed01),
+      metresPerSecondForSpeed01,
+    });
     function createWaterSimForFloor(floorIndex) {
       return createWaterSimSubsystem({
         THREE,
@@ -32808,6 +32883,7 @@ async function startVtPanViewerUnserialized({
        * in this list — three RGBA16F world-space targets, per floor, is the
        * largest single allocation water makes. */
       disposeWaterBody() {
+        waterWaves.dispose();
         for (const sim of waterSimsByFloor.values()) sim.dispose();
         waterSimsByFloor.clear();
         for (const flow of waterFlowsByFloor.values()) flow.dispose();
@@ -32986,6 +33062,74 @@ async function startVtPanViewerUnserialized({
       getFireStatus: () => fireSubsystem.getStatus(),
       /** Leaf Shed's own counts — canopy files decoded/pending/missing, emitters, births, the engine. */
       getLeafShedStatus: () => leafShed.getStatus(),
+      /**
+       * THE SOLVED FLOW, read back (2026-11-10, lab only — it stalls): the published flow pack of a floor as a coarse
+       * field (`stride` texels a sample; vx, vy normalised so free-stream = 1, speed01, solidity) plus the values at
+       * any world `points`. `MapShine.readWaterFlow({points: [[x, y], ...]})`.
+       */
+      readWaterFlow: async ({ floor = null, stride = 6, points = [], field = true, sim = false } = {}) => {
+        const floorIndex = floor ?? [...waterFlowsByFloor.keys()][0];
+        const flow = waterFlowsByFloor.get(floorIndex);
+        const rt = flow?.rt;
+        if (!rt) return { ok: false, reason: 'no flow pack yet' };
+        const rect = getWaterBodyForFloor(floorIndex)?.getRect?.();
+        const w = rt.width;
+        const h = rt.height;
+        const px = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, w, h);
+        const dec = px instanceof Uint16Array ? (i) => THREE.DataUtils.fromHalfFloat(px[i]) : (i) => px[i];
+        const at = (tx, ty) => {
+          const i = (Math.min(h - 1, Math.max(0, ty)) * w + Math.min(w - 1, Math.max(0, tx))) * 4;
+          return [dec(i), dec(i + 1), dec(i + 2), dec(i + 3)];
+        };
+        const out = { ok: true, floor: floorIndex, grid: [w, h], rect, status: flow.getStatus?.() };
+        out.points = points.map(([x, y]) => {
+          const u = (x - rect.minX) / (rect.maxX - rect.minX);
+          const v = (y - rect.minY) / (rect.maxY - rect.minY);
+          const [vx, vy, sp, so] = at(Math.floor(u * w), Math.floor(v * h));
+          return { x, y, vx: +vx.toFixed(3), vy: +vy.toFixed(3), speed01: +sp.toFixed(3), solid: +so.toFixed(3) };
+        });
+        if (field) {
+          const gw = Math.ceil(w / stride);
+          const gh = Math.ceil(h / stride);
+          const q = new Int8Array(gw * gh * 4);
+          for (let gy = 0; gy < gh; gy++) {
+            for (let gx = 0; gx < gw; gx++) {
+              const [vx, vy, sp, so] = at(gx * stride, gy * stride);
+              const o = (gy * gw + gx) * 4;
+              q[o] = Math.round(Math.max(-2.5, Math.min(2.5, vx)) * 50);
+              q[o + 1] = Math.round(Math.max(-2.5, Math.min(2.5, vy)) * 50);
+              q[o + 2] = Math.round(Math.min(1, sp) * 100);
+              q[o + 3] = Math.round(Math.min(1, so) * 100);
+            }
+          }
+          let bin = '';
+          for (let i = 0; i < q.length; i += 8192) bin += String.fromCharCode(...new Uint8Array(q.buffer, i, Math.min(8192, q.length - i)));
+          out.field = { gw, gh, stride, b64: btoa(bin) };
+        }
+        // the foam sim's own memory (raw R accumulator), same rect: `{sim: true}` (2026-11-10, trails/riffles lab)
+        const simTex = sim ? waterSimsByFloor.get(floorIndex)?.softTexture : null;
+        if (simTex) {
+          const sw = simTex.image?.width ?? simTex.width;
+          const sh = simTex.image?.height ?? simTex.height;
+          const srt = waterSimsByFloor.get(floorIndex)?.softTarget ?? null;
+          const spx = srt ? await renderer.readRenderTargetPixelsAsync(srt, 0, 0, srt.width, srt.height) : null;
+          if (spx) {
+            const ch = spx.length / (srt.width * srt.height);
+            const sdec = spx instanceof Uint16Array ? (i) => THREE.DataUtils.fromHalfFloat(spx[i]) : (i) => spx[i];
+            const q = new Uint8Array(srt.width * srt.height);
+            for (let i = 0; i < q.length; i++) q[i] = Math.round(Math.max(0, Math.min(1, sdec(i * ch) / 2)) * 255);
+            let bin = '';
+            for (let i = 0; i < q.length; i += 8192) bin += String.fromCharCode(...q.subarray(i, Math.min(q.length, i + 8192)));
+            out.sim = { w: srt.width, h: srt.height, scale: 2, b64: btoa(bin), declared: [sw, sh] };
+          }
+        }
+        return out;
+      },
+      /** THE ONE WAVE SYSTEM's numbers, read back from the GPU (2026-11-10). */
+      readWaterWaves: (tune) => {
+        if (tune) waterWaves.tune(tune); // session-only tuning overrides, e.g. {contrast: 1}
+        return waterWaves.readStats(renderer);
+      },
       getWaterSprayStatus: () => ({
         ...waterSpray.debugState(),
         live: waterSprayLive,
@@ -36940,6 +37084,16 @@ export function getVtPanViewerLeafShedStatus() {
  * whether the engine is drawing.
  * @returns {object}
  */
+export function readVtPanViewerWaterWaves(tune = null) {
+  if (!_active) return Promise.resolve({ skipped: true, reason: 'viewer not started' });
+  return _active.readWaterWaves(tune);
+}
+/** @returns {Promise<object>} the solved water flow, read back from the GPU (lab only). */
+export function readVtPanViewerWaterFlow(opts) {
+  if (!_active) return Promise.resolve({ ok: false, reason: 'no viewer' });
+  return _active.readWaterFlow(opts);
+}
+
 export function getVtPanViewerWaterSprayStatus() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.getWaterSprayStatus();

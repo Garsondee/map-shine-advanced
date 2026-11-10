@@ -29,6 +29,8 @@ import { run as runWaterBounds } from './water-bounds.test.mjs';
 import { run as runWaterShore } from './water-shore.test.mjs';
 import { run as runWaterShoreMask } from './water-shore-mask.test.mjs';
 import { run as runWaterSprayShore } from './water-spray-shore.test.mjs';
+import { run as runWaterWaves } from './water-waves.test.mjs';
+import { run as runWaterFlowPotential } from './water-flow-potential.test.mjs';
 import { run as runWaterRegistration } from './water-registration.test.mjs';
 import { run as runWaterSurfaceSubsystem } from './water-surface-subsystem.test.mjs';
 import { run as runWaterSurfaceRebuild } from './water-surface-rebuild.test.mjs';
@@ -85,6 +87,8 @@ const suites = [
   ['water-sim', runWaterSim],
   ['water-sim-subsystem', runWaterSimSubsystem],
   ['water-refraction-subsystem', runWaterRefractionSubsystem],
+  ['water-waves', runWaterWaves],
+  ['water-flow-potential', runWaterFlowPotential],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

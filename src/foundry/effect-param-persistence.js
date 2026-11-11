@@ -124,17 +124,18 @@ export async function writeSceneAllEffectParams(all) {
  */
 export function watchSceneEffectParams(onChange) {
   if (typeof onChange !== 'function' || typeof Hooks === 'undefined') return () => {};
-  const id = Hooks.on('updateScene', (doc, change) => {
+  const id = Hooks.on('updateScene', (doc, change, _options, userId) => {
     try {
       const activeId = typeof canvas !== 'undefined' ? (canvas?.scene?.id ?? null) : null;
       if (!activeId || doc?.id !== activeId) return;
-      if (
-        !change?.flags?.[EFFECT_PARAM_NAMESPACE] ||
-        !(SCENE_EFFECT_PARAMS_FLAG in change.flags[EFFECT_PARAM_NAMESPACE])
-      ) {
+      const flags = change?.flags?.[EFFECT_PARAM_NAMESPACE];
+      // `-=effectParams` is how Foundry reports an unsetFlag (the global reset uses it): without it a reset
+      // never reached a connected client.
+      if (!flags || !(SCENE_EFFECT_PARAMS_FLAG in flags || `-=${SCENE_EFFECT_PARAMS_FLAG}` in flags)) {
         return;
       }
-      onChange();
+      // Second argument: was it ANOTHER user's write? (Our own is already applied live by the setter that made it.)
+      onChange(change, typeof userId === 'string' && userId !== game?.user?.id);
     } catch (err) {
       void err; // a mid-teardown update; nothing to recover
     }

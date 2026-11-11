@@ -55,6 +55,7 @@ import { run as runSettingsAdapter } from './settings-adapter.test.mjs';
 import { run as runSettingsAdapterCache } from './settings-adapter-cache.test.mjs';
 import { run as runForceDefaults } from './force-defaults.test.mjs';
 import { run as runWindPersistence } from './wind-persistence.test.mjs';
+import { run as runEffectParamPersistence } from './effect-param-persistence.test.mjs';
 import { run as runScenePresetPersistence } from './scene-preset-persistence.test.mjs';
 import { run as runPlayerLightPermissions } from './player-light-permissions.test.mjs';
 import { run as runPlayerLightMode } from './player-light-mode.test.mjs';
@@ -147,6 +148,7 @@ const suites = [
   ['settings-adapter-cache', runSettingsAdapterCache],
   ['force-defaults', runForceDefaults],
   ['wind-persistence', runWindPersistence],
+  ['effect-param-persistence', runEffectParamPersistence],
   ['scene-preset-persistence', runScenePresetPersistence],
   ['player-light-permissions', runPlayerLightPermissions],
   ['player-light-mode', runPlayerLightMode],

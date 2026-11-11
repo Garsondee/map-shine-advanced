@@ -3998,6 +3998,20 @@ function install() {
     }
   }
 
+  // LIVE EFFECT PARAMS FOR EVERY OTHER CLIENT (two-client QA pass, 2026-11-11). The `effectParams` scene flag
+  // always synced, but only UI shadow re-resolved from it, so a GM tuning grade/bloom/lens... left every connected
+  // player on the old look until their next reload (measured: GM `setGrade({saturation: 0})` -> GM greyscale,
+  // player's flag 0 but picture unchanged). A change made by ANOTHER user re-resolves every effect here, debounced
+  // so a slider drag (one write per step) costs one pass after it settles.
+  let remoteEffectParamsTimer = null;
+  function scheduleRemoteEffectParamsReapply() {
+    if (remoteEffectParamsTimer !== null) clearTimeout(remoteEffectParamsTimer);
+    remoteEffectParamsTimer = setTimeout(() => {
+      remoteEffectParamsTimer = null;
+      reapplyAll('another client changed the scene effect params');
+    }, 250);
+  }
+
   // COPY/PASTE SCENE EFFECT SETTINGS (mythica-machina-press#12) — depended on
   // real settings persistence existing first (#11), which Stage B
   // (#288/#389, the effectParams scene flag) now provides. A session-only,
@@ -20085,7 +20099,11 @@ function install() {
         // load') below; this watcher is the LIVE half, for a second client
         // already sitting in this same scene when the GM tunes it.
         effectParamsUnsub?.();
-        effectParamsUnsub = watchSceneEffectParams(() => reapplyUiShadow());
+        effectParamsUnsub = watchSceneEffectParams((_change, fromOtherUser) => {
+          reapplyUiShadow();
+          // Our own write was already applied live by the setter that made it; only another user's needs a pass.
+          if (fromOtherUser === true) scheduleRemoteEffectParamsReapply();
+        });
         // THE CUE STACK'S OWN SCENE LOAD (U3) — scene-scoped exactly like the
         // fade state above; a sold map's authored cues travel WITH its scene,
         // so a scene SWITCH must re-load this scene's own stack, never carry

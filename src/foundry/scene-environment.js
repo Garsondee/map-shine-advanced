@@ -434,7 +434,11 @@ export function shouldPublishDarkness({ darkness01, lastPublished01, nowMs, last
  * refreshDynamicIllumination`, verified in the vendored v14 source: meshes
  * whose darkness falls outside `[min,max]` get `BLEND_MODES.ERASE`).
  */
-export const GLOBAL_LIGHT_DAYLIGHT_MAX = 0.25;
+// ⭐ RAISED TO THE SIGHT THRESHOLD (mmp-bsp, Ingram 2026-11-11): the window's top IS "the critical threshold"
+// above which tokens can't see far. Full moonlight caps exterior darkness just under it
+// (world/environment.js FULL_MOON_DARKNESS_CAP), so on a full-moon night tokens still see the full distance.
+// Same number as world/environment.js SIGHT_DARKNESS_THRESHOLD (foundry/ may not import world/).
+export const GLOBAL_LIGHT_DAYLIGHT_MAX = 0.5;
 
 /**
  * Pure derivation — see this section's own header for the full reasoning.
@@ -481,9 +485,11 @@ export const GLOBAL_LIGHT_DAYLIGHT_MAX = 0.25;
  */
 export function deriveGlobalLightWindow(minRegionFloor, authored = null) {
   const clamp01 = (v, fb) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : fb);
-  if (authored?.enabled === true) {
-    return { enabled: true, min: clamp01(authored.min, 0), max: clamp01(authored.max, 1) };
-  }
+  // MSA TAKES CONTROL OF GLOBAL LIGHT (mmp-bsp.2, Ingram 2026-11-11: "we should take control of the global light
+  // system from Foundry"): the scene's own GI setting no longer replaces MSA's window. `authored` is still read
+  // (diagnostics, and the system-ownership check) but no longer decides anything.
+  void authored;
+  void clamp01;
   let max = GLOBAL_LIGHT_DAYLIGHT_MAX;
   if (Number.isFinite(minRegionFloor)) {
     // Stay strictly under an authored interior, margined by the same step the
@@ -612,6 +618,36 @@ export function shouldPublishGlobalLightWindow(next, last, live, nowMs, lastPubl
   if (!enabledDrifted && !maxDrifted) return false;
   if (!Number.isFinite(nowMs) || !Number.isFinite(lastPublishedAtMs)) return true;
   return nowMs - lastPublishedAtMs >= DARKNESS_PUBLISH_MIN_INTERVAL_MS;
+}
+
+/**
+ * ⭐ MSA TAKES CONTROL OF A SYSTEM-OWNED GLOBAL LIGHT (mmp-bsp.2, Ingram 2026-11-11: "take control of the global
+ * light system from Foundry"). PF2e overrides `EnvironmentCanvasGroup#initialize` so the global light always comes
+ * from the SCENE DOCUMENT (`scene.environment.globalLight`), discarding the window MSA sends, and that is why MSA's
+ * window never landed there. So each client adopts the window into its own in-memory scene source with
+ * `updateSource` - never persisted, never broadcast, no permission needed - and the system's override then reads
+ * MSA's values. Every client computes the same window from the same constants, so they agree.
+ * A system that sets rules-based vision re-forces its own window in `prepareBaseData`; that is the system's call.
+ *
+ * @param {{enabled?: boolean, min?: number, max?: number}} win - `deriveGlobalLightWindow`'s result.
+ * @returns {{ok: boolean, changed: boolean}} `changed` = the in-memory source was edited this call.
+ */
+export function adoptSceneGlobalLight(win) {
+  try {
+    const scene = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
+    if (!scene || typeof scene.updateSource !== 'function') return { ok: false, changed: false };
+    const cur = scene.environment?.globalLight;
+    const min = Number.isFinite(win?.min) ? win.min : 0;
+    const max = Number.isFinite(win?.max) ? win.max : 1;
+    if (cur?.enabled === true && cur?.darkness?.min === min && cur?.darkness?.max === max) {
+      return { ok: true, changed: false };
+    }
+    // LOCAL, NOT SAVED, NOT BROADCAST: `updateSource` edits this client's in-memory scene source only.
+    scene.updateSource({ environment: { globalLight: { enabled: true, darkness: { min, max } } } });
+    return { ok: true, changed: true };
+  } catch {
+    return { ok: false, changed: false };
+  }
 }
 
 /**

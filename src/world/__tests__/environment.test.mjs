@@ -3,7 +3,17 @@
  * it is FROZEN (nobody scribbles on it), time flows one way into it, and
  * darkness has exactly one derivation with the max(night, GM) authority rule.
  */
-import { buildEnvSnapshot, DEFAULT_WEATHER, DEFAULT_WIND, DEFAULT_AMBIENT } from '../environment.js';
+import {
+  buildEnvSnapshot,
+  DEFAULT_WEATHER,
+  DEFAULT_WIND,
+  DEFAULT_AMBIENT,
+  SIGHT_DARKNESS_THRESHOLD,
+  FULL_MOON_DARKNESS_CAP,
+  moonDarknessCap,
+  undergroundDarkness,
+  indoorShareOfOutdoorsGrid,
+} from '../environment.js';
 import { WEATHER_AXIS_NAMES, createWeatherManager } from '../weather.js';
 
 const time = (over = {}) => ({ frame: 1, tMs: 1000, dtSec: 0.016, ...over });
@@ -77,11 +87,49 @@ export function run(t) {
     const midnight = buildEnvSnapshot({ time: time(), todHour: 0, darknessInput: 0 });
     t.ok('midnight: night wins even when GM slider is 0', midnight.darkness01 === 1);
 
-    const gmDarkNoon = buildEnvSnapshot({ time: time(), todHour: 12, darknessInput: 0.8 });
-    t.ok('GM darkening at noon wins over the daylight', gmDarkNoon.darkness01 === 0.8);
+    // MSA OWNS DARKNESS (mmp-bsp, Ingram 2026-11-11): "Outside at noon should be darkness 0 (we should force this)".
+    const gmDarkNoon = buildEnvSnapshot({ time: time(), todHour: 12, darknessInput: 0.8, indoorShare01: 0 });
+    t.ok(
+      'noon is forced to darkness 0 on a floor with an outdoors mask, even with an authored 0.8',
+      gmDarkNoon.darkness01 === 0
+    );
+    const basement = buildEnvSnapshot({ time: time(), todHour: 12, darknessInput: 1, indoorShare01: null });
+    t.ok('a floor with NO outdoors mask (a basement) still honours the authored darkness', basement.darkness01 === 1);
+    t.ok('…the authored value is still reported', gmDarkNoon.darknessParts.authoredDarkness01 === 0.8);
 
     const both = buildEnvSnapshot({ time: time(), todHour: 0, darknessInput: 0.3 });
-    t.ok('the darker authority wins (max, never dilution)', both.darkness01 === 1);
+    t.ok('midnight with no moon reaches full darkness', both.darkness01 === 1);
+  }
+
+  // ---- moonlight caps the exterior; underground floors are dark ------------
+  {
+    const fullMoon = buildEnvSnapshot({ time: time(), todHour: 0, moonlight01: 1 });
+    t.ok(
+      'full moon: midnight exterior stays just under the sight threshold (tokens see full distance)',
+      fullMoon.darkness01 === FULL_MOON_DARKNESS_CAP && fullMoon.darkness01 < SIGHT_DARKNESS_THRESHOLD
+    );
+    const halfMoon = buildEnvSnapshot({ time: time(), todHour: 0, moonlight01: 0.5 });
+    t.ok(
+      'half moon: a darker night, above the sight threshold, below full dark',
+      halfMoon.darkness01 > SIGHT_DARKNESS_THRESHOLD && halfMoon.darkness01 < 1
+    );
+    t.ok('moon cap is a straight gradient', moonDarknessCap(0) === 1 && moonDarknessCap(1) === FULL_MOON_DARKNESS_CAP);
+    const cave = buildEnvSnapshot({ time: time(), todHour: 12, moonlight01: 1, indoorShare01: 0.95 });
+    t.ok('a floor 95% indoors is underground: full dark even at noon', cave.darkness01 === 1);
+    const house = buildEnvSnapshot({ time: time(), todHour: 12, indoorShare01: 0.3 });
+    t.ok('a mostly outdoor floor at noon stays at 0', house.darkness01 === 0);
+    t.ok(
+      'underground eases in between 60% and 90% indoors',
+      undergroundDarkness(0.6) === 0 &&
+        undergroundDarkness(0.75) > 0 &&
+        undergroundDarkness(0.75) < 1 &&
+        undergroundDarkness(0.9) === 1
+    );
+    t.ok(
+      'indoor share is the black fraction of the _Outdoors grid',
+      indoorShareOfOutdoorsGrid({ data: new Uint8Array([0, 0, 0, 255]) }) === 0.75 &&
+        indoorShareOfOutdoorsGrid(null) === null
+    );
   }
 
   // ---- ambient palette: passed through, defaulted, and clamped ---------------

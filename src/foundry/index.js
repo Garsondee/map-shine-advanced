@@ -244,6 +244,7 @@ export {
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
   isGlobalLightSystemOwned,
+  adoptSceneGlobalLight,
   readSceneGlobalLightRaw,
   GLOBAL_LIGHT_DAYLIGHT_MAX,
 } from './scene-environment.js';

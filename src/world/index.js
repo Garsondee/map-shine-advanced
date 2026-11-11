@@ -11,7 +11,17 @@ export {
   DEFAULT_SUN_CONFIG,
   SKY_PHASES,
 } from './sun.js';
-export { buildEnvSnapshot, DEFAULT_WEATHER, DEFAULT_WIND, DEFAULT_AMBIENT } from './environment.js';
+export {
+  buildEnvSnapshot,
+  DEFAULT_WEATHER,
+  DEFAULT_WIND,
+  DEFAULT_AMBIENT,
+  SIGHT_DARKNESS_THRESHOLD,
+  FULL_MOON_DARKNESS_CAP,
+  moonDarknessCap,
+  undergroundDarkness,
+  indoorShareOfOutdoorsGrid,
+} from './environment.js';
 export {
   createDayClock,
   shortestHourDelta,

@@ -140,6 +140,8 @@ export function buildEnvSnapshot({
   darknessInput = 0,
   ambientInput = DEFAULT_AMBIENT,
   sunConfig = DEFAULT_SUN_CONFIG,
+  moonlight01 = 0,
+  indoorShare01 = null,
 }) {
   if (!time || !Number.isFinite(time.tMs)) {
     // Loud, not silent: an env without a clock is a programming error upstream,
@@ -164,8 +166,23 @@ export function buildEnvSnapshot({
   // Using the former made the scene snap to full night at sunset and deleted
   // the blue hour entirely — there was no window where the sun gave nothing but
   // the sky still gave something. See world/sun.js#SKY_PHASES.
-  const nightDarkness = 1 - sun.skyFactor01;
-  const darkness01 = clamp01(Math.max(nightDarkness, clamp01(darknessInput)));
+  //
+  // ⭐ MSA OWNS DARKNESS (mmp-bsp, Ingram 2026-11-11): *"Outside at noon should be darkness 0 (we should force
+  // this) ... moonlight should counter this and with moonlight at full ... exterior darkness never go above the
+  // critical threshold ... on full moonlight we let tokens see full distance, anything less than full is a
+  // gradient where we make nights darker ... if the whole or 90% of a scene/floor is the black part of
+  // _Outdoors then we should make interiors full darkness because we're underground."*
+  //   exterior = min(clock, moon cap)        the clock: ~0 by day, rising to 1 across the night
+  //   darkness = max(exterior, underground)  a mostly-indoors floor is underground, fully dark
+  // The scene's authored darkness no longer darkens the exterior (it is reported as `authoredDarkness01`).
+  const clockDarkness = 1 - sun.skyFactor01;
+  const moonCap = moonDarknessCap(moonlight01);
+  const exteriorDarkness = Math.min(clockDarkness, moonCap);
+  // `indoorShare01 === null` = this floor has NO outdoors mask to read (e.g. a basement map), so nothing says it is
+  // underground except the GM's own authored darkness, which then still counts. A floor WITH a mask is judged by it.
+  const underground =
+    indoorShare01 === null || indoorShare01 === undefined ? clamp01(darknessInput) : undergroundDarkness(indoorShare01);
+  const darkness01 = clamp01(Math.max(exteriorDarkness, underground));
 
   const amb = ambientInput ?? DEFAULT_AMBIENT;
 
@@ -246,7 +263,62 @@ export function buildEnvSnapshot({
       gustiness01: clamp01(wd.gustiness01),
     },
     darkness01,
+    // The pieces darkness was made from, for the diagnostics report and the probe.
+    darknessParts: {
+      clock01: clockDarkness,
+      moonCap01: moonCap,
+      exterior01: exteriorDarkness,
+      underground01: underground,
+      indoorShare01: Number.isFinite(indoorShare01) ? clamp01(indoorShare01) : null,
+      authoredDarkness01: clamp01(darknessInput),
+    },
   });
+}
+
+/**
+ * The darkness at which tokens stop seeing far: Foundry's global light (MSA's window) admits darkness up to
+ * here, so below it a token sees the full distance, above it only what its own sight and lights reach.
+ * Ingram, 2026-11-11: "the critical threshold (0.5 I think)".
+ */
+export const SIGHT_DARKNESS_THRESHOLD = 0.5;
+/** Full moon holds exterior darkness just under the threshold, so tokens see full distance. */
+export const FULL_MOON_DARKNESS_CAP = SIGHT_DARKNESS_THRESHOLD - 1 / 64;
+
+/**
+ * How dark the exterior may get under this much moonlight. Full moon (1) caps it just under the sight
+ * threshold; no moon (0) leaves the night free to reach 1; in between is a straight gradient.
+ * @param {number} moonlight01 @returns {number} 0..1
+ */
+export function moonDarknessCap(moonlight01) {
+  const m = clamp01(moonlight01);
+  return 1 - m * (1 - FULL_MOON_DARKNESS_CAP);
+}
+
+/** Share of a floor that must be indoors (black in the outdoors mask) before it starts to read as underground, and
+ * where it is fully underground (Ingram: "the whole or 90%"). */
+export const UNDERGROUND_SHARE_FROM = 0.6;
+export const UNDERGROUND_SHARE_FULL = 0.9;
+
+/**
+ * A floor that is mostly indoors is underground: full darkness at 90%+ indoors, easing in from 60%, none below.
+ * @param {number} indoorShare01 @returns {number} 0..1
+ */
+export function undergroundDarkness(indoorShare01) {
+  const s = clamp01(indoorShare01);
+  const t = clamp01((s - UNDERGROUND_SHARE_FROM) / (UNDERGROUND_SHARE_FULL - UNDERGROUND_SHARE_FROM));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * The indoor share of a floor from its rasterised outdoors-mask grid (0 = black = indoors, 255 = outdoors).
+ * @param {{data: Uint8Array}|null} grid @returns {number|null} 0..1, or null when there is no grid.
+ */
+export function indoorShareOfOutdoorsGrid(grid) {
+  const data = grid?.data;
+  if (!data || !data.length) return null;
+  let indoor = 0;
+  for (let i = 0; i < data.length; i++) if (data[i] < 128) indoor++;
+  return indoor / data.length;
 }
 
 /** @param {number} x @returns {number} */

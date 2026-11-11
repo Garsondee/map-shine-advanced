@@ -298,6 +298,7 @@ import {
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
   isGlobalLightSystemOwned,
+  adoptSceneGlobalLight,
   readSceneGlobalLightRaw,
   // THE DOOR-REVEAL BRIDGE (2026-08-31) — the inverse of the darkness
   // write-back above: mirrors MSA's own light descriptors (candles, fires,
@@ -408,6 +409,7 @@ import {
 
 import {
   buildEnvSnapshot,
+  indoorShareOfOutdoorsGrid,
   createDayClock,
   createWeatherManager,
   WEATHER_AXES,
@@ -14722,6 +14724,22 @@ async function startVtPanViewerUnserialized({
      * moonlight lever (0 = off). effects/sky-access.js. */
     let skyGoldenHour01 = 1;
     let skyMoonlight01 = 0;
+    // UNDERGROUND FLOORS (mmp-bsp.4): the indoor share of each floor's _Outdoors grid, measured once per grid.
+    const indoorShareCache = new Map();
+    function indoorShareForFloor(floorIndex) {
+      let grid = null;
+      try {
+        grid = getOutdoorsMaskGrid(floorIndex);
+      } catch {
+        grid = null; // no _Outdoors for this floor (the mask throws loudly elsewhere)
+      }
+      if (!grid) return null; // no outdoors mask on this floor: the authored darkness stays the signal
+      const hit = indoorShareCache.get(floorIndex);
+      if (hit && hit.grid === grid) return hit.share;
+      const share = indoorShareOfOutdoorsGrid(grid) ?? 0;
+      indoorShareCache.set(floorIndex, { grid, share });
+      return share;
+    }
     /** THE ENVIRONMENTAL GRADE strength, 0..1 (docs/planning/Grade.md). 0 =
      * neutral (the automatic ToD/weather look is off). This is the lever that
      * carries the cloud desaturation the deleted sky veil couldn't. */
@@ -14866,6 +14884,10 @@ async function startVtPanViewerUnserialized({
         // The AUTHORED scene darkness (mmp-ynr.3), never the live echo above:
         // buildEnvSnapshot folds it as max(MSA night, authored).
         darknessInput: authoredDarkness.darkness01,
+        // MSA OWNS DARKNESS (mmp-bsp): the moonlight lever caps the exterior, and a floor that is mostly
+        // indoors in its _Outdoors mask is underground.
+        moonlight01: skyMoonlight01,
+        indoorShare01: indoorShareForFloor(view?.floorIndex ?? 0),
         ambientInput: { daylight: ambient.daylight, darkness: ambient.darkness, brightest: ambient.brightest },
         // SUN LATITUDE (mythica-machina-press#170) — the real equinox peak-
         // altitude relationship; see setSunLatitude's own doc. Omitted at
@@ -14948,6 +14970,10 @@ async function startVtPanViewerUnserialized({
           lastPublishedDarknessAtMs
         );
 
+      // A SYSTEM-OWNED window (PF2e) is overridden from the scene document, so MSA adopts its window INTO that
+      // document's in-memory source on this client (mmp-bsp.2); a change there needs one publish to take effect.
+      const adoptedGlobalLight = globalLightSystemOwned ? adoptSceneGlobalLight(nextGlobalLightWindow).changed : false;
+
       // OR'd with the window's own change flag: darkness may sit still for a
       // long time (a static time of day), and if a GM edits a region's
       // modifier during that stillness, the window needs to publish on ITS
@@ -14961,7 +14987,8 @@ async function startVtPanViewerUnserialized({
           // Drift repair: a scene update re-initialises Foundry from the document.
           liveDarkness01: darkness.source === 'scene' ? darkness.darkness01 : undefined,
         }) ||
-        globalLightWindowChanged
+        globalLightWindowChanged ||
+        adoptedGlobalLight
       ) {
         const windowToSend = globalLightSystemOwned ? null : nextGlobalLightWindow;
         const published = publishSceneDarkness(env.darkness01, windowToSend);
@@ -34028,7 +34055,9 @@ async function startVtPanViewerUnserialized({
           // thinks it wrote), `foundryDarkness01` (what Foundry actually has) —
           // are what turn "darkness isn't working" into one glance.
           foundryDarkness01: readSceneDarkness().darkness01,
-          // The GM-saved value (document source) MSA folds in: max(night, authored).
+          // What MSA's darkness was made from (mmp-bsp): clock, moon cap, exterior, underground, indoor share.
+          darknessParts: lastEnvSnapshot?.darknessParts ?? null,
+          // The GM-saved value (document source), reported only: MSA owns darkness (mmp-bsp).
           authoredDarkness01: lastAuthoredDarkness?.darkness01 ?? null,
           darknessReason: lastEnvSnapshot.darkness.reason,
           // THE GLOBAL ILLUMINATION WRITE-BACK's own state (2026-08-15) — the

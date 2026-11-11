@@ -154,7 +154,7 @@ export const DOOR_DAYLIGHT_OUTDOORS_MIN = 0.5;
 /** Daylight ends where `scene-environment.js#GLOBAL_LIGHT_DAYLIGHT_MAX` ends it
  * (duplicated as a literal to keep this module import-free; the test pins the
  * two together) - ONE idea of "it is day" for doors and open ground alike. */
-export const DOOR_DAYLIGHT_DARKNESS_MAX = 0.25;
+export const DOOR_DAYLIGHT_DARKNESS_MAX = 0.5;
 
 /** Wall-clock floor between syncs. Matches `DARKNESS_PUBLISH_MIN_INTERVAL_MS`'s
  * own reasoning (`foundry/scene-environment.js`): a door's revealed-ness has

@@ -16,6 +16,7 @@ import {
   deriveGlobalLightWindow,
   shouldPublishGlobalLightWindow,
   isGlobalLightSystemOwned,
+  adoptSceneGlobalLight,
   GLOBAL_LIGHT_DAYLIGHT_MAX,
   deriveSceneBackground,
   readSceneBackground,
@@ -425,16 +426,57 @@ export function run(t) {
     );
   }
 
-  // ---- THE GM'S OWN GLOBAL ILLUMINATION (Foundry Parity, mmp-ynr.3) -------
-  // Turned ON in Scene Config, the GM's window is what native Foundry uses, so it
-  // is what MSA publishes, unclamped by MSA's own daylight rule.
+  // ---- MSA OWNS GLOBAL ILLUMINATION (mmp-bsp.2, Ingram 2026-11-11) ----------
+  // "we should take control of the global light system from Foundry": a GM's own
+  // Scene Config window no longer replaces MSA's; the window's top is the sight
+  // threshold (0.5) and still clamps under an authored dark interior.
   {
-    const w = deriveGlobalLightWindow(0.5, { enabled: true, min: 0.1, max: 0.8 });
-    ok('an authored ON window is published as authored', w.enabled && w.min === 0.1 && w.max === 0.8);
+    const w = deriveGlobalLightWindow(0.8, { enabled: true, min: 0.1, max: 0.8 });
+    ok('an authored ON window is NOT published: MSA owns the window', w.enabled && w.min === 0 && w.max === 0.5);
     const def = deriveGlobalLightWindow(null, { enabled: true, min: null, max: null });
-    ok('an authored ON window with no range is the Foundry schema default 0..1', def.min === 0 && def.max === 1);
+    ok(
+      'the window top is the sight threshold, 0.5',
+      def.min === 0 && def.max === GLOBAL_LIGHT_DAYLIGHT_MAX && def.max === 0.5
+    );
     const off = deriveGlobalLightWindow(null, { enabled: false, min: 0, max: 1 });
     ok('authored OFF keeps the MSA daylight window', off.max === GLOBAL_LIGHT_DAYLIGHT_MAX && off.min === 0);
+
+    // ---- adoptSceneGlobalLight: a system-owned window (PF2e) reads the scene document, so MSA writes it there,
+    // in memory only (mmp-bsp.2) --------------------------------------------------------------------------
+    const priorCanvas = globalThis.canvas;
+    try {
+      const calls = [];
+      const scene = {
+        environment: { globalLight: { enabled: false, darkness: { min: 0, max: 1 } } },
+        updateSource(change) {
+          calls.push(change);
+          const g = change.environment.globalLight;
+          this.environment.globalLight = { enabled: g.enabled, darkness: { ...g.darkness } };
+        },
+      };
+      globalThis.canvas = { scene };
+      const first = adoptSceneGlobalLight({ min: 0, max: 0.5 });
+      ok(
+        'adopt writes the window into the in-memory scene source',
+        first.ok && first.changed && calls.length === 1 && scene.environment.globalLight.darkness.max === 0.5
+      );
+      const again = adoptSceneGlobalLight({ min: 0, max: 0.5 });
+      ok(
+        'adopting the same window again is a no-op (no refresh storm)',
+        again.ok && !again.changed && calls.length === 1
+      );
+      ok(
+        'a changed window is adopted again',
+        adoptSceneGlobalLight({ min: 0, max: 0.3 }).changed && calls.length === 2
+      );
+      globalThis.canvas = { scene: {} };
+      ok('a scene without updateSource reports not ok, never throws', adoptSceneGlobalLight({ max: 0.5 }).ok === false);
+      delete globalThis.canvas;
+      ok('no canvas: not ok', adoptSceneGlobalLight({ max: 0.5 }).ok === false);
+    } finally {
+      if (priorCanvas === undefined) delete globalThis.canvas;
+      else globalThis.canvas = priorCanvas;
+    }
     ok(
       'a change of the window MIN alone republishes',
       shouldPublishGlobalLightWindow({ enabled: true, min: 0.3, max: 0.8 }, { enabled: true, min: 0, max: 0.8 }) ===

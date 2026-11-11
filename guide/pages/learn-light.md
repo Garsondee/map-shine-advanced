@@ -1,5 +1,5 @@
 ---
-sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/lens.js (Glare), src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), src/foundry/scene-environment.js (readSceneAuthoredDarkness), src/foundry/scene-regions.js (every darkness behaviour), src/foundry/region-darkness-override.js (off by default, regionDarknessAuthored, restoreRegionDarkness), src/effects/lighting/point-light-illumination.js (a lamp's floor and dim light follow the room's own light), boot.js onSweepToHour, src/effects/vision/vision-mask.js (nightRevealFloor), src/foundry/scene-vision.js (readActiveLightShapes)
+sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/lens.js (Glare), src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), src/foundry/scene-environment.js (readSceneAuthoredDarkness), src/foundry/scene-regions.js (every darkness behaviour), src/foundry/region-darkness-override.js (off by default, regionDarknessAuthored, restoreRegionDarkness), src/effects/lighting/point-light-illumination.js (a lamp's floor and dim light follow the room's own light), boot.js onSweepToHour, src/world/environment.js (moonDarknessCap, undergroundDarkness), src/foundry/scene-environment.js (adoptSceneGlobalLight), src/effects/vision/vision-mask.js (nightRevealFloor), src/foundry/scene-vision.js (readActiveLightShapes)
 ---
 
 Map Shine lights a scene like a camera would see it: a real sun that moves, shadows that stretch, lamps that glow, and a camera that copes with bright and dark together.
@@ -21,7 +21,7 @@ Map Shine lights a scene like a camera would see it: a real sun that moves, shad
 
 Foundry's own lights become Map Shine lights. Their radius, colour and animation are set the same way as always, in the light's settings. **Studio → Effects → Colour Grade** has a **Light level** for every lamp at once.
 
-The scene's own **Environment** settings in Foundry (Base and Darkness: tint, luminosity, saturation, shadows) colour the map art the same way they do in Foundry. So does its **Darkness Level**: a scene set dark in Foundry stays at least that dark, and the clock can only make it darker.
+The scene's own **Environment** settings in Foundry (Base and Darkness: tint, luminosity, saturation, shadows) colour the map art the same way they do in Foundry. Its **Darkness Level** is not used outdoors: Map Shine sets darkness from the clock and the moon (below).
 
 ### Window light
 
@@ -44,9 +44,13 @@ A lamp fades into the light already around it, so its pool has no rim. Inside a 
 
 > [!tip] Interiors look best a little darker than you expect. Dark rooms make lamps and window light the stars. If players can't see, raise the **lamps** before the exposure.
 
-### What players can see at night
+### Night, the moon and sight
 
-As in Foundry, a player sees what their own sight covers and whatever a light reaches: the whole of a light's dim radius, and everything under global light. Moonlight and the night sky colour the picture but do not extend sight, so on an open map at night a player sees the ground around their lights, not the whole map. By day nothing changes.
+Outside, darkness is 0 by day, rises fast after dusk to 1 at deep night, and falls before dawn. **Moonlight** (the vertical slider) holds it down: at full moon tokens still see their full distance; less moon is a smooth gradient to full dark. Map Shine also controls Foundry's global light.
+
+Players see what their own sight covers and what lights reach. In deeper dark an open map shows only the ground around lights.
+
+A floor 90% or more black in its `_Outdoors` mask is underground: fully dark even at noon, easing in from about 60%. A floor with no `_Outdoors` mask keeps the Darkness Level you set in Foundry.
 
 [[do: lamps-up, brighten-inside, more-drama]]
 

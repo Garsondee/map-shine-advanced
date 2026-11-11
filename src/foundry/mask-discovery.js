@@ -49,6 +49,26 @@
  */
 
 import { MASK_KINDS } from '../scene/index.js';
+import { wallClockMs } from '../core/frame-clock.js';
+
+/**
+ * PROBE ANSWERS REMEMBERED ACROSS RUNS (mmp-6u9, catalogue sweep 2026-11-11). A player who cannot browse files
+ * probes mask URLs blind, and every absent one is a 404 in the console. The per-run memo below stops one run
+ * probing a URL twice, but the early kick-off, the scene start and the prewarm each run with a DIFFERENT target
+ * list (so they miss the 10-minute result cache) and re-probed the same URLs: three 404s per absent mask, 100 to
+ * 900 per scene. A probe that completed (exists or not) is remembered for the same ten minutes; a probe that
+ * THREW is never remembered. Keyed by the probe function so an injected test probe never shares answers.
+ */
+const PROBE_MEMO_TTL_MS = 10 * 60 * 1000;
+const sharedProbeMemos = new WeakMap();
+function sharedProbeMemoFor(probeUrl) {
+  let memo = sharedProbeMemos.get(probeUrl);
+  if (!memo) {
+    memo = new Map();
+    sharedProbeMemos.set(probeUrl, memo);
+  }
+  return memo;
+}
 
 /** Extension preference when several sibling files could satisfy one kind —
  * the art's own extension first (authors overwhelmingly keep one format per
@@ -291,6 +311,7 @@ export async function discoverAuthoredMasks({
   let probesAttempted = 0;
   const listingCache = new Map(); // dir -> string[]|null (one browse per directory per run)
   const probeMemo = new Map(); // url -> boolean (a run never probes one URL twice)
+  const sharedMemo = sharedProbeMemoFor(probeUrl); // url -> {exists, at} (kept across runs for ten minutes)
   const floorList = floors ?? [];
 
   /** One floor's discovery settled — advance the shared counter + tell the caller. */
@@ -342,15 +363,20 @@ export async function discoverAuthoredMasks({
         for (const url of candidateUrls(art, kind)) {
           let exists = probeMemo.get(url);
           if (exists === undefined) {
+            const earlier = sharedMemo.get(url);
+            if (earlier && wallClockMs() - earlier.at < PROBE_MEMO_TTL_MS) exists = earlier.exists;
+          }
+          if (exists === undefined) {
             probesAttempted++;
             try {
               exists = await probeUrl(url);
+              sharedMemo.set(url, { exists, at: wallClockMs() });
             } catch (err) {
               exists = false;
               failures.push({ targetId: floor.id, stage: 'probe', detail: `${url}: ${String(err?.message || err)}` });
             }
-            probeMemo.set(url, exists);
           }
+          probeMemo.set(url, exists);
           if (exists) {
             found.set(kind.id, url);
             const suffixRank = kind.suffixes.findIndex((s) => url.includes(`${art.base}${s}.`));

@@ -169,6 +169,10 @@ export const WALL_TIME_BUDGETS = {
   'src/vt/compressed-textures.js': { max: 3, why: 'worker rebuild cooldown' },
   'src/foundry/scene-synthetic-lights.js': { max: 2, why: 'a poll throttle — re-reads scene lights, moves nothing' },
   'src/foundry/scene-switch-gate.js': { max: 1, why: 'a diagnostic timestamp' },
+  'src/foundry/mask-discovery.js': {
+    max: 2,
+    why: 'the ten-minute expiry of remembered mask-probe answers (network cache, not world motion)',
+  },
   'src/foundry/tile-motion-runtime.js': { max: 1, why: 'the tile-edit poll throttle (motion itself is worldSimNowMs)' },
   'src/graph/frame-graph.js': { max: 1, why: 'per-pass timing' },
   'src/ui/floor-transition.js': { max: 1, why: 'the floor-transition curtain timeout (UI)' },

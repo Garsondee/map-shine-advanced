@@ -203,6 +203,41 @@ export async function run(t) {
   t.ok('probe count is reported truthfully', resultProbe.probesAttempted === probed.length && probed.length > 0);
   t.ok('a found kind stops probing its remaining candidates', !probed.some((u) => u.endsWith('castle_Outdoors.png')));
 
+  // --- the probe answers are remembered ACROSS runs (mmp-6u9): the same player, three runs with different
+  // target lists, used to probe (404) the same absent masks three times -----------------------------------
+  {
+    const sameProbe = async (url) => {
+      calls.push(url);
+      return url.endsWith('keep_Outdoors.webp');
+    };
+    const calls = [];
+    const art = 'https://cdn.example/x/keep.webp';
+    await discoverAuthoredMasks({ floors: [{ index: 0, id: 'A', url: art }], probeUrl: sameProbe });
+    const first = calls.length;
+    const second = await discoverAuthoredMasks({
+      floors: [
+        { index: 0, id: 'A', url: art },
+        { index: 1, id: 'B', url: art },
+      ],
+      probeUrl: sameProbe,
+    });
+    t.ok('a second run with another target list probes nothing it already asked', first > 0 && calls.length === first);
+    t.ok(
+      '…and still finds what exists, from the remembered answers',
+      second.byTargetId.get('B')?.get('outdoors') === 'https://cdn.example/x/keep_Outdoors.webp'
+    );
+    t.ok('…reporting that this run attempted no probes', second.probesAttempted === 0);
+    let thrown = 0;
+    const flaky = async () => {
+      thrown++;
+      throw new Error('network down');
+    };
+    await discoverAuthoredMasks({ floors: [{ index: 0, id: 'A', url: art }], probeUrl: flaky });
+    const afterFirst = thrown;
+    await discoverAuthoredMasks({ floors: [{ index: 0, id: 'A', url: art }], probeUrl: flaky });
+    t.ok('a probe that THREW is never remembered (retried next run)', afterFirst > 0 && thrown === afterFirst * 2);
+  }
+
   // --- discoverAuthoredMasks: listing DENIED → fallback, recorded ----------
   const resultDenied = await discoverAuthoredMasks({
     floors: [{ index: 0, id: 'L0', url: 'maps/base.webp' }],

@@ -653,10 +653,24 @@ function smokeCameraHeight(env, tune) {
  * @param {number} [startSmoke=0] the smoke lobe index to start writing at.
  * @returns {{count:number, flame:number, smoke:number, coal:number}} lobes written (`count` = in `out`; `smoke` = in `outSmoke`).
  */
+// PERF (2026-11-11 sweep, mmp-yuu.4/.5): every fire, every frame, spread the whole BILLOW_TUNE (~60 keys) over its override
+// into a new object (three call sites): ~250 KB of garbage a frame on Church of the Light. The engine's override is
+// memoised (`brFor`), so the merge is memoised on the override object. (An override mutated in place after its first
+// use would be stale: none is; tests pass fresh objects.)
+const MERGED_TUNE = new WeakMap();
+function mergedTune(override) {
+  if (!override) return BILLOW_TUNE;
+  let m = MERGED_TUNE.get(override);
+  if (!m) {
+    m = { ...BILLOW_TUNE, ...override };
+    MERGED_TUNE.set(override, m);
+  }
+  return m;
+}
 const PROJ_SCRATCH = [0, 0, 1];
 const BASE_SCRATCH = [0, 0, 1];
 export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null, startSmoke = 0) {
-  const tune = tuneOverride ? { ...BILLOW_TUNE, ...tuneOverride } : BILLOW_TUNE;
+  const tune = mergedTune(tuneOverride);
   const sz = fireSizes(f, tune);
   const { R, out: outdoor, turb, plume, height } = sz;
   // THE OUTDOOR CLIP (2026-11-06, mmp-9un.4): an outdoor fire's lobes are told so, and draw nothing over indoor ground (the
@@ -1278,7 +1292,7 @@ export const MASS_SMOKE_MAX = 48;
  * @returns {{count:number}} lobes written
  */
 export function emitMassSmoke(out, start, m, env, tuneOverride) {
-  const tune = tuneOverride ? { ...BILLOW_TUNE, ...tuneOverride } : BILLOW_TUNE;
+  const tune = mergedTune(tuneOverride);
   const q = clamp(env.quality ?? 1, 0.2, 1);
   const t = env.tSec * Math.max(0.05, env.animSpeed ?? 1);
   const Rm = Math.max(8, m.radius);
@@ -1422,7 +1436,7 @@ export function emitMassSmoke(out, start, m, env, tuneOverride) {
 
 /** An upper bound on the lobes one fire can emit — what a buffer must hold per fire. */
 export function maxLobesPerFire(R, tuneOverride) {
-  const tune = tuneOverride ? { ...BILLOW_TUNE, ...tuneOverride } : BILLOW_TUNE;
+  const tune = mergedTune(tuneOverride);
   const body = BODY_LAYERS.reduce((n, L) => n + Math.ceil(L.count * (0.72 + 0.28 * Math.min(2, R / 50))), 0);
   return (
     Math.ceil(body) +

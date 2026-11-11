@@ -126,6 +126,8 @@ export const WAVE_CREST_FULL_MS = 14;
 export const WAVE_SLICES_M = Object.freeze([0.15, 0.4, 0.9, 1.8, 3.5]);
 /** Caustic slice resolution (each covers the view). */
 export const WAVE_CAUSTIC_RES = 1536;
+/** The caustic atlas redraws every this-many frames while the view is still (1 = every frame). */
+export const WAVE_ATLAS_EVERY = 2;
 /** Photon grid cells across the view (and down, scaled by aspect) — ~3 px at a 1280 px wide view. */
 export const WAVE_SPLAT_CELLS = 900;
 /** Margin round the view the photon grid also covers, as a fraction of the view (refraction carries light in). */
@@ -1170,6 +1172,7 @@ export function createWaterWaveSystem({
 
   let renders = 0;
   let updates = 0;
+  const atlasView = uView.value.clone();
   /** Per frame, GPU side: bake both bands, then splat every slice. */
   function render(renderer) {
     renders++;
@@ -1192,6 +1195,18 @@ export function createWaterWaveSystem({
     // after the last
     // ⚠️ the GPU texture's mip count is fixed when it is first created from `generateMipmaps`: it must be on for the
     // first frame (off, the atlas was made with one level and every `.level()` read — the shafts' blur — fell to 0)
+    // PERF (2026-11-11 sweep): the five 1536 px caustic slices are the dearest part of this pass and the caustics only
+    // drift slowly, so with the view still the atlas refreshes every `atlasEvery`th frame (default 2) and the other
+    // frames reuse it. A moving view (the atlas is laid out in view space) or the first frames always redraw.
+    const every = Math.max(1, Math.round(Number.isFinite(tune.atlasEvery) ? tune.atlasEvery : WAVE_ATLAS_EVERY));
+    const vk = uView.value;
+    const still = atlasView.equals(vk);
+    atlasView.copy(vk);
+    if (renders > 2 && every > 1 && still && renders % every !== 0) {
+      renderer.setRenderTarget(prevTarget);
+      renderer.autoClear = prevAuto;
+      return;
+    }
     caustAtlas.viewport.set(0, 0, WAVE_CAUSTIC_RES * NSL, WAVE_CAUSTIC_RES);
     caustAtlas.texture.generateMipmaps = renders <= 1;
     renderer.setRenderTarget(caustAtlas);

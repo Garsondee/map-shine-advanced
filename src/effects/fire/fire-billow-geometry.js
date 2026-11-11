@@ -653,6 +653,8 @@ function smokeCameraHeight(env, tune) {
  * @param {number} [startSmoke=0] the smoke lobe index to start writing at.
  * @returns {{count:number, flame:number, smoke:number, coal:number}} lobes written (`count` = in `out`; `smoke` = in `outSmoke`).
  */
+const PROJ_SCRATCH = [0, 0, 1];
+const BASE_SCRATCH = [0, 0, 1];
 export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null, startSmoke = 0) {
   const tune = tuneOverride ? { ...BILLOW_TUNE, ...tuneOverride } : BILLOW_TUNE;
   const sz = fireSizes(f, tune);
@@ -717,17 +719,16 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
   const wdy = wy / windLen;
   const windAng = Math.atan2(wdy, wdx);
 
-  const proj = [0, 0, 1];
-  const base = [0, 0, 1];
+  // PERF (2026-11-11 sweep): module scratch, not two arrays a fire per frame (see PROJ_SCRATCH). lastX/Y/R were written
+  // by every `put` and read by nobody: each store boxed a double into the closure's context.
+  const proj = PROJ_SCRATCH;
+  const base = BASE_SCRATCH;
   const smokeD = smokeCameraHeight(env, tune);
   let n = start;
   let ns = startSmoke;
   let flameCount = 0;
   let smokeCount = 0;
   let coalCount = 0;
-  let lastX = 0;
-  let lastY = 0;
-  let lastR = 0;
   // `stretch` is the old area-preserving elongation; a chain lobe passes its own `along` and `across` instead
   // (long and as wide as before: a tongue should not thin as it is stretched along its own path).
   const put = (
@@ -778,9 +779,6 @@ export function emitFireLobes(out, start, f, env, tuneOverride, outSmoke = null,
     buf[o + 13] = outdoorClip;
     buf[o + 14] = 0;
     buf[o + 15] = 0;
-    lastX = proj[0];
-    lastY = proj[1];
-    lastR = radius * M;
     if (toSmoke) ns++;
     else n++;
     if (kind === KIND_SMOKE) smokeCount++;

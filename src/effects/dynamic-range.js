@@ -263,16 +263,18 @@ const sortU32 = new Uint32Array(sortF32.buffer);
  * @returns {Uint32Array|number[]} the order (length n)
  */
 function sortedOrder(vals, n, scratch = null) {
-  const keys = scratch?.keys && scratch.keys.length >= n ? scratch.keys.subarray(0, n) : new BigUint64Array(n);
+  const keys = scratch?.keys && scratch.keys.length >= n ? scratch.keys.subarray(0, n) : new Float64Array(n);
   for (let k = 0; k < n; k++) {
     sortF32[0] = vals[k];
     const bits = sortU32[0];
     const ord = bits & 0x80000000 ? ~bits >>> 0 : (bits | 0x80000000) >>> 0;
-    keys[k] = (BigInt(ord) << 32n) | BigInt(k);
+    // (2026-11-11: a plain double — ord·2^16 + k stays under 2^53 for n < 65536 — instead of two BigInts per cell, which
+    // allocated ~6 MB/s and cost most of the reading; the order is identical)
+    keys[k] = ord * 65536 + k;
   }
   keys.sort();
   const order = scratch?.order && scratch.order.length >= n ? scratch.order.subarray(0, n) : new Uint32Array(n);
-  for (let k = 0; k < n; k++) order[k] = Number(keys[k] & 0xffffffffn);
+  for (let k = 0; k < n; k++) order[k] = keys[k] % 65536;
   return order;
 }
 
@@ -330,7 +332,7 @@ function meterScratchFor(w, h) {
     ill: new Float32Array(cells),
     logs: new Float64Array(cells),
     wts: new Float64Array(cells),
-    sort: { keys: new BigUint64Array(cells), order: new Uint32Array(cells) },
+    sort: { keys: new Float64Array(cells), order: new Uint32Array(cells) },
   };
   return meterScratch;
 }

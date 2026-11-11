@@ -156,20 +156,55 @@ const WAVE_THROW_FLOOR = 0.3;
  * @param {number} c - drive speed, world px/s.
  */
 export function sprayWaveImpact(x, y, t, dx, dy, c) {
+  return sprayWaveAt(sprayWaveFrame(t, dx, dy, c, SCRATCH_WAVE_FRAME), x, y);
+}
+
+// PERF (2026-11-11 sweep, mmp-yuu.2): `sprayWaveImpact` ran per in-view shore point per frame and re-derived every
+// train's heading, speed and wavelength each time, with `Math.pow(.., 10)`: 2.5 ms of main thread on Flooded River
+// Prison. The per-frame part now lives in `sprayWaveFrame` (once per frame); `sprayWaveAt` is three cosines and
+// multiplies per point. Same formula, same answers (to float rounding); WAVE_CREST_POWER 10 is unrolled as q^8·q^2.
+const TRAIN_CA = WAVE_TRAINS.map((w) => Math.cos(w.ang));
+const TRAIN_SA = WAVE_TRAINS.map((w) => Math.sin(w.ang));
+const TRAIN_CK = WAVE_TRAINS.map((w) => 0.8 * Math.sqrt(w.len / 340));
+const SCRATCH_WAVE_FRAME = { a: new Float64Array(9), s: new Float64Array(3) };
+
+/** The per-frame constants of {@link sprayWaveImpact} (phase = ax·x + ay·y + a0 per train, and the set envelope). */
+export function sprayWaveFrame(t, dx, dy, c, out = { a: new Float64Array(9), s: new Float64Array(3) }) {
   const speed = Math.max(20, c);
-  let h = 0;
-  for (const w of WAVE_TRAINS) {
-    const ca = Math.cos(w.ang);
-    const sa = Math.sin(w.ang);
-    const kx = dx * ca - dy * sa;
-    const ky = dx * sa + dy * ca;
-    const ck = speed * 0.8 * Math.sqrt(w.len / 340);
-    const ph = (2 * Math.PI * (x * kx + y * ky - ck * t)) / w.len + w.ph;
-    h += w.amp * Math.pow(0.5 + 0.5 * Math.cos(ph), WAVE_CREST_POWER);
+  for (let k = 0; k < 3; k++) {
+    const w = WAVE_TRAINS[k];
+    const sc = (2 * Math.PI) / w.len;
+    out.a[k * 3] = (dx * TRAIN_CA[k] - dy * TRAIN_SA[k]) * sc;
+    out.a[k * 3 + 1] = (dx * TRAIN_SA[k] + dy * TRAIN_CA[k]) * sc;
+    out.a[k * 3 + 2] = -speed * TRAIN_CK[k] * t * sc + w.ph;
   }
-  const sp = (2 * Math.PI * (x * dx + y * dy - 0.5 * speed * t)) / WAVE_SET_PX + 1.3;
-  const env = 0.3 + 0.7 * Math.pow(0.5 + 0.5 * Math.cos(sp), 2);
-  const over = h * env - WAVE_THROW_FLOOR;
+  const ss = (2 * Math.PI) / WAVE_SET_PX;
+  out.s[0] = dx * ss;
+  out.s[1] = dy * ss;
+  out.s[2] = -0.5 * speed * t * ss + 1.3;
+  return out;
+}
+
+/** {@link sprayWaveImpact} at one point, given this frame's {@link sprayWaveFrame}. */
+export function sprayWaveAt(f, x, y) {
+  const a = f.a;
+  let q = 0.5 + 0.5 * Math.cos(a[0] * x + a[1] * y + a[2]);
+  let q2 = q * q;
+  let q8 = q2 * q2;
+  q8 *= q8;
+  let h = WAVE_TRAINS[0].amp * q8 * q2;
+  q = 0.5 + 0.5 * Math.cos(a[3] * x + a[4] * y + a[5]);
+  q2 = q * q;
+  q8 = q2 * q2;
+  q8 *= q8;
+  h += WAVE_TRAINS[1].amp * q8 * q2;
+  q = 0.5 + 0.5 * Math.cos(a[6] * x + a[7] * y + a[8]);
+  q2 = q * q;
+  q8 = q2 * q2;
+  q8 *= q8;
+  h += WAVE_TRAINS[2].amp * q8 * q2;
+  const e = 0.5 + 0.5 * Math.cos(f.s[0] * x + f.s[1] * y + f.s[2]);
+  const over = h * (0.3 + 0.7 * e * e) - WAVE_THROW_FLOOR;
   return over > 0 ? over * over : 0;
 }
 
@@ -302,9 +337,10 @@ export function planSprayBirths(shore, o) {
   if (!c.wave || c.wave.length < len) c.wave = new Float64Array(Math.max(len, 16));
   const cum = c.wave;
   let waveTotal = 0;
+  const wf = sprayWaveFrame(tSec, fx, fy, drive, c.waveFrame ?? (c.waveFrame = { a: new Float64Array(9), s: new Float64Array(3) }));
   for (let j = 0; j < len; j++) {
     const i = idx[j];
-    const wi = c.w[i] * sprayWaveImpact(pts[i * 4], pts[i * 4 + 1], tSec, fx, fy, drive);
+    const wi = c.w[i] * sprayWaveAt(wf, pts[i * 4], pts[i * 4 + 1]);
     waveTotal += wi;
     cum[j] = waveTotal;
   }

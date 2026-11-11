@@ -141,8 +141,19 @@ export function shapeProgress(curve, t01) {
  */
 export function rawProgress(entry, nowMs) {
   if (!(entry.overMs > 0)) return 1; // overMs:0 — an instant cut, always "arrived"
+  // A start stamped far AHEAD of this client's clock is stale, not "not begun yet": the shared
+  // sim clock restarted (a fresh ledger, a world copy) or the scene came from another world
+  // whose clock had run for hours. Read as "hasn't started" it pins the fade's FROM value
+  // (and blocks every authored edit to that axis) until the clock catches up — found on the
+  // two-client QA rig 2026-11-11: a wind fade stamped 56,304,789 ms against a clock at 187,674
+  // held wind at its start for 15 hours. Nothing schedules a fade in the future; every start
+  // is "now", so a genuine start is only ever a little ahead (GM/player clock skew).
+  if (entry.startedAtMs - nowMs > FUTURE_START_SLOP_MS) return 1;
   return clamp01((nowMs - entry.startedAtMs) / entry.overMs);
 }
+
+/** How far ahead of the clock a fade's start may sit (client skew) before it counts as stale. */
+export const FUTURE_START_SLOP_MS = 120000;
 
 /** @param {FadeEntry} entry @param {number} nowMs @returns {number} 0..1, curve-shaped */
 export function progressOf(entry, nowMs) {

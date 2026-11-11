@@ -63,6 +63,16 @@ export function run(t) {
     t.ok('not expired mid-window', !isEntryExpired(e, 1500));
     t.ok('expired at the boundary', isEntryExpired(e, 2000));
 
+    // A start far ahead of the clock is stale (clock restarted / scene from another world), not
+    // "not begun": read as 0 it pinned the FROM value for hours (QA pass 2026-11-11).
+    const stale = entry({ startedAtMs: 56304789, overMs: 10000 });
+    t.ok('a start hours ahead of the clock counts as arrived', rawProgress(stale, 187674) === 1);
+    t.ok('…so the entry is expired and pruned, not held', isEntryExpired(stale, 187674));
+    t.ok(
+      'a start only a few seconds ahead (client skew) is still "not begun"',
+      rawProgress(entry({ startedAtMs: 6000, overMs: 1000 }), 1000) === 0
+    );
+
     const eased = entry({ startedAtMs: 1000, overMs: 1000, curve: 'smoothstep' });
     t.ok(
       "progressOf applies the entry's own curve to its raw progress",

@@ -43,9 +43,15 @@ export function broadcastImpulse(id) {
 export function listenForImpulses(onImpulse) {
   try {
     if (typeof game === 'undefined' || !game.socket || typeof onImpulse !== 'function') return false;
-    game.socket.on(SOCKET_NAME, (msg) => {
+    game.socket.on(SOCKET_NAME, (msg, senderId) => {
       if (msg?.type !== MESSAGE_TYPE || typeof msg.id !== 'string') return;
-      if (!game.users?.get(msg.userId)?.isGM) return;
+      // WHO SENT IT is Foundry's own sender id (the handler's 2nd argument, which the
+      // server fills in), never `msg.userId`: that is whatever the sender typed, so a
+      // player could claim to be the GM and fire a strike on every client
+      // (found by the two-client QA pass, 2026-11-11). Falls back to the payload only
+      // when no sender id arrives (unit tests); Foundry v14 always supplies it.
+      const sender = typeof senderId === 'string' ? senderId : msg.userId;
+      if (!game.users?.get(sender)?.isGM) return;
       onImpulse(msg.id);
     });
     return true;

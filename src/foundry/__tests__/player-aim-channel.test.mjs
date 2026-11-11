@@ -350,6 +350,11 @@ export function run(t) {
     withWorld(w, () => {
       const good = { type: 'playerAim', tokenId: 't2', userId: 'p2', a: 270 };
       ok('receive: an owner’s aim for their own token is accepted', channel.handleMessage(good) === true);
+      ok(
+        'receive: a message whose real sender (Foundry’s id) is another user is refused as spoofed (QA 2026-11-11)',
+        channel.handleMessage({ ...good, a: 10 }, 'p1') === false
+      );
+      ok('receive: …while the true sender id passes', channel.handleMessage({ ...good, a: 270 }, 'p2') === true);
       let snaps = channel.annotate(readActivePlayerCarriedLightTokens());
       ok('receive: …and annotates that token (west = 270°)', near(snaps[1].aimAngleDeg, 270));
       ok('receive: …without touching mine', snaps[0].aimAngleDeg === undefined);

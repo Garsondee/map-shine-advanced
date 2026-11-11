@@ -24,7 +24,7 @@ function mkGame({ isGM }) {
   ]);
   return {
     emitted,
-    deliver: (msg) => listeners.forEach((fn) => fn(msg)),
+    deliver: (msg, sender) => listeners.forEach((fn) => fn(msg, sender)),
     game: {
       user: { id: isGM ? 'gm1' : 'p1', isGM },
       users: { get: (id) => users.get(id) },
@@ -60,6 +60,14 @@ export function run(t) {
     player.deliver({ type: 'other', id: 'strike', userId: 'gm1' });
     player.deliver(null);
     t.ok('only the GM-sent impulse fires', fired.length === 1 && fired[0] === 'gust');
+
+    // Foundry's own sender id (2nd argument) outranks the payload's `userId`: a player who
+    // writes the GM's id into the message is still the player (QA pass 2026-11-11).
+    fired.length = 0;
+    player.deliver({ type: 'impulse', id: 'strike', userId: 'gm1' }, 'p1');
+    t.ok('a player claiming to be the GM does not fire an impulse', fired.length === 0);
+    player.deliver({ type: 'impulse', id: 'strike', userId: 'p1' }, 'gm1');
+    t.ok('the real GM sender fires it whatever the payload says', fired.length === 1 && fired[0] === 'strike');
   });
 
   withGame(undefined, () => {

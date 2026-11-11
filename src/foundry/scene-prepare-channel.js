@@ -149,21 +149,28 @@ export function sendPrepareCancel({ token, recipients }) {
 export function listenForPrepareMessages({ onRequest, onPresent, onReady, onCancel }) {
   try {
     if (typeof game === 'undefined' || !game.socket) return false;
-    game.socket.on(SOCKET_NAME, (msg) => {
+    game.socket.on(SOCKET_NAME, (msg, senderId) => {
       try {
         if (!msg || typeof msg.token !== 'string') return;
+        // Foundry's own sender id decides "is this a GM" (and whose present/ready it is);
+        // the payload's `from`/`userId` are only what the sender typed (QA pass 2026-11-11).
+        const sender = typeof senderId === 'string' ? senderId : null;
+        const gmSent = (claimed) => game.users?.get(sender ?? claimed)?.isGM === true;
+        const claimsOther = (claimed) => sender !== null && claimed !== sender;
         if (msg.type === PREPARE_MESSAGE.REQUEST) {
           if (typeof msg.sceneId !== 'string') return;
-          if (!game.users?.get(msg.from)?.isGM) return; // only a GM can ask a table to prepare
+          if (!gmSent(msg.from)) return; // only a GM can ask a table to prepare
           onRequest?.({ token: msg.token, sceneId: msg.sceneId, levelId: msg.levelId ?? null, from: msg.from });
         } else if (msg.type === PREPARE_MESSAGE.PRESENT) {
           if (typeof msg.userId !== 'string') return;
+          if (claimsOther(msg.userId)) return; // a player answering for someone else
           onPresent?.({ token: msg.token, userId: msg.userId });
         } else if (msg.type === PREPARE_MESSAGE.READY) {
           if (typeof msg.userId !== 'string') return;
+          if (claimsOther(msg.userId)) return;
           onReady?.({ token: msg.token, userId: msg.userId });
         } else if (msg.type === PREPARE_MESSAGE.CANCEL) {
-          if (!game.users?.get(msg.from)?.isGM) return;
+          if (!gmSent(msg.from)) return;
           onCancel?.({ token: msg.token });
         }
       } catch (err) {

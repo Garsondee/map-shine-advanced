@@ -443,10 +443,14 @@ export function createPlayerAimChannel({
    * @param {*} raw
    * @returns {boolean} whether it was this feature's and was accepted.
    */
-  function handleMessage(raw) {
+  function handleMessage(raw, senderId) {
     if (raw?.type !== AIM_MESSAGE_TYPE) return false; // another feature's message — not ours to count
     const msg = decodeAimMessage(raw);
     if (!msg) return reject('malformed');
+    // The payload's `userId` is whatever the sender typed. When Foundry supplies the real
+    // sender id (2nd socket argument), a message claiming another user is refused, so a
+    // player cannot steer someone else's token (QA pass 2026-11-11).
+    if (typeof senderId === 'string' && senderId !== msg.userId) return reject('spoofed-sender');
     if (typeof game === 'undefined' || typeof canvas === 'undefined') return reject('no-world');
     if (msg.userId === game.user?.id) return reject('own-echo');
     const sender = game.users?.get?.(msg.userId);
@@ -468,9 +472,9 @@ export function createPlayerAimChannel({
   function start() {
     if (typeof game === 'undefined' || !game?.socket) return false;
     if (socketHandler === null) {
-      socketHandler = (raw) => {
+      socketHandler = (raw, senderId) => {
         try {
-          handleMessage(raw);
+          handleMessage(raw, senderId);
         } catch (err) {
           noteError('handling a player-aim message', err);
         }

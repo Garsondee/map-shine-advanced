@@ -337,7 +337,13 @@ export function planSprayBirths(shore, o) {
   if (!c.wave || c.wave.length < len) c.wave = new Float64Array(Math.max(len, 16));
   const cum = c.wave;
   let waveTotal = 0;
-  const wf = sprayWaveFrame(tSec, fx, fy, drive, c.waveFrame ?? (c.waveFrame = { a: new Float64Array(9), s: new Float64Array(3) }));
+  const wf = sprayWaveFrame(
+    tSec,
+    fx,
+    fy,
+    drive,
+    c.waveFrame ?? (c.waveFrame = { a: new Float64Array(9), s: new Float64Array(3) })
+  );
   for (let j = 0; j < len; j++) {
     const i = idx[j];
     const wi = c.w[i] * sprayWaveAt(wf, pts[i * 4], pts[i * 4 + 1]);

@@ -1595,8 +1595,14 @@ export function buildWaterSurfaceMaterial({
     for (const iy of [-1, 0, 1]) {
       for (const ix of [-1, 0, 1]) {
         const w = ((ix === 0 ? 2 : 1) * (iy === 0 ? 2 : 1)) / 16;
-        const u = positionWorld.x.add(float(ix * S)).sub(uMaskRect.x).div(spanX);
-        const v = positionWorld.y.add(float(iy * S)).sub(uMaskRect.y).div(spanY);
+        const u = positionWorld.x
+          .add(float(ix * S))
+          .sub(uMaskRect.x)
+          .div(spanX);
+        const v = positionWorld.y
+          .add(float(iy * S))
+          .sub(uMaskRect.y)
+          .div(spanY);
         const tap = flowPackTexNode.sample(
           buildSmoothTexelUv(THREE.TSL, { uvNode: vec2(clamp(u, 0, 1), clamp(v, 0, 1)), uTexSize: uFlowPackTexSize })
         );
@@ -2716,7 +2722,10 @@ export function buildWaterSurfaceMaterial({
   // only the focused excess, filtered by this water's own absorption on the way in and out (so its colour is the
   // water's, not a painted tint), under the same sun/cloud/shadow/sky gates.
   const sigmaPerM = sigma.mul(max(depth01, float(1e-3))).div(max(depthM, float(0.05)));
-  const shaftGate = uSunWater.w.mul(specular.sunVis).mul(specular.outdoors ?? float(1)).mul(inside);
+  const shaftGate = uSunWater.w
+    .mul(specular.sunVis)
+    .mul(specular.outdoors ?? float(1))
+    .mul(inside);
   const shafts = waves ? waves.shaftsAt(posXY, depthM, sigmaPerM) : null;
   const shaftLight = shafts
     ? shafts.light.mul(causticMask).mul(shaftGate).mul(uLightShafts).mul(float(WATER_SHAFT_GAIN))
@@ -2726,7 +2735,12 @@ export function buildWaterSurfaceMaterial({
   // spread and lifts where it is focused — dark lanes between the shafts, the mean kept — under the same sun gates.
   const shaftShade = shafts
     ? clamp(
-        float(1).add(shafts.deviation.mul(float(WATER_SHAFT_SHADE)).mul(uLightShafts).mul(clamp(shaftGate, float(0), float(1)))),
+        float(1).add(
+          shafts.deviation
+            .mul(float(WATER_SHAFT_SHADE))
+            .mul(uLightShafts)
+            .mul(clamp(shaftGate, float(0), float(1)))
+        ),
         float(0.25),
         float(2.5)
       )
@@ -3409,12 +3423,16 @@ export function buildWaterSurfaceMaterial({
         const push = clamp(length(warp).div(float(48)), float(0), float(1));
         const wpx = max(fwidth(positionWorld.x), float(1e-4));
         const shear = clamp(
-          length(vec2(fwidth(warp.x), fwidth(warp.y))).div(wpx).mul(float(1)),
+          length(vec2(fwidth(warp.x), fwidth(warp.y)))
+            .div(wpx)
+            .mul(float(1)),
           float(0),
           float(1)
         );
         return {
-          domainGrid: vec3(push, line.mul(float(0.85)), inside.mul(float(0.35))).add(vec3(line, line, line).mul(float(0.15))),
+          domainGrid: vec3(push, line.mul(float(0.85)), inside.mul(float(0.35))).add(
+            vec3(line, line, line).mul(float(0.15))
+          ),
           domainShear: vec3(shear, shear.mul(shear), inside.mul(float(0.25))),
           // 34 (2026-11-10): the same grid in the FULL travelling domain (`domainOffset`: flow + wind drift + bends).
           // The pattern sits at `x − offset`, so the grid is drawn at `x + offset` like every reader of the field.
@@ -3423,7 +3441,9 @@ export function buildWaterSurfaceMaterial({
             const tw = max(fwidth(t), vec2(1e-4, 1e-4));
             const tx = abs(fract(t.x.add(float(0.5))).sub(float(0.5))).div(tw.x);
             const ty = abs(fract(t.y.add(float(0.5))).sub(float(0.5))).div(tw.y);
-            const tl = float(1).sub(smoothstep(float(0.5), float(2), min(tx, ty))).mul(inside);
+            const tl = float(1)
+              .sub(smoothstep(float(0.5), float(2), min(tx, ty)))
+              .mul(inside);
             return vec3(tl, tl, tl);
           })(),
         };

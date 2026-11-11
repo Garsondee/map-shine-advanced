@@ -138,7 +138,9 @@ function clamp01(v) {
 export const ORGANIC_LIGHT_ANIMATIONS = Object.freeze(['torch', 'flame', 'firePuff', 'candleFlicker']);
 export const ORGANIC_MIN_ATTENUATION = 0.8;
 function softenOrganic(attenuation01, animationType) {
-  return ORGANIC_LIGHT_ANIMATIONS.includes(animationType) ? Math.max(attenuation01, ORGANIC_MIN_ATTENUATION) : attenuation01;
+  return ORGANIC_LIGHT_ANIMATIONS.includes(animationType)
+    ? Math.max(attenuation01, ORGANIC_MIN_ATTENUATION)
+    : attenuation01;
 }
 
 /**

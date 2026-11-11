@@ -16,11 +16,7 @@ import { validateEffectManifest } from '../../effect-manifest.js';
 import { createEffectRegistry } from '../../registry.js';
 import { resolveEffectEnabled } from '../../effect-cascade.js';
 import { WATER, WATER_PARAMS, WATER_DIALS, WATER_PRESETS, waterPreset } from '../water.js';
-import {
-  WATER_BANK_INFLUENCE,
-  WATER_TIER2_FLOW_ANGLE_DEG,
-  waterFlowSpeedPx,
-} from '../water-field.js';
+import { WATER_BANK_INFLUENCE, WATER_TIER2_FLOW_ANGLE_DEG, waterFlowSpeedPx } from '../water-field.js';
 import { WATER_TIER3_SHADOW_RESPONSE, WATER_TIER3_GLOSSINESS, WATER_MIN_ROUGHNESS } from '../water-light.js';
 import {
   WATER_TIER4_SWASH_FOAM,
@@ -300,13 +296,26 @@ export function run(t) {
   // === THE ONE WAVE SYSTEM (2026-11-10, mmp-78u.30.9) — the thirteen Worley-net controls are gone; Light shafts and
   // Wave speed are new; Surface chop's default is the wave system's reference (0.31 = the measured sea). ===
   for (const key of [
-    'causticSharpness', 'causticScale', 'causticNetting', 'causticWaveWarp', 'causticWaveWarpCap', 'causticGrowth',
-    'causticGrowthCap', 'causticGrowthScale', 'causticGrowthSpeed', 'causticEvolveSpeed', 'causticJunctionWidth',
-    'causticLineFloor', 'causticSpecularInfluence',
+    'causticSharpness',
+    'causticScale',
+    'causticNetting',
+    'causticWaveWarp',
+    'causticWaveWarpCap',
+    'causticGrowth',
+    'causticGrowthCap',
+    'causticGrowthScale',
+    'causticGrowthSpeed',
+    'causticEvolveSpeed',
+    'causticJunctionWidth',
+    'causticLineFloor',
+    'causticSpecularInfluence',
   ]) {
     ok(`${key} is retired with the Worley net`, !(key in WATER_PARAMS));
   }
-  ok('lightShafts default matches WATER_TIER4_LIGHT_SHAFTS', WATER_PARAMS.lightShafts?.default === WATER_TIER4_LIGHT_SHAFTS);
+  ok(
+    'lightShafts default matches WATER_TIER4_LIGHT_SHAFTS',
+    WATER_PARAMS.lightShafts?.default === WATER_TIER4_LIGHT_SHAFTS
+  );
   ok('lightShafts lives under Light', WATER_PARAMS.lightShafts?.category === 'Light');
   ok('waveSpeed defaults to real speed (1)', WATER_PARAMS.waveSpeed?.default === 1);
   ok('Surface chop default is the wave system reference', WATER_PARAMS.chop.default === WAVE_CHOP_REFERENCE);

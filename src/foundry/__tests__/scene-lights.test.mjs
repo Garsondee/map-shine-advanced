@@ -136,7 +136,15 @@ export function run(t) {
   // ---- organic lights never have a rim (2026-11-08) ------------------------
   {
     const mk = (type, attenuation) =>
-      deriveLightSnapshot({ sourceId: 'a', x: 0, y: 0, radius: 1, attenuation, animation: { type }, shapePoints: TRIANGLE });
+      deriveLightSnapshot({
+        sourceId: 'a',
+        x: 0,
+        y: 0,
+        radius: 1,
+        attenuation,
+        animation: { type },
+        shapePoints: TRIANGLE,
+      });
     ok('a default torch light is floored to soft (0.8)', mk('torch', 0.5).attenuation01 === ORGANIC_MIN_ATTENUATION);
     ok('flame is floored too', mk('flame', 0).attenuation01 === ORGANIC_MIN_ATTENUATION);
     ok('a softer-than-floor torch is left alone', mk('torch', 1).attenuation01 === 1);

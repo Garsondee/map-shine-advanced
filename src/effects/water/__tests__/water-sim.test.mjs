@@ -150,11 +150,25 @@ export function run(t) {
   );
   // ── trails and riffles (2026-11-10, mmp-78u.30.11) ──
   ok('fast water keeps the author decay', Math.abs(waterSimFoamLifeSec(1.3, 1) - 1.3) < 1e-9);
-  ok('slow water keeps foam SLOW_LIFE_MUL times longer (rafts drift for seconds)', Math.abs(waterSimFoamLifeSec(1.3, 0) - 1.3 * WATER_SIM_SLOW_LIFE_MUL) < 1e-9);
-  ok('a river reach (0.33, ~23 px/s) keeps foam ~5 s: trails of 100+ px', waterSimFoamLifeSec(1.3, 0.33) * 0.33 * 70 > 100);
-  ok('life never rises with speed', [0, 0.2, 0.4, 0.6, 0.8, 1].every((v, i, a) => i === 0 || waterSimFoamLifeSec(1.3, v) <= waterSimFoamLifeSec(1.3, a[i - 1])));
+  ok(
+    'slow water keeps foam SLOW_LIFE_MUL times longer (rafts drift for seconds)',
+    Math.abs(waterSimFoamLifeSec(1.3, 0) - 1.3 * WATER_SIM_SLOW_LIFE_MUL) < 1e-9
+  );
+  ok(
+    'a river reach (0.33, ~23 px/s) keeps foam ~5 s: trails of 100+ px',
+    waterSimFoamLifeSec(1.3, 0.33) * 0.33 * 70 > 100
+  );
+  ok(
+    'life never rises with speed',
+    [0, 0.2, 0.4, 0.6, 0.8, 1].every(
+      (v, i, a) => i === 0 || waterSimFoamLifeSec(1.3, v) <= waterSimFoamLifeSec(1.3, a[i - 1])
+    )
+  );
   ok('deep water never riffles, however fast', waterSimRiffleEmit(1, 0.95, 0) === 0);
   ok('slow water never riffles, however shallow', waterSimRiffleEmit(0.3, 0.1, 0.05) === 0);
   ok('fast shallow water riffles', waterSimRiffleEmit(1.1, 0.2, 0) > 0.4);
-  ok('fast water climbing over a submerged rock riffles even where it is deepish', waterSimRiffleEmit(1.1, 0.7, 0.05) > waterSimRiffleEmit(1.1, 0.7, 0));
+  ok(
+    'fast water climbing over a submerged rock riffles even where it is deepish',
+    waterSimRiffleEmit(1.1, 0.7, 0.05) > waterSimRiffleEmit(1.1, 0.7, 0)
+  );
 }

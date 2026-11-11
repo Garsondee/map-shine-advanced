@@ -102,7 +102,14 @@ export function waveBoilSign(i) {
  * @param {number} [o.share] - `WAVE_WIND_TRAVEL_SHARE`
  * @returns {{vx:number, vy:number, windPx:number, flowing:number}}
  */
-export function wavePatternVelocity({ currentPx, windDir, windRatio, peakSpeedPx, flowSpeedPx, share = WAVE_WIND_TRAVEL_SHARE }) {
+export function wavePatternVelocity({
+  currentPx,
+  windDir,
+  windRatio,
+  peakSpeedPx,
+  flowSpeedPx,
+  share = WAVE_WIND_TRAVEL_SHARE,
+}) {
   const cur = Math.hypot(currentPx[0], currentPx[1]) / Math.max(flowSpeedPx, 1e-3);
   const t = Math.min(1, Math.max(0, (cur - WAVE_FLOWING_LO) / (WAVE_FLOWING_HI - WAVE_FLOWING_LO)));
   const flowing = t * t * (3 - 2 * t);
@@ -391,7 +398,10 @@ const slopeVarOf = (set, a2) => a2.reduce((acc, x, i) => acc + (x * set[i].k * s
  *   (y down). The RIPPLE band is baked at {@link WAVE_REFERENCE_WIND_MS} and scaled per pixel by the local wind
  *   ({@link waveRippleGain}).
  */
-export function waveAmplitudes(set, { windMs, towardRad, fetchM, pxPerM, resolved = WAVE_RESOLVED_SLOPE, rippleSpread = WAVE_RIPPLE_SPREAD_S }) {
+export function waveAmplitudes(
+  set,
+  { windMs, towardRad, fetchM, pxPerM, resolved = WAVE_RESOLVED_SLOPE, rippleSpread = WAVE_RIPPLE_SPREAD_S }
+) {
   const U = Math.max(0, windMs || 0);
   const F = Math.max(1, fetchM);
   const Uref = WAVE_REFERENCE_WIND_MS;
@@ -406,13 +416,17 @@ export function waveAmplitudes(set, { windMs, towardRad, fetchM, pxPerM, resolve
   const seaA2 = bandA2(set, { U: Math.max(0.3, U), towardRad, fetchM: F, band: 'sea' }).map((x) => x * gain2 * calm);
   // the ripple band is CANONICAL: baked running toward +x of its own plane with a narrow spread; the shader turns it to
   // each pixel's own wind (`WAVE_RIPPLE_BINS`). Its slope budget is the reference sea's ripple share (same gain).
-  const ripA2 = bandA2(set, { U: Uref, towardRad: 0, fetchM: F, band: 'ripple', spreadS: rippleSpread }).map((x) => x * gain2);
+  const ripA2 = bandA2(set, { U: Uref, towardRad: 0, fetchM: F, band: 'ripple', spreadS: rippleSpread }).map(
+    (x) => x * gain2
+  );
   const { wp, kp } = wavePeak(Math.max(0.3, U), F);
   const rg = waveRippleGain(U);
   const drawnVar = slopeVarOf(set, seaA2) + slopeVarOf(set, ripA2) * rg * rg;
   const ampsSea = seaA2.map((x) => Math.sqrt(Math.max(0, x)));
   const ampsRip = ripA2.map((x) => Math.sqrt(Math.max(0, x)));
-  const hsM = 4 * Math.sqrt(ampsSea.reduce((a, s) => a + (s * s) / 2, 0) + ampsRip.reduce((a, s) => a + (s * s * rg * rg) / 2, 0));
+  const hsM =
+    4 *
+    Math.sqrt(ampsSea.reduce((a, s) => a + (s * s) / 2, 0) + ampsRip.reduce((a, s) => a + (s * s * rg * rg) / 2, 0));
   return {
     U,
     peakOmega: wp,
@@ -630,14 +644,22 @@ export function createWaterWaveSystem({
     Loop({ ...range, type: 'int', condition: '<' }, ({ i }) => {
       const c = textureLoad(compTex, ivec2(i, int(0)));
       const e = textureLoad(compTex, ivec2(i, int(1)));
-      const ph = c.x.mul(p.x).add(c.y.mul(p.y)).add(band === 1 ? e.z : e.x);
+      const ph = c.x
+        .mul(p.x)
+        .add(c.y.mul(p.y))
+        .add(band === 1 ? e.z : e.x);
       const cs = cos(ph);
       const sn = sin(ph);
       const a = band === 1 ? e.y : c.z;
       h.addAssign(a.mul(cs));
       sx.addAssign(a.mul(c.x).mul(sn).negate());
       sy.addAssign(a.mul(c.y).mul(sn).negate());
-      lap.addAssign(a.mul(c.x.mul(c.x).add(c.y.mul(c.y))).mul(cs).negate());
+      lap.addAssign(
+        a
+          .mul(c.x.mul(c.x).add(c.y.mul(c.y)))
+          .mul(cs)
+          .negate()
+      );
     });
     return vec4(h, sx, sy, lap);
   };
@@ -711,7 +733,9 @@ export function createWaterWaveSystem({
       // THE LOCAL CURRENT (2026-11-10, Lab · River): the solved flow field at this texel (`water-flow-potential.js`) -
       // the river's own bends, the rapids' squeeze, the stillness of a closed pond - times the author's flow speed.
       // Without a flow field yet (or a floor with none) it falls back to the one global current.
-      const wp = vec2(uWindRect.x, uWindRect.y).add(uv().mul(vec2(uWindRect.z.sub(uWindRect.x), uWindRect.w.sub(uWindRect.y))));
+      const wp = vec2(uWindRect.x, uWindRect.y).add(
+        uv().mul(vec2(uWindRect.z.sub(uWindRect.x), uWindRect.w.sub(uWindRect.y)))
+      );
       const fspan = vec2(max(uFlowRect.z.sub(uFlowRect.x), float(1)), max(uFlowRect.w.sub(uFlowRect.y), float(1)));
       const fuv = clamp(wp.sub(vec2(uFlowRect.x, uFlowRect.y)).div(fspan), vec2(0.001, 0.001), vec2(0.999, 0.999));
       const fn = texture(placeholderWind, fuv);
@@ -725,9 +749,17 @@ export function createWaterWaveSystem({
       const flowing = smoothstep(float(WAVE_FLOWING_LO), float(WAVE_FLOWING_HI), curN);
       const still = uWindTravelPx.mul(ratio);
       const windPx = mix(still, min(still, length(currentHere).mul(float(WAVE_WIND_IN_FLOW_RATIO))), flowing);
-      const v = local.div(max(localLen, float(1e-4))).mul(windPx).add(currentHere);
+      const v = local
+        .div(max(localLen, float(1e-4)))
+        .mul(windPx)
+        .add(currentHere);
       const prev = driftPrevNode;
-      const keep = vec4(float(1).sub(uDriftReset.x), float(1).sub(uDriftReset.x), float(1).sub(uDriftReset.y), float(1).sub(uDriftReset.y));
+      const keep = vec4(
+        float(1).sub(uDriftReset.x),
+        float(1).sub(uDriftReset.x),
+        float(1).sub(uDriftReset.y),
+        float(1).sub(uDriftReset.y)
+      );
       return prev.mul(keep).add(vec4(v.x, v.y, v.x, v.y).mul(uDriftDt));
     })();
     return new THREE.QuadMesh(m);
@@ -750,7 +782,9 @@ export function createWaterWaveSystem({
     const ca = cos(alpha);
     const sa = sin(alpha);
     // q = s·R(−α)·p + shift: a bake wave toward +x shows in the world toward α
-    const q = vec2(p.x.mul(ca).add(p.y.mul(sa)), p.y.mul(ca).sub(p.x.mul(sa))).mul(scale).add(shift);
+    const q = vec2(p.x.mul(ca).add(p.y.mul(sa)), p.y.mul(ca).sub(p.x.mul(sa)))
+      .mul(scale)
+      .add(shift);
     const t = texture(bandRT[1].texture, q.div(float(WAVE_TILE_PX)));
     // ∂h/∂p = s·R(α)·∂h/∂q; curvature × s²
     const hx = t.y.mul(scale);
@@ -803,7 +837,11 @@ export function createWaterWaveSystem({
     // restarts. Their Σw² = 1 keeps the height variance through the fade. The second patch's offset and every bearing's
     // own scale replace the old second read at `WAVE_RIPPLE_SCALE2`: no two reads share a period.
     const ang = atan(g.dir.y, g.dir.x);
-    const sBins = mix(float(WAVE_RIPPLE_BIN_S_CALM), uBinWindyS, smoothstep(float(1.5), float(WAVE_RIPPLE_BIN_WINDY_MS), g.U));
+    const sBins = mix(
+      float(WAVE_RIPPLE_BIN_S_CALM),
+      uBinWindyS,
+      smoothstep(float(1.5), float(WAVE_RIPPLE_BIN_WINDY_MS), g.U)
+    );
     const dr = driftAt(p);
     const fa = fract(uFlowT);
     const fb = fract(uFlowT.add(0.5));
@@ -811,12 +849,18 @@ export function createWaterWaveSystem({
     const wB = float(1).sub(abs(float(1).sub(fb.mul(2))));
     const rA = ripplesAt(p.sub(dr.xy), ang, sBins, vec2(0, 0));
     const rB = ripplesAt(p.sub(dr.zw), ang, sBins, vec2(311.7, 529.3));
-    const ripW = rA.mul(wA).add(rB.mul(wB)).div(sqrt(max(wA.mul(wA).add(wB.mul(wB)), float(1e-4))));
+    const ripW = rA
+      .mul(wA)
+      .add(rB.mul(wB))
+      .div(sqrt(max(wA.mul(wA).add(wB.mul(wB)), float(1e-4))));
     // THE WIND SEA RIDES THE SAME DRIFT (`WAVE_WIND_TRAVEL_SHARE`): two phases, phase B on a different patch of the
     // tile (a cross-fade of shifted copies of one patch would echo), Σw² = 1
     const seaA = texture(bandRT[0].texture, p.sub(dr.xy).div(float(WAVE_TILE_PX)));
     const seaB = texture(bandRT[0].texture, p.sub(dr.zw).add(vec2(437.3, 211.9)).div(float(WAVE_TILE_PX)));
-    const sea = seaA.mul(wA).add(seaB.mul(wB)).div(sqrt(max(wA.mul(wA).add(wB.mul(wB)), float(1e-4))));
+    const sea = seaA
+      .mul(wA)
+      .add(seaB.mul(wB))
+      .div(sqrt(max(wA.mul(wA).add(wB.mul(wB)), float(1e-4))));
     const s = sea.mul(g.gSea).add(ripW.mul(g.gRip));
     // WIND-SHAPED CRESTS (`WAVE_CREST_LEAN`, `WAVE_CREST_SHARP`): the face falling downwind steepens and the back eases;
     // slopes near a crest sharpen, near a trough flatten. Shading-only (the slopes, not the heights).
@@ -871,7 +915,12 @@ export function createWaterWaveSystem({
     splat.positionNode = vec3(qUv.x, float(1).sub(qUv.y), float(0)); // see `uvW`: y = 1 − v is v's row
     const vP = varying(pS);
     const vQ = varying(q);
-    const area = (v) => abs(dFdx(v).x.mul(dFdy(v).y).sub(dFdx(v).y.mul(dFdy(v).x)));
+    const area = (v) =>
+      abs(
+        dFdx(v)
+          .x.mul(dFdy(v).y)
+          .sub(dFdx(v).y.mul(dFdy(v).x))
+      );
     const inten = clamp(area(vP).div(max(area(vQ), float(1e-6))), float(0), uSplatMax);
     splat.colorNode = vec4(inten, inten, inten, float(1));
   }
@@ -930,7 +979,8 @@ export function createWaterWaveSystem({
     const t0 = b.sub(1).add(w1.div(s0)).add(0.5).div(size);
     const t1 = b.add(1).add(w3.div(s1)).add(0.5).div(size);
     const at = (x, y) => texture(caustAtlas.texture, vec2(x.add(i).div(NSL), y)).level(float(L)).r;
-    return at(t0.x, t0.y).mul(s0.x.mul(s0.y))
+    return at(t0.x, t0.y)
+      .mul(s0.x.mul(s0.y))
       .add(at(t1.x, t0.y).mul(s1.x.mul(s0.y)))
       .add(at(t0.x, t1.y).mul(s0.x.mul(s1.y)))
       .add(at(t1.x, t1.y).mul(s1.x.mul(s1.y)));
@@ -942,11 +992,14 @@ export function createWaterWaveSystem({
    * a bed between them (0.9 m and 1.8 m) laid two copies of every line ~50 px apart. Each slice is now read shifted
    * BACK by its own run to the bed's depth (sampled at p − run·(z_i − depth)), so neighbouring slices line up on one
    * net and the blend only morphs the focus between them. MEASURED: it did not sharpen the net (gradient energy 4.45
- * vs 4.57 without), so `uRunAlign` defaults to 0; kept as a tuning hook.
+   * vs 4.57 without), so `uRunAlign` defaults to 0; kept as a tuning hook.
    */
   const sunRunPx = () => {
     const Rs = refract(uSun.negate(), vec3(0, 0, 1), float(1 / WAVE_IOR));
-    return Rs.xy.div(max(Rs.z.negate(), float(0.2))).mul(uPxPerM).mul(uRunAlign);
+    return Rs.xy
+      .div(max(Rs.z.negate(), float(0.2)))
+      .mul(uPxPerM)
+      .mul(uRunAlign);
   };
   const causticRaw = (p, depthM, lod = null) => {
     const run = sunRunPx();
@@ -972,14 +1025,24 @@ export function createWaterWaveSystem({
     }
     const c = acc.div(max(wsum, float(1e-4)));
     // beyond the deepest slice the many waves blur each other out: ease to the flat level by ~2× its depth
-    const far = smoothstep(float(WAVE_SLICES_M[WAVE_SLICES_M.length - 1]), float(WAVE_SLICES_M[WAVE_SLICES_M.length - 1] * 2.2), depthM);
+    const far = smoothstep(
+      float(WAVE_SLICES_M[WAVE_SLICES_M.length - 1]),
+      float(WAVE_SLICES_M[WAVE_SLICES_M.length - 1] * 2.2),
+      depthM
+    );
     return mix(c, float(1), far);
   };
   // ⚠️ SMOOTH EVERYWHERE (2026-11-10, Ingram: "smoother on the left and breaks into double lines on the right away from
   // the 'beach'. Smoother all around is better."). Past ~1 m the waves fold the light over itself and the net breaks into
   // doubled lines. The bed reads its caustic at a depth capped at `WAVE_CAUSTIC_DEPTH_CAP_M` (eased in, so the shallows
   // are unchanged): deep water shows the same clean net as the beach, while depth still reads through absorption.
-  const causticDepth = (d) => min(d, float(WAVE_CAUSTIC_DEPTH_CAP_M).mul(float(1).sub(exp(d.negate().div(float(WAVE_CAUSTIC_DEPTH_CAP_M))))).add(d.mul(0.02)));
+  const causticDepth = (d) =>
+    min(
+      d,
+      float(WAVE_CAUSTIC_DEPTH_CAP_M)
+        .mul(float(1).sub(exp(d.negate().div(float(WAVE_CAUSTIC_DEPTH_CAP_M)))))
+        .add(d.mul(0.02))
+    );
   const causticAt = (p, depthM) => contrastOf(causticRaw(p, causticDepth(depthM)));
   /**
    * THE CAUSTICS' STRENGTH ACROSS THE WATER (2026-11-10, Ingram: "there isn't an even strength of caustics across the
@@ -997,7 +1060,9 @@ export function createWaterWaveSystem({
       const q = p.sub(o).div(float(WAVE_CAUSTIC_MASK_SCALE_M).mul(uPxPerM));
       return mx_fractal_noise_float(vec3(q.x, q.y, uMaskTime), 2, 2.0, 0.5);
     };
-    const n = at(dr.xy).mul(wA).add(at(dr.zw).mul(float(1).sub(wA)));
+    const n = at(dr.xy)
+      .mul(wA)
+      .add(at(dr.zw).mul(float(1).sub(wA)));
     return mix(float(WAVE_CAUSTIC_MASK_FLOOR), float(WAVE_CAUSTIC_MASK_PEAK), smoothstep(float(-0.25), float(0.35), n));
   };
   /**
@@ -1036,7 +1101,13 @@ export function createWaterWaveSystem({
     const att = exp(sigma.negate().mul(zMid).mul(float(1).div(cosT).add(1)));
     const column = min(depthM, float(3)); // metres of lit water under the eye
     const light = att.mul(d.max(0)).mul(column);
-    return { light: light.mul(uShaftGain), deviation: d.mul(att.y).mul(smoothstep(float(0.1), float(0.6), depthM)).mul(uShaftShade) };
+    return {
+      light: light.mul(uShaftGain),
+      deviation: d
+        .mul(att.y)
+        .mul(smoothstep(float(0.1), float(0.6), depthM))
+        .mul(uShaftShade),
+    };
   };
 
   function setWindTexture(field) {
@@ -1046,7 +1117,11 @@ export function createWaterWaveSystem({
     for (const n of windTexNodes) if (n.value !== t) n.value = t;
     if (field?.uRect?.value) uWindRect.value.copy(field.uRect.value);
     // the drift field lives on the wind texture's rect: a regrid (or the texture arriving) restarts both phases once
-    const key = uWindRect.value.toArray().map((x) => Math.round(x)).join(',') + (tex ? '' : '~');
+    const key =
+      uWindRect.value
+        .toArray()
+        .map((x) => Math.round(x))
+        .join(',') + (tex ? '' : '~');
     if (key !== driftRectKey) {
       driftRectKey = key;
       uDriftReset.value.set(1, 1);
@@ -1087,7 +1162,13 @@ export function createWaterWaveSystem({
     const towardRad = Math.atan2(-Math.cos(wr), Math.sin(wr));
     const key = `${seaMs.toFixed(2)}|${towardRad.toFixed(3)}|${Math.round(o.fetchM || 0)}`;
     if (key !== seaKey) {
-      sea = waveAmplitudes(set, { windMs: seaMs, towardRad, fetchM: o.fetchM || 50, pxPerM, rippleRot: WAVE_RIPPLE_ROT });
+      sea = waveAmplitudes(set, {
+        windMs: seaMs,
+        towardRad,
+        fetchM: o.fetchM || 50,
+        pxPerM,
+        rippleRot: WAVE_RIPPLE_ROT,
+      });
       seaKey = key;
     }
     const ts = Number.isFinite(o.timeScale) ? o.timeScale : 1;
@@ -1140,7 +1221,10 @@ export function createWaterWaveSystem({
     // the caustic patches ride the same drift as the surface (`causticMaskAt`) and slowly change shape
     uMaskTime.value += dt * 0.03;
     // the wind's travel in still water: a share of the wind sea's peak phase speed (0 at a calm)
-    const cPeak = sea.peakPeriodSec > 0 && Number.isFinite(sea.peakWavelengthM / sea.peakPeriodSec) ? sea.peakWavelengthM / sea.peakPeriodSec : 0;
+    const cPeak =
+      sea.peakPeriodSec > 0 && Number.isFinite(sea.peakWavelengthM / sea.peakPeriodSec)
+        ? sea.peakWavelengthM / sea.peakPeriodSec
+        : 0;
     const travelShare = Number.isFinite(tune.windTravel) ? tune.windTravel : WAVE_WIND_TRAVEL_SHARE;
     uWindTravelPx.value = cPeak * pxPerM * travelShare * Math.min(1, seaMs / 0.5);
     if (metresPerSecondForSpeed01) uMaxMs.value = metresPerSecondForSpeed01(1);
@@ -1156,7 +1240,11 @@ export function createWaterWaveSystem({
     uBinWindyS.value = Number.isFinite(tune.binWindyS) ? tune.binWindyS : WAVE_RIPPLE_BIN_S_WINDY;
     uSliceLod.value = Number.isFinite(tune.sliceLod) ? tune.sliceLod : WAVE_CAUSTIC_LOD;
     uSplatMax.value = Number.isFinite(tune.splatMax) ? tune.splatMax : WAVE_SPLAT_MAX;
-    uContrast.value = Number.isFinite(tune.contrast) ? tune.contrast : Number.isFinite(o.contrast) ? Math.max(0, o.contrast) : WAVE_CAUSTIC_CONTRAST;
+    uContrast.value = Number.isFinite(tune.contrast)
+      ? tune.contrast
+      : Number.isFinite(o.contrast)
+        ? Math.max(0, o.contrast)
+        : WAVE_CAUSTIC_CONTRAST;
     uHsPx.value = Math.max(0.5, sea.hsPx * uSlopeGain.value);
     uGlintRough.value = Math.max(0.02, sea.glintRoughness);
     if (getWindStrengthField) setWindTexture(getWindStrengthField());
@@ -1276,16 +1364,29 @@ export function createWaterWaveSystem({
         const h = rt.height;
         const px = await renderer.readRenderTargetPixelsAsync(rt, x0, 0, w, h);
         const f = px instanceof Uint16Array ? (i) => THREE.DataUtils.fromHalfFloat(px[i]) : (i) => px[i];
-        let n = 0, sum = 0, sum2 = 0, mn = Infinity, mx = -Infinity;
+        let n = 0,
+          sum = 0,
+          sum2 = 0,
+          mn = Infinity,
+          mx = -Infinity;
         const nch = Math.max(1, Math.round(px.length / (w * h)));
         if (ch >= nch) return null;
         for (let i = ch; i < px.length; i += nch * 7) {
           const v = f(i);
           if (!Number.isFinite(v)) continue;
-          n++; sum += v; sum2 += v * v; mn = Math.min(mn, v); mx = Math.max(mx, v);
+          n++;
+          sum += v;
+          sum2 += v * v;
+          mn = Math.min(mn, v);
+          mx = Math.max(mx, v);
         }
         const mean = sum / Math.max(1, n);
-        return { mean: +mean.toFixed(4), std: +Math.sqrt(Math.max(0, sum2 / Math.max(1, n) - mean * mean)).toFixed(4), min: +mn.toFixed(4), max: +mx.toFixed(4) };
+        return {
+          mean: +mean.toFixed(4),
+          std: +Math.sqrt(Math.max(0, sum2 / Math.max(1, n) - mean * mean)).toFixed(4),
+          min: +mn.toFixed(4),
+          max: +mx.toFixed(4),
+        };
       };
       return {
         renders,
@@ -1319,16 +1420,29 @@ export function createWaterWaveSystem({
           const r = uWindRect.value;
           return pts.map(([x, y]) => {
             const tx = Math.min(rt.width - 1, Math.max(0, Math.floor(((x - r.x) / Math.max(1, r.z - r.x)) * rt.width)));
-            const ty = Math.min(rt.height - 1, Math.max(0, Math.floor(((y - r.y) / Math.max(1, r.w - r.y)) * rt.height)));
+            const ty = Math.min(
+              rt.height - 1,
+              Math.max(0, Math.floor(((y - r.y) / Math.max(1, r.w - r.y)) * rt.height))
+            );
             const o = (ty * rt.width + tx) * 4;
-            return { x, y, ax: +f(o).toFixed(1), ay: +f(o + 1).toFixed(1), bx: +f(o + 2).toFixed(1), by: +f(o + 3).toFixed(1) };
+            return {
+              x,
+              y,
+              ax: +f(o).toFixed(1),
+              ay: +f(o + 1).toFixed(1),
+              bx: +f(o + 2).toFixed(1),
+              by: +f(o + 3).toFixed(1),
+            };
           });
         })(),
         driftAx: await stat(driftRT[driftRead], 0),
         driftAy: await stat(driftRT[driftRead], 1),
         driftBx: await stat(driftRT[driftRead], 2),
         caustics: await Promise.all(
-          WAVE_SLICES_M.map(async (d, i) => ({ depthM: d, ...(await stat(caustAtlas, 0, i * WAVE_CAUSTIC_RES, WAVE_CAUSTIC_RES)) }))
+          WAVE_SLICES_M.map(async (d, i) => ({
+            depthM: d,
+            ...(await stat(caustAtlas, 0, i * WAVE_CAUSTIC_RES, WAVE_CAUSTIC_RES)),
+          }))
         ),
       };
     },

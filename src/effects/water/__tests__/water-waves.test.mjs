@@ -44,11 +44,15 @@ export function run(t) {
     'every component tiles exactly on the tile (k·tile = 2π·integer), so the baked texture has no seam',
     set.every(
       (c) =>
-        Math.abs((c.kx * WAVE_TILE_PX) / (2 * Math.PI) - c.n) < 1e-6 && Math.abs((c.ky * WAVE_TILE_PX) / (2 * Math.PI) - c.m) < 1e-6
+        Math.abs((c.kx * WAVE_TILE_PX) / (2 * Math.PI) - c.n) < 1e-6 &&
+        Math.abs((c.ky * WAVE_TILE_PX) / (2 * Math.PI) - c.m) < 1e-6
     )
   );
   const set2 = buildWaveSet({ seed: 7, pxPerM: PPM });
-  ok('the set is deterministic for a seed (a scene reloads into the same sea)', set2.every((c, i) => c.n === set[i].n && c.ph === set[i].ph));
+  ok(
+    'the set is deterministic for a seed (a scene reloads into the same sea)',
+    set2.every((c, i) => c.n === set[i].n && c.ph === set[i].ph)
+  );
 
   // ── the sea for a wind ──
   const sea = (wind01, fetchM = 400, towardRad = 0) =>
@@ -71,7 +75,10 @@ export function run(t) {
   );
   ok(
     `a 7 m/s breeze over a harbour has metre-scale waves (${breeze.peakWavelengthM.toFixed(2)} m, period ${breeze.peakPeriodSec.toFixed(2)} s)`,
-    breeze.peakWavelengthM > 0.6 && breeze.peakWavelengthM < 2.5 && breeze.peakPeriodSec > 0.5 && breeze.peakPeriodSec < 1.5
+    breeze.peakWavelengthM > 0.6 &&
+      breeze.peakWavelengthM < 2.5 &&
+      breeze.peakPeriodSec > 0.5 &&
+      breeze.peakPeriodSec < 1.5
   );
   ok(
     `at the reference wind (7 m/s) the drawn sea is the resolved share of Cox & Munk (${breeze.drawnShare.toFixed(4)} vs ${WAVE_RESOLVED_SLOPE})`,
@@ -104,11 +111,18 @@ export function run(t) {
   const br = waveBandRanges(set);
   ok(
     `each band bakes only its own components (sea 0..${br.seaEnd}, ripples ${br.rippleStart}..${set.length}) and together they cover all`,
-    br.seaEnd < set.length && br.rippleStart > 0 && br.rippleStart <= br.seaEnd &&
-      set.every((c, i) => (i < br.seaEnd || waveRippleWeight(c.k) === 1) && (i >= br.rippleStart || waveRippleWeight(c.k) === 0))
+    br.seaEnd < set.length &&
+      br.rippleStart > 0 &&
+      br.rippleStart <= br.seaEnd &&
+      set.every(
+        (c, i) => (i < br.seaEnd || waveRippleWeight(c.k) === 1) && (i >= br.rippleStart || waveRippleWeight(c.k) === 0)
+      )
   );
   ok('ripples: none in still air (capillary onset)', waveRippleGain(0) === 0 && waveRippleGain(0.4) === 0);
-  ok('ripples: the reference wind is 1, and they grow as √U', Math.abs(waveRippleGain(7) - 1) < 1e-9 && waveRippleGain(28) > 1.9);
+  ok(
+    'ripples: the reference wind is 1, and they grow as √U',
+    Math.abs(waveRippleGain(7) - 1) < 1e-9 && waveRippleGain(28) > 1.9
+  );
   // world-locked layout: a pan by any amount keeps the photon grid and the slice texels on one world lattice
   const a = waveViewLayout({ minX: 1000, minY: 500, maxX: 2920, maxY: 1580 });
   const b = waveViewLayout({ minX: 1037.3, minY: 523.9, maxX: 2957.3, maxY: 1603.9 });
@@ -120,7 +134,8 @@ export function run(t) {
       onLattice(a.grid[0], cell) &&
       onLattice(b.grid[0], cell) &&
       onLattice(b.view[0], b.view[2] / WAVE_CAUSTIC_RES) &&
-      b.view[0] <= 1037.3 && b.grid[0] <= 1037.3 - 0.2 * 1920
+      b.view[0] <= 1037.3 &&
+      b.grid[0] <= 1037.3 - 0.2 * 1920
   );
   const pond = sea(0.1, 6);
   ok(
@@ -129,8 +144,10 @@ export function run(t) {
   );
   // energy goes downwind: components heading into the wind carry far less than those with it
   const e2 = (s, i) => s.ampsSea[i] ** 2;
-  const along = (s, towardRad) => set.reduce((acc, c, i) => acc + (Math.cos(c.theta - towardRad) > 0.7 ? e2(s, i) : 0), 0);
-  const against = (s, towardRad) => set.reduce((acc, c, i) => acc + (Math.cos(c.theta - towardRad) < -0.7 ? e2(s, i) : 0), 0);
+  const along = (s, towardRad) =>
+    set.reduce((acc, c, i) => acc + (Math.cos(c.theta - towardRad) > 0.7 ? e2(s, i) : 0), 0);
+  const against = (s, towardRad) =>
+    set.reduce((acc, c, i) => acc + (Math.cos(c.theta - towardRad) < -0.7 ? e2(s, i) : 0), 0);
   const east = sea(0.1, 400, 0);
   ok('the wind sea runs with the wind, not against it', along(east, 0) > against(east, 0) * 20);
   const north = sea(0.1, 400, -Math.PI / 2);
@@ -140,10 +157,16 @@ export function run(t) {
   const ripE = r2(east);
   const ripN = r2(north);
   // (only through the drawing gain, pinned on the lattice's slightly un-round wind sea: ~1%)
-  ok('the ripple bake does not depend on the scene wind’s bearing (within 3%)', ripE.every((x, i) => Math.abs(x - ripN[i]) <= 1e-12 + 0.06 * x));
+  ok(
+    'the ripple bake does not depend on the scene wind’s bearing (within 3%)',
+    ripE.every((x, i) => Math.abs(x - ripN[i]) <= 1e-12 + 0.06 * x)
+  );
   const ripAlong = set.reduce((a, c, i) => a + (Math.cos(c.theta) > 0.85 ? ripE[i] : 0), 0);
   const ripTotal = ripE.reduce((a, x) => a + x, 0);
-  ok(`the ripple bake runs toward +x with a narrow spread (${((100 * ripAlong) / ripTotal).toFixed(0)}% within ±32°)`, ripAlong > 0.6 * ripTotal);
+  ok(
+    `the ripple bake runs toward +x with a narrow spread (${((100 * ripAlong) / ripTotal).toFixed(0)}% within ±32°)`,
+    ripAlong > 0.6 * ripTotal
+  );
   const pure = set.filter((c) => waveRippleWeight(c.k) >= 1);
   ok(
     `every pure ripple component lies within ±60° of +x (${pure.length} of them carry the band)`,
@@ -161,22 +184,39 @@ export function run(t) {
     }
     return worst;
   };
-  const unit = [0.3, 3, 10].every((s) => [0, 0.4, 1.3, -2.9].every((a) => Math.abs(waveRippleBinWeights(a, s).reduce((x, w) => x + w * w, 0) - 1) < 1e-9));
+  const unit = [0.3, 3, 10].every((s) =>
+    [0, 0.4, 1.3, -2.9].every((a) => Math.abs(waveRippleBinWeights(a, s).reduce((x, w) => x + w * w, 0) - 1) < 1e-9)
+  );
   ok('the bearing blend keeps Σw² = 1 (the ripples’ variance holds)', unit);
-  ok(`turning the wind never jumps the bearing weights (worst step ${cont(0.3).toFixed(4)}, ${cont(10).toFixed(4)} per mrad)`, cont(0.3) < 0.01 && cont(10) < 0.01);
+  ok(
+    `turning the wind never jumps the bearing weights (worst step ${cont(0.3).toFixed(4)}, ${cont(10).toFixed(4)} per mrad)`,
+    cont(0.3) < 0.01 && cont(10) < 0.01
+  );
   const peak = (s) => Math.max(...waveRippleBinWeights(WAVE_RIPPLE_ROT + 0.1, s));
-  ok(`a strong wind narrows the ripples onto its bearing (main weight ${peak(0.3).toFixed(2)} calm → ${peak(10).toFixed(2)} windy)`, peak(10) > 0.9 && peak(0.3) < 0.7);
+  ok(
+    `a strong wind narrows the ripples onto its bearing (main weight ${peak(0.3).toFixed(2)} calm → ${peak(10).toFixed(2)} windy)`,
+    peak(10) > 0.9 && peak(0.3) < 0.7
+  );
   const rw = set.map((c) => waveRippleWeight(c.k));
-  ok('ripple weights are 0..1', rw.every((r) => r >= 0 && r <= 1));
+  ok(
+    'ripple weights are 0..1',
+    rw.every((r) => r >= 0 && r <= 1)
+  );
   ok('short waves are ripples, long ones the wind sea', rw.some((r) => r > 0.9) && rw.some((r) => r < 0.1));
 
   // ── fetch ──
   const sceneRect = { minX: 0, minY: 0, maxX: 3000, maxY: 3000 };
-  ok('water running off the scene edge is open sea', waveFetchMetres({ bounds: { minX: 0, minY: 0, maxX: 3000, maxY: 900 }, sceneRect, pxPerM: PPM }) === 2000);
+  ok(
+    'water running off the scene edge is open sea',
+    waveFetchMetres({ bounds: { minX: 0, minY: 0, maxX: 3000, maxY: 900 }, sceneRect, pxPerM: PPM }) === 2000
+  );
   const pf = waveFetchMetres({ bounds: { minX: 500, minY: 500, maxX: 900, maxY: 800 }, sceneRect, pxPerM: PPM });
   ok(`an inland pond's fetch is its own size (${pf.toFixed(1)} m)`, pf > 5 && pf < 8);
 
-  ok('Surface chop reference = WATER_TIER3_CHOP (0.31 means the measured sea)', WAVE_CHOP_REFERENCE === WATER_TIER3_CHOP);
+  ok(
+    'Surface chop reference = WATER_TIER3_CHOP (0.31 means the measured sea)',
+    WAVE_CHOP_REFERENCE === WATER_TIER3_CHOP
+  );
 
   // ── the GPU system constructs, steps, and every water tier builds against it ──
   let sys = null;
@@ -237,25 +277,34 @@ export function run(t) {
   {
     const base = { windDir: [1, 0], windRatio: 1, peakSpeedPx: 95, flowSpeedPx: 70 };
     const pond = wavePatternVelocity({ ...base, currentPx: [0, 0] });
-    ok('a closed pond (no current) moves with the wind alone, downwind', pond.vx > 0 && pond.vy === 0 && pond.flowing === 0);
-    const river = wavePatternVelocity({ ...base, currentPx: [-31, 0] });
     ok(
-      `a river reach running INTO the wind still moves with the river (vx ${river.vx.toFixed(1)} px/s)`,
-      river.vx < 0
+      'a closed pond (no current) moves with the wind alone, downwind',
+      pond.vx > 0 && pond.vy === 0 && pond.flowing === 0
     );
+    const river = wavePatternVelocity({ ...base, currentPx: [-31, 0] });
+    ok(`a river reach running INTO the wind still moves with the river (vx ${river.vx.toFixed(1)} px/s)`, river.vx < 0);
     ok(
       `in a river the wind's travel is a small share of the current's (${river.windPx.toFixed(1)} vs 31 px/s)`,
       river.windPx < 0.4 * 31
     );
     const rapids = wavePatternVelocity({ ...base, currentPx: [0, 110], peakSpeedPx: 227 });
     ok('in a rapid the wind still leans on it (both mix)', rapids.vx > 0 && rapids.vy === 110);
-    ok('in running water the wind travels at WAVE_WIND_IN_FLOW_RATIO of the current', Math.abs(rapids.windPx - 110 * WAVE_WIND_IN_FLOW_RATIO) < 1e-9);
+    ok(
+      'in running water the wind travels at WAVE_WIND_IN_FLOW_RATIO of the current',
+      Math.abs(rapids.windPx - 110 * WAVE_WIND_IN_FLOW_RATIO) < 1e-9
+    );
     const slow = wavePatternVelocity({ ...base, currentPx: [0, 12] });
-    ok(`even a slow reach (12 px/s) is carried more by its current than the wind (${slow.windPx.toFixed(1)} px/s)`, slow.windPx < 0.4 * 12);
+    ok(
+      `even a slow reach (12 px/s) is carried more by its current than the wind (${slow.windPx.toFixed(1)} px/s)`,
+      slow.windPx < 0.4 * 12
+    );
     const strong = wavePatternVelocity({ ...base, currentPx: [0, 0], peakSpeedPx: 220 });
     ok('a stronger wind (longer, faster waves) carries still water faster', strong.vx > pond.vx);
     ok('a calm carries nothing', wavePatternVelocity({ ...base, currentPx: [0, 0], peakSpeedPx: 0 }).vx === 0);
-    ok('shelter (local wind 0) carries nothing by wind', wavePatternVelocity({ ...base, currentPx: [0, 0], windRatio: 0 }).vx === 0);
+    ok(
+      'shelter (local wind 0) carries nothing by wind',
+      wavePatternVelocity({ ...base, currentPx: [0, 0], windRatio: 0 }).vx === 0
+    );
     let net = 0;
     for (let i = 0; i < 64; i++) net += waveBoilSign(i);
     ok('the components boil in place: as many run forward as backward', net === 0);

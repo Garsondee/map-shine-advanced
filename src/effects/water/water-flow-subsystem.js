@@ -306,7 +306,12 @@ export function createWaterFlowSubsystem({
       levelsAtFinish: levels.length,
       publishedAtFinish: Boolean(published),
       stats: res.stats,
-      bodies: res.bodies.map((b) => ({ id: b.id, cells: b.cells, open: b.open, links: b.links.map((l) => `${l.edge}:${l.cells}`) })),
+      bodies: res.bodies.map((b) => ({
+        id: b.id,
+        cells: b.cells,
+        open: b.open,
+        links: b.links.map((l) => `${l.edge}:${l.cells}`),
+      })),
     };
     // (no publish here: the GPU bake WAITS for this solve before it renders - see `bakeSteps` - so the pack it
     // composites with the field was rendered in the same frame. Copying a pack a few frames after its bake read
@@ -794,7 +799,16 @@ export function createWaterFlowSubsystem({
         levelCount: levels.length,
         published: published ? `${published.w}x${published.h}` : 'none',
         potential: pot
-          ? { grid: `${pot.w}x${pot.h}`, frames: pot.frames, finishedWhileBaking: pot.finishedWhileBaking, bakesAtFinish: pot.bakesAtFinish, levelsAtFinish: pot.levelsAtFinish, publishedAtFinish: pot.publishedAtFinish, stats: pot.stats, bodies: pot.bodies }
+          ? {
+              grid: `${pot.w}x${pot.h}`,
+              frames: pot.frames,
+              finishedWhileBaking: pot.finishedWhileBaking,
+              bakesAtFinish: pot.bakesAtFinish,
+              levelsAtFinish: pot.levelsAtFinish,
+              publishedAtFinish: pot.publishedAtFinish,
+              stats: pot.stats,
+              bodies: pot.bodies,
+            }
           : potJob
             ? 'solving'
             : 'none',

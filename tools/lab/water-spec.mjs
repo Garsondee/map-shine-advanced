@@ -23,7 +23,18 @@
  *
  * @module tools/lab/water-spec
  */
-import { GRID, GREY, INK, LAB_FLAG, LAB_SKY, LAB_WIND, LAB_VERSION, MODULE_ID, PADDING, paintOps } from './lab-spec.mjs';
+import {
+  GRID,
+  GREY,
+  INK,
+  LAB_FLAG,
+  LAB_SKY,
+  LAB_WIND,
+  LAB_VERSION,
+  MODULE_ID,
+  PADDING,
+  paintOps,
+} from './lab-spec.mjs';
 
 const { sq, rect, text, checker } = paintOps;
 
@@ -191,7 +202,9 @@ export function waterImages(version = LAB_VERSION) {
 
   // ── B1: hard edges on a uniform bed ──────────────────────────────────────────────
   art.push(rect(B1.pool, BED.mud));
-  art.push(checker({ x: B1.pool.x, y: B1.pool.y + B1.pool.h - sq(1), w: B1.pool.w, h: sq(1) }, 75, BED.checkA, BED.checkB));
+  art.push(
+    checker({ x: B1.pool.x, y: B1.pool.y + B1.pool.h - sq(1), w: B1.pool.w, h: sq(1) }, 75, BED.checkA, BED.checkB)
+  );
   mask.push(rect(B1.pool, WHITE));
   for (const b of [B1.boatH, B1.boatV]) {
     art.push({ op: 'ellipse', cx: b.cx, cy: b.cy, rx: b.rx + 7, ry: b.ry + 7, rgba: [40, 28, 20, 255] });
@@ -231,7 +244,16 @@ export function waterImages(version = LAB_VERSION) {
 
   // ── C3: beach -> open sea to the scene edge, rock island, jetty ──────────────────
   art.push({ op: 'ramp', x: SEA.x, y: SEA.y, w: sq(12), h: SEA.h, a: BED.sand, b: [104, 98, 84, 255], axis: 'x' });
-  art.push({ op: 'ramp', x: SEA.x + sq(12), y: SEA.y, w: sq(8), h: SEA.h, a: [104, 98, 84, 255], b: BED.rock, axis: 'x' });
+  art.push({
+    op: 'ramp',
+    x: SEA.x + sq(12),
+    y: SEA.y,
+    w: sq(8),
+    h: SEA.h,
+    a: [104, 98, 84, 255],
+    b: BED.rock,
+    axis: 'x',
+  });
   art.push(checker({ x: SEA.x, y: SEA.y + sq(10), w: SEA.w, h: sq(1.5) }, 75, BED.checkA, BED.checkB));
   mask.push({ op: 'ramp', x: SEA.x, y: SEA.y, w: SEA.beachW, h: SEA.h, a: BLACK, b: WHITE, axis: 'x' });
   mask.push(rect({ x: SEA.x + SEA.beachW, y: SEA.y, w: SEA.w - SEA.beachW, h: SEA.h }, WHITE));
@@ -253,11 +275,7 @@ export function waterImages(version = LAB_VERSION) {
     mode,
     ops,
   });
-  return [
-    img('', 'RGB', art),
-    img('_Water', 'RGB', mask),
-    img('_Outdoors', 'RGB', [{ op: 'fill', rgba: WHITE }]),
-  ];
+  return [img('', 'RGB', art), img('_Water', 'RGB', mask), img('_Outdoors', 'RGB', [{ op: 'fill', rgba: WHITE }])];
 }
 
 export function waterScene(assetDir, version = LAB_VERSION) {

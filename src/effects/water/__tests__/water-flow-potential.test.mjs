@@ -29,7 +29,10 @@ export function run(t) {
   const ds = downsampleDepth(bytes, 40, 20, 10, 5);
   ok('a white mask downsamples to depth 1', ds.length === 50 && ds.every((v) => Math.abs(v - 1) < 1e-6));
   const g = potentialGridDims(6300, 5100);
-  ok(`the potential grid keeps the aspect (${g.gw}x${g.gh})`, g.gw === 512 && Math.abs(g.gh / g.gw - 5100 / 6300) < 0.01);
+  ok(
+    `the potential grid keeps the aspect (${g.gw}x${g.gh})`,
+    g.gw === 512 && Math.abs(g.gh / g.gw - 5100 / 6300) < 0.01
+  );
 
   // ── bodies: links on the edge decide open and closed ──
   const W = 64;
@@ -53,7 +56,10 @@ export function run(t) {
   ok('a bay with a full link on the edge is open', bay && bay.open);
   // a body only ever shallow at the edge is not linked: "fully white"
   const shallowEdge = paint(32, 32, (x, y) => (y < 10 && x > 8 && x < 20 ? WATER_LINK_LEVEL - 0.1 : 0));
-  ok('water at the edge that is not fully white does not link', analyseBodies(shallowEdge, 32, 32).bodies.every((b) => !b.open));
+  ok(
+    'water at the edge that is not fully white does not link',
+    analyseBodies(shallowEdge, 32, 32).bodies.every((b) => !b.open)
+  );
 
   // ── a straight channel: flow along it, speed ∝ 1 / width ──
   const CW = 72;
@@ -61,7 +67,10 @@ export function run(t) {
   const channel = (halfWidthAt) => paint(CW, CH, (x, y) => (Math.abs(y - 24) <= halfWidthAt(x) ? 1 : 0));
   const wide = solvePotentialFlow({ depth: channel(() => 8), gw: CW, gh: CH, dir: EAST });
   const mid = 24 * CW + 36;
-  ok(`a channel open at both ends flows along it (vx ${wide.vx[mid].toFixed(2)})`, wide.vx[mid] > 0.9 && Math.abs(wide.vy[mid]) < 0.05);
+  ok(
+    `a channel open at both ends flows along it (vx ${wide.vx[mid].toFixed(2)})`,
+    wide.vx[mid] > 0.9 && Math.abs(wide.vy[mid]) < 0.05
+  );
   // narrowing in the middle: continuity speeds the water up
   const pinch = solvePotentialFlow({ depth: channel((x) => (x > 28 && x < 44 ? 3 : 8)), gw: CW, gh: CH, dir: EAST });
   ok(
@@ -69,9 +78,17 @@ export function run(t) {
     pinch.vx[24 * CW + 36] > 1.7 * pinch.vx[24 * CW + 12]
   );
   // the flow turned to a bearing along the channel's other direction: a channel closed at one end flows not at all
-  const deadEnd = solvePotentialFlow({ depth: paint(CW, CH, (x, y) => (x < 50 && Math.abs(y - 24) <= 6 ? 1 : 0)), gw: CW, gh: CH, dir: EAST });
+  const deadEnd = solvePotentialFlow({
+    depth: paint(CW, CH, (x, y) => (x < 50 && Math.abs(y - 24) <= 6 ? 1 : 0)),
+    gw: CW,
+    gh: CH,
+    dir: EAST,
+  });
   const deadMid = deadEnd.vx[24 * CW + 25];
-  ok(`a channel open at one end only has no through-flow (|v| ${Math.abs(deadMid).toFixed(3)})`, Math.abs(deadMid) < 0.12);
+  ok(
+    `a channel open at one end only has no through-flow (|v| ${Math.abs(deadMid).toFixed(3)})`,
+    Math.abs(deadMid) < 0.12
+  );
 
   // ── a bend: the flow follows the channel, north edge in, east edge out ──
   const bendDepth = paint(60, 60, (x, y) => {
@@ -82,8 +99,14 @@ export function run(t) {
   const bend = solvePotentialFlow({ depth: bendDepth, gw: 60, gh: 60, dir: [0.6, 0.8] });
   const up = bend.vy[10 * 60 + 12];
   const out = bend.vx[36 * 60 + 40];
-  ok(`the flow runs south down the first reach (vy ${up.toFixed(2)})`, up > 0.3 && Math.abs(bend.vx[10 * 60 + 12]) < 0.15);
-  ok(`and east along the second, round the corner (vx ${out.toFixed(2)})`, out > 0.3 && Math.abs(bend.vy[36 * 60 + 40]) < 0.15);
+  ok(
+    `the flow runs south down the first reach (vy ${up.toFixed(2)})`,
+    up > 0.3 && Math.abs(bend.vx[10 * 60 + 12]) < 0.15
+  );
+  ok(
+    `and east along the second, round the corner (vx ${out.toFixed(2)})`,
+    out > 0.3 && Math.abs(bend.vy[36 * 60 + 40]) < 0.15
+  );
 
   // ── a rock in a stream: stagnation behind it, acceleration beside it ──
   const rockDepth = paint(CW, CH, (x, y) => (Math.hypot(x - 36, y - 24) < 4 ? 0 : 1));
@@ -113,10 +136,21 @@ export function run(t) {
   );
 
   // ── shallow reaches flow slower than the deep core beside them ──
-  const bank = solvePotentialFlow({ depth: paint(CW, CH, (x, y) => (Math.abs(y - 24) > 11 ? 0 : Math.abs(y - 24) > 5 ? 0.18 : 1)), gw: CW, gh: CH, dir: EAST });
-  ok(`a shallow bank flows slower than the deep core (${bank.speed[(24 + 8) * CW + 36].toFixed(2)} vs ${bank.speed[24 * CW + 36].toFixed(2)})`, bank.speed[(24 + 8) * CW + 36] < 0.8 * bank.speed[24 * CW + 36]);
+  const bank = solvePotentialFlow({
+    depth: paint(CW, CH, (x, y) => (Math.abs(y - 24) > 11 ? 0 : Math.abs(y - 24) > 5 ? 0.18 : 1)),
+    gw: CW,
+    gh: CH,
+    dir: EAST,
+  });
+  ok(
+    `a shallow bank flows slower than the deep core (${bank.speed[(24 + 8) * CW + 36].toFixed(2)} vs ${bank.speed[24 * CW + 36].toFixed(2)})`,
+    bank.speed[(24 + 8) * CW + 36] < 0.8 * bank.speed[24 * CW + 36]
+  );
 
   // ── determinism ──
   const again = solvePotentialFlow({ depth: rockDepth, gw: CW, gh: CH, dir: EAST });
-  ok('the solve is deterministic', again.vx.every((v, k) => v === rock.vx[k]));
+  ok(
+    'the solve is deterministic',
+    again.vx.every((v, k) => v === rock.vx[k])
+  );
 }

@@ -862,8 +862,12 @@ export function buildWaterSurfaceField({
     // Central differences of the signed distance, 2R apart: the field is continuous everywhere, so the direction can
     // only change smoothly (a 3x3 mask blur jumps whenever a tap crosses a wall, which drew a hard outline 48 px out).
     const S = WATER_BANK_BLUR_PX;
-    const gx = sampleSdfAt(float(S), float(0)).sub(sampleSdfAt(float(-S), float(0))).div(float(2 * S));
-    const gy = sampleSdfAt(float(0), float(S)).sub(sampleSdfAt(float(0), float(-S))).div(float(2 * S));
+    const gx = sampleSdfAt(float(S), float(0))
+      .sub(sampleSdfAt(float(-S), float(0)))
+      .div(float(2 * S));
+    const gy = sampleSdfAt(float(0), float(S))
+      .sub(sampleSdfAt(float(0), float(-S)))
+      .div(float(2 * S));
     const gLen = length(vec2(gx, gy));
     const nrm = vec2(gx, gy).div(max(gLen, float(1e-5)));
     const t = vec2(nrm.y.negate(), nrm.x);

@@ -121,20 +121,29 @@ export function run(t) {
   const mean = timeline.reduce((a, b) => a + b, 0) / timeline.length;
   ok(`spray comes in splats: quiet spells (${quiet}/600 frames empty)`, quiet > 120);
   ok(`... and bursts far above the mean (peak ${peak} vs mean ${mean.toFixed(1)})`, peak > mean * 4);
-  ok('wind alone (no current) drives spray into a wall it blows at', (() => {
-    let n = 0;
-    for (let f = 0; f < 2000; f++) n += plan([1, 0], 0, f + 1, 1, { wind01: 0.8, windDir: [1, 0] }).length;
-    return n > 2000;
-  })());
-  ok('wind blowing away from the wall, no current: none', (() => {
-    let n = 0;
-    for (let f = 0; f < 120; f++) n += plan([1, 0], 0, f + 1, 1, { wind01: 0.8, windDir: [-1, 0] }).length;
-    return n === 0;
-  })());
-  ok('the wave impact averages to its stated mean', (() => {
-    let s = 0;
-    for (let i = 0; i < 4000; i++) s += sprayWaveImpact(i * 13.7, i * 3.1, i * 0.113, 0.6, 0.8, 60);
-    const m = s / 4000;
-    return m > WAVE_IMPACT_MEAN * 0.6 && m < WAVE_IMPACT_MEAN * 1.6;
-  })());
+  ok(
+    'wind alone (no current) drives spray into a wall it blows at',
+    (() => {
+      let n = 0;
+      for (let f = 0; f < 2000; f++) n += plan([1, 0], 0, f + 1, 1, { wind01: 0.8, windDir: [1, 0] }).length;
+      return n > 2000;
+    })()
+  );
+  ok(
+    'wind blowing away from the wall, no current: none',
+    (() => {
+      let n = 0;
+      for (let f = 0; f < 120; f++) n += plan([1, 0], 0, f + 1, 1, { wind01: 0.8, windDir: [-1, 0] }).length;
+      return n === 0;
+    })()
+  );
+  ok(
+    'the wave impact averages to its stated mean',
+    (() => {
+      let s = 0;
+      for (let i = 0; i < 4000; i++) s += sprayWaveImpact(i * 13.7, i * 3.1, i * 0.113, 0.6, 0.8, 60);
+      const m = s / 4000;
+      return m > WAVE_IMPACT_MEAN * 0.6 && m < WAVE_IMPACT_MEAN * 1.6;
+    })()
+  );
 }

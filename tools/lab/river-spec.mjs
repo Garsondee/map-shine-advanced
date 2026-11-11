@@ -48,8 +48,23 @@ export const COLOURS = Object.freeze({
 /** The river's centre line (squares) and its width at each point (squares): meander, then the narrow rapids. */
 export const RIVER = Object.freeze({
   points: [
-    [8, -1.5], [8.3, 3.5], [11.5, 7.6], [16.5, 8.4], [19.6, 11.8], [18.2, 16.2], [12.4, 17.2], [7.4, 19.4],
-    [6.2, 24], [9.2, 28], [15, 28.6], [20, 26.6], [23.5, 25.6], [27, 25.3], [30, 25.8], [33, 25.4], [35.6, 25.2],
+    [8, -1.5],
+    [8.3, 3.5],
+    [11.5, 7.6],
+    [16.5, 8.4],
+    [19.6, 11.8],
+    [18.2, 16.2],
+    [12.4, 17.2],
+    [7.4, 19.4],
+    [6.2, 24],
+    [9.2, 28],
+    [15, 28.6],
+    [20, 26.6],
+    [23.5, 25.6],
+    [27, 25.3],
+    [30, 25.8],
+    [33, 25.4],
+    [35.6, 25.2],
     [37.6, 25.2],
   ],
   width: [4.2, 4.2, 4.2, 4.2, 4.2, 4.2, 4.2, 4.2, 4.2, 4.2, 4.2, 3.6, 2.8, 2.6, 2.6, 2.8, 4.5, 6],
@@ -62,7 +77,15 @@ export const RAPIDS = Object.freeze({ x0: 23.6, x1: 33.2, yC: 25.5, half: 1.15 }
 
 /** The oxbow: the cut-off horseshoe of an old meander (squares), its own still body. */
 export const OXBOW = Object.freeze({
-  points: [[25, 2.6], [24, 6.2], [25.6, 9.6], [29.4, 10.4], [32.4, 8.2], [32.6, 4.6], [30.6, 2.4]],
+  points: [
+    [25, 2.6],
+    [24, 6.2],
+    [25.6, 9.6],
+    [29.4, 10.4],
+    [32.4, 8.2],
+    [32.6, 4.6],
+    [30.6, 2.4],
+  ],
   width: 2.8,
   bank: 1.0,
   peak: 190,
@@ -70,9 +93,27 @@ export const OXBOW = Object.freeze({
 });
 
 export const SEA = Object.freeze({ x: sq(34.5), beachW: sq(2.5) });
-export const POND = Object.freeze({ cx: sq(29), cy: sq(17), rx: 360, ry: 300, peak: 255, shore: 0.5, wobble: 0.1, seed: 23 });
+export const POND = Object.freeze({
+  cx: sq(29),
+  cy: sq(17),
+  rx: 360,
+  ry: 300,
+  peak: 255,
+  shore: 0.5,
+  wobble: 0.1,
+  seed: 23,
+});
 export const POND_ISLAND = Object.freeze({ cx: sq(29.4), cy: sq(16.7), rx: 70, ry: 55 });
-export const LOOP_POND = Object.freeze({ cx: sq(13.5), cy: sq(22.8), rx: 230, ry: 170, peak: 200, shore: 0.6, wobble: 0.2, seed: 29 });
+export const LOOP_POND = Object.freeze({
+  cx: sq(13.5),
+  cy: sq(22.8),
+  rx: 230,
+  ry: 170,
+  peak: 200,
+  shore: 0.6,
+  wobble: 0.2,
+  seed: 29,
+});
 export const PUDDLES = Object.freeze([
   { cx: sq(2.6), cy: sq(9.5), rx: 90, ry: 60, peak: 110, shore: 0.6, wobble: 0.2, seed: 31 },
   { cx: sq(3.6), cy: sq(12.4), rx: 140, ry: 90, peak: 140, shore: 0.5, wobble: 0.25, seed: 37 },
@@ -92,7 +133,13 @@ export function rapidsRocks() {
     const x = sq(RAPIDS.x0 + (RAPIDS.x1 - RAPIDS.x0) * ((i + r()) / 17));
     const y = sq(RAPIDS.yC + (r() * 2 - 1) * RAPIDS.half);
     const rr = 26 + r() * 46;
-    dry.push({ cx: Math.round(x), cy: Math.round(y), rx: Math.round(rr), ry: Math.round(rr * (0.7 + r() * 0.4)), seed: 100 + i });
+    dry.push({
+      cx: Math.round(x),
+      cy: Math.round(y),
+      rx: Math.round(rr),
+      ry: Math.round(rr * (0.7 + r() * 0.4)),
+      seed: 100 + i,
+    });
   }
   for (let i = 0; i < 16; i++) {
     const x = sq(RAPIDS.x0 + (RAPIDS.x1 - RAPIDS.x0) * r());
@@ -157,9 +204,29 @@ export function riverImages(version = LAB_VERSION) {
   const stone = (o) => {
     const wob = o.wobble ?? 0.2;
     const seed = o.seed ?? 7;
-    art.push({ op: 'dip', cx: o.cx, cy: o.cy, rx: o.rx + 7, ry: o.ry + 7, shore: 0, wobble: wob, seed, rgba: C.rockRim });
+    art.push({
+      op: 'dip',
+      cx: o.cx,
+      cy: o.cy,
+      rx: o.rx + 7,
+      ry: o.ry + 7,
+      shore: 0,
+      wobble: wob,
+      seed,
+      rgba: C.rockRim,
+    });
     art.push({ op: 'dip', cx: o.cx, cy: o.cy, rx: o.rx, ry: o.ry, shore: 0.25, wobble: wob, seed, rgba: C.rock });
-    art.push({ op: 'dip', cx: o.cx - o.rx * 0.18, cy: o.cy - o.ry * 0.2, rx: o.rx * 0.55, ry: o.ry * 0.5, shore: 0.9, wobble: wob, seed: seed + 1, rgba: [138, 136, 128, 255] });
+    art.push({
+      op: 'dip',
+      cx: o.cx - o.rx * 0.18,
+      cy: o.cy - o.ry * 0.2,
+      rx: o.rx * 0.55,
+      ry: o.ry * 0.5,
+      shore: 0.9,
+      wobble: wob,
+      seed: seed + 1,
+      rgba: [138, 136, 128, 255],
+    });
     mask.push({ op: 'dip', cx: o.cx, cy: o.cy, rx: o.rx + 6, ry: o.ry + 6, floor: 0, shore: 0.1, wobble: wob, seed });
   };
   stone({ ...POND_ISLAND, seed: 3 });
@@ -173,7 +240,11 @@ export function riverImages(version = LAB_VERSION) {
   }
   for (const d of rocks.dry) stone(d);
 
-  label(1, 0.6, 'Lab · River  —  R river (in across the north edge), RR rapids, S sea (whole east edge), O oxbow, P ponds');
+  label(
+    1,
+    0.6,
+    'Lab · River  —  R river (in across the north edge), RR rapids, S sea (whole east edge), O oxbow, P ponds'
+  );
   label(10.5, 2.2, 'R  inlet', 44);
   label(20.6, 14.4, 'boulder', 40);
   label(24, 23.3, 'RR  rapids: dry rocks + submerged boulders', 44);
@@ -183,7 +254,15 @@ export function riverImages(version = LAB_VERSION) {
   label(11.4, 24.6, 'P2  pond in the loop', 40);
   label(1.4, 14.4, 'P3  puddles', 40);
   art.push(...labels);
-  const img = (suffix, mode, ops) => ({ name: `${base}-Ground${suffix}.webp`, role: suffix || 'art', floor: 'river', w: W.w, h: W.h, mode, ops });
+  const img = (suffix, mode, ops) => ({
+    name: `${base}-Ground${suffix}.webp`,
+    role: suffix || 'art',
+    floor: 'river',
+    w: W.w,
+    h: W.h,
+    mode,
+    ops,
+  });
   return [img('', 'RGB', art), img('_Water', 'RGB', mask), img('_Outdoors', 'RGB', [{ op: 'fill', rgba: WHITE }])];
 }
 

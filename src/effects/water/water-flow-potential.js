@@ -83,7 +83,12 @@ export function potentialGridDims(rectW, rectH, maxDim = WATER_POTENTIAL_GRID_MA
  * @returns {{labels: Int32Array, bodies: Array<{id:number, cells:number, linkCells:number, open:boolean,
  *   links: Array<{edge:'N'|'S'|'W'|'E', cells:number, centre:number}>}>}} labels: 0 = land, else body id (1-based).
  */
-export function analyseBodies(depth, gw, gh, { presence = WATER_PRESENCE, linkLevel = WATER_LINK_LEVEL, minLink = WATER_LINK_MIN_CELLS } = {}) {
+export function analyseBodies(
+  depth,
+  gw,
+  gh,
+  { presence = WATER_PRESENCE, linkLevel = WATER_LINK_LEVEL, minLink = WATER_LINK_MIN_CELLS } = {}
+) {
   const labels = new Int32Array(gw * gh);
   const bodies = [];
   const queue = new Int32Array(gw * gh);
@@ -134,10 +139,30 @@ export function analyseBodies(depth, gw, gh, { presence = WATER_PRESENCE, linkLe
     }
     if (cur) addLink(bodies[cur - 1], edge, run);
   };
-  sweep('N', gw, (k) => k, (k) => k / gw);
-  sweep('S', gw, (k) => (gh - 1) * gw + k, (k) => k / gw);
-  sweep('W', gh, (k) => k * gw, (k) => k / gh);
-  sweep('E', gh, (k) => k * gw + gw - 1, (k) => k / gh);
+  sweep(
+    'N',
+    gw,
+    (k) => k,
+    (k) => k / gw
+  );
+  sweep(
+    'S',
+    gw,
+    (k) => (gh - 1) * gw + k,
+    (k) => k / gw
+  );
+  sweep(
+    'W',
+    gh,
+    (k) => k * gw,
+    (k) => k / gh
+  );
+  sweep(
+    'E',
+    gh,
+    (k) => k * gw + gw - 1,
+    (k) => k / gh
+  );
   for (const b of bodies) b.open = b.linkCells >= minLink;
   return { labels, bodies };
 }
@@ -316,7 +341,16 @@ function halve(depth, gw, gh) {
  * @param {number} [o.levels] - cascade levels (the coarsest is 1/2^(levels−1) of the finest)
  * @param {number} [o.shallowFriction] - 0..1, how much shallow reaches slow (1 = full)
  */
-export function* solvePotentialFlowSteps({ depth, gw, gh, dir, levels = 3, shallowFriction = 1, tol = 1e-4, maxIts = 500 }) {
+export function* solvePotentialFlowSteps({
+  depth,
+  gw,
+  gh,
+  dir,
+  levels = 3,
+  shallowFriction = 1,
+  tol = 1e-4,
+  maxIts = 500,
+}) {
   // the cascade, finest first
   const pyramid = [{ depth, gw, gh, f: 1 }];
   for (let l = 1; l < levels; l++) {

@@ -10573,7 +10573,11 @@ async function startVtPanViewerUnserialized({
           depth: false,
         });
         const { uniform, vec4 } = THREE.TSL;
-        waterWindStrengthField = { texture: waterWindStrengthRT.texture, uRect: uniform(vec4(0, 0, 1, 1)), rt: waterWindStrengthRT };
+        waterWindStrengthField = {
+          texture: waterWindStrengthRT.texture,
+          uRect: uniform(vec4(0, 0, 1, 1)),
+          rt: waterWindStrengthRT,
+        };
       }
       return waterWindStrengthField;
     }
@@ -11724,7 +11728,9 @@ async function startVtPanViewerUnserialized({
           timeScale: Number.isFinite(wp.waveSpeed) ? wp.waveSpeed : 1,
           // √: maps tuned for the old water carry chop up to ~0.8, which as a straight ratio drew a sea 2.6× steeper
           // than any real one (caustics past focus everywhere — Docklands went milky, 2026-11-10); 0.8 now reads 1.6×
-          slopeGain: Math.sqrt(Math.max(0, Number.isFinite(wp.chop) ? wp.chop : WAVE_CHOP_REFERENCE) / WAVE_CHOP_REFERENCE),
+          slopeGain: Math.sqrt(
+            Math.max(0, Number.isFinite(wp.chop) ? wp.chop : WAVE_CHOP_REFERENCE) / WAVE_CHOP_REFERENCE
+          ),
           localWind: Number.isFinite(wp.windRipple) ? Math.min(1.5, Math.max(0, wp.windRipple)) : 1,
         });
         waterWaves.render(renderer);
@@ -33115,7 +33121,8 @@ async function startVtPanViewerUnserialized({
             }
           }
           let bin = '';
-          for (let i = 0; i < q.length; i += 8192) bin += String.fromCharCode(...new Uint8Array(q.buffer, i, Math.min(8192, q.length - i)));
+          for (let i = 0; i < q.length; i += 8192)
+            bin += String.fromCharCode(...new Uint8Array(q.buffer, i, Math.min(8192, q.length - i)));
           out.field = { gw, gh, stride, b64: btoa(bin) };
         }
         // the foam sim's own memory (raw R accumulator), same rect: `{sim: true}` (2026-11-10, trails/riffles lab)
@@ -33131,7 +33138,8 @@ async function startVtPanViewerUnserialized({
             const q = new Uint8Array(srt.width * srt.height);
             for (let i = 0; i < q.length; i++) q[i] = Math.round(Math.max(0, Math.min(1, sdec(i * ch) / 2)) * 255);
             let bin = '';
-            for (let i = 0; i < q.length; i += 8192) bin += String.fromCharCode(...q.subarray(i, Math.min(q.length, i + 8192)));
+            for (let i = 0; i < q.length; i += 8192)
+              bin += String.fromCharCode(...q.subarray(i, Math.min(q.length, i + 8192)));
             out.sim = { w: srt.width, h: srt.height, scale: 2, b64: btoa(bin), declared: [sw, sh] };
           }
         }

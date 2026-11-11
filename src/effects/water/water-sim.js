@@ -512,7 +512,11 @@ export function buildWaterSimStepMaterial({
   const diffusedR = mix(prevSharpNode.r, blurredR, diffuseNode);
   // LIFE BY SPEED (`WATER_SIM_SLOW_LIFE_MUL`, twin `waterSimFoamLifeSec`)
   const lifeSec = tauFoamSecNode.mul(
-    mix(float(WATER_SIM_SLOW_LIFE_MUL), float(1), smoothstep(float(WATER_SIM_SLOW_SPEED), float(WATER_SIM_FAST_SPEED), speed01))
+    mix(
+      float(WATER_SIM_SLOW_LIFE_MUL),
+      float(1),
+      smoothstep(float(WATER_SIM_SLOW_SPEED), float(WATER_SIM_FAST_SPEED), speed01)
+    )
   );
   const decayedR = diffusedR.mul(exp(uDtSec.negate().div(lifeSec)));
 
@@ -563,7 +567,9 @@ export function buildWaterSimStepMaterial({
   const depthGrad = vec2(depthR.sub(depthL), depthD.sub(depthU)).div(float(2));
   const climb = max(dot(velDir, depthGrad).negate(), float(0));
   const fast = smoothstep(float(WATER_SIM_RIFFLE_SPEED_LO), float(WATER_SIM_RIFFLE_SPEED_HI), speed01);
-  const shallow = float(1).sub(smoothstep(float(WATER_SIM_RIFFLE_SHALLOW), float(WATER_SIM_RIFFLE_DEEP), bodyTexNode.g));
+  const shallow = float(1).sub(
+    smoothstep(float(WATER_SIM_RIFFLE_SHALLOW), float(WATER_SIM_RIFFLE_DEEP), bodyTexNode.g)
+  );
   const emitRiffleRaw = fast
     .mul(min(float(1), shallow.add(climb.mul(float(WATER_SIM_RIFFLE_CLIMB_GAIN)))))
     .mul(float(WATER_SIM_RIFFLE_GAIN));
@@ -608,7 +614,9 @@ export function buildWaterSimStepMaterial({
       : float(1);
 
   // riffles break out in spots (`WATER_SIM_RIFFLE_SPOT_LO`) that the current draws into streaks
-  const emitRiffle = emitRiffleRaw.mul(smoothstep(float(WATER_SIM_RIFFLE_SPOT_LO), float(WATER_SIM_RIFFLE_SPOT_HI), noiseRaw));
+  const emitRiffle = emitRiffleRaw.mul(
+    smoothstep(float(WATER_SIM_RIFFLE_SPOT_LO), float(WATER_SIM_RIFFLE_SPOT_HI), noiseRaw)
+  );
   const emitSum = emitFront.add(emitShear).add(emitSwash).add(emitRiffle).add(emitLee);
   const totalEmit = emitSum.div(float(1).add(emitSum.div(float(WATER_SIM_EMIT_SOFT_CAP)))).mul(uFoamAmount);
   const newR = decayedR.add(totalEmit.mul(uDtSec).mul(noiseGate).mul(patchGate));

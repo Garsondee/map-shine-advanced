@@ -30,6 +30,7 @@ import {
   normalizeTransportState,
   computeTileWorldTransforms,
   reanchorTransport,
+  repairStaleTransportAnchor,
   buildMotionGraph,
   convertTileMotionToTileScrollFlags,
 } from './tile-motion.js';
@@ -522,6 +523,14 @@ export function initializeTileMotionRuntime() {
     unwatchTiles = watchTileMotionConfigs(onTileDocChanged);
     unwatchPauseGame = watchGamePause();
     initialized = true;
+  }
+
+  // A transport anchored far ahead of the shared clock (a scene imported from a world whose clock had run
+  // longer) would hold every tile at its start pose for hours. A GM re-anchors it once, keeping the elapsed
+  // time; every other client follows through the transport watcher above.
+  if (canEditScene()) {
+    const repaired = repairStaleTransportAnchor(transportCache, nowMs());
+    if (repaired) void writeTransportState(repaired);
   }
 
   // Autoplay must take effect even if nobody ever opens the dialog this

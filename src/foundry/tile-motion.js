@@ -202,6 +202,27 @@ export function computeElapsedSec(transport, nowMs) {
   return Math.max(0, transport.anchorElapsedSec + dtMs * 0.001 * speed * timeFactor);
 }
 
+/** How far ahead of the shared clock a playing transport's anchor may sit (client skew) before it is stale. */
+export const STALE_ANCHOR_SLOP_MS = 120000;
+
+/**
+ * A playing transport whose anchor is stamped far AHEAD of the shared sim clock is stale: the scene came
+ * from a world whose clock had run longer (a map import, a world copy) or the ledger restarted. The pose
+ * maths clamps negative time to 0, so every tile would stand still at its start pose until the clock caught
+ * up, hours in the worst case (found on the two-client QA rig 2026-11-11: anchor 2,574,843 vs a clock at
+ * 75,874, tiles frozen for ~42 minutes). Returns the same transport re-anchored at `nowMs` (its elapsed time
+ * is kept), or null when nothing is wrong. Pure: a GM client writes the result back, every other client
+ * follows through the transport watcher.
+ * @param {TileMotionTransport} transport - already normalized.
+ * @param {number} nowMs
+ * @returns {TileMotionTransport|null}
+ */
+export function repairStaleTransportAnchor(transport, nowMs) {
+  if (!transport?.playing || transport.paused) return null;
+  if (!Number.isFinite(nowMs) || !(transport.anchorAtMs - nowMs > STALE_ANCHOR_SLOP_MS)) return null;
+  return { ...transport, anchorAtMs: nowMs };
+}
+
 /**
  * Re-stamp the anchor at `nowMs`, freezing whatever `elapsedSec` currently is
  * as the new baseline. Call this from every transport mutation that could

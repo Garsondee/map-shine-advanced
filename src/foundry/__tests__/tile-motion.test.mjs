@@ -9,6 +9,7 @@ import {
   normalizeTransportState,
   computeElapsedSec,
   reanchorTransport,
+  repairStaleTransportAnchor,
   easeByName01,
   hash01,
   tileSeed,
@@ -93,6 +94,32 @@ export function run(t) {
       computeElapsedSec(normalizeTransportState({ playing: false }), 99999) === 0
     );
     ok('elapsed advances 1:1 at 100% speed', near(computeElapsedSec(transport, 5000), 5));
+
+    // A stale anchor (stamped far ahead of the clock by an imported scene) is re-anchored, keeping elapsed time.
+    const stale = normalizeTransportState({ playing: true, anchorElapsedSec: 12, anchorAtMs: 2574843 });
+    ok('stale anchor: tiles would stand still (clamped to the baseline)', near(computeElapsedSec(stale, 75874), 12));
+    const fixed = repairStaleTransportAnchor(stale, 75874);
+    ok(
+      'stale anchor: repaired at the current clock, elapsed kept',
+      fixed && fixed.anchorAtMs === 75874 && fixed.anchorElapsedSec === 12
+    );
+    ok('stale anchor: …and then time advances again', near(computeElapsedSec(fixed, 80874), 17));
+    ok(
+      'a healthy transport is left alone',
+      repairStaleTransportAnchor(normalizeTransportState({ playing: true, anchorAtMs: 70000 }), 75874) === null
+    );
+    ok(
+      'a few seconds of client skew is left alone',
+      repairStaleTransportAnchor(normalizeTransportState({ playing: true, anchorAtMs: 80000 }), 75874) === null
+    );
+    ok(
+      'a paused or stopped transport is never rewritten',
+      repairStaleTransportAnchor(
+        normalizeTransportState({ playing: true, paused: true, anchorAtMs: 2574843 }),
+        75874
+      ) === null &&
+        repairStaleTransportAnchor(normalizeTransportState({ playing: false, anchorAtMs: 2574843 }), 75874) === null
+    );
 
     // Play 10s, then bump speed to 300% (reanchor).
     transport = reanchorTransport(

@@ -47,6 +47,13 @@ export const MIST_LIGHT_SPREAD_UV = 0.018;
  * this power to be lit exactly like the ground beneath it (mmp-78u.34.8).
  */
 export const MIST_ILLUM_GAMMA = 2.2;
+/** Mist light (linear, after the gamma lift) where the lamp-lit mist starts / finishes giving up opacity. Noon sits ~0.85. */
+export const MIST_LAMP_KNEE_LO = 0.9;
+export const MIST_LAMP_KNEE_HI = 2.0;
+/** Share of its opacity the mist keeps in the brightest lamp light (line work shows through the rest). */
+export const MIST_LAMP_OPACITY_KEEP = 0.5;
+/** The brightest light the mist is ever lit by, so a hot lamp does not paint a white wall. */
+export const MIST_LIGHT_CAP = 1.6;
 /** Density below this draws nothing at all (a JS `if`, not a zero uniform: Law 4). */
 export const MIST_MIN_DENSITY = 0.002;
 
@@ -204,7 +211,18 @@ export function createGroundMist({
         .max(vec3(0, 0, 0))
         .pow(vec3(MIST_ILLUM_GAMMA, MIST_ILLUM_GAMMA, MIST_ILLUM_GAMMA));
     }
-    return vec4(uAlbedo.mul(cool).mul(tone.mul(lit)).mul(light), opacity);
+    // LAMP-LIT FOG MUST NOT WASH OUT THE ART (Ingram 2026-11-11: fog at night near a light turned the black outlines
+    // white first). A normal blend lifts the darkest pixel toward the fog colour, and beside a lamp that colour is the
+    // brightest on screen. So where the mist's own light is above a ground-lit level, the mist gives up opacity and
+    // brightness: the lamp glows in it, the line work underneath stays dark.
+    const lampLuma = light.dot(vec3(0.2126, 0.7152, 0.0722));
+    const lampKeep = mix(
+      float(1),
+      float(MIST_LAMP_OPACITY_KEEP),
+      smoothstep(float(MIST_LAMP_KNEE_LO), float(MIST_LAMP_KNEE_HI), lampLuma)
+    );
+    const litLight = light.min(vec3(MIST_LIGHT_CAP, MIST_LIGHT_CAP, MIST_LIGHT_CAP));
+    return vec4(uAlbedo.mul(cool).mul(tone.mul(lit)).mul(litLight), opacity.mul(lampKeep));
   })();
 
   material.transparent = true;

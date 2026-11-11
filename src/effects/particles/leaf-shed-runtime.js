@@ -115,6 +115,9 @@ const LOFT_MAX_CROWNS = 3.5;
 const FADE_IN_SEC = 0.15;
 /** Seconds of its ground time a leaf spends fading out. */
 const FADE_OUT_SEC = 1.2;
+/** Within this many metres of the scene edge a body fades out over EDGE_FADE_SEC (see the flight kernel). */
+const EDGE_FADE_MARGIN_M = 1.5;
+const EDGE_FADE_SEC = 0.6;
 
 /**
  * Per-kind motion, [leaf, clump, twig]. A twig is heavy: it falls fast, barely
@@ -130,6 +133,10 @@ const KIND_TAU_SEC = [0.3, 0.5, 0.9];
  */
 const TURN_TAU_SEC = 0.06;
 const KIND_FALL_MPS = [1.5, 2.4, 4.5];
+/** An eddy never slows a fall below this share of its base sink rate (only storm lofting can lift a body). */
+const GLIDE_FLOOR = 0.45;
+/** Soft ceiling on a carried body's speed (m/s): speed s becomes s / (1 + s / this), so 20 m/s of carried air = 10. */
+const CARRY_SOFT_MAX_MPS = 30;
 const KIND_FLUTTER = [1, 0.5, 0.12];
 /** How much the air's eddies toss each kind about (random jinks, sudden lifts): a twig barely notices. */
 const KIND_TURB = [1, 0.6, 0.12];
@@ -140,15 +147,15 @@ const KIND_TURB = [1, 0.6, 0.12];
  *   TAU      — how fast the ground drags its velocity to rest (s): small = grippy.
  *   MOBILITY — how much of the already-small ground push a body takes: a twig barely shifts, a leaf skitters.
  */
-const KIND_GROUND_KEEP = [0.3, 0.12, 0.02];
-const KIND_GROUND_TAU_SEC = [0.1, 0.06, 0.025];
-const KIND_GROUND_MOBILITY = [0.5, 0.12, 0.03];
+const KIND_GROUND_KEEP = [0.12, 0.05, 0.01];
+const KIND_GROUND_TAU_SEC = [0.05, 0.03, 0.015];
+const KIND_GROUND_MOBILITY = [0.25, 0.06, 0.015];
 /**
  * STICK, THEN SLIP: a landed body only moves while a GUST of at least this many m/s is on it (and gets a
  * 6 m/s ramp to full push) — a steady gale does not slide it along for ever, only the gust fronts shove it.
  * A twig needs a near-extreme gust.
  */
-const KIND_GROUND_STICK_MPS = [13, 19, 30];
+const KIND_GROUND_STICK_MPS = [30, 38, 50];
 
 /**
  * @param {object} opts
@@ -327,7 +334,11 @@ export function createLeafShedEngine({
       phaseY: -TREE_GUST_PHASE * 0.61,
     });
     // Scaled by the field's own speed, never added flat: dead calm stays dead calm (the trees' rule).
-    const leaned = field.add(wander.mul(uTreeGust).mul(uFollow).mul(field.length()));
+    // In a gale the wind's heading wins over the canopy swerve (2026-11-11: "like a hurricane"): the
+    // wander and clump turn fade by 75% toward full wind, so leaves run downwind instead of circling.
+    const fieldMps = field.length().mul(float(MPS_PER_FIELD_UNIT));
+    const swerve = float(1).sub(smoothstep(uStartMps, uFullMps, fieldMps).mul(0.75));
+    const leaned = field.add(wander.mul(uTreeGust).mul(uFollow).mul(swerve).mul(field.length()));
     const cellF = pos.div(uClumpPx);
     const cell = floor(cellF);
     const frac = cellF.sub(cell);
@@ -335,7 +346,7 @@ export function createLeafShedEngine({
     const by = smoothstep(0, 1, frac.y);
     const h = (dx, dy) => clumpHash(cell.add(vec2(dx, dy)), TREE_CLUMP_DIR_SALT);
     const blended = TSL.mix(TSL.mix(h(0, 0), h(1, 0), bx), TSL.mix(h(0, 1), h(1, 1), bx), by);
-    const turn = blended.sub(0.5).mul(uClumpTurnRad.mul(2)).mul(uFollow);
+    const turn = blended.sub(0.5).mul(uClumpTurnRad.mul(2)).mul(uFollow).mul(swerve);
     const ct = cos(turn);
     const st = sin(turn);
     const air = vec2(leaned.x.mul(ct).sub(leaned.y.mul(st)), leaned.x.mul(st).add(leaned.y.mul(ct)));
@@ -396,7 +407,8 @@ export function createLeafShedEngine({
   // A step longer than SWEEP_N texels (a 0.05 s hitch frame at gale speed) is shortened to that, never
   // sampled more thinly. It holds at EVERY height: a storm-lofted leaf does not cross a building either
   // (before 2026-11-03 anything above the crowns did, and the lab found every stray sample up there).
-  const SWEEP_N = 6;
+  const SWEEP_N = 10;
+  const SWEEP_MIN_SPACING_M = 0.1;
   const clearFraction = (from, delta) => {
     let f = float(1);
     for (let k = 1; k <= SWEEP_N; k++) {
@@ -409,7 +421,10 @@ export function createLeafShedEngine({
     const never = float(0).greaterThan(1);
     if (!hasOutdoors) return { next: pos.add(d0), hitX: never, hitY: never };
     const texel = uOutdoorsRect.zw.sub(uOutdoorsRect.xy).div(vec2(textureSize(outdoorsTexNode, int(0))));
-    const maxTravel = min(texel.x, texel.y).mul(0.9 * SWEEP_N);
+    // Samples at most a texel apart, but never closer than SWEEP_MIN_SPACING_M: on a full-resolution mask
+    // (1 px texels) a texel cap held a leaf to ~6 px a frame — about 4 m/s in a 70 m/s gale (2026-11-11). A
+    // painted wall is wider than 10 cm, so this spacing still cannot step over one.
+    const maxTravel = max(min(texel.x, texel.y).mul(0.9), pixelsPerMetreNode.mul(SWEEP_MIN_SPACING_M)).mul(SWEEP_N);
     const d = d0.mul(min(float(1), maxTravel.div(max(d0.length(), 1e-4))));
     const dx = vec2(d.x, 0);
     const dy = vec2(0, d.y);
@@ -453,18 +468,23 @@ export function createLeafShedEngine({
       // A leaf born indoors (a canopy overhanging a roofed building) is never shown.
       const kept = r(1.7).lessThan(keepP).and(outdoorsAt(pos).greaterThan(0.5));
       position.element(i).assign(pos);
-      velocity.element(i).assign(air.mul(pxPerSecPerFieldUnit).mul(uCarry).mul(byKind(kind, KIND_CARRY)).mul(0.3));
+      velocity.element(i).assign(air.mul(pxPerSecPerFieldUnit).mul(uCarry).mul(byKind(kind, KIND_CARRY)).mul(0.6));
       age.element(i).assign(0);
       life.element(i).assign(select(kept, float(-1), float(0)));
       custom.element(i).assign(vec4(rec1.w, r(2.3).mul(6.2832), r(3.1).mul(6.2832), select(kept, float(1), float(0))));
     }).Else(() => {
-      const a = age.element(i);
-      const lf = life.element(i);
+      // SNAPSHOT the slot into locals (`toVar`). A bare `buffer.element(i)` is read wherever the generated code
+      // USES it, so anything emitted after `position.element(i).assign(next)` read the NEW position. That made
+      // the wall veto's `moved = next - pos` zero, flagged every moving leaf as hitting a wall, and wiped its
+      // velocity each frame: from 71ef1bbf (2026-11-03) leaves drifted at ~0.6 m/s in a 70 m/s gale
+      // (rig measurement 2026-11-11, `MapShine.getLeafShedStatus().sample()`).
+      const a = age.element(i).toVar();
+      const lf = life.element(i).toVar();
       If(lf.lessThan(0).or(a.lessThan(lf)), () => {
         // ── A FLIGHT ──
-        const pos = position.element(i);
-        const vel = velocity.element(i);
-        const c = custom.element(i);
+        const pos = position.element(i).toVar();
+        const vel = velocity.element(i).toVar();
+        const c = custom.element(i).toVar();
         const airborne = c.x.greaterThan(0);
         const dt = uDtSec;
         const { air, w } = sampleAir(pos);
@@ -473,11 +493,18 @@ export function createLeafShedEngine({
         const carry = uCarry.mul(byKind(kind, KIND_CARRY));
         // On the ground the air only shifts a body once it is properly blowing — and a heavy one hardly at all.
         const stick = byKind(kind, KIND_GROUND_STICK_MPS);
-        const groundPush = smoothstep(stick, stick.add(6), localMps)
-          .mul(0.35)
+        // (2026-11-11: at full wind this was 0.35 x mobility of the RAW carried air = still ~6 m/s, so landed
+        // leaves slid on. The push is now a few percent of the soft-limited carry, ramping over 20 m/s.)
+        const groundPush = smoothstep(stick, stick.add(20), localMps)
+          .mul(0.06)
           .mul(byKind(kind, KIND_GROUND_MOBILITY))
           .div(uGrip);
-        const target = select(airborne, airPx.mul(carry), airPx.mul(carry).mul(groundPush));
+        // Airborne it keeps up with the air (carry), but the carried speed is soft-limited so a gale never
+        // throws a leaf off the map before it reads as a leaf (the old fix was a tiny carry for everyone).
+        const carried = airPx.mul(carry);
+        const carriedSp = carried.length();
+        const carriedSoft = carried.div(float(1).add(carriedSp.div(pixelsPerMetreNode.mul(CARRY_SOFT_MAX_MPS))));
+        const target = select(airborne, carriedSoft, carriedSoft.mul(groundPush));
         // Grounded, the relaxation time is the GRIP: small tau = it stops where it lands (the twigs' ice-skating fix).
         const tau = select(airborne, byKind(kind, KIND_TAU_SEC), byKind(kind, KIND_GROUND_TAU_SEC).div(uGrip));
         const vRelaxed = vel.add(target.sub(vel).mul(float(1).sub(exp(dt.negate().div(tau)))));
@@ -535,6 +562,9 @@ export function createLeafShedEngine({
           // Following the trees, the direction comes from their wander; what is left here is the flutter
           // of a single leaf in an eddy too small for a tree to feel (a quarter of the old size).
           .mul(float(1).sub(uFollow.mul(0.75)))
+          // Eddies must not out-shout the wind (2026-11-11: leaves "wander around the tree"): the harder it
+          // blows, the more the flight is a drift downwind and the less a random walk.
+          .mul(float(1).sub(smoothstep(uStartMps, uFullMps.mul(1.5), localMps).mul(0.7)))
           .mul(select(airborne, float(1), float(0)));
         let move = v1.add(perp.mul(swing).mul(flutterPx)).add(jink);
         if (windCells) {
@@ -571,10 +601,19 @@ export function createLeafShedEngine({
           .mul(byKind(kind, KIND_TURB))
           .mul(float(1).sub(smoothstep(LOFT_SEC - 2, LOFT_SEC, a)));
         const airborneF = select(airborne, float(1), float(0));
-        const glide = float(1)
-          .add(abs(swing).sub(0.5).mul(flutterK).mul(0.9))
-          .sub(max(updraft, 0).mul(turbK).mul(gale).mul(2.6).mul(airborneF))
-          .sub(loftK.mul(float(3.6).add(max(updraft, 0).mul(2.4))).mul(airborneF));
+        // (2026-11-11, the author: leaves "don't fall quickly enough to the ground".) Ordinary eddies used to pull
+        // the sink factor NEGATIVE at the default Turbulence (2.6 x 3 x gale ~ 3), so a leaf hovered half the
+        // time. Now an eddy can only SLOW a fall (floor GLIDE_FLOOR); a real lift past zero is the storm
+        // lofting's job alone, which is gated on a genuinely strong local wind.
+        const eddyLift = max(updraft, 0)
+          .mul(min(turbK, 1.5))
+          .mul(smoothstep(uStartMps, uFullMps, localMps))
+          .mul(1.4)
+          .mul(airborneF);
+        const glideBase = float(1).add(abs(swing).sub(0.5).mul(flutterK).mul(0.9)).sub(eddyLift);
+        const glide = max(glideBase, float(GLIDE_FLOOR)).sub(
+          loftK.mul(float(3.6).add(max(updraft, 0).mul(2.4))).mul(airborneF)
+        );
         // The ceiling: its birth height (plus a little), or up to LOFT_MAX_CROWNS crowns in a storm — and never
         // below where it already is, so a lull lets a lofted leaf fall rather than snapping it down.
         const rise = max(rec1.w.mul(1.35).add(float(2)), uCrownPx.mul(float(1).add(loftK.mul(LOFT_MAX_CROWNS - 1))));
@@ -614,7 +653,18 @@ export function createLeafShedEngine({
         custom.element(i).assign(vec4(h2, angle.mod(6.2832), flip.mod(6.2832), c.w));
         age.element(i).assign(a.add(dt));
         // Leaving the scene ends it (nothing renders in the padding).
-        life.element(i).assign(select(out.or(shut), a, lf1));
+        // Near the scene edge it fades out quickly. Maps paint a dark border into _Outdoors, which the wall veto
+        // treats as a wall: in a gale every leaf piled up there (rig 2026-11-11: 87% of leaves older than 2 s sat
+        // in one 50 px row at the top of Deep Forest), never leaving the scene and so never dying.
+        const edgeM = pixelsPerMetreNode.mul(EDGE_FADE_MARGIN_M);
+        const nearEdge = next.x
+          .lessThan(uRectMin.x.add(edgeM))
+          .or(next.y.lessThan(uRectMin.y.add(edgeM)))
+          .or(next.x.greaterThan(uRectMax.x.sub(edgeM)))
+          .or(next.y.greaterThan(uRectMax.y.sub(edgeM)));
+        const edgeEnd = a.add(EDGE_FADE_SEC);
+        const lfEdge = select(nearEdge, select(lf1.lessThan(0), edgeEnd, min(lf1, edgeEnd)), lf1);
+        life.element(i).assign(select(out.or(shut), a, lfEdge));
       });
     });
   })().compute(capacity);
@@ -845,7 +895,7 @@ export function createLeafShedEngine({
     setLook(p = {}) {
       if (Number.isFinite(p.startsAboveMps)) uStartMps.value = p.startsAboveMps;
       if (Number.isFinite(p.fullAtMps)) uFullMps.value = Math.max(p.fullAtMps, uStartMps.value + 0.5);
-      if (Number.isFinite(p.carry)) uCarry.value = p.carry;
+      if (Number.isFinite(p.windCarry)) uCarry.value = p.windCarry;
       if (Number.isFinite(p.flutter)) uFlutter.value = p.flutter;
       if (Number.isFinite(p.turbulence)) uTurb.value = p.turbulence;
       if (Number.isFinite(p.followTrees)) uFollow.value = p.followTrees;
@@ -891,6 +941,34 @@ export function createLeafShedEngine({
     },
 
     /** For the debug panel and the lab: prove the engine is alive without a screenshot. */
+    /**
+     * DIAGNOSTIC ONLY (stalls the GPU): the live leaves' position, velocity (px/s), height, age, kind tag.
+     * @returns {Promise<Array<{x:number,y:number,vx:number,vy:number,h:number,age:number}>>}
+     */
+    async sample(renderer, max = 400) {
+      const read = async (node) => {
+        const all = new Float32Array(await renderer.getArrayBufferAsync(node.value));
+        return { all, stride: Math.max(1, Math.round(all.length / capacity)) };
+      };
+      const [P, V, A, L, C] = await Promise.all([read(position), read(velocity), read(age), read(life), read(custom)]);
+      const out = [];
+      for (let i = 0; i < capacity && out.length < max; i++) {
+        const lf = L.all[i * L.stride];
+        const a = A.all[i * A.stride];
+        if (!(lf < 0 || a < lf) || C.all[i * C.stride + 3] < 0.5) continue;
+        out.push({
+          i,
+          x: P.all[i * P.stride],
+          y: P.all[i * P.stride + 1],
+          vx: V.all[i * V.stride],
+          vy: V.all[i * V.stride + 1],
+          h: C.all[i * C.stride],
+          age: a,
+        });
+      }
+      return out;
+    },
+
     debugState() {
       return {
         capacity,

@@ -83,6 +83,7 @@ export function createLeafShedSubsystem({
   const placedByKey = new Map();
   let engine = null;
   let carry = new Float64Array(0);
+  let lastRenderer = null;
   let liveUntilSec = -Infinity;
   let clockSec = 0;
   let lastPlanned = 0;
@@ -177,6 +178,7 @@ export function createLeafShedSubsystem({
      *   sun shadow per px of height; `daylight01`: how much sun there is to cast one.
      */
     sync(renderer, frame) {
+      lastRenderer = renderer;
       drawThisFrame = false;
       const state = getRenderState();
       if (!state?.enabled) return;
@@ -268,6 +270,8 @@ export function createLeafShedSubsystem({
         lastPlanned,
         drawing: drawThisFrame,
         engine: engine?.debugState() ?? null,
+        /** DIAGNOSTIC: read the live leaves back (GPU stall). */
+        sample: (max) => (engine && lastRenderer ? engine.sample(lastRenderer, max) : Promise.resolve([])),
       };
     },
   };

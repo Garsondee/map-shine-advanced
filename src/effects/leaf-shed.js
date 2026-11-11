@@ -372,12 +372,13 @@ export const LEAF_SHED_PARAMS = Object.freeze({
     label: 'Follow the trees',
     help: 'Leaves and twigs read the same wind texture the trees do. This sets how much they also take the trees’ own swerve: the slow curling gust-wander and the per-clump turn that lean the canopies (the Vegetation card’s Gust turbulence and Clump direction spread). 1 = a leaf flies the way the tree beside it is leaning; 0 = the plain wind, with only its own random jinks.',
   },
-  carry: {
+  windCarry: {
+    // renamed from `carry` 2026-11-11: scenes had a stale saved 0.2 that overrode every default fix
     type: 'float',
     min: 0.2,
     max: 1.5,
     step: 0.05,
-    default: 0.2, // leaf lab 2026-10-31: at 1 a 24 m/s gale crosses 16 squares a second — gone before it reads as a leaf (2026-10-31 new default: 0.45 -> 0.2)
+    default: 1, // 2026-11-11: 0.2 -> 0.7 -> 1 (full wind: leaves must head downwind fast) — leaves lagged far behind the wind; the runtime now soft-limits carried speed (10 m/s knee) so a gale no longer needs a tiny carry
     category: 'Motion',
     label: 'Carried by the wind',
     help: 'How closely a leaf keeps up with the air around it. 1 = as fast as the wind itself.',

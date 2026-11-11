@@ -299,13 +299,16 @@ export function run(t) {
       '⭐ walls: the step is swept through the mask and can never end indoors, at any height',
       /const step = guardedStep\(pos, move\.mul\(dt\)\)/.test(rt) &&
         /const next = step\.next/.test(rt) &&
-        /SWEEP_N = 6/.test(rt) &&
-        /0\.9 \* SWEEP_N/.test(rt)
+        /SWEEP_N = 10/.test(rt) &&
+        // the sweep spacing is now floored in world units (never thinner than a texel's 0.9 share, never
+        // closer than SWEEP_MIN_SPACING_M), not a flat 0.9 * SWEEP_N (2026-11-11, gale speeds)
+        /\.mul\(0\.9\), pixelsPerMetreNode\.mul\(SWEEP_MIN_SPACING_M\)\)\.mul\(SWEEP_N\)/.test(rt)
     );
     ok('walls: no roof exemption is left in the steering', !/overRoofs/.test(rt));
     ok(
       "walls: a body already in the black ends (the floor's mask changed under it)",
-      /select\(out\.or\(shut\), a, lf1\)/.test(rt) && /const shut = outdoorsAt\(pos\)\.lessThan\(0\.5\)/.test(rt)
+      // the life assign now routes through the scene-edge fade (lfEdge) before the out/shut gate, same effect
+      /select\(out\.or\(shut\), a, lfEdge\)/.test(rt) && /const shut = outdoorsAt\(pos\)\.lessThan\(0\.5\)/.test(rt)
     );
     ok(
       'walls: the velocity that hit is zeroed, so landed leaves pile along the wall',
@@ -631,7 +634,9 @@ export function run(t) {
     );
     ok(
       "followTrees: scaled by the field's own speed, so dead calm stays calm",
-      /wander\.mul\(uTreeGust\)\.mul\(uFollow\)\.mul\(field\.length\(\)\)/.test(runtime)
+      // `swerve` (the gale heading-takes-over fade, 2026-11-11) sits between uFollow and the field.length()
+      // factor, so a dead-calm field (length 0) still zeroes the whole term regardless of swerve's value.
+      /wander\.mul\(uTreeGust\)\.mul\(uFollow\)\.mul\(swerve\)\.mul\(field\.length\(\)\)/.test(runtime)
     );
     const sub = readFileSync(new URL('../leaf-shed-subsystem.js', here), 'utf8');
     const boot = readFileSync(new URL('../../boot.js', here), 'utf8');

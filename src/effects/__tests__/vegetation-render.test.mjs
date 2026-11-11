@@ -16,6 +16,7 @@ import {
   vegetationHeightFt,
   vegetationOverlayRenderOrder,
   buildVegetationDepthItems,
+  vegetationShadowCeilingRank,
   flutterFoldFreeAmplitudePx,
   VEG_FLUTTER_FOLD_SAFETY,
   vegetationAliasFreeClumpSizePx,
@@ -1118,5 +1119,39 @@ export function run(t) {
       'pivot map: blendTexels 0 keeps the hard seam (weight 1 everywhere)',
       Array.from({ length: w * h }, (_, i) => noBlend.second[i * 4 + 3]).every((a) => a === 1)
     );
+  }
+
+  // vegetationShadowCeilingRank (2026-11-11): a tree's shadow must still fall on the bush beneath it.
+  {
+    const mk = (host, kind, elevation, levelId = 'ground') => ({
+      id: 'veg:' + host + ':' + kind,
+      kind: 'vegetationOverlay',
+      vegHostItemId: host,
+      vegKindId: kind,
+      levelId,
+      key: { elevation },
+    });
+    const items = [
+      mk('a', 'bush', 2),
+      mk('a', 'tree', 25),
+      mk('b', 'bush', 2),
+      mk('c', 'bush', 22, 'upper'),
+      mk('c', 'tree', 45, 'upper'),
+    ];
+    const rank = (i) =>
+      ({ 'veg:a:bush': 3, 'veg:a:tree': 8, 'veg:b:bush': 4, 'veg:c:bush': 20, 'veg:c:tree': 30 })[i.id] ?? null;
+    ok(
+      'tree shadow ceiling = the tallest LOWER canopy on its floor (any host), here the other tile bush',
+      vegetationShadowCeilingRank(items, 'a', 'tree', rank) === 4
+    );
+    ok(
+      'a bush shadow has no lower canopy, so it stays on the bare ground (null)',
+      vegetationShadowCeilingRank(items, 'a', 'bush', rank) === null
+    );
+    ok(
+      'canopies on another floor never raise the ceiling',
+      vegetationShadowCeilingRank(items, 'a', 'tree', rank) !== 20
+    );
+    ok('unknown plant returns null', vegetationShadowCeilingRank(items, 'zzz', 'tree', rank) === null);
   }
 }

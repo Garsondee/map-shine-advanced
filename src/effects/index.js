@@ -651,6 +651,7 @@ export {
   vegetationHeightFt,
   vegetationOverlayRenderOrder,
   buildVegetationDepthItems,
+  vegetationShadowCeilingRank,
   flutterFoldFreeAmplitudePx,
   VEG_FLUTTER_FOLD_SAFETY,
   springChase,

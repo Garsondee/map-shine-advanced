@@ -559,6 +559,7 @@ import {
   vegetationOverlayRenderOrder,
   vegetationHeightFt,
   buildVegetationDepthItems,
+  vegetationShadowCeilingRank,
   VEG_FLUTTER_FOLD_SAFETY,
   vegetationMeshSegments,
   vegetationAliasFreeClumpSizePx,
@@ -27980,7 +27981,14 @@ async function startVtPanViewerUnserialized({
         const hostRank = depthAuthority.rankOf({ id });
         for (const kind of VEGETATION_KINDS) {
           const u = st.vegetationOverlays[kind.id]?.shadow?.uniforms?.uExpectedDepth;
-          if (u) u.value = hostRank == null ? 0 : computeTieSafeExpectedDepth(hostRank, maxRank);
+          // A tree's shadow still falls on the bush beneath it: the ceiling is the tallest LOWER canopy on this
+          // floor, not the bare ground (vegetationShadowCeilingRank).
+          const lowerCanopy =
+            hostRank == null
+              ? null
+              : vegetationShadowCeilingRank(items, id, kind.id, (it) => depthAuthority.rankOf(it));
+          const ceiling = hostRank == null ? null : Math.max(hostRank, lowerCanopy ?? hostRank);
+          if (u) u.value = ceiling == null ? 0 : computeTieSafeExpectedDepth(ceiling, maxRank);
         }
       }
       // FLUID CARRIER TILES MUST OCCLUDE BY THEIR ACTUAL PIPE/GLASS

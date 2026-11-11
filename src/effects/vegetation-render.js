@@ -600,6 +600,34 @@ export function buildVegetationDepthItems(items, floors, urlByItemId, params) {
 }
 
 /**
+ * THE HIGHEST CANOPY A PLANT'S GROUND SHADOW MAY STILL FALL ON (2026-11-11, author: "A bush under a tree doesn't seem to
+ * be darkened by the shadow correctly"). A vegetation shadow discards itself wherever `buf:scene.depth` holds something
+ * ranked above its host GROUND (that keeps it off roofs and off its own canopy). A bush is ranked above the ground, so a
+ * tree's shadow was thrown away over every bush pixel: the bush under the tree stayed fully lit. A shadow must still fall
+ * on every canopy that stands LOWER than its caster (a tree's on a bush) and never on its own or a taller one.
+ *
+ * @param {ReadonlyArray<object>} items - the ranked list incl. the synthetic `vegetationOverlay` items.
+ * @param {string} hostItemId @param {string} kindId - the casting plant (`veg:<host>:<kind>`).
+ * @param {(item: object) => number|null} rankOf - `depthAuthority.rankOf`.
+ * @returns {number|null} the highest rank among lower canopies on the SAME floor, or null when there is none.
+ */
+export function vegetationShadowCeilingRank(items, hostItemId, kindId, rankOf) {
+  const own = (items ?? []).find(
+    (i) => i?.kind === 'vegetationOverlay' && i.vegHostItemId === hostItemId && i.vegKindId === kindId
+  );
+  const ownElevation = own?.key?.elevation;
+  if (!own || !Number.isFinite(ownElevation)) return null;
+  let best = null;
+  for (const i of items) {
+    if (i?.kind !== 'vegetationOverlay' || i === own || (i.levelId ?? null) !== (own.levelId ?? null)) continue;
+    if (!(i.key?.elevation < ownElevation)) continue;
+    const r = rankOf(i);
+    if (r != null && (best == null || r > best)) best = r;
+  }
+  return best;
+}
+
+/**
  * THE VERTEX-DISPLACEMENT CURVE — how much of the sampled wind lean reaches a
  * point at normalized height `v` up the mesh (0 = root/bottom edge, pinned;
  * 1 = canopy top/far edge, full sway). Quadratic ease-IN, not linear: real

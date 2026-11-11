@@ -84,12 +84,55 @@ const WOBBLE_SCALE_PX = 55;
 const WOBBLE_PX = 4;
 /** Along-shore scale of the slow in-and-out drift of the whole foam profile, world px (2026-11-09, mmp-78u.30.1). */
 const DRIFT_SCALE_PX = 150;
+/** The fill behind a pushed-out leading edge fades out this far shoreward of the waterline, world px (varies along the
+ * shore between the two) — see NO HARD LINE in `buildMaskShoreDensity`. */
+const FILL_FADE_MIN_PX = 4;
+const FILL_FADE_MAX_PX = 14;
+/** Shore foam thins out with the water: none below this fraction of the waterline level of mask, full at the level. */
+const THIN_WATER_LO = 0.3;
+/**
+ * NO COMBS ON A SHELVING BANK (2026-11-10, mmp-78u.30.19 — Ingram: "Still seeing a lot of combs/grid patterns near the
+ * shore"). The distance from the waterline is (mask − level) / |∇mask|, and on a gently shelving bank the gradient is
+ * mostly noise: MEASURED on Lab · River's rapids bank, the (lossy WebP) mask's tail climbs one 8-bit level per 16 px in
+ * 4 px and 16 px compression blocks, and the 5×5 blur, its taps 4 px apart, cannot average that away. Dividing by a
+ * gradient that flickers between ~0 and twice its true value threw the distance, and every foam edge drawn on it, into
+ * rows of horizontal dashes (`readWaterWaves({debugView: 6})` shows the contours). The divisor now has a soft floor
+ * (√(g² + floor²)): a ramp shallower than this (0 → 1 over 500 px) reads as this, which smooths the distance over the
+ * shelf and only compresses it a little (a 375 px beach reads 80% wide); a steep bank or a hard edge, many times above it,
+ * is untouched. Gated off on dry ground and on saturated water (`shallowRampGate`), where the mask measures nothing and
+ * the body SDF takes over as before.
+ */
+const SHALLOW_RAMP_GRADIENT = 0.002;
+/** 0 on dry ground (mask 0) and in saturated water (mask ~1), 1 on any ramp between (CPU twin of the shader's gate). */
+function shallowRampGate(m) {
+  const ss = (e0, e1, x) => {
+    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
+  return ss(0, 0.02, m) * (1 - ss(0.9, 0.99, m));
+}
 /** Where |∇m| is below this (per world px) the mask has no gradient to measure. */
 const MIN_GRADIENT = 1e-4;
 /** Clamp on the distance estimate, world px. */
 const MAX_DIST_PX = 4096;
 /** The binomial kernel — [1 4 6 4 1]/16 has variance 1, so σ = tap spacing. */
 const KERNEL = [1, 4, 6, 4, 1];
+/**
+ * ⚠️ THE TAP GRID IS ROTATED (2026-11-10, mmp-78u.30.19 — Ingram: "Still seeing a lot of combs/grid patterns near the
+ * shore"). A lossy WebP mask is stored in 4×4 pixel blocks, and the taps used to sit on an axis-aligned grid exactly σ = 4 px
+ * apart: every tap landed at the SAME spot inside its block, so the "blur" never averaged across a block edge and the
+ * blurred mask, its gradient and the distance read off them changed in 4 px steps - rows of horizontal hatching through
+ * every shore foam band on a soft bank (MEASURED on Lab · River's rapids bank: the hatching fades as σ goes 4 → 8 → 12, the
+ * foam's flow makes no difference). Rotating the grid by atan(1/2) puts the 25 taps at many different phases of the
+ * block lattice in both axes while keeping the same Gaussian (the binomial grid is near-isotropic, and its second moment
+ * is unchanged by a rotation), so the corners round off no more than before.
+ */
+const TAP_COS = 2 / Math.sqrt(5);
+const TAP_SIN = 1 / Math.sqrt(5);
+/** A kernel tap's offset in σ units, rotated (see `TAP_COS`). */
+export function rotatedTap(ix, iy) {
+  return [TAP_COS * ix - TAP_SIN * iy, TAP_SIN * ix + TAP_COS * iy];
+}
 
 /**
  * THE SHORE PATTERN RIDES THE CURRENT (2026-11-10, mmp-78u.30.11 — Ingram: "we need foam on the water surface which flows
@@ -131,7 +174,8 @@ export function shoreFlowPhases(tSec, cycleSec = SHORE_FLOW_CYCLE_SEC) {
  * @returns {number} signed world px, positive into the water
  */
 export function maskShoreDistance(m, gradLen, level, farDistPx = null, sigmaPx = WATER_SHORE_FOAM_SOFT_PX) {
-  const raw = (m - level) / Math.max(gradLen, MIN_GRADIENT);
+  const floorG = SHALLOW_RAMP_GRADIENT * shallowRampGate(m);
+  const raw = (m - level) / Math.max(Math.sqrt(gradLen * gradLen + floorG * floorG), MIN_GRADIENT);
   const dMask = Math.min(MAX_DIST_PX, Math.max(-MAX_DIST_PX, raw));
   if (farDistPx === null) return dMask;
   return Math.min(dMask, Math.max(farDistPx + 0.9 * sigmaPx, 2 * sigmaPx));
@@ -201,15 +245,22 @@ export function buildMaskShoreDensity(
   for (let iy = -2; iy <= 2; iy++) {
     for (let ix = -2; ix <= 2; ix++) {
       const w = (KERNEL[ix + 2] * KERNEL[iy + 2]) / 256;
-      const tap = maskTexNode.sample(maskUvAt(vec2(float(ix), float(iy)).mul(sigma))).r;
+      const [ux, uy] = rotatedTap(ix, iy);
+      const tap = maskTexNode.sample(maskUvAt(vec2(float(ux), float(uy)).mul(sigma))).r;
       m = m ? m.add(tap.mul(float(w))) : tap.mul(float(w));
-      if (ix !== 0) gx = gx ? gx.add(tap.mul(float(w * ix))) : tap.mul(float(w * ix));
-      if (iy !== 0) gy = gy ? gy.add(tap.mul(float(w * iy))) : tap.mul(float(w * iy));
+      if (ux !== 0) gx = gx ? gx.add(tap.mul(float(w * ux))) : tap.mul(float(w * ux));
+      if (uy !== 0) gy = gy ? gy.add(tap.mul(float(w * uy))) : tap.mul(float(w * uy));
     }
   }
-  // ∇(G∗m) = Σ wᵢ mᵢ oᵢ / σ², with oᵢ = (ix, iy)·σ — so one σ cancels.
+  // ∇(G∗m) = Σ wᵢ mᵢ oᵢ / σ², with oᵢ = (ux, uy)·σ — so one σ cancels. (The rotated grid keeps Σ wᵢ oᵢ oᵢᵀ = σ²·I, so
+  // the same formula holds.)
   const gradLen = length(vec2(gx, gy)).div(sigma);
-  const dMask = clamp(m.sub(level).div(max(gradLen, float(MIN_GRADIENT))), float(-MAX_DIST_PX), float(MAX_DIST_PX));
+  // the divisor has a soft floor on gently shelving ramps (see `SHALLOW_RAMP_GRADIENT`)
+  const floorG = float(SHALLOW_RAMP_GRADIENT)
+    .mul(smoothstep(float(0), float(0.02), m))
+    .mul(float(1).sub(smoothstep(float(0.9), float(0.99), m))); // = shallowRampGate
+  const gradDiv = sqrt(gradLen.mul(gradLen).add(floorG.mul(floorG)));
+  const dMask = clamp(m.sub(level).div(max(gradDiv, float(MIN_GRADIENT))), float(-MAX_DIST_PX), float(MAX_DIST_PX));
   const dist = shoreDist ? min(dMask, max(shoreDist.add(sigma.mul(float(0.9))), sigma.mul(float(2)))) : dMask;
 
   // ── THE SHORE NORMAL, from the same taps ────────────────────────────────
@@ -339,10 +390,28 @@ export function buildMaskShoreDensity(
       // `lead` is 0 shoreward of the leading edge, so wherever the swash, wobble or drift pushed the edge out from the
       // waterline the strip between the shore and the foam was left as bare water: dark arches between foam and wall.
       // That strip is now filled with the line's own foam (the same `lineGate`, so the line still breaks where it breaks).
-      const fill = float(1).sub(lead).mul(lineGate);
-      out.assign(
-        clamp(max(lead.mul(max(line, tail.mul(patches).mul(coverage))), fill).mul(amount), float(0), float(1))
+      // ⚠️ NO HARD LINE, NO FOAM SHEET ON THE THINNEST WATER (2026-11-10, mmp-78u.30.19 — Ingram: "the foam on this shore is
+      // a pixel perfect line and is strongest where technically there should be the least actual water"). The fill used to
+      // be full strength all the way shoreward to where this `If` ends (dist -40), then nothing: on a soft-painted ramp
+      // (a beach, a shelving bank) that was a band of solid foam over the shallowest water, cut off on one contour of the
+      // mask, a ruler-straight edge on a straight ramp and a comb of 8-bit terrace steps on a curved one. Now the fill only
+      // covers what it was for (the strip between the waterline and a leading edge pushed out into the water, dist >= 0)
+      // and fades out a varying few px shoreward of the waterline; the whole profile thins with the water itself
+      // (`thinWater`, the mask value: a hard edge reaches full depth within a pixel or two and is unaffected) and with the
+      // distance to both ends of this branch, so nothing is cut.
+      const fillFadePx = float(FILL_FADE_MIN_PX).add(
+        smoothstep(float(-0.3), float(0.3), patchNoiseEarly).mul(float(FILL_FADE_MAX_PX - FILL_FADE_MIN_PX))
       );
+      const fill = lineGate.mul(smoothstep(fillFadePx.negate(), float(0), dist));
+      const body = max(line, tail.mul(patches).mul(coverage));
+      // mix, not max: at the leading edge `lead` is 0.5, so max() of the two halves dipped to half density along it (a thin
+      // dark crack drawn through the foam)
+      const profile = mix(fill, body, lead);
+      const thinWater = smoothstep(level.mul(float(THIN_WATER_LO)), level, m);
+      const ends = smoothstep(float(-40), float(-24), dist).mul(
+        float(1).sub(smoothstep(widthPx.mul(float(6)), widthPx.mul(float(9)).add(float(60)), dist))
+      );
+      out.assign(clamp(profile.mul(thinWater).mul(ends).mul(amount), float(0), float(1)));
     });
     return out;
   })();
@@ -358,6 +427,9 @@ export function buildMaskShoreDensity(
   return {
     density,
     dist,
+    // for the lab view (`readWaterWaves({debugView: 6})`): 1 where `dist` came from the body SDF rather than the mask
+    distFromSdf: shoreDist ? smoothstep(float(0.25), float(1), dMask.sub(dist)) : float(0),
+    thinWater: smoothstep(level.mul(float(THIN_WATER_LO)), level, m),
     hardness,
     outward,
     front: frontN,

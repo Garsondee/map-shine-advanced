@@ -54,7 +54,11 @@ export const WATER_PARAMS = Object.freeze({
     // settings drew olive-brown sludge, from a puddle to the open sea (Lab · Water, and the Monastery sea: painted blue
     // 14,57,72 came out 50,52,42). 0.25 is a clean-ish, slightly green water that reads right at every size; the town
     // river is the `pollutedTownRiver` preset, and Pollution is still one dial away.
-    default: 0.25,
+    // ⚠️ 0.5, UP FROM 0.25 (2026-11-10, Ingram live after 128a6b67: "Water feels a bit too blue and opaque currently",
+    // decision bead mmp-78u.30.17). Measured on Docklands at its own depth 1: 0.25 drew the harbour grey-blue (blue minus
+    // red +3) over a brown painted bed; 0.5 gives back a warm, slightly green water (blue minus red -7) without the old
+    // olive sludge.
+    default: 0.5,
     category: 'Look',
     label: 'Pollution',
     help: 'Clean water at 0, silty sludge at 1 — blends between two real colour references (clear tropical shallows/abyss and murky silt-brown shallows/black-brown depths) rather than just darkening one tint. Also thickens the murk, so heavily polluted water hides its bed sooner than the Depth slider alone would.',
@@ -81,7 +85,9 @@ export const WATER_PARAMS = Object.freeze({
     // actually lets the depth/absorption/inscatter terms (and tier 5's own
     // refraction) do the work they exist for, rather than being visually
     // buried under a near-solid multiply.
-    default: 0.11,
+    // ⚠️ 0.07, DOWN FROM 0.11 (2026-11-10, same report, decision bead mmp-78u.30.17): since depth comes from the mask's
+    // brightness, a map painted pure white is deep everywhere; at 0.11 Docklands' rocks and weed vanished under the water.
+    default: 0.07,
     category: 'Look',
     label: 'Opacity',
     help: 'How solid the water looks over the painted riverbed. Lower lets more of the art beneath show through; it stays below 1 on purpose so your painted bed still does part of the work.',
@@ -1532,6 +1538,33 @@ export const WATER_DEBUG_CHANNELS = Object.freeze([
       'A 384 px grid riding the surface itself (the full domain shift: flow, wind and bends). It slides the way the ' +
       'swell, its foam and the caustics all travel: south with a south flow in calm air, bending downwind as the wind ' +
       'rises. Rigid, so two frames show the motion exactly (Lab · Water motion tool).',
+  }),
+  Object.freeze({
+    n: 35,
+    id: 'waveDriftGrid',
+    label: '34 · Wave drift grid (2026-11-10)',
+    reads:
+      'A 48 px grid drawn in the coordinates the waves AND the caustics are read at (the per-texel drift: local current + ' +
+      'wind, both flow-map phases, each line as strong as its phase weight). Straight lines = an undistorted pattern; ' +
+      'swirls, crushed or crowded lines round rocks and combs along banks are exactly what the caustics inherit. Red = ' +
+      'shear (the stretch per world px), blue = water.',
+  }),
+  Object.freeze({
+    n: 36,
+    id: 'waveDriftShear',
+    label: '35 · Wave drift shear (2026-11-10)',
+    reads:
+      'How hard the drift stretches the wave pattern at each pixel, the weighted worse of its two phases: black = rigid, ' +
+      'red = stretched by half, yellow-white = doubled or worse. The caustics are splatted from this surface, so this ' +
+      'is where they swirl and crush.',
+  }),
+  Object.freeze({
+    n: 37,
+    id: 'waveNormal',
+    label: '36 · Wave normals (2026-11-10)',
+    reads:
+      'The surface normal the glint and the foam are lit on (x, y slope ×4 into red/green around 0.5; flat = mid grey-' +
+      'blue). Smooth, wavy colour = a clean surface; hard lines, rings or swirls show the shapes the specular draws.',
   }),
 ]);
 

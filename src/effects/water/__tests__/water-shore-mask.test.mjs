@@ -28,6 +28,7 @@ import {
   shoreFlowPhases,
   SHORE_FLOW_CYCLE_SEC,
   SHORE_SLIDE_MAX_PX,
+  rotatedTap,
 } from '../water-shore-mask.js';
 import { WATER_PARAMS } from '../water.js';
 
@@ -45,9 +46,25 @@ export function run(t) {
   ok('above the level is the water side (positive)', maskShoreDistance(0.3, 0.01, 0.2) > 0);
   ok('below the level is the land side (negative)', maskShoreDistance(0.1, 0.01, 0.2) < 0);
   ok(
-    'a soft ramp gives a metric distance: 0.1 of value at 0.005/px is 20 px',
-    Math.abs(maskShoreDistance(0.3, 0.005, 0.2) - 20) < 1e-9
+    'a soft ramp well above the shelf floor stays metric: 0.1 of value at 0.005/px is 20 px, within 10%',
+    Math.abs(maskShoreDistance(0.3, 0.005, 0.2) - 20) < 2
   );
+  ok(
+    'a hard edge is untouched by the shelf floor (within 0.1%)',
+    Math.abs(maskShoreDistance(0.5, 0.05, 0.2) - 6) < 6e-3
+  );
+  {
+    // NO COMBS ON A SHELVING BANK (2026-11-10): a WebP mask's shelf climbs one level per 16 px, and the blurred gradient
+    // there flickers between ~0 and twice its true 0.000245/px. The distance read off it must not flicker with it.
+    const trueG = 1 / 255 / 16;
+    const ds = [0.02, 0.5, 1, 1.5, 2].map((k) => maskShoreDistance(0.12, trueG * k, 0.2));
+    const spread = Math.max(...ds) - Math.min(...ds);
+    ok(`a shelf's flickering gradient moves the distance less than 2 px (moved ${spread.toFixed(2)} px)`, spread < 2);
+    ok(
+      'a shelf still reads as the land side of the waterline',
+      ds.every((d) => d < 0)
+    );
+  }
   ok(
     'no gradient (deep water plateau) clamps to a large finite distance, never Infinity/NaN',
     Number.isFinite(maskShoreDistance(1, 0, 0.2)) && maskShoreDistance(1, 0, 0.2) > 1000
@@ -62,13 +79,46 @@ export function run(t) {
   );
   ok(
     'right at a hard edge the mask estimate wins (the SDF never undercuts the 2σ floor)',
-    Math.abs(maskShoreDistance(0.5, 0.05, 0.2, 0, 4) - 6) < 1e-9
+    Math.abs(maskShoreDistance(0.5, 0.05, 0.2, 0, 4) - 6) < 6e-3
   );
   ok(
     'on dry land the SDF can never pull the distance back up to the water side',
     maskShoreDistance(0.05, 0.01, 0.2, 0, 4) < 0
   );
 
+  {
+    // THE ROTATED TAP GRID (2026-11-10): same Gaussian, taps spread over a 4 px WebP block's phases.
+    const K = [1, 4, 6, 4, 1];
+    let sxx = 0,
+      syy = 0,
+      sxy = 0,
+      sx = 0,
+      sy = 0;
+    const phasesY = new Set();
+    const phasesX = new Set();
+    for (let iy = -2; iy <= 2; iy++) {
+      for (let ix = -2; ix <= 2; ix++) {
+        const w = (K[ix + 2] * K[iy + 2]) / 256;
+        const [ux, uy] = rotatedTap(ix, iy);
+        sxx += w * ux * ux;
+        syy += w * uy * uy;
+        sxy += w * ux * uy;
+        sx += w * ux;
+        sy += w * uy;
+        phasesX.add(Math.round(((((ux * 4) % 4) + 4) % 4) * 4));
+        phasesY.add(Math.round(((((uy * 4) % 4) + 4) % 4) * 4));
+      }
+    }
+    ok('the rotated tap grid is still centred', Math.abs(sx) < 1e-12 && Math.abs(sy) < 1e-12);
+    ok(
+      'the rotated tap grid keeps the same Gaussian (second moment = identity)',
+      Math.abs(sxx - 1) < 1e-12 && Math.abs(syy - 1) < 1e-12 && Math.abs(sxy) < 1e-12
+    );
+    ok(
+      `at sigma 4 the taps cover many phases of a 4 px block in x (${phasesX.size}) and y (${phasesY.size})`,
+      phasesX.size >= 8 && phasesY.size >= 8
+    );
+  }
   // ── schema ↔ constants ──────────────────────────────────────────────────
   ok('shoreFoam default matches WATER_SHORE_FOAM_AMOUNT', WATER_PARAMS.shoreFoam.default === WATER_SHORE_FOAM_AMOUNT);
   ok(

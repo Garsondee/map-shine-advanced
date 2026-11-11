@@ -23,7 +23,7 @@ sources: src/scene/mask-catalog.js (water: rgba, red read), src/effects/water/ (
 ### Painting it
 
 1. Paint every patch of water white.
-2. **Blur the edges**, or paint a grey band along the shore. That band is the shallows, and it is where the foam gathers.
+2. **Blur the edges**, or paint a grey band along the shore. That band is the shallows, and it is where the foam gathers. It thins out toward the dry edge, where the water is too thin to carry it.
 3. Leave piers, boats and rocks black. The foam then wraps around them.
 
 ### Tips

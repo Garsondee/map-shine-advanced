@@ -584,6 +584,11 @@ export function buildWaterSpecular({
 
   return {
     reflection,
+    /** The surface normal the glint is lit on, the sun's direction and its shadow/cloud gate — foam is lit on the
+     * SAME waves (2026-11-10, Ingram: foam and specular "live in separate worlds"; `water-render.js` FOAM ON THE WAVES). */
+    normal: normalNode,
+    keyDir: uKeyDir,
+    sunShade: sunShadowFactor.mul(cloudVisNode ?? float(1)),
     /** The outdoors gate the reflection is masked by (0 indoors). Caustics reuse
      * it: no open sky, no direct sun to focus (2026-11-01). */
     outdoors,

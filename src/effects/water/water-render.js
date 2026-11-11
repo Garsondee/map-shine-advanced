@@ -372,7 +372,18 @@ export const WATER_POLLUTION_ABSORPTION_RANGE = Object.freeze([1.0, 1.6]);
  * polluted medieval town river" lean (`pollution`). Matches `water.js`'s
  * schema defaults; a change lands in both places or in neither. */
 export const WATER_TIER1_DEPTH = 0.45;
-export const WATER_TIER1_POLLUTION = 0.25;
+export const WATER_TIER1_POLLUTION = 0.5;
+
+/** FOAM ON THE WAVES (2026-11-10): how far the foam pattern is pushed per unit of wave slope, world px — the lace
+ * bunches and stretches over the same crests the glint shows. */
+export const FOAM_WAVE_WARP_PX = 14;
+/** Foam is lit on the wave normal with its slope exaggerated this much (a raft of bubbles is rougher than the water). */
+export const FOAM_WAVE_NORMAL_GAIN = 3;
+/** The share of foam's light that does not depend on the facet's angle to the sun (sky, scattering inside the raft). */
+export const FOAM_WAVE_AMBIENT = 0.5;
+/** Soft cap on how fast the foam TEXTURE slides, world px/s (`v / sqrt(1 + (v/cap)^2)`): the foam density still rides the
+ * full current through the sim; only the lace pattern drawn on it is held back so a varying current cannot tear it. */
+export const FOAM_TEXTURE_SPEED_CAP_PX = 50;
 
 /**
  * Where the mask's RED channel is thresholded into presence, and over how wide
@@ -594,6 +605,9 @@ export const WATER_TIER4_LIGHT_SHAFTS = 1;
 /** Spacing of the 3x3 taps that average the solved flow before it bends the wave field, world px (2026-11-09,
  * mmp-78u.30.1): several flow texels, so the per-texel direction flips beside a wall average out. */
 export const WATER_FLOW_SMOOTH_PX = 30;
+/** Across the rotated square of B-spline reads the current foam rides is averaged over, world px (see THE CURRENT FOAM
+ * RIDES IS READ AS A CUBIC B-SPLINE). */
+const FOAM_FLOW_SMOOTH_PX = 40;
 
 /** Spacing of the five taps that smooth the shore distance the wave field reads, world px (2026-11-09, mmp-78u.30.1):
  * a few flood texels, so a seed switch's kink is rounded off without softening the shore itself. */
@@ -1285,6 +1299,8 @@ export function buildWaterSurfaceMaterial({
     ivec2,
     floor,
     fract,
+    normalize,
+    sqrt,
   } = THREE.TSL;
 
   const uMaskRect = uniform(vec4(maskRect.minX, maskRect.minY, maskRect.maxX, maskRect.maxY));
@@ -1586,9 +1602,6 @@ export function buildWaterSurfaceMaterial({
   // solved velocity is ~7 px per texel and falls to zero in the solid texels beside a wall, so its DIRECTION flips texel
   // by texel there. Averaged over 3x3 taps `WATER_FLOW_SMOOTH_PX` apart, and normalised softly (a short average is a
   // short direction, not a noisy unit one), the bend becomes a slow, large-scale lean toward the lee of an obstacle.
-  // the same 3x3 average as a VECTOR (normalised current, 1 = free stream): what foam reads - its length is the
-  // water's speed, so a closed pond (current 0) gives foam no heading at all (2026-11-10, Lab · River)
-  let flowLocalVec = vec2(0, 0);
   const flowSmooth = (() => {
     const S = WATER_FLOW_SMOOTH_PX;
     let acc = vec2(0, 0);
@@ -1613,7 +1626,6 @@ export function buildWaterSurfaceMaterial({
     // direction means nothing: trust it only as the flow there is real, else fall back to the free-stream heading, so a
     // wall deflects NOTHING at its face instead of everything (the full-cap strip with a hard rectangular end).
     const accLen = length(acc);
-    flowLocalVec = acc;
     const trust = smoothstep(float(0.2), float(0.65), accLen);
     return mix(uFlowDir, acc.div(max(accLen, float(1e-4))), trust);
   })();
@@ -2559,15 +2571,62 @@ export function buildWaterSurfaceMaterial({
     setBreakSpray() {},
   };
   const breakSpecks = null;
+  let foamVelocityForDebug = null;
+  let shoreForDebug = null;
   if (activeTier >= 4) {
     const tSecFoam = (timeMsNode ?? float(0)).mul(float(1 / 1000));
+    // ⚠️ THE CURRENT FOAM RIDES IS READ AS A CUBIC B-SPLINE (2026-11-10, mmp-78u.30.19 — Ingram: "Still seeing a lot of
+    // combs/grid patterns near the shore"). It used to be the 3x3 average of `buildSmoothTexelUv` reads, whose ease is
+    // FLAT at every flow texel centre (~7 px apart) and steep between them, so the velocity - and the stretch the foam
+    // texture's flow map puts into the lace - came in bands one flow cell wide: `readWaterWaves({debugView: 5})` drew it
+    // as a checker of dots, and the lace showed it as fine hatching (on a beach whose mask does not change along the shore
+    // at all). Four B-spline reads (each four bilinear taps, Sigg & Hadwiger - the read `simSoft` already uses for the same
+    // flaw) on a rotated square `FOAM_FLOW_SMOOTH_PX` across: C2 everywhere, no flat spots, about as wide as the old average.
+    // The vector's length is the water's speed (1 = free stream), so a closed pond (current 0) gives foam no heading.
+    const flowSize = max(uFlowPackTexSize, vec2(1, 1));
+    const flowBSplineAt = (offX, offY) => {
+      const uvc = vec2(
+        clamp(positionWorld.x.add(float(offX)).sub(uMaskRect.x).div(spanX), 0, 1),
+        clamp(positionWorld.y.add(float(offY)).sub(uMaskRect.y).div(spanY), 0, 1)
+      );
+      const p = uvc.mul(flowSize).sub(vec2(0.5, 0.5));
+      const i = floor(p);
+      const f = p.sub(i);
+      const f2 = f.mul(f);
+      const f3 = f2.mul(f);
+      const om = vec2(1, 1).sub(f);
+      const w0 = om.mul(om).mul(om).div(6);
+      const w1 = f3.mul(3).sub(f2.mul(6)).add(4).div(6);
+      const w2 = f3.mul(-3).add(f2.mul(3)).add(f.mul(3)).add(1).div(6);
+      const w3 = f3.div(6);
+      const g0 = w0.add(w1);
+      const g1 = w2.add(w3);
+      const c0 = i.sub(vec2(0.5, 0.5)).add(w1.div(g0));
+      const c1 = i.add(vec2(1.5, 1.5)).add(w3.div(g1));
+      const at = (cx, cy) => {
+        const s = flowPackTexNode.sample(vec2(cx, cy).div(flowSize));
+        return vec2(s.r, s.g);
+      };
+      return at(c0.x, c0.y)
+        .mul(g0.x)
+        .add(at(c1.x, c0.y).mul(g1.x))
+        .mul(g0.y)
+        .add(at(c0.x, c1.y).mul(g0.x).add(at(c1.x, c1.y).mul(g1.x)).mul(g1.y));
+    };
+    const fa = FOAM_FLOW_SMOOTH_PX * 0.5 * (2 / Math.sqrt(5));
+    const fb = FOAM_FLOW_SMOOTH_PX * 0.5 * (1 / Math.sqrt(5));
+    const flowLocalVec = flowBSplineAt(fa, fb)
+      .add(flowBSplineAt(-fb, fa))
+      .add(flowBSplineAt(-fa, -fb))
+      .add(flowBSplineAt(fb, -fa))
+      .mul(float(0.25))
+      .mul(inRect);
     // THE CURRENT AGAINST THE SHORE (2026-10-17, author: "make it react to the stream
     // movement"). Within a few texels of any shore the flow pack is degenerate (zero
     // velocity inside solid texels), so there the GLOBAL heading stands in for the
     // local one; the shore's own normal comes from the mask (see `outward` in
     // `water-shore-mask.js`), with the body pack's rotated tangent only as the far
     // fallback.
-    const nearBank = float(1).sub(smoothstep(float(8), float(48), shoreDist));
     // ⚠️ THE LOCAL CURRENT, NOT THE COMPASS (2026-11-10, Ingram: "If we have a pond cut off ... we don't want that to
     // flow in the same way the river does"). The solved flow (`water-flow-potential.js`) runs ALONG the banks and is
     // zero in a closed pond, so the shore's front and lee now come from the water actually moving past it - length =
@@ -2597,17 +2656,26 @@ export function buildWaterSurfaceMaterial({
       farOutward: bodyOutward,
     });
     maskShoreSetters = maskShore.setters;
-    // THE CURRENT THAT CARRIES FOAM AND FLECKS: the solved local flow in open water;
-    // along the bank near a shore — the mask normal turned a quarter, pointed
-    // downstream, fading to a standstill where the bank faces the current square-on
-    // (a pier's nose), so foam splits there instead of flickering between directions.
-    const bankTangent = vec2(maskShore.outward.y.negate(), maskShore.outward.x);
-    // along the bank: the local current's own component along the shore (falls to 0 where the bank faces the current
-    // square-on, a pier's nose, and in a still pond) - no compass sign flip, so no split line
-    const alongBankPx = bankTangent.mul(dot(bankTangent, flowLocalVec)).mul(uFlowSpeedPx).mul(float(0.85));
     // (2026-11-10) the SMOOTHED local current, not the raw flow texel: beside a rock or a wall the raw velocity jumps from
     // texel to texel, and a foam texture carried by it is torn into thin horizontal/vertical pixel lines.
-    const currentPx = mix(flowLocalVec.mul(uFlowSpeedPx), alongBankPx, nearBank).add(windOnFoamPx);
+    // ⚠️ NO BANK-TANGENT SWITCH (2026-11-10, mmp-78u.30.18 — Ingram: "The edges of the river show comb like gaps"). Within
+    // 8-48 px of every shore the foam's velocity used to swap to the bank's own tangent, which turns fast round a rock and
+    // is noisy pixel to pixel: MEASURED with `tune({debugView: 5})`, a ~40 px ring of shear at double or worse round every
+    // rock and bank, and the lace torn into combs there. The solved current already runs along the banks, so foam rides it
+    // everywhere (the 3x3-smoothed vector), softly capped at `FOAM_TEXTURE_SPEED_CAP_PX` (the faster the pattern slides, the
+    // harder a current that varies tears it).
+    const foamCur = flowLocalVec.mul(uFlowSpeedPx);
+    const foamCurLen = length(foamCur);
+    const currentPx = foamCur
+      .div(
+        sqrt(
+          float(1).add(
+            foamCurLen.div(float(FOAM_TEXTURE_SPEED_CAP_PX)).mul(foamCurLen.div(float(FOAM_TEXTURE_SPEED_CAP_PX)))
+          )
+        )
+      )
+      .add(windOnFoamPx);
+    foamVelocityForDebug = currentPx;
     // the sim's flowing foam may come right up to the bank (it used to fade out over 8-48 px, so foam leaving a shore
     // or a rock only appeared well downstream): trails now peel visibly off the bank and the rocks
     const simShoreFade = smoothstep(float(0), float(0.25), inside).mul(smoothstep(float(2), float(14), shoreDist));
@@ -2618,8 +2686,15 @@ export function buildWaterSurfaceMaterial({
     // dense whitewater at the rocks and thinning flecks down a trail.
     const simDensity = smoothstep(uSimClumpLo, float(WATER_SIM_DENSITY_FULL), simSoft).mul(inRect);
     foamDensity = max(max(maskShore.density, simDensity.mul(simShoreFade)), field.foam.mul(crestPatch));
+    shoreForDebug = { shore: maskShore, sim: simDensity.mul(simShoreFade), crest: field.foam.mul(crestPatch) };
+    // FOAM ON THE WAVES (2026-11-10, Ingram: "the surface foam and the specular seem to live in separate worlds, I would
+    // expect the surface foam to conform to the normal/shape of the waves seen in specular"). The foam used to be a flat
+    // pattern on a flat plane: it never saw the waves the glint is lit on. Its pattern is now read where the wave's slope
+    // pushes it (`FOAM_WAVE_WARP_PX` per unit slope): the same `field.slope` the specular's normal is built from, so the
+    // lace bunches and stretches over the same crests and troughs the glint shows, and rides them as they pass.
+    const foamWorldXY = vec2(positionWorld.x, positionWorld.y).add(field.slope.mul(float(FOAM_WAVE_WARP_PX)));
     foamTexture = buildFoamTexture(THREE, {
-      worldXY: vec2(positionWorld.x, positionWorld.y),
+      worldXY: foamWorldXY,
       density: foamDensity,
       tSec: tSecFoam,
       texturePx: maskShore.uTexturePx,
@@ -3102,6 +3177,92 @@ export function buildWaterSurfaceMaterial({
     material.blendDstAlpha = THREE.OneFactor;
   }
 
+  // ── LAB INSTRUMENTS IN THE LIVE WATER (2026-11-10, mmp-78u.30.18 — Ingram: "create a better way to visualize the
+  // normals/distortion"). The debug-channel picker drives the old water path, not the viewer Foundry draws; these draw
+  // in the real water, swapped in by `MapShine.readWaterWaves({debugView: n})` (1 drift grid, 2 drift shear, 3 wave
+  // normals, 4 the caustics alone, 5 the foam texture's own shear; 0 = off). A uniform blend, so off costs the live picture nothing visible.
+  let waveDebugColor = null;
+  let waveDebugOn = float(0);
+  if (waves?.driftAt && waves.uDebugView) {
+    const pw = vec2(positionWorld.x, positionWorld.y);
+    const dr = waves.driftAt(pw);
+    const fa = fract(waves.uFlowT);
+    const wA = float(1).sub(abs(float(1).sub(fa.mul(2))));
+    const wB = float(1).sub(wA);
+    const wpx = max(fwidth(positionWorld.x), float(1e-4));
+    const gridOf = (off) => {
+      const g = pw.sub(off).div(float(48));
+      const fw = max(fwidth(g), vec2(1e-4, 1e-4));
+      const ddx = abs(fract(g.x.add(float(0.5))).sub(float(0.5))).div(fw.x);
+      const ddy = abs(fract(g.y.add(float(0.5))).sub(float(0.5))).div(fw.y);
+      return float(1).sub(smoothstep(float(0.5), float(1.5), min(ddx, ddy)));
+    };
+    const shearOf = (off) => length(vec2(fwidth(off.x), fwidth(off.y))).div(wpx);
+    const line = max(gridOf(dr.xy).mul(wA), gridOf(dr.zw).mul(wB));
+    const sh = max(shearOf(dr.xy).mul(wA), shearOf(dr.zw).mul(wB));
+    const shN = clamp(sh, float(0), float(1));
+    const sl = field.slope ?? vec2(0, 0);
+    const v = waves.uDebugView;
+    const is = (k) => float(1).sub(smoothstep(float(0.25), float(0.5), abs(v.sub(float(k)))));
+    const cGrid = vec3(shN.add(line.mul(0.2)), line.mul(0.85), float(0.3));
+    const cShear = vec3(
+      clamp(sh.mul(2), float(0), float(1)),
+      clamp(sh.sub(0.5), float(0), float(1)).mul(2),
+      float(0.15)
+    );
+    const cNorm = vec3(
+      clamp(sl.x.mul(-4).mul(0.5).add(0.5), float(0), float(1)),
+      clamp(sl.y.mul(-4).mul(0.5).add(0.5), float(0), float(1)),
+      float(0.6)
+    );
+    const cCaus = vec3(causticI, causticI, causticI).mul(0.5);
+    // 5: the FOAM texture's own shear — how far its flow map stretches the lace over half a cycle (1.6 s), per world px
+    const fv = foamVelocityForDebug ?? vec2(0, 0);
+    const fsh = length(vec2(fwidth(fv.x), fwidth(fv.y)))
+      .div(wpx)
+      .mul(float(0.8));
+    const cFoam = vec3(
+      clamp(fsh.mul(2), float(0), float(1)),
+      clamp(fsh.sub(0.5), float(0), float(1)).mul(2),
+      float(0.15)
+    );
+    // 6: THE SHORE FOAM'S ANATOMY (2026-11-10, mmp-78u.30.19): red = its density, green = contour lines of its distance from
+    // the waterline every 8 px (a staircase here is a staircase in the foam), blue = where that distance comes from the
+    // body SDF instead of the mask, dim grey = water too thin for foam (`thinWater`).
+    // 7: WHICH FOAM IS WHICH: red = shoreline (mask), green = sim (wakes, trails, riffles), blue = wave crests.
+    let cShore = vec3(0, 0, 0);
+    let cSrc = vec3(0, 0, 0);
+    if (shoreForDebug) {
+      const s = shoreForDebug.shore;
+      const dq = s.dist.div(float(8));
+      const dLine = float(1).sub(
+        smoothstep(
+          float(0.5),
+          float(1.5),
+          abs(fract(dq.add(float(0.5))).sub(float(0.5))).div(max(fwidth(dq), float(1e-4)))
+        )
+      );
+      cShore = vec3(clamp(s.density, float(0), float(1)), dLine.mul(float(0.8)), s.distFromSdf.mul(float(0.7))).add(
+        vec3(0.12, 0.12, 0.12).mul(float(1).sub(s.thinWater))
+      );
+      cSrc = vec3(
+        clamp(s.density, float(0), float(1)),
+        clamp(shoreForDebug.sim, float(0), float(1)),
+        clamp(shoreForDebug.crest, float(0), float(1))
+      );
+    }
+    waveDebugColor = cGrid
+      .mul(is(1))
+      .add(cShear.mul(is(2)))
+      .add(cNorm.mul(is(3)))
+      .add(cCaus.mul(is(4)))
+      .add(cFoam.mul(is(5)))
+      .add(cShore.mul(is(6)))
+      .add(cSrc.mul(is(7)))
+      .mul(max(inside, is(6).add(is(7))));
+    // views 6 and 7 also show the thin water and painted land shoreward of the visible edge, where shore foam may draw
+    waveDebugOn = clamp(v, float(0), float(1)).mul(max(inside, is(6).add(is(7)).mul(inRect)));
+  }
   // ── MESH 1: ABSORPTION ───────────────────────────────────────────────────
   // `dst · src` — the bed, multiplied per channel. The wet band rides here and
   // ONLY here, as a neutral darkening with no colour of its own.
@@ -3145,7 +3306,34 @@ export function buildWaterSurfaceMaterial({
   const landedSpray = breakSpecks ? breakSpecks.mul(foamSharpnessFactor) : float(0);
   const shoreFoam = max(totalFoam.mul(mix(float(1), paintedLand, shoreDry)), landedSpray);
   const foamCover = shoreFoam.mul(shoreFoam).mul(mix(float(1), uShoreFoamDryCover, shoreDry));
-  const foamGlow = shoreFoam.mul(float(2).sub(shoreFoam)).mul(mix(float(1), uShoreFoamDryGlow, shoreDry));
+  // FOAM IS LIT ON THE WAVES (2026-11-10, see FOAM ON THE WAVES above): the sun on the same normal the glint uses, with
+  // the slope exaggerated (`FOAM_WAVE_NORMAL_GAIN`: a raft of bubbles is rougher than the water under it), relative to
+  // flat water so the average brightness is unchanged - faces toward the sun brighten, the backs of the waves dim.
+  // Gated by the same shadow/cloud the glint is: in shade the foam is evenly lit.
+  let foamWaveShade = float(1);
+  if (specular?.keyDir && field.slope) {
+    const fN = normalize(
+      vec3(field.slope.x.mul(float(-FOAM_WAVE_NORMAL_GAIN)), field.slope.y.mul(float(-FOAM_WAVE_NORMAL_GAIN)), float(1))
+    );
+    const fL = normalize(specular.keyDir);
+    const amb = float(FOAM_WAVE_AMBIENT);
+    const lit = amb.add(
+      float(1)
+        .sub(amb)
+        .mul(max(dot(fN, fL), float(0)))
+    );
+    const flat = amb.add(
+      float(1)
+        .sub(amb)
+        .mul(max(fL.z, float(0)))
+    );
+    const rel = clamp(lit.div(max(flat, float(0.05))), float(0.55), float(1.45));
+    foamWaveShade = mix(float(1), rel, clamp(specular.sunShade ?? float(1), float(0), float(1)).mul(inside));
+  }
+  const foamGlow = shoreFoam
+    .mul(float(2).sub(shoreFoam))
+    .mul(mix(float(1), uShoreFoamDryGlow, shoreDry))
+    .mul(foamWaveShade);
   const foamHide = float(1).sub(foamCover);
   const foamLift = float(1).add(shoreFoam.mul(shoreDry).mul(uShoreFoamDryLift));
 
@@ -3173,7 +3361,7 @@ export function buildWaterSurfaceMaterial({
   //
   // Named (not inlined) because debug channel 17 (`absorbFinal`) reads this
   // exact expression — see the instrument below.
-  const absorbFinalColor = mix(vec3(1, 1, 1), absorbColor, notOccluded);
+  const absorbFinalColor = mix(vec3(1, 1, 1), mix(absorbColor, vec3(0, 0, 0), waveDebugOn), notOccluded);
   absorbMaterial.colorNode = vec4(absorbFinalColor, 1);
   configureShared(absorbMaterial);
   absorbMaterial.blendSrc = THREE.ZeroFactor;
@@ -3230,7 +3418,8 @@ export function buildWaterSurfaceMaterial({
     .mul(float(1).sub(steamAlpha))
     .add(vec3(0.94, 0.95, 0.97).mul(steamAlpha))
     .mul(notOccluded);
-  inscatterMaterial.colorNode = vec4(inscatterFinalColor, 1);
+  const inscatterOut = waveDebugColor ? mix(inscatterFinalColor, waveDebugColor, waveDebugOn) : inscatterFinalColor;
+  inscatterMaterial.colorNode = vec4(inscatterOut, 1);
   configureShared(inscatterMaterial);
   inscatterMaterial.blendSrc = THREE.OneFactor;
   inscatterMaterial.blendDst = THREE.OneFactor;
@@ -3279,7 +3468,7 @@ export function buildWaterSurfaceMaterial({
     //    5's ALPHA rides `output.w` (an unwritten pixel reads alpha 0), and
     //    every extra attachment is read only through its RGB (cleared to 0,
     //    which is `1 − 1`: the multiply's neutral).
-    resolveMaterial.colorNode = vec4(inscatterFinalColor, refractResolveAlpha ?? float(0));
+    resolveMaterial.colorNode = vec4(inscatterOut, refractResolveAlpha ?? float(0));
     resolveMaterial.mrtNode = mrt(
       refractResolveOut
         ? { waterAbsorb: vec4(vec3(1, 1, 1).sub(absorbFinalColor), 1), waterRefract: refractResolveOut }
@@ -3445,6 +3634,45 @@ export function buildWaterSurfaceMaterial({
               .sub(smoothstep(float(0.5), float(2), min(tx, ty)))
               .mul(inside);
             return vec3(tl, tl, tl);
+          })(),
+          // 35-37 (2026-11-10, mmp-78u.30.18 — Ingram: "create a better way to visualize the normals/distortion"). The drift
+          // the wave system reads its surface (and so the caustic splat) at, drawn as a grid per flow-map phase.
+          ...(() => {
+            if (!waves?.driftAt) {
+              const z = vec3(0, 0, 0);
+              return { waveDriftGrid: z, waveDriftShear: z, waveNormal: z };
+            }
+            const pw = vec2(positionWorld.x, positionWorld.y);
+            const dr = waves.driftAt(pw);
+            const fa = fract(waves.uFlowT);
+            const wA = float(1).sub(abs(float(1).sub(fa.mul(2))));
+            const wB = float(1).sub(wA);
+            const wpx = max(fwidth(positionWorld.x), float(1e-4));
+            const gridOf = (off) => {
+              const g = pw.sub(off).div(float(48));
+              const fw = max(fwidth(g), vec2(1e-4, 1e-4));
+              const ddx = abs(fract(g.x.add(float(0.5))).sub(float(0.5))).div(fw.x);
+              const ddy = abs(fract(g.y.add(float(0.5))).sub(float(0.5))).div(fw.y);
+              return float(1).sub(smoothstep(float(0.5), float(1.5), min(ddx, ddy)));
+            };
+            const shearOf = (off) => clamp(length(vec2(fwidth(off.x), fwidth(off.y))).div(wpx), float(0), float(2));
+            const line = max(gridOf(dr.xy).mul(wA), gridOf(dr.zw).mul(wB));
+            const sh = max(shearOf(dr.xy).mul(wA), shearOf(dr.zw).mul(wB));
+            const shN = clamp(sh, float(0), float(1));
+            const sl = field.slope ?? vec2(0, 0);
+            return {
+              waveDriftGrid: vec3(shN.add(line.mul(0.15)), line.mul(0.85), inside.mul(0.35)),
+              waveDriftShear: vec3(
+                clamp(sh.mul(2), float(0), float(1)),
+                clamp(sh.sub(0.5), float(0), float(1)).mul(2),
+                inside.mul(0.2)
+              ),
+              waveNormal: vec3(
+                clamp(sl.x.mul(-4).mul(0.5).add(0.5), float(0), float(1)),
+                clamp(sl.y.mul(-4).mul(0.5).add(0.5), float(0), float(1)),
+                inside.mul(0.6)
+              ),
+            };
           })(),
         };
       })(),

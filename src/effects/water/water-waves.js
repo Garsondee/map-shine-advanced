@@ -118,9 +118,23 @@ export function wavePatternVelocity({
   return { vx: currentPx[0] + windDir[0] * windPx, vy: currentPx[1] + windDir[1] * windPx, windPx, flowing };
 }
 /** Flow-map cycle, seconds: each of two phases integrates its drift for one cycle, then restarts unseen. */
-export const WAVE_FLOW_CYCLE_SEC = 3;
+export const WAVE_FLOW_CYCLE_SEC = 2;
+/**
+ * ⚠️ THE DRIFT MUST NOT CRUSH THE PATTERN (2026-11-10, mmp-78u.30.18 — Ingram, Lab · River rapids: "The distortions are
+ * creating extremely strong over strong lines and breaking points, the caustics are being crushed and swirled ... The
+ * edges of the river show comb like gaps"). MEASURED with the live instruments (`tune({debugView})`): over the rapids
+ * the drift stretched the pattern to double or worse almost everywhere, and the field showed ~25 px squares (256 texels
+ * over the whole scene) that tear into combs at the banks. A pattern carried for a whole cycle by a current that changes
+ * from texel to texel round a rock is sheared by (Δv per px) × cycle. So: the current the drift reads is blurred over
+ * `WAVE_DRIFT_BLUR_TEXELS`, its speed is softly capped at `WAVE_DRIFT_SPEED_CAP_PX` (the water still runs that fast; its
+ * pattern need not travel at it), the field is twice as fine, the cycle is 2 s, and the caustics are splatted from the
+ * surface read at `WAVE_CAUSTIC_DRIFT_SHARE` of the drift — the bed's light distorts less than the surface over it.
+ */
+export const WAVE_DRIFT_BLUR_TEXELS = 1.5;
+export const WAVE_DRIFT_SPEED_CAP_PX = 80;
+export const WAVE_CAUSTIC_DRIFT_SHARE = 0.4;
 /** Drift field resolution (over the wind texture's rect). */
-export const WAVE_DRIFT_RES = 256;
+export const WAVE_DRIFT_RES = 512;
 /**
  * WIND-SHAPED CRESTS: in a real wind sea the downwind face is steep and the crests are sharp, the troughs broad. Applied
  * to the summed surface: the slope down the wind's face is steepened (`WAVE_CREST_LEAN`), the up-wind back eased, and
@@ -621,6 +635,7 @@ export function createWaterWaveSystem({
   const uDriftReset = uniform(new THREE.Vector2(0, 0)); // 1 = that phase restarts its drift this frame
   const uCrestLean = uniform(WAVE_CREST_LEAN);
   const uCrestSharp = uniform(WAVE_CREST_SHARP);
+  const uDebugView = uniform(0); // lab instrument the water draws instead of itself (1 drift grid, 2 shear, 3 normals; `tune({debugView})`)
   const uWindTravelPx = uniform(0); // the wind's share of the pattern's travel in still water, world px/s (CPU, per frame)
   const uBinWindyS = uniform(WAVE_RIPPLE_BIN_S_WINDY);
   const uSliceLod = uniform(WAVE_CAUSTIC_LOD);
@@ -737,10 +752,33 @@ export function createWaterWaveSystem({
         uv().mul(vec2(uWindRect.z.sub(uWindRect.x), uWindRect.w.sub(uWindRect.y)))
       );
       const fspan = vec2(max(uFlowRect.z.sub(uFlowRect.x), float(1)), max(uFlowRect.w.sub(uFlowRect.y), float(1)));
-      const fuv = clamp(wp.sub(vec2(uFlowRect.x, uFlowRect.y)).div(fspan), vec2(0.001, 0.001), vec2(0.999, 0.999));
-      const fn = texture(placeholderWind, fuv);
-      flowTexNodes.push(fn);
-      const currentHere = mix(uCurrentPx, vec2(fn.x, fn.y).mul(uFlowSpeedPx), uFlowOk);
+      // blurred over a 3x3 of taps `WAVE_DRIFT_BLUR_TEXELS` drift texels apart (see `WAVE_DRIFT_BLUR_TEXELS`)
+      const texelW = vec2(uWindRect.z.sub(uWindRect.x), uWindRect.w.sub(uWindRect.y))
+        .div(float(WAVE_DRIFT_RES))
+        .mul(float(WAVE_DRIFT_BLUR_TEXELS));
+      // weighted by WATER (the pack's A is solidity): a tap inside a rock or the bank holds no current and must not pull
+      // the water beside it toward a standstill — that seam was the last ring of shear round every rock
+      let flowSum = vec2(0, 0);
+      let wSum = float(0);
+      for (const oy of [-1, 0, 1]) {
+        for (const ox of [-1, 0, 1]) {
+          const w = ((ox === 0 ? 2 : 1) * (oy === 0 ? 2 : 1)) / 16;
+          const tuv = clamp(
+            wp.add(vec2(ox, oy).mul(texelW)).sub(vec2(uFlowRect.x, uFlowRect.y)).div(fspan),
+            vec2(0.001, 0.001),
+            vec2(0.999, 0.999)
+          );
+          const fn = texture(placeholderWind, tuv);
+          flowTexNodes.push(fn);
+          const ww = float(w).mul(float(1).sub(clamp(fn.w, float(0), float(1))));
+          flowSum = flowSum.add(vec2(fn.x, fn.y).mul(ww));
+          wSum = wSum.add(ww);
+        }
+      }
+      const rawCurrent = mix(uCurrentPx, flowSum.div(max(wSum, float(1e-3))).mul(uFlowSpeedPx), uFlowOk);
+      // soft speed cap: s / sqrt(1 + (s/cap)^2)
+      const rawLen = length(rawCurrent);
+      const currentHere = rawCurrent.div(sqrt(float(1).add(rawLen.div(float(WAVE_DRIFT_SPEED_CAP_PX)).pow(2))));
       // the wind's travel (`WAVE_WIND_TRAVEL_SHARE`, twin: `wavePatternVelocity`): downwind along the local air, scaled by
       // its gusts and shelter against the scene's wind, and shrunk where the water itself runs
       const localLen = length(local);
@@ -823,7 +861,7 @@ export function createWaterWaveSystem({
    * (`WAVE_RIPPLE_ROT`, an angle whose tangent is irrational): the two bands' lattices never line up again, the sum
    * never repeats. Its slopes are turned back into world axes (`rippleRead`).
    */
-  const surfaceAt = (p) => {
+  const surfaceAt = (p, driftShare = null) => {
     const g = localGains(p);
     // ⚠️ NO REPEAT AT LOW WIND (2026-11-10, Ingram: "when you lower wind strength you can clearly see an echoing
     // repeating pattern"). In a light air the ripples are all there is, and one read of their 1024 px tile repeats every
@@ -842,7 +880,7 @@ export function createWaterWaveSystem({
       uBinWindyS,
       smoothstep(float(1.5), float(WAVE_RIPPLE_BIN_WINDY_MS), g.U)
     );
-    const dr = driftAt(p);
+    const dr = driftShare === null ? driftAt(p) : driftAt(p).mul(float(driftShare));
     const fa = fract(uFlowT);
     const fb = fract(uFlowT.add(0.5));
     const wA = float(1).sub(abs(float(1).sub(fa.mul(2))));
@@ -907,7 +945,7 @@ export function createWaterWaveSystem({
     // origin now steps in whole cells (and the slices' in whole texels), so a pan only adds and drops rows at the edges.
     const g = uv();
     const pS = vec2(uGrid.x.add(g.x.mul(uGrid.z)), uGrid.y.add(g.y.mul(uGrid.w)));
-    const wS = surfaceAt(pS);
+    const wS = surfaceAt(pS, WAVE_CAUSTIC_DRIFT_SHARE);
     const nS = normalize(vec3(wS.y.negate(), wS.z.negate(), float(1)));
     const R = refract(uSun.negate(), nS, float(1 / WAVE_IOR));
     const q = pS.add(R.xy.mul(uDepthPx.div(max(R.z.negate(), float(0.05)))));
@@ -1238,6 +1276,7 @@ export function createWaterWaveSystem({
     uCrestLean.value = Number.isFinite(tune.crestLean) ? tune.crestLean : WAVE_CREST_LEAN;
     uCrestSharp.value = Number.isFinite(tune.crestSharp) ? tune.crestSharp : WAVE_CREST_SHARP;
     uBinWindyS.value = Number.isFinite(tune.binWindyS) ? tune.binWindyS : WAVE_RIPPLE_BIN_S_WINDY;
+    uDebugView.value = Number.isFinite(tune.debugView) ? tune.debugView : 0;
     uSliceLod.value = Number.isFinite(tune.sliceLod) ? tune.sliceLod : WAVE_CAUSTIC_LOD;
     uSplatMax.value = Number.isFinite(tune.splatMax) ? tune.splatMax : WAVE_SPLAT_MAX;
     uContrast.value = Number.isFinite(tune.contrast)
@@ -1335,6 +1374,10 @@ export function createWaterWaveSystem({
     },
     /** Node builders for the water material (each call adds texture taps). */
     surfaceAt,
+    /** Debug instruments (2026-11-10): the drift (vec4: phase A, phase B offsets, world px) and the flow-map clock. */
+    driftAt,
+    uFlowT,
+    uDebugView,
     causticMaskAt,
     causticAt,
     shaftsAt,

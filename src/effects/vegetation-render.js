@@ -370,6 +370,9 @@ export function vegetationHeightFt(kind, params) {
  */
 const VEG_KIND_SLOT_MARGIN = 0.02;
 
+// Just above the top of water (0.52) and the rain mantle (0.53) paint bands.
+const VEG_WATER_CLEARANCE = 0.6;
+
 // Ground-to-sky tiebreak order when nothing real separates two vegetation
 // sub-items sharing one gap (the sparse-floor-tie class, Bug-Tracker.md bug
 // #2, 2026-08-04 — generalized to cover the shadow too, 2026-08-06). Canopy
@@ -418,7 +421,14 @@ export function vegetationOverlayRenderOrder(sortedItems, hostItem, kind, band, 
   const fraction = VEG_SLOT_RANK[kind?.id]?.[role] ?? 0.5;
   const span = 1 - 2 * VEG_KIND_SLOT_MARGIN;
   const slot = VEG_KIND_SLOT_MARGIN + fraction * span;
-  return { renderOrder: below - 1 + slot, elevation, fellBack: false };
+  // WATER CLEARANCE (2026-11-11, "bushes render underwater"): water's tier-0 surface meshes
+  // sit at renderOrder 0.5-0.52 (water-surface-subsystem.js) and rain's mantle at 0.52-0.53,
+  // and vegetation overlays write no scene depth, so water's depth gate cannot see them. A bush
+  // canopy over the background (below == 1) computed 0.5 = a dead tie with water. Lift any
+  // canopy above that band; it stays strictly inside (below-1, below), so no real drawable moves.
+  let renderOrder = below - 1 + slot;
+  if (role === 'canopy' && below >= 1) renderOrder = Math.max(renderOrder, VEG_WATER_CLEARANCE);
+  return { renderOrder, elevation, fellBack: false };
 }
 
 /**

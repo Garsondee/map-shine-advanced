@@ -278,6 +278,10 @@ export function run(t) {
         sparseBush.renderOrder !== sparseTree.renderOrder
       );
       ok(
+        'a bush canopy draws ABOVE water (0.5-0.52) and the rain mantle (0.53), never tied with them',
+        sparseBush.renderOrder > 0.53 && sparseBush.renderOrder > sparseHost.renderOrder + 0.53
+      );
+      ok(
         'canopy still draws above undergrowth when nothing else breaks the tie',
         sparseTree.renderOrder > sparseBush.renderOrder
       );

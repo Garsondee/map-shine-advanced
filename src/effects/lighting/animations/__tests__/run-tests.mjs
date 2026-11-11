@@ -7,6 +7,7 @@
  */
 import { run as runLightAnimationClock } from './light-animation-clock.test.mjs';
 import { run as runRegistry } from './registry.test.mjs';
+import { run as runCandleVaryings } from './candle-varyings.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -38,6 +39,7 @@ const t = {
 const suites = [
   ['light-animation-clock', runLightAnimationClock],
   ['registry', runRegistry],
+  ['candle-varyings', runCandleVaryings],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

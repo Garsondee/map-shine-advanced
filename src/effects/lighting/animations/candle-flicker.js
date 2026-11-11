@@ -248,6 +248,14 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse, allow
   // construction, since a value that is constant across the primitive
   // interpolates to itself exactly at every fragment.
   const hoist = (node, name) => node.toVarying(name);
+  // PACKED (2026-11-11): one vec4 varying carries n / pulse / warmth / presence. Each had its own vertex output,
+  // and with the batched light's attributes and the soft-wall-edge attributes (light-penumbra.js) the candle
+  // illumination shader reached 17 outputs; WebGPU allows 16, so the pipeline failed and candle-animated lights
+  // drew nothing. `life` stays its own: only the vertex stage (candleShape's size) reads it.
+  const pack = (n, brightnessPulse, warmth, presence) => {
+    const v = TSL.vec4(n, brightnessPulse, warmth, presence ?? TSL.float(1)).toVarying('vCandleLifePack');
+    return { n: v.x, brightnessPulse: v.y, warmth: v.z, presence: presence ? v.w : null };
+  };
 
   if (quality < 1) {
     // TIER 0 — byte-identical to light-animation-clock.js#buildFlickerNode.
@@ -258,10 +266,8 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse, allow
     const unit = remap(perlin(vec2(time, float(0))));
     const n = unit.mul(amplitude);
     return {
-      presence: null, // tier 0 has no wind coupling, so its flame is never out
-      n: hoist(n, 'vCandleLifeN'),
-      brightnessPulse: hoist(float(0.55).add(n), 'vCandleBrightnessPulse'),
-      warmth: hoist(unit.sub(float(0.5)).mul(float(2)), 'vCandleWarmth'),
+      // presence null: tier 0 has no wind coupling, so its flame is never out
+      ...pack(n, float(0.55).add(n), unit.sub(float(0.5)).mul(float(2)), null),
       life: hoist(unit, 'vCandleLife'),
     };
   }
@@ -334,11 +340,8 @@ function candleLife(TSL, time, amplification, quality, wind, windResponse, allow
   const aliveNow = windState ? windState.alive01 : float(1).sub(snuff);
   const presence = aliveNow.mul(aliveNow);
   return {
-    n: hoist(n, 'vCandleLifeN'),
-    brightnessPulse: hoist(brightnessPulse, 'vCandleBrightnessPulse'),
-    warmth: hoist(warmth, 'vCandleWarmth'),
+    ...pack(n, brightnessPulse, warmth, presence),
     life: hoist(life, 'vCandleLife'),
-    presence: hoist(presence, 'vCandlePresence'),
   };
 }
 
@@ -415,11 +418,14 @@ function candleShape(TSL, time, dist, localPosition, life, quality, wind, windRe
   // candleLife), so none of them need the per-fragment `P` this function was
   // called for. Only the combination with `P` just below genuinely needs the
   // fragment stage.
-  const lean = leanRaw.toVarying('vCandleLean');
-  const axis = axisRaw.toVarying('vCandleAxis');
-  const a = aRaw.toVarying('vCandleStretchA');
-  const b = bRaw.toVarying('vCandleStretchB');
-  const size = sizeRaw.toVarying('vCandleSize');
+  // Packed into two varyings, not five (see candleLife's `pack`: the 16-output limit).
+  const leanAxis = TSL.vec4(leanRaw, axisRaw).toVarying('vCandleLeanAxis');
+  const stretch = TSL.vec3(aRaw, bRaw, sizeRaw).toVarying('vCandleStretch');
+  const lean = leanAxis.xy;
+  const axis = leanAxis.zw;
+  const a = stretch.x;
+  const b = stretch.y;
+  const size = stretch.z;
 
   // Shift the pool body toward the lean (the flame bends off the wick) — the
   // first point in this function that actually needs the fragment's own P.

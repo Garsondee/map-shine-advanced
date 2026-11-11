@@ -311,6 +311,7 @@ import {
   // THE VISION-SOURCE READER (Pillar 11) — consumes Foundry's own wall-swept
   // polygons; never reproduces the vision ruleset.
   readActiveVisionSources,
+  readActiveLightShapes,
   readIsGM,
   setVisibilitySuppression,
   readSceneAmbient,
@@ -457,6 +458,8 @@ import {
   VISION_GATE_BUILD_TAG,
   decideFogGating,
   REVEAL_ILLUMINATION_THRESHOLD,
+  nightRevealFloor,
+  setRevealNightFloor,
   EXPLORED_DIM_FACTOR,
   // DOOR-LEAF-OCCLUSION — a swinging leaf's own CURRENT geometry as a
   // real-time vision occluder (additive to the door-fog timer fade above).
@@ -11520,6 +11523,15 @@ async function startVtPanViewerUnserialized({
       envLight.setAmbience?.(globalThis.canvas?.scene?.environment ?? null, darkness01);
       lastRaisedBackground = raisedBackground;
       uVisionMemoryLight.value.set(raisedBackground[0], raisedBackground[1], raisedBackground[2]);
+      // THE NIGHT FLOOR for light-perception (mmp-tye.1): at night the unlit ground (ambient + sky fill + moon)
+      // sits above the 0.08 reveal threshold, so an open map revealed itself whole. Global light ON = the
+      // ambient is lit, so no floor then. See vision-mask.js#nightRevealFloor.
+      setRevealNightFloor(
+        nightRevealFloor({
+          darkness01,
+          globalLightFloorMax: Math.max(0, ...(Array.isArray(lastGlobalLightFloor) ? lastGlobalLightFloor : [0])),
+        })
+      );
       profiler?.end(Z.lightAmbient);
 
       // SUN SHADOWS — re-march ONLY if the quantised sun, the masks, a floor
@@ -12367,13 +12379,18 @@ async function startVtPanViewerUnserialized({
         const visionDraw = visionMask.sync({
           sources: sourcesForMask,
           gate: gating.gate,
+          // Where Foundry says there is light (mask A, mmp-tye.1): read only when gating, a GM looking at
+          // everything needs no shapes.
+          litShapes: gating.gate ? readActiveLightShapes().shapes : null,
         });
         // FOG MEMORY (2026-11-02): the explored buffer belongs to the tokens in sight; follow them.
         if (gating.gate && visionDraw.explored?.camera) syncFogMemory(visionRead.sources);
         renderer.setRenderTarget(visionDraw.target);
         const prevVisionClear = renderer.getClearColor(new THREE.Color());
         const prevVisionAlpha = renderer.getClearAlpha();
-        renderer.setClearColor(visionDraw.clearColor, 1);
+        // Alpha is the "inside a lit shape" channel: 0 when gated (only the lit-shape meshes write 1), 1 when
+        // ungated (the white clear reveals everything).
+        renderer.setClearColor(visionDraw.clearColor, gating.gate ? 0 : 1);
         renderer.clear(true, false, false);
         // ⚠️ AUTOCLEAR GUARD — same trap as the illum sequence's own
         // "BLACK OUTSIDE THE LIGHT RADIUS" postmortem (2026-07-19, above) and

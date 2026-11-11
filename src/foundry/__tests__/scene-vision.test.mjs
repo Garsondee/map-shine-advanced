@@ -9,7 +9,15 @@
  * a real token — the bench scene ships none, and a GM with nothing selected
  * exercises none of this.
  */
-import { deriveVisionSource, isUsablePolygon, shouldGateVision, MIN_POLYGON_FLOATS } from '../scene-vision.js';
+import {
+  deriveVisionSource,
+  deriveLightShape,
+  readActiveLightShapes,
+  MAX_LIT_SHAPES,
+  isUsablePolygon,
+  shouldGateVision,
+  MIN_POLYGON_FLOATS,
+} from '../scene-vision.js';
 import { REPORT_BUILD_TAG } from '../vision-diagnostics.js';
 // `effects/` sits above `foundry/` in the layering (`zones/one-door` —
 // foundry/ is a leaf and may not import effects/ in PRODUCTION code), but a
@@ -33,6 +41,84 @@ export function run(t) {
   ok('an odd-length array is malformed, never half-read', !isUsablePolygon([0, 0, 1, 0, 5]));
   ok('a non-array never throws, just reads false', isUsablePolygon(null) === false);
   ok('the minimum is 3 vertices = 6 floats', MIN_POLYGON_FLOATS === 6);
+
+  // ======================================================================
+  // deriveLightShape / readActiveLightShapes — "is it lit?" as geometry (mmp-tye.1, QA pass 2026-11-11)
+  // ======================================================================
+  {
+    const lamp = { sourceId: 'AmbientLight.a', active: true, isDarkness: false, points: SQUARE, x: 50, y: 50 };
+    const d = deriveLightShape(lamp);
+    ok(
+      'an active point light yields its polygon and its own position as the fan origin',
+      d && d.x === 50 && d.y === 50 && d.points === SQUARE
+    );
+    ok(
+      'an inactive light (hidden, or global light off at this darkness) lights nothing',
+      deriveLightShape({ ...lamp, active: false }) === null
+    );
+    ok('a darkness source lights nothing', deriveLightShape({ ...lamp, isDarkness: true }) === null);
+    ok('a degenerate polygon lights nothing', deriveLightShape({ ...lamp, points: [0, 0, 1, 1] }) === null);
+    ok('no id, no shape', deriveLightShape({ ...lamp, sourceId: '' }) === null && deriveLightShape(null) === null);
+    const gl = deriveLightShape({
+      ...lamp,
+      sourceId: 'globalLight',
+      x: 0,
+      y: 0,
+      points: [100, 100, 300, 100, 300, 300, 100, 300],
+    });
+    ok(
+      'the global light fans from its centroid (it reports 0,0, outside its own rectangle)',
+      gl && gl.x === 200 && gl.y === 200
+    );
+    const noPos = deriveLightShape({ ...lamp, x: NaN, y: undefined });
+    ok('a light with no usable position falls back to the centroid', noPos && noPos.x === 50 && noPos.y === 50);
+
+    const prior = globalThis.canvas;
+    try {
+      globalThis.canvas = {
+        effects: {
+          lightSources: [
+            { sourceId: 'globalLight', active: false, shape: { points: SQUARE }, data: { x: 0, y: 0 } },
+            {
+              sourceId: 'AmbientLight.a',
+              active: true,
+              isDarkness: false,
+              shape: { points: SQUARE },
+              data: { x: 50, y: 50 },
+            },
+            {
+              sourceId: 'AmbientLight.dark',
+              active: true,
+              isDarkness: true,
+              shape: { points: SQUARE },
+              data: { x: 1, y: 1 },
+            },
+          ],
+        },
+      };
+      const r = readActiveLightShapes();
+      ok(
+        'the live reader keeps only the active lighting source',
+        r.ok && r.shapes.length === 1 && r.shapes[0].sourceId === 'AmbientLight.a'
+      );
+      globalThis.canvas = { effects: {} };
+      ok('a missing collection reports ok:false instead of guessing', readActiveLightShapes().ok === false);
+      globalThis.canvas = {
+        effects: {
+          lightSources: Array.from({ length: MAX_LIT_SHAPES + 20 }, (_, i) => ({
+            sourceId: 'AmbientLight.' + i,
+            active: true,
+            shape: { points: SQUARE },
+            data: { x: 1, y: 1 },
+          })),
+        },
+      };
+      ok('a map with hundreds of lamps is capped', readActiveLightShapes().shapes.length === MAX_LIT_SHAPES);
+    } finally {
+      if (prior === undefined) delete globalThis.canvas;
+      else globalThis.canvas = prior;
+    }
+  }
 
   // ======================================================================
   // deriveVisionSource — the happy path

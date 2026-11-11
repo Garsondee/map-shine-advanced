@@ -92,7 +92,8 @@ export function buildVisionLosMaterial({ THREE }) {
   material.blendEquationAlpha = THREE.MaxEquation;
   material.blendSrcAlpha = THREE.OneFactor;
   material.blendDstAlpha = THREE.OneFactor;
-  material.fragmentNode = vec4(float(1), float(0), float(0), float(1));
+  // Alpha is now the "inside a lit shape" channel (buildVisionLitMaterial), so the sight polygon writes 0 there.
+  material.fragmentNode = vec4(float(1), float(0), float(0), float(0));
   return { material };
 }
 
@@ -120,7 +121,36 @@ export function buildVisionLightMaterial({ THREE }) {
   material.blendEquationAlpha = THREE.MaxEquation;
   material.blendSrcAlpha = THREE.OneFactor;
   material.blendDstAlpha = THREE.OneFactor;
-  material.fragmentNode = vec4(float(0), float(0), float(1), float(1));
+  material.fragmentNode = vec4(float(0), float(0), float(1), float(0));
+  return { material };
+}
+
+/**
+ * Build the material that stamps a LIT SHAPE (an active Foundry light source's wall-clipped polygon, or the
+ * global light's whole-scene one) into A (mmp-tye.1, two-client QA pass 2026-11-11).
+ *
+ * The reveal rule asks "is it lit?" and MSA's illumination buffer cannot answer that at night (ambient, sky
+ * fill and moonlight share the number with the lights, so an open map read as lit everywhere and a player
+ * saw all of it). Foundry's own answer is geometric: inside a light source's shape = lit. Alpha was a
+ * constant 1 nobody read; the clear now writes 0 and only this material writes 1, MAX-blended like the rest.
+ *
+ * @param {*} THREE @returns {{material: *}}
+ */
+export function buildVisionLitMaterial({ THREE }) {
+  const { float, vec4 } = THREE.TSL;
+  const material = new THREE.NodeMaterial();
+  material.transparent = false;
+  material.depthTest = false;
+  material.depthWrite = false;
+  material.side = THREE.DoubleSide;
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.MaxEquation;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.MaxEquation;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.fragmentNode = vec4(float(0), float(0), float(0), float(1));
   return { material };
 }
 
@@ -166,7 +196,7 @@ export function buildVisionFloorMaterial({ THREE }) {
   material.blendEquationAlpha = THREE.MaxEquation;
   material.blendSrcAlpha = THREE.OneFactor;
   material.blendDstAlpha = THREE.OneFactor;
-  material.fragmentNode = vec4(float(0), float(1), float(0), float(1));
+  material.fragmentNode = vec4(float(0), float(1), float(0), float(0));
   return { material };
 }
 
@@ -213,8 +243,32 @@ function sampleRevealIllum(THREE, illumTexture, at) {
   const illum = texture(illumTexture).sample(at);
   const cover = revealCoverByIllum.get(illumTexture);
   if (!cover) return illum;
-  const lift = texture(cover).sample(at).r.clamp(0, 1).mul(float(REVEAL_CASTER_FLOOR));
+  // At night the lifted floor must clear the night floor too, or a lit floor under a passing shadow flips
+  // to "not seen" (the mmp-rk6.3 flicker) the moment the night floor is on.
+  const lift = texture(cover)
+    .sample(at)
+    .r.clamp(0, 1)
+    .mul(max(float(REVEAL_CASTER_FLOOR), getRevealNightFloorUniform(THREE)));
   return vec4(max(illum.rgb, vec3(lift, lift, lift)), illum.a);
+}
+
+/**
+ * THE NIGHT FLOOR's one shared uniform (`vision-mask.js#nightRevealFloor`, mmp-tye.1). Every reveal consumer
+ * (gate, soft resolve, coverage, explored-dim) builds its rule through `buildRevealedNode`, so reading the
+ * floor in there changes all of them at once and no call site needs a new argument. The viewer sets it each
+ * frame through {@link setRevealNightFloor}; 0 (day, dusk, global light on) leaves the rule exactly as it was.
+ */
+let revealNightFloorValue = 0;
+let revealNightFloorUniform = null;
+function getRevealNightFloorUniform(THREE) {
+  if (!revealNightFloorUniform) revealNightFloorUniform = THREE.TSL.uniform(revealNightFloorValue);
+  return revealNightFloorUniform;
+}
+/** @param {number} value 0..1 - the extra illumination floor light-perception must clear this frame. */
+export function setRevealNightFloor(value) {
+  const v = Number.isFinite(value) ? Math.max(0, value) : 0;
+  revealNightFloorValue = v;
+  if (revealNightFloorUniform) revealNightFloorUniform.value = v;
 }
 
 function buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed = null, screenUV = null }) {
@@ -223,7 +277,13 @@ function buildRevealedNode({ THREE, mask, illum, threshold, extraRevealed = null
   // a second, differently-derived brightness, so "bright enough to see" and
   // "bright enough to look lit" can never disagree on screen.
   const luminance = max(max(illum.r, illum.g), illum.b);
-  const litEnough = luminance.greaterThanEqual(float(threshold));
+  // Bright enough to count at all, AND lit: inside an active light source's shape (mask A, Foundry's own
+  // geometric answer) or brighter than the unlit night floor (mask-less lights MSA draws itself). By day and
+  // with global light the night floor is 0, so the second clause is true and the rule is exactly as calibrated.
+  const brightEnough = luminance.greaterThanEqual(float(threshold));
+  const litByShape = mask.a.greaterThan(float(0.5));
+  const brighterThanNightFloor = luminance.greaterThanEqual(getRevealNightFloorUniform(THREE));
+  const litEnough = brightEnough.and(litByShape.or(brighterThanNightFloor));
   // UNION, not intersection — a no-darkvision token has a degenerate .shape,
   // and ANDing against it once blacked out the entire map (the regression
   // `vision-mask.js#decideRevealed`'s own header documents in full).
@@ -1398,6 +1458,50 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     return { losMesh, lightMesh };
   }
 
+  /**
+   * LIT SHAPES (A channel, mmp-tye.1): one pooled mesh per active Foundry light source's polygon. A map can
+   * carry hundreds of lamps and their polygons only change when Foundry refreshes a light (it hands us a NEW
+   * points array then), so the geometry is rewritten only when the array identity changes, never per frame.
+   * @param {Array<{sourceId: string, points: number[], x: number, y: number}>|null} shapes
+   * @returns {number} meshes drawn
+   */
+  const litPool = new Map();
+  let litMaterial = null;
+  function syncLitShapes(shapes) {
+    const live = Array.isArray(shapes) ? shapes : [];
+    if (!litMaterial && live.length > 0) litMaterial = buildVisionLitMaterial({ THREE }).material;
+    const seenLit = new Set();
+    let drawnLit = 0;
+    for (const shape of live) {
+      const id = shape?.sourceId;
+      if (typeof id !== 'string' || id.length === 0 || seenLit.has(id)) continue;
+      seenLit.add(id);
+      let rec = litPool.get(id);
+      if (!rec) {
+        const mesh = new THREE.Mesh(new THREE.BufferGeometry(), litMaterial);
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 2;
+        scene.add(mesh);
+        rec = { mesh, pointsRef: null };
+        litPool.set(id, rec);
+      }
+      if (rec.pointsRef !== shape.points) {
+        writeFanGeometry(THREE, rec.mesh, shape.points, shape.x, shape.y);
+        rec.pointsRef = shape.points;
+      }
+      rec.mesh.position.set(shape.x, shape.y, 0);
+      rec.mesh.visible = true;
+      drawnLit++;
+    }
+    for (const [id, rec] of [...litPool]) {
+      if (seenLit.has(id)) continue;
+      scene.remove(rec.mesh);
+      rec.mesh.geometry.dispose();
+      litPool.delete(id);
+    }
+    return drawnLit;
+  }
+
   function disposeEntry(entry) {
     scene.remove(entry.losMesh);
     scene.remove(entry.lightMesh);
@@ -1459,7 +1563,7 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
    * @returns {{target: *, scene: *, clearColor: number, drawn: number}} the
    *   draw the host should perform.
    */
-  function sync({ sources, gate }) {
+  function sync({ sources, gate, litShapes = null }) {
     lastGate = gate;
     const live = Array.isArray(sources) ? sources : [];
 
@@ -1468,6 +1572,7 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
         entry.losMesh.visible = false;
         entry.lightMesh.visible = false;
       }
+      for (const [, rec] of litPool) rec.mesh.visible = false;
       lastDrawn = 0;
       return { target: renderTarget, scene, clearColor: 0xffffff, drawn: 0 };
     }
@@ -1515,6 +1620,8 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
       disposeEntry(entry);
       pool.delete(id);
     }
+
+    drawn += syncLitShapes(litShapes);
 
     lastDrawn = drawn;
     // Consumed ONCE, shared by `explored` and `snapshot` below — a scene
@@ -1656,6 +1763,13 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
     allocator.dispose(softTarget);
     for (const [, entry] of pool) disposeEntry(entry);
     pool.clear();
+    for (const [, rec] of litPool) {
+      scene.remove(rec.mesh);
+      rec.mesh.geometry.dispose();
+    }
+    litPool.clear();
+    litMaterial?.dispose();
+    litMaterial = null;
     clearFloorMeshes();
     allocator.dispose(renderTarget);
     allocator.dispose(exploredTarget);
@@ -1669,6 +1783,7 @@ export function createVisionMaskSubsystem({ THREE, allocator, rtName = 'vision.m
   function getInfo() {
     return {
       pooled: pool.size,
+      litShapes: litPool.size,
       meshesDrawn: lastDrawn,
       gated: lastGate,
       // The explored buffer never clears, so "is it accumulating" cannot be

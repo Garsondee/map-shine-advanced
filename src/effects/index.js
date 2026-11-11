@@ -214,13 +214,16 @@ export {
   reconcileVisionMeshPool,
   decideFogGating,
   REVEAL_ILLUMINATION_THRESHOLD,
+  nightRevealFloor,
   EXPLORED_DIM_FACTOR,
   VISION_GATE_BUILD_TAG,
 } from './vision/vision-mask.js';
 export {
+  setRevealNightFloor,
   createVisionMaskSubsystem,
   buildVisionLosMaterial,
   buildVisionLightMaterial,
+  buildVisionLitMaterial,
   buildVisionGateMaterial,
   buildVisionExploredDimMaterial,
   buildVisionSnapshotPublishMaterial,

@@ -14,6 +14,8 @@ import {
   decideFogGating,
   REVEAL_ILLUMINATION_THRESHOLD,
   EXPLORED_DIM_FACTOR,
+  nightRevealFloor,
+  NIGHT_REVEAL_FLOOR,
 } from '../vision-mask.js';
 
 /** A lit-daylight pixel, calibrated from the author's own probe (0.933-0.945). */
@@ -31,6 +33,68 @@ const outdoorNoon = (over = {}) => ({
 
 export function run(t) {
   const { ok } = t;
+
+  // ======================================================================
+  // THE NIGHT FLOOR (mmp-tye.1, two-client QA pass 2026-11-11)
+  // ======================================================================
+  // Measured: the unlit ground of an open map at darkness 0.9 reads illum 0.19 (no moon) to 0.45 (moon), far
+  // above the 0.08 threshold, so light-perception revealed the whole moonlit map to a player.
+  const MOONLIT_UNLIT = 0.45;
+  const night = nightRevealFloor({ darkness01: 0.9, globalLightFloorMax: 0 });
+  ok('night floor: full strength at darkness 0.9 with no global light', night === NIGHT_REVEAL_FLOOR);
+  ok(
+    'night floor: sits above the highest unlit night value measured',
+    NIGHT_REVEAL_FLOOR > MOONLIT_UNLIT && NIGHT_REVEAL_FLOOR > 0.19
+  );
+  ok(
+    'THE LEAK: moonlit unlit ground (outside every light shape) is NOT revealed at night by light perception',
+    decideRevealed(outdoorNoon({ illumination: MOONLIT_UNLIT, nightFloor: night, insideLitShape: false })) === false
+  );
+  ok(
+    "a light's DIM zone (illum 0.3, under the night floor) IS revealed inside its shape - Foundry shows dim light",
+    decideRevealed(outdoorNoon({ illumination: 0.3, nightFloor: night, insideLitShape: true })) === true
+  );
+  ok(
+    '…and the same 0.3 pixel outside every shape is not (it is just moonlit ground)',
+    decideRevealed(outdoorNoon({ illumination: 0.3, nightFloor: night, insideLitShape: false })) === false
+  );
+  ok(
+    'a bright core MSA drew itself (no Foundry source) still reveals above the floor',
+    decideRevealed(outdoorNoon({ illumination: 0.9, nightFloor: night, insideLitShape: false })) === true
+  );
+  ok(
+    'inside a lit shape but darker than the 0.08 threshold is still not revealed',
+    decideRevealed(outdoorNoon({ illumination: 0.02, nightFloor: night, insideLitShape: true })) === false
+  );
+  ok(
+    'and the same pixel WAS revealed before the floor (the old behaviour this pins away from)',
+    decideRevealed(outdoorNoon({ illumination: MOONLIT_UNLIT })) === true
+  );
+  ok(
+    'a torch-lit pixel (bright core) is still revealed at night',
+    decideRevealed(outdoorNoon({ illumination: 0.9, nightFloor: night })) === true
+  );
+  ok(
+    'sight (darkvision) is illumination-independent, night or not',
+    decideRevealed(outdoorNoon({ insideSightPolygon: true, illumination: 0.01, nightFloor: night })) === true
+  );
+  ok('night floor: none by day', nightRevealFloor({ darkness01: 0, globalLightFloorMax: 0 }) === 0);
+  ok(
+    'night floor: none at dusk (darkness 0.5), so dusk is exactly as calibrated',
+    nightRevealFloor({ darkness01: 0.5 }) === 0
+  );
+  ok(
+    'night floor: eases in between 0.5 and 0.7',
+    nightRevealFloor({ darkness01: 0.6 }) > 0 && nightRevealFloor({ darkness01: 0.6 }) < NIGHT_REVEAL_FLOOR
+  );
+  ok(
+    'night floor: global illumination ON means the ambient is lit - no floor even at darkness 0.9',
+    nightRevealFloor({ darkness01: 0.9, globalLightFloorMax: 0.6 }) === 0
+  );
+  ok(
+    'night floor: garbage in is no floor, never NaN',
+    nightRevealFloor({ darkness01: NaN }) === 0 && nightRevealFloor() === 0
+  );
 
   // ======================================================================
   // THE REPORTED BUG — this is the assertion the whole build exists for

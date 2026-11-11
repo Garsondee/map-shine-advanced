@@ -170,6 +170,80 @@ export function readActiveVisionSources() {
 }
 
 /**
+ * Normalise ONE raw light-source read into a "this ground is lit" polygon, or `null` if it lights nothing.
+ *
+ * WHY THIS EXISTS (mmp-tye.1, two-client QA pass 2026-11-11): the reveal rule asks "is it lit?" of a pixel,
+ * and MSA's illumination buffer cannot answer that at night, because ambient + sky fill + moonlight share
+ * the one number with the lights, so an open map read as lit everywhere and a player saw all of it while
+ * Foundry itself said it was dark. Foundry's own answer is geometric: a point is lit if it is inside an
+ * active light source's shape (or the global light's, which is the whole scene). Like the vision polygons,
+ * these shapes were already computed by Foundry's wall sweep, so we consume them and never recompute them.
+ *
+ * Darkness sources light nothing (they take light away) and an inactive source (a hidden light, global light
+ * switched off at this darkness) is not lit ground this frame.
+ *
+ * `x`/`y` is the fan origin the renderer triangulates from. A point light's polygon is star-shaped about the
+ * light's own position, so that is the only safe origin for it; the global light reports (0,0), which is
+ * outside its own rectangle, so it (and any source without a usable position) takes the polygon's centroid,
+ * which is inside a convex shape.
+ *
+ * @param {object|null} raw - `{sourceId, active, isDarkness, points, x, y}` plucked from a live light source.
+ * @returns {{sourceId: string, points: number[], x: number, y: number}|null}
+ */
+export function deriveLightShape(raw) {
+  if (!raw) return null;
+  if (typeof raw.sourceId !== 'string' || raw.sourceId.length === 0) return null;
+  if (raw.active !== true || raw.isDarkness === true) return null;
+  if (!isUsablePolygon(raw.points)) return null;
+  let x = Number(raw.x);
+  let y = Number(raw.y);
+  if (raw.sourceId === 'globalLight' || !Number.isFinite(x) || !Number.isFinite(y)) {
+    let sx = 0;
+    let sy = 0;
+    const n = raw.points.length / 2;
+    for (let i = 0; i < raw.points.length; i += 2) {
+      sx += raw.points[i];
+      sy += raw.points[i + 1];
+    }
+    x = sx / n;
+    y = sy / n;
+  }
+  return { sourceId: raw.sourceId, points: raw.points, x, y };
+}
+
+/** The most light shapes drawn into the mask in one frame (a map can carry hundreds of lamps). */
+export const MAX_LIT_SHAPES = 512;
+
+/**
+ * Live read of every active light source's lit polygon (point lights AND the global light). Never throws.
+ * `ok:false` means the collection could not be read; the caller must then NOT treat "no shapes" as "nothing
+ * is lit" for a day scene, so it reports the failure instead of guessing.
+ * @returns {{shapes: Array<{sourceId: string, points: number[], x: number, y: number}>, ok: boolean}}
+ */
+export function readActiveLightShapes() {
+  try {
+    const collection = typeof canvas !== 'undefined' ? (canvas?.effects?.lightSources ?? null) : null;
+    if (!collection) return { shapes: [], ok: false };
+    const shapes = [];
+    for (const ls of collection) {
+      const derived = deriveLightShape({
+        sourceId: ls?.sourceId,
+        active: ls?.active,
+        isDarkness: ls?.isDarkness,
+        points: ls?.shape?.points,
+        x: ls?.data?.x,
+        y: ls?.data?.y,
+      });
+      if (derived) shapes.push(derived);
+      if (shapes.length >= MAX_LIT_SHAPES) break;
+    }
+    return { shapes, ok: true };
+  } catch {
+    return { shapes: [], ok: false };
+  }
+}
+
+/**
  * Is THIS client a GM? The one live read of `game.user.isGM` outside
  * `diag/debug-panel.js` (which owns its own for panel gating).
  *

@@ -486,6 +486,8 @@ export { readTokenVisionDiagnostic, REPORT_BUILD_TAG } from './vision-diagnostic
 // keeps this compatible with any game system. Nothing renders from it yet.
 export {
   readActiveVisionSources,
+  readActiveLightShapes,
+  deriveLightShape,
   deriveVisionSource,
   isUsablePolygon,
   shouldGateVision,

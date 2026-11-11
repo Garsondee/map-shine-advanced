@@ -72,6 +72,42 @@
 export const REVEAL_ILLUMINATION_THRESHOLD = 0.08;
 
 /**
+ * THE NIGHT FLOOR (two-client QA pass, 2026-11-11, mmp-tye.1). The 0.08 above assumed the unlit night floor
+ * "sits far below" it. Measured on an open map at darkness 0.9 the unlit ground reads `illum` 0.19 with no
+ * moonlight and 0.26-0.45 with it (ambient + sky fill + moon share one buffer), so with unlimited light
+ * perception and no walls EVERY pixel passed and a player saw the whole map at night while Foundry itself
+ * said it was dark. At night, light-perception must see only pixels that are brighter than any unlit floor:
+ * above the highest unlit value measured (0.45), with margin.
+ *
+ * Costs the outer fringe of a light's dim radius (it fades into the floor), and only ever shows a player
+ * LESS - the fail-safe direction. Global illumination ON means the ambient IS lit (Foundry parity), so
+ * the floor is off then, and the ramp keeps dusk and day exactly as calibrated.
+ */
+export const NIGHT_REVEAL_FLOOR = 0.55;
+/** Scene darkness at which the night floor starts to apply, and where it is fully on. */
+export const NIGHT_REVEAL_DARKNESS_FROM = 0.5;
+export const NIGHT_REVEAL_DARKNESS_TO = 0.7;
+
+/**
+ * The extra illumination floor light-perception needs this frame. Pure; the viewer feeds it to the reveal
+ * shader's shared uniform and `decideRevealed` takes the same number, so CPU and GPU cannot disagree.
+ * @param {object} args
+ * @param {number} args.darkness01 - the scene's darkness, 0 (day) to 1 (night).
+ * @param {number} [args.globalLightFloorMax=0] - the global-illumination floor's brightest channel; > 0 means
+ *   Foundry's global light is lighting the ambient, which therefore counts as lit.
+ * @returns {number} 0 (no extra floor) .. NIGHT_REVEAL_FLOOR
+ */
+export function nightRevealFloor({ darkness01, globalLightFloorMax = 0 } = {}) {
+  if (Number.isFinite(globalLightFloorMax) && globalLightFloorMax > 0.001) return 0;
+  const d = Number.isFinite(darkness01) ? darkness01 : 0;
+  const t = Math.min(
+    1,
+    Math.max(0, (d - NIGHT_REVEAL_DARKNESS_FROM) / (NIGHT_REVEAL_DARKNESS_TO - NIGHT_REVEAL_DARKNESS_FROM))
+  );
+  return NIGHT_REVEAL_FLOOR * t;
+}
+
+/**
  * How brightly the "explored, not currently visible" memory zone shows —
  * 0..1, multiplying the remembered map-only colour (`vision-mask-render.js`'s
  * `exploredSnapshotTarget`). A taste knob, not a rules-visible number the way
@@ -115,6 +151,10 @@ export const VISION_GATE_BUILD_TAG = 'r2-union-not-intersection-2026-08-15';
  * @param {number} args.illumination - MSA's own 0..1 brightness at this pixel.
  * @param {boolean} [args.blinded=false]
  * @param {number} [args.threshold=REVEAL_ILLUMINATION_THRESHOLD]
+ * @param {number} [args.nightFloor=0] - `nightRevealFloor(...)` for this frame: a pixel outside every lit shape
+ *   must be brighter than this to count as lit.
+ * @param {boolean} [args.insideLitShape=true] - inside an active light source's shape (mask A); `true` by default
+ *   so a caller that has no light geometry keeps the rule as it was calibrated.
  * @returns {boolean}
  */
 export function decideRevealed({
@@ -123,6 +163,8 @@ export function decideRevealed({
   illumination,
   blinded = false,
   threshold = REVEAL_ILLUMINATION_THRESHOLD,
+  nightFloor = 0,
+  insideLitShape = true,
 }) {
   // A blinded source reveals nothing at all — Foundry's own `!blinded` guard.
   if (blinded) return false;
@@ -149,7 +191,11 @@ export function decideRevealed({
   // only extra question is whether the pixel is actually bright.
   if (!insideLightPolygon) return false;
   const lum = Number.isFinite(illumination) ? illumination : 0;
-  return lum >= threshold;
+  // Bright enough, AND lit: inside a light source's shape (Foundry's own geometric answer, mask A) or brighter
+  // than the night floor (lights MSA draws that Foundry has no source for). By day / with global light the
+  // floor is 0, so the second clause is true and this is the rule exactly as it was calibrated.
+  if (!(lum >= threshold)) return false;
+  return insideLitShape === true || lum >= (Number.isFinite(nightFloor) ? nightFloor : 0);
 }
 
 /**

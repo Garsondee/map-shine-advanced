@@ -1,5 +1,5 @@
 ---
-sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/lens.js (Glare), src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), src/foundry/scene-environment.js (readSceneAuthoredDarkness), src/foundry/scene-regions.js (every darkness behaviour), src/foundry/region-darkness-override.js (off by default, regionDarknessAuthored, restoreRegionDarkness), src/effects/lighting/point-light-illumination.js (a lamp's floor and dim light follow the room's own light), boot.js onSweepToHour
+sources: src/effects/sun-shadows.js, src/effects/window/window.js, src/effects/dynamic-range.js, src/effects/bloom.js, src/effects/lens.js (Glare), src/effects/grade/grade.js (lightLevel), src/effects/lighting/ambience-filter.js (scene Environment), src/foundry/scene-environment.js (readSceneAuthoredDarkness), src/foundry/scene-regions.js (every darkness behaviour), src/foundry/region-darkness-override.js (off by default, regionDarknessAuthored, restoreRegionDarkness), src/effects/lighting/point-light-illumination.js (a lamp's floor and dim light follow the room's own light), boot.js onSweepToHour, src/effects/vision/vision-mask.js (nightRevealFloor), src/foundry/scene-vision.js (readActiveLightShapes)
 ---
 
 Map Shine lights a scene like a camera would see it: a real sun that moves, shadows that stretch, lamps that glow, and a camera that copes with bright and dark together.
@@ -43,6 +43,10 @@ A lamp fades into the light already around it, so its pool has no rim. Inside a 
 - **Exposure** brightens or darkens the whole picture.
 
 > [!tip] Interiors look best a little darker than you expect. Dark rooms make lamps and window light the stars. If players can't see, raise the **lamps** before the exposure.
+
+### What players can see at night
+
+As in Foundry, a player sees what their own sight covers and whatever a light reaches: the whole of a light's dim radius, and everything under global light. Moonlight and the night sky colour the picture but do not extend sight, so on an open map at night a player sees the ground around their lights, not the whole map. By day nothing changes.
 
 [[do: lamps-up, brighten-inside, more-drama]]
 

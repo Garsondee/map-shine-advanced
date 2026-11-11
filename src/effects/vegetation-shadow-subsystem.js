@@ -98,6 +98,12 @@ import { edgeRamp01 } from './lighting/sun-occlusion.js';
 export const VEG_SHADOW_RENDER_ORDER_MAGNITUDE = 0.2;
 
 /**
+ * Each kind's share of the Shadow strength dial (2026-11-11, author: "Bush shadows seem too strong currently, maybe halve
+ * the strength, lower tree shadow by 25%"). A bush is a low mass, so its shadow reads heavier than a tree's dappled one.
+ */
+export const VEG_SHADOW_KIND_STRENGTH_MUL = Object.freeze({ tree: 0.75, bush: 0.5 });
+
+/**
  * How many stations the shadow sweep samples between the plant's feet and the
  * tip of its shadow (2026-07-24, the "shadows don't smear" fix).
  *
@@ -554,7 +560,7 @@ export function createVegetationShadowSubsystem({
     const casterHeightPx = vegetationShadowHeightPx(kind, params, getPxPerFt());
     const cast = shadowHandle.forCaster({
       heightPx: casterHeightPx,
-      strength01: params?.shadowStrength ?? 0,
+      strength01: (params?.shadowStrength ?? 0) * (VEG_SHADOW_KIND_STRENGTH_MUL[kind?.id] ?? 1),
     });
     const w = Math.max(1, Math.abs(placement?.width ?? 1));
     const h = Math.max(1, Math.abs(placement?.height ?? 1));
